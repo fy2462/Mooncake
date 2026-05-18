@@ -165,7 +165,7 @@ impl MasterService for MasterServiceImpl {
         if let Some(mut entry) = self.state.clients.get_mut(&client_id) {
             entry.last_ping = SystemTime::now();
         }
-        metrics::PING_COUNTER.inc();
+        metrics::PING_REQUESTS.inc();
         Ok(Response::new(proto::PingResponse {}))
     }
 
@@ -227,7 +227,7 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::ExistKeyResponse>, Status> {
         let req = request.into_inner();
         let exists = self.state.objects.contains_key(&req.key);
-        metrics::GET_COUNTER.inc();
+        metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::ExistKeyResponse { exists }))
     }
 
@@ -275,7 +275,7 @@ impl MasterService for MasterServiceImpl {
             replicas,
         });
 
-        metrics::PUT_COUNTER.inc();
+        metrics::PUT_START_REQUESTS.inc();
         Ok(Response::new(proto::PutStartResponse { replicas: proto_replicas }))
     }
 
@@ -317,7 +317,7 @@ impl MasterService for MasterServiceImpl {
         match self.state.objects.get(&req.key) {
             Some(entry) => {
                 let replicas = entry.replicas.iter().map(replica_to_proto).collect();
-                metrics::GET_COUNTER.inc();
+                metrics::GET_REQUESTS.inc();
                 Ok(Response::new(proto::GetReplicaListResponse { replicas }))
             }
             None => Err(Status::not_found(format!("key not found: {}", req.key))),
@@ -331,7 +331,7 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
         self.state.objects.remove(&req.key);
-        metrics::REMOVE_COUNTER.inc();
+        metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
     }
 
@@ -358,7 +358,8 @@ impl MasterService for MasterServiceImpl {
             removed += 1;
         }
 
-        metrics::REMOVE_COUNTER.inc_by(removed as u64);
+        metrics::REMOVE_BY_REGEX_REQUESTS.inc();
+        metrics::REMOVE_REQUESTS.inc_by(removed as u64);
         Ok(Response::new(proto::RemoveByRegexResponse { removed_count: removed }))
     }
 
@@ -580,7 +581,7 @@ impl MasterService for MasterServiceImpl {
                 0
             })
             .collect();
-        metrics::REMOVE_COUNTER.inc_by(req.keys.len() as u64);
+        metrics::BATCH_REMOVE_REQUESTS.inc_by(req.keys.len() as u64);
         Ok(Response::new(proto::BatchRemoveResponse { statuses }))
     }
 

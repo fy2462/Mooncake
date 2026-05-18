@@ -1,7 +1,7 @@
 pub mod client;
 pub mod hot_cache;
 
-pub use client::MooncakeClient;
+pub use client::{BufferHandle, MooncakeClient};
 pub use hot_cache::LocalHotCache;
 
 // Generated protobuf code

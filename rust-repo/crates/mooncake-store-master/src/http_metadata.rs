@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MetadataNodeInfo {
-    local_hostname: String,
-    rpc_port: u16,
-    rdma_devices: Vec<String>,
+    pub local_hostname: String,
+    pub rpc_port: u16,
+    pub rdma_devices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

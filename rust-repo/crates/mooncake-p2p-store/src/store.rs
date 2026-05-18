@@ -99,9 +99,11 @@ impl P2pStore {
             let addr = addr_list[i] as *mut c_void;
             let size = size_list[i];
 
-            self.engine
-                .register_local_memory(addr, size as usize, location, true)
-                .map_err(|_| P2pStoreError::TransferEngine)?;
+            unsafe {
+                self.engine
+                    .register_local_memory(addr, size as usize, location, true)
+                    .map_err(|_| P2pStoreError::TransferEngine)?;
+            }
 
             payload.size += size;
             let mut offset: u64 = 0;
@@ -163,9 +165,11 @@ impl P2pStore {
             if success {
                 self.catalog.lock().remove(name);
                 for i in 0..catalog_entry.addr_list.len() {
-                    self.engine
-                        .unregister_local_memory(catalog_entry.addr_list[i] as *mut c_void)
-                        .map_err(|_| P2pStoreError::TransferEngine)?;
+                    unsafe {
+                        self.engine
+                            .unregister_local_memory(catalog_entry.addr_list[i] as *mut c_void)
+                            .map_err(|_| P2pStoreError::TransferEngine)?;
+                    }
                 }
                 return Ok(());
             }
@@ -203,9 +207,11 @@ impl P2pStore {
         for i in 0..addr_list.len() {
             let addr = addr_list[i] as *mut c_void;
             let size = size_list[i] as usize;
-            self.engine
-                .register_local_memory(addr, size, "cpu:0", true)
-                .map_err(|_| P2pStoreError::TransferEngine)?;
+            unsafe {
+                self.engine
+                    .register_local_memory(addr, size, "cpu:0", true)
+                    .map_err(|_| P2pStoreError::TransferEngine)?;
+            }
         }
 
         let mut task_id = 0usize;

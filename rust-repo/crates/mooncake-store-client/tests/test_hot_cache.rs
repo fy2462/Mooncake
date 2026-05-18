@@ -1,4 +1,4 @@
-use mooncake_store_client::LocalHotCache;
+use mooncake_store_client::{BufferHandle, LocalHotCache};
 
 #[test]
 fn test_hot_cache_basic_put_get() {
@@ -45,19 +45,17 @@ fn test_hot_cache_clear() {
 #[test]
 fn test_hot_cache_evicts_when_full() {
     let cache = LocalHotCache::new(4096, 100);
-    // Fill with many 100-byte entries
     for i in 0..50 {
-        let val = format!("{:>99}", i); // 99 bytes + 1 char = 100 bytes
+        let val = format!("{:>99}", i);
         cache.put(&format!("key_{}", i), val.as_bytes());
     }
-    // At least some entries should survive
     assert!(cache.get("key_0").is_some() || cache.get("key_49").is_some());
 }
 
 #[test]
 fn test_hot_cache_rejects_oversized() {
     let cache = LocalHotCache::new(4096, 10);
-    let big_value = vec![0u8; 3000]; // > max_size/2 (4096/2=2048)
+    let big_value = vec![0u8; 3000];
     cache.put("big", &big_value);
     assert!(cache.get("big").is_none());
 }
@@ -82,4 +80,48 @@ fn test_hot_cache_default_constructor() {
     cache.put("test", b"default");
     let result = cache.get("test");
     assert_eq!(result.as_deref(), Some(&b"default"[..]));
+}
+
+#[test]
+fn test_hot_cache_empty_value() {
+    let cache = LocalHotCache::new(1024, 100);
+    cache.put("empty", b"");
+    let result = cache.get("empty");
+    assert_eq!(result.as_deref(), Some(&b""[..]));
+}
+
+#[test]
+fn test_hot_cache_entry_count_limit() {
+    let cache = LocalHotCache::new(1024 * 1024, 3);
+    cache.put("a", b"1");
+    cache.put("b", b"2");
+    cache.put("c", b"3");
+    cache.put("d", b"4");
+    assert!(cache.get("a").is_none());
+    assert_eq!(cache.get("d"), Some(b"4".to_vec()));
+}
+
+#[test]
+fn test_buffer_handle_creation() {
+    let bh = BufferHandle {
+        key: "test_key".into(),
+        size: 42,
+        data: vec![1, 2, 3],
+    };
+    assert_eq!(bh.key, "test_key");
+    assert_eq!(bh.size, 42);
+    assert_eq!(bh.data, vec![1, 2, 3]);
+}
+
+#[test]
+fn test_buffer_handle_large() {
+    let data = vec![0xAAu8; 65536];
+    let bh = BufferHandle {
+        key: "large".into(),
+        size: data.len(),
+        data: data.clone(),
+    };
+    assert_eq!(bh.size, 65536);
+    assert_eq!(bh.data.len(), 65536);
+    assert_eq!(bh.data[0], 0xAA);
 }

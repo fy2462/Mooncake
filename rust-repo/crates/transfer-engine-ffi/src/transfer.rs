@@ -80,3 +80,238 @@ pub struct TransferStatus {
     pub status: TransferStatusEnum,
     pub transferred_bytes: u64,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // BatchId
+    // =========================================================================
+
+    #[test]
+    fn test_batch_id_creation() {
+        assert_eq!(BatchId(0).0, 0);
+        assert_eq!(BatchId(42).0, 42);
+        assert_eq!(BatchId(u64::MAX).0, u64::MAX);
+    }
+
+    #[test]
+    fn test_batch_id_clone_eq() {
+        let id = BatchId(99);
+        assert_eq!(id, id.clone());
+        assert_eq!(id, BatchId(99));
+        assert_ne!(id, BatchId(100));
+    }
+
+    #[test]
+    fn test_batch_id_debug() {
+        assert_eq!(format!("{:?}", BatchId(5)), "BatchId(5)");
+    }
+
+    #[test]
+    fn test_batch_id_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(BatchId(1));
+        set.insert(BatchId(2));
+        set.insert(BatchId(1));
+        assert_eq!(set.len(), 2);
+    }
+
+    // =========================================================================
+    // Opcode
+    // =========================================================================
+
+    #[test]
+    fn test_opcode_values() {
+        assert_ne!(Opcode::Read, Opcode::Write);
+    }
+
+    #[test]
+    fn test_opcode_from_i32_valid() {
+        assert_eq!(Opcode::from_i32(Opcode::Read as i32), Some(Opcode::Read));
+        assert_eq!(Opcode::from_i32(Opcode::Write as i32), Some(Opcode::Write));
+    }
+
+    #[test]
+    fn test_opcode_from_i32_invalid() {
+        assert_eq!(Opcode::from_i32(99), None);
+        assert_eq!(Opcode::from_i32(-1), None);
+        assert_eq!(Opcode::from_i32(2), None);
+    }
+
+    #[test]
+    fn test_opcode_clone_copy() {
+        let op = Opcode::Read;
+        assert_eq!(op, op.clone());
+        let op2 = op;
+        assert_eq!(op, op2);
+    }
+
+    #[test]
+    fn test_opcode_debug() {
+        let s = format!("{:?}", Opcode::Read);
+        assert!(!s.is_empty());
+        let s = format!("{:?}", Opcode::Write);
+        assert!(!s.is_empty());
+    }
+
+    // =========================================================================
+    // TransferRequest
+    // =========================================================================
+
+    #[test]
+    fn test_transfer_request_creation() {
+        let req = TransferRequest {
+            opcode: Opcode::Write,
+            source: std::ptr::null_mut(),
+            target_id: SegmentId(1),
+            target_offset: 0x1000,
+            length: 4096,
+        };
+        assert_eq!(req.opcode, Opcode::Write);
+        assert_eq!(req.target_id, SegmentId(1));
+        assert_eq!(req.target_offset, 0x1000);
+        assert_eq!(req.length, 4096);
+    }
+
+    #[test]
+    fn test_transfer_request_read() {
+        let buf: u8 = 0;
+        let req = TransferRequest {
+            opcode: Opcode::Read,
+            source: &buf as *const u8 as *mut c_void,
+            target_id: SegmentId(7),
+            target_offset: 0,
+            length: 128,
+        };
+        assert_eq!(req.opcode, Opcode::Read);
+        assert_eq!(req.source, &buf as *const u8 as *mut c_void);
+        assert_eq!(req.target_id.0, 7);
+    }
+
+    #[test]
+    fn test_transfer_request_clone() {
+        let req = TransferRequest {
+            opcode: Opcode::Read,
+            source: 0x1000 as *mut c_void,
+            target_id: SegmentId(3),
+            target_offset: 64,
+            length: 512,
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.opcode, req.opcode);
+        assert_eq!(cloned.target_id, req.target_id);
+        assert_eq!(cloned.target_offset, req.target_offset);
+        assert_eq!(cloned.length, req.length);
+    }
+
+    // =========================================================================
+    // TransferStatusEnum
+    // =========================================================================
+
+    #[test]
+    fn test_transfer_status_enum_from_i32_all() {
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Waiting as i32), TransferStatusEnum::Waiting);
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Pending as i32), TransferStatusEnum::Pending);
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Invalid as i32), TransferStatusEnum::Invalid);
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Canceled as i32), TransferStatusEnum::Canceled);
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Completed as i32), TransferStatusEnum::Completed);
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Timeout as i32), TransferStatusEnum::Timeout);
+        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Failed as i32), TransferStatusEnum::Failed);
+    }
+
+    #[test]
+    fn test_transfer_status_enum_from_i32_unknown() {
+        assert_eq!(TransferStatusEnum::from_i32(99), TransferStatusEnum::Invalid);
+        assert_eq!(TransferStatusEnum::from_i32(-5), TransferStatusEnum::Invalid);
+    }
+
+    #[test]
+    fn test_transfer_status_enum_is_terminal() {
+        assert!(TransferStatusEnum::Completed.is_terminal());
+        assert!(TransferStatusEnum::Failed.is_terminal());
+        assert!(TransferStatusEnum::Canceled.is_terminal());
+        assert!(TransferStatusEnum::Timeout.is_terminal());
+        assert!(!TransferStatusEnum::Waiting.is_terminal());
+        assert!(!TransferStatusEnum::Pending.is_terminal());
+        assert!(!TransferStatusEnum::Invalid.is_terminal());
+    }
+
+    #[test]
+    fn test_transfer_status_enum_clone_eq() {
+        for status in &[
+            TransferStatusEnum::Waiting,
+            TransferStatusEnum::Pending,
+            TransferStatusEnum::Completed,
+            TransferStatusEnum::Failed,
+        ] {
+            assert_eq!(*status, status.clone());
+        }
+    }
+
+    #[test]
+    fn test_transfer_status_enum_debug() {
+        assert!(format!("{:?}", TransferStatusEnum::Completed).contains("Completed"));
+        assert!(format!("{:?}", TransferStatusEnum::Failed).contains("Failed"));
+        assert!(format!("{:?}", TransferStatusEnum::Waiting).contains("Waiting"));
+    }
+
+    // =========================================================================
+    // TransferStatus
+    // =========================================================================
+
+    #[test]
+    fn test_transfer_status_completed() {
+        let st = TransferStatus {
+            status: TransferStatusEnum::Completed,
+            transferred_bytes: 4096,
+        };
+        assert_eq!(st.status, TransferStatusEnum::Completed);
+        assert_eq!(st.transferred_bytes, 4096);
+        assert!(st.status.is_terminal());
+    }
+
+    #[test]
+    fn test_transfer_status_waiting() {
+        let st = TransferStatus {
+            status: TransferStatusEnum::Waiting,
+            transferred_bytes: 0,
+        };
+        assert_eq!(st.transferred_bytes, 0);
+        assert!(!st.status.is_terminal());
+    }
+
+    #[test]
+    fn test_transfer_status_invalid() {
+        let st = TransferStatus {
+            status: TransferStatusEnum::Invalid,
+            transferred_bytes: 0,
+        };
+        assert_eq!(st.status, TransferStatusEnum::Invalid);
+        assert!(!st.status.is_terminal());
+    }
+
+    #[test]
+    fn test_transfer_status_debug() {
+        let st = TransferStatus {
+            status: TransferStatusEnum::Completed,
+            transferred_bytes: 1024,
+        };
+        let s = format!("{:?}", st);
+        assert!(s.contains("Completed"));
+        assert!(s.contains("1024"));
+    }
+
+    #[test]
+    fn test_transfer_status_clone() {
+        let st = TransferStatus {
+            status: TransferStatusEnum::Pending,
+            transferred_bytes: 500,
+        };
+        let cloned = st.clone();
+        assert_eq!(cloned.status, st.status);
+        assert_eq!(cloned.transferred_bytes, st.transferred_bytes);
+    }
+}

@@ -81,7 +81,7 @@ impl TransferEngine {
         topology_matrix: Option<&str>,
     ) -> TransferEngineResult<()> {
         let proto_c = CString::new(protocol)?;
-        let matrix_c = topology_matrix.map(|s| CString::new(s)).transpose()?;
+        let matrix_c = topology_matrix.map(CString::new).transpose()?;
         let matrix_ptr = matrix_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
 
         let mut args: [*const c_void; 2] = [
@@ -134,7 +134,10 @@ impl TransferEngine {
     ///
     /// `location` is a device identifier like `"cpu:0"` or `"cuda:0"`.
     /// `remote_accessible` — whether remote peers can read/write this region.
-    pub fn register_local_memory(
+    ///
+    /// # Safety
+    /// `addr` must point to valid memory of at least `length` bytes.
+    pub unsafe fn register_local_memory(
         &self,
         addr: *mut c_void,
         length: usize,
@@ -158,7 +161,10 @@ impl TransferEngine {
     }
 
     /// Unregister a previously registered local memory region.
-    pub fn unregister_local_memory(&self, addr: *mut c_void) -> TransferEngineResult<()> {
+    ///
+    /// # Safety
+    /// `addr` must be the same pointer passed to `register_local_memory`.
+    pub unsafe fn unregister_local_memory(&self, addr: *mut c_void) -> TransferEngineResult<()> {
         let rc = unsafe { ffi::unregisterLocalMemory(self.handle.as_ptr(), addr) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));

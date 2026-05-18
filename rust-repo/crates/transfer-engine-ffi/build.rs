@@ -11,7 +11,7 @@ fn main() {
     let te_c_header = te_include.join("transfer_engine_c.h");
 
     if !te_c_header.exists() {
-        println!("cargo:warning=Transfer Engine C header not found at {:?}; FFI bindings will be generated from stub declarations.", te_c_header);
+        println!("cargo:warning=Transfer Engine C header not found at {}; FFI bindings will be generated from stub declarations.", te_c_header.display());
     }
 
     let bindings = bindgen::Builder::default()

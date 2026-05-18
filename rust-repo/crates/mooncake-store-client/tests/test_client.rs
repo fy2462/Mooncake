@@ -1,4 +1,3 @@
-use mooncake_store_client::MooncakeClient;
 use mooncake_store_core::{ReplicateConfig, StoreError};
 
 /// Test that a fresh client can be created (without real backend — just struct init).

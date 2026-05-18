@@ -13,36 +13,30 @@ use uuid::Uuid;
 use crate::proto;
 
 // ---------------------------------------------------------------------------
+// BufferHandle
+// ---------------------------------------------------------------------------
+
+pub struct BufferHandle {
+    pub data: Vec<u8>,
+    pub key: String,
+    pub size: usize,
+}
+
+// ---------------------------------------------------------------------------
 // MooncakeClient
 // ---------------------------------------------------------------------------
 
-/// A client that can perform Put/Get/Remove operations against a Mooncake
-/// Store cluster.  It talks to the Master via gRPC for metadata, and uses
-/// `transfer_engine_ffi` for the actual data-plane transfers.
 pub struct MooncakeClient {
     master: proto::master_service_client::MasterServiceClient<Channel>,
     engine: Arc<TransferEngine>,
-
-    /// Our UUID (assigned by Master).
     client_id: Uuid,
-
-    /// Pre-allocated, TE-registered local transfer buffer (copy-based path).
+    local_hostname: String,
     local_buffer: Vec<u8>,
-
-    /// Locally registered buffers: ptr → (size, location).
     registered_buffers: RwLock<HashMap<usize, (usize, String)>>,
+    tear_down: Arc<RwLock<bool>>,
 }
 
 impl MooncakeClient {
-    /// Create and initialise a new client.
-    ///
-    /// - `master_addr` — `"IP:port"` of the Master gRPC service.
-    /// - `metadata_conn_string` — Transfer Engine metadata (etcd/HTTP/P2P).
-    /// - `local_host` — IP or hostname of this node.
-    /// - `protocol` — transport protocol (`"tcp"` or `"rdma"`).
-    /// - `device` — RDMA device name (empty = auto).
-    /// - `global_segment_size` — size of segment to contribute (0 = pure client).
-    /// - `local_buffer_size` — size of local transfer buffer.
     pub async fn create(
         master_addr: &str,
         metadata_conn_string: &str,
@@ -62,7 +56,6 @@ impl MooncakeClient {
         let mut master =
             proto::master_service_client::MasterServiceClient::new(channel);
 
-        // --- Init Transfer Engine ---
         let parts: Vec<&str> = local_host.split(':').collect();
         let ip = parts.first().copied().unwrap_or(local_host);
         let port: u64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
@@ -85,19 +78,18 @@ impl MooncakeClient {
 
         let engine = Arc::new(engine);
 
-        // --- Pre-allocate and register local transfer buffer ---
         let local_buffer = vec![0u8; local_buffer_size as usize];
-        engine.register_local_memory(
-            local_buffer.as_ptr() as *mut c_void,
-            local_buffer_size as usize,
-            "cpu:0",
-            true,
-        )?;
+        unsafe {
+            engine.register_local_memory(
+                local_buffer.as_ptr() as *mut c_void,
+                local_buffer_size as usize,
+                "cpu:0",
+                true,
+            )?;
+        }
 
-        // --- Register with Master ---
         let client_id = Uuid::new_v4();
 
-        // Mount segments if contributing memory.
         if global_segment_size > 0 {
             let request = proto::MountSegmentRequest {
                 client_id: Some(proto::Uuid {
@@ -114,8 +106,10 @@ impl MooncakeClient {
             master,
             engine,
             client_id,
+            local_hostname: local_host.to_string(),
             local_buffer,
             registered_buffers: RwLock::new(HashMap::new()),
+            tear_down: Arc::new(RwLock::new(false)),
         })
     }
 
@@ -123,7 +117,6 @@ impl MooncakeClient {
     // Put
     // -----------------------------------------------------------------------
 
-    /// Store a value under a key (copy-based).
     pub async fn put(
         &mut self,
         key: &str,
@@ -132,7 +125,6 @@ impl MooncakeClient {
     ) -> StoreResult<()> {
         let cfg = config.unwrap_or_default();
 
-        // 1. Ask Master where to put the data.
         let request = proto::PutStartRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
@@ -153,31 +145,15 @@ impl MooncakeClient {
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
 
-        let replicas: Vec<ReplicaDescriptor> = response
-            .replicas
-            .iter()
-            .filter_map(|r| {
-                let sid = r.segment_id.as_ref()?;
-                Some(ReplicaDescriptor {
-                    segment_id: Uuid::from_u64_pair(sid.high, sid.low),
-                    segment_name: r.segment_name.clone(),
-                    offset: r.offset,
-                    status: mooncake_store_core::ReplicaStatus::Allocating,
-                    replica_type: mooncake_store_core::ReplicaType::Memory,
-                })
-            })
-            .collect();
-
+        let replicas = self.replicas_from_proto(&response.replicas);
         if replicas.is_empty() {
             return Err(StoreError::NoAvailableHandle);
         }
 
-        // 2. Write data to each replica via Transfer Engine.
         for replica in &replicas {
             self.write_to_replica(replica, value).await?;
         }
 
-        // 3. Notify Master that Put is complete.
         let end_request = proto::PutEndRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
@@ -191,10 +167,6 @@ impl MooncakeClient {
         Ok(())
     }
 
-    /// Store data from a pre-registered buffer (zero-copy).
-    ///
-    /// # Safety
-    /// `buffer` must point to a registered memory region of at least `size` bytes.
     pub async unsafe fn put_from(
         &mut self,
         key: &str,
@@ -218,17 +190,7 @@ impl MooncakeClient {
         };
 
         let response = self.master.put_start(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
-
-        let replicas: Vec<ReplicaDescriptor> = response.replicas.iter().filter_map(|r| {
-            let sid = r.segment_id.as_ref()?;
-            Some(ReplicaDescriptor {
-                segment_id: Uuid::from_u64_pair(sid.high, sid.low),
-                segment_name: r.segment_name.clone(),
-                offset: r.offset,
-                status: mooncake_store_core::ReplicaStatus::Allocating,
-                replica_type: mooncake_store_core::ReplicaType::Memory,
-            })
-        }).collect();
+        let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
             self.zero_copy_write(replica, buffer, size).await?;
@@ -245,87 +207,355 @@ impl MooncakeClient {
     }
 
     // -----------------------------------------------------------------------
-    // Get
+    // Put parts (split data across multiple writes)
     // -----------------------------------------------------------------------
 
-    /// Retrieve the value for `key` as bytes (copy-based).
-    pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
-        let request = proto::GetReplicaListRequest { key: key.to_string() };
-        let response = self
-            .master
-            .get_replica_list(request)
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
-            .into_inner();
+    pub async fn put_parts(
+        &mut self,
+        key: &str,
+        values: &[&[u8]],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<()> {
+        let cfg = config.unwrap_or_default();
+        let total_len: usize = values.iter().map(|v| v.len()).sum();
 
-        let replicas: Vec<ReplicaDescriptor> = response
-            .replicas
-            .iter()
-            .filter_map(|r| {
-                let sid = r.segment_id.as_ref()?;
-                Some(ReplicaDescriptor {
-                    segment_id: Uuid::from_u64_pair(sid.high, sid.low),
-                    segment_name: r.segment_name.clone(),
-                    offset: r.offset,
-                    status: mooncake_store_core::ReplicaStatus::Allocating,
-                    replica_type: mooncake_store_core::ReplicaType::Memory,
+        let request = proto::PutStartRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            slice_length: total_len as u64,
+            config: Some(proto::ReplicateConfig {
+                replica_num: cfg.replica_num,
+                with_soft_pin: cfg.with_soft_pin,
+                with_hard_pin: cfg.with_hard_pin,
+                preferred_segment: cfg.preferred_segment.clone(),
+                prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+            }),
+        };
+
+        let response = self.master.put_start(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let replicas = self.replicas_from_proto(&response.replicas);
+
+        if replicas.is_empty() {
+            return Err(StoreError::NoAvailableHandle);
+        }
+
+        for replica in &replicas {
+            let segment_id = self.engine.open_segment(&replica.segment_name)?;
+            let batch_id = self.engine.allocate_batch_id(values.len())?;
+
+            let requests: Vec<TransferRequest> = values
+                .iter()
+                .enumerate()
+                .map(|(i, data)| {
+                    let src_offset = values[..i].iter().map(|v| v.len()).sum::<usize>();
+                    let tgt_offset = replica.offset + src_offset as u64;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            self.local_buffer[src_offset..].as_ptr() as *mut u8,
+                            data.len(),
+                        );
+                    }
+                    TransferRequest {
+                        opcode: Opcode::Write,
+                        source: unsafe { self.local_buffer.as_ptr().add(src_offset) as *mut c_void },
+                        target_id: segment_id,
+                        target_offset: tgt_offset,
+                        length: data.len() as u64,
+                    }
                 })
+                .collect();
+
+            self.engine.submit_transfer(batch_id, &requests)?;
+
+            for i in 0..values.len() {
+                loop {
+                    let status = self.engine.get_transfer_status(batch_id, i)?;
+                    if status.status == TransferStatusEnum::Completed {
+                        break;
+                    }
+                    if status.status == TransferStatusEnum::Failed {
+                        return Err(StoreError::OperationFailed(-1));
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+                }
+            }
+
+            self.engine.free_batch_id(batch_id)?;
+            self.engine.close_segment(segment_id)?;
+        }
+
+        let end_request = proto::PutEndRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            replica_type: 0,
+        };
+        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch Put
+    // -----------------------------------------------------------------------
+
+    pub async fn batch_put(
+        &mut self,
+        keys: &[String],
+        values: &[&[u8]],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<i32>> {
+        let mut statuses = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            match self.put(key, values[i], config.clone()).await {
+                Ok(()) => statuses.push(0),
+                Err(_) => statuses.push(-1),
+            }
+        }
+
+        let end_entries: Vec<proto::PutEndEntry> = keys
+            .iter()
+            .map(|key| proto::PutEndEntry {
+                client_id: Some(self.client_id_proto()),
+                key: key.clone(),
+                replica_type: 0,
             })
             .collect();
 
+        let _ = self.master.batch_put_end(proto::BatchPutEndRequest { entries: end_entries }).await;
+        Ok(statuses)
+    }
+
+    pub async unsafe fn batch_put_from(
+        &mut self,
+        keys: &[String],
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<i32>> {
+        let mut statuses = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            match self.put_from(key, buffers[i], sizes[i], config.clone()).await {
+                Ok(()) => statuses.push(0),
+                Err(_) => statuses.push(-1),
+            }
+        }
+        Ok(statuses)
+    }
+
+    // -----------------------------------------------------------------------
+    // Get
+    // -----------------------------------------------------------------------
+
+    pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
+        let replicas = self.fetch_replicas(key).await?;
         if replicas.is_empty() {
             return Err(StoreError::KeyNotFound(key.to_string()));
         }
-
-        // Read from the first available replica.
         self.read_from_replica(&replicas[0]).await
     }
 
-    /// Retrieve data directly into a registered buffer (zero-copy).
-    ///
-    /// # Safety
-    /// `buffer` must point to a registered memory region of at least `size` bytes.
     pub async unsafe fn get_into(
         &mut self,
         key: &str,
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<usize> {
-        let request = proto::GetReplicaListRequest { key: key.to_string() };
-        let response = self
-            .master
-            .get_replica_list(request)
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
-            .into_inner();
-
-        let replicas: Vec<ReplicaDescriptor> = response
-            .replicas
-            .iter()
-            .filter_map(|r| {
-                let sid = r.segment_id.as_ref()?;
-                Some(ReplicaDescriptor {
-                    segment_id: Uuid::from_u64_pair(sid.high, sid.low),
-                    segment_name: r.segment_name.clone(),
-                    offset: r.offset,
-                    status: mooncake_store_core::ReplicaStatus::Allocating,
-                    replica_type: mooncake_store_core::ReplicaType::Memory,
-                })
-            })
-            .collect();
-
+        let replicas = self.fetch_replicas(key).await?;
         if replicas.is_empty() {
             return Err(StoreError::KeyNotFound(key.to_string()));
         }
-
         self.zero_copy_read(&replicas[0], buffer, size).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Get into ranges (zero-copy multi-range read)
+    // -----------------------------------------------------------------------
+
+    pub async unsafe fn get_into_ranges(
+        &mut self,
+        buffers: &[*mut c_void],
+        keys: &[Vec<String>],
+        dst_offsets: &[Vec<Vec<usize>>],
+        src_offsets: &[Vec<Vec<usize>>],
+        sizes: &[Vec<Vec<usize>>],
+    ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
+        let count = buffers.len().min(keys.len()).min(dst_offsets.len()).min(src_offsets.len()).min(sizes.len());
+        let mut results = Vec::with_capacity(count);
+        for buf_idx in 0..count {
+            let mut buf_results = vec![];
+            for (key_idx, key) in keys[buf_idx].iter().enumerate() {
+                let replicas = self.fetch_replicas(key).await?;
+                if replicas.is_empty() {
+                    buf_results.push(vec![-1]);
+                    continue;
+                }
+                let seg = self.engine.open_segment(&replicas[0].segment_name)?;
+                let batch_id = self.engine.allocate_batch_id(sizes[buf_idx][key_idx].len())?;
+
+                let reqs: Vec<TransferRequest> = sizes[buf_idx][key_idx]
+                    .iter()
+                    .enumerate()
+                    .map(|(ri, &sz)| TransferRequest {
+                        opcode: Opcode::Read,
+                        source: buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri]),
+                        target_id: seg,
+                        target_offset: replicas[0].offset + src_offsets[buf_idx][key_idx][ri] as u64,
+                        length: sz as u64,
+                    })
+                    .collect();
+
+                self.engine.submit_transfer(batch_id, &reqs)?;
+
+                let mut range_results: Vec<i64> = vec![0; sizes[buf_idx][key_idx].len()];
+                for ri in 0..sizes[buf_idx][key_idx].len() {
+                    loop {
+                        let status = self.engine.get_transfer_status(batch_id, ri)?;
+                        if status.status == TransferStatusEnum::Completed {
+                            range_results[ri] = status.transferred_bytes as i64;
+                            break;
+                        }
+                        if status.status == TransferStatusEnum::Failed {
+                            range_results[ri] = -1;
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+                    }
+                }
+                self.engine.free_batch_id(batch_id)?;
+                self.engine.close_segment(seg)?;
+                buf_results.push(range_results);
+            }
+            results.push(buf_results);
+        }
+        Ok(results)
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch Get
+    // -----------------------------------------------------------------------
+
+    pub async fn batch_get(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<Option<Vec<u8>>>> {
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            match self.get(key).await {
+                Ok(data) => results.push(Some(data)),
+                Err(_) => results.push(None),
+            }
+        }
+        Ok(results)
+    }
+
+    pub async unsafe fn batch_get_into(
+        &mut self,
+        keys: &[String],
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+    ) -> StoreResult<Vec<i64>> {
+        let mut results = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            match self.get_into(key, buffers[i], sizes[i]).await {
+                Ok(n) => results.push(n as i64),
+                Err(_) => results.push(-1),
+            }
+        }
+        Ok(results)
+    }
+
+    // -----------------------------------------------------------------------
+    // Batch get into multi buffers
+    // -----------------------------------------------------------------------
+
+    pub async unsafe fn batch_get_into_multi_buffers(
+        &mut self,
+        keys: &[String],
+        all_buffers: &[Vec<*mut c_void>],
+        all_sizes: &[Vec<usize>],
+        _prefer_same_node: bool,
+    ) -> StoreResult<Vec<Vec<i64>>> {
+        let mut results = vec![];
+        for (key_idx, key) in keys.iter().enumerate() {
+            let replicas = self.fetch_replicas(key).await?;
+            if replicas.is_empty() {
+                results.push(vec![-1; all_buffers[key_idx].len()]);
+                continue;
+            }
+            let seg = self.engine.open_segment(&replicas[0].segment_name)?;
+            let count = all_buffers[key_idx].len();
+            let batch_id = self.engine.allocate_batch_id(count)?;
+
+            let reqs: Vec<TransferRequest> = (0..count)
+                .map(|i| TransferRequest {
+                    opcode: Opcode::Read,
+                    source: all_buffers[key_idx][i],
+                    target_id: seg,
+                    target_offset: replicas[0].offset,
+                    length: all_sizes[key_idx][i] as u64,
+                })
+                .collect();
+
+            self.engine.submit_transfer(batch_id, &reqs)?;
+
+            let mut key_results: Vec<i64> = vec![0; count];
+            for i in 0..count {
+                loop {
+                    let status = self.engine.get_transfer_status(batch_id, i)?;
+                    if status.status == TransferStatusEnum::Completed {
+                        key_results[i] = status.transferred_bytes as i64;
+                        break;
+                    }
+                    if status.status == TransferStatusEnum::Failed {
+                        key_results[i] = -1;
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+                }
+            }
+            self.engine.free_batch_id(batch_id)?;
+            self.engine.close_segment(seg)?;
+            results.push(key_results);
+        }
+        Ok(results)
+    }
+
+    // -----------------------------------------------------------------------
+    // Buffer-based get (returns owned BufferHandle)
+    // -----------------------------------------------------------------------
+
+    pub async fn get_buffer(
+        &mut self,
+        key: &str,
+    ) -> StoreResult<BufferHandle> {
+        let data = self.get(key).await?;
+        let size = data.len();
+        Ok(BufferHandle {
+            key: key.to_string(),
+            size,
+            data,
+        })
+    }
+
+    pub async fn batch_get_buffer(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<Option<BufferHandle>>> {
+        let mut results = Vec::with_capacity(keys.len());
+        for key in keys {
+            match self.get_buffer(key).await {
+                Ok(bh) => results.push(Some(bh)),
+                Err(_) => results.push(None),
+            }
+        }
+        Ok(results)
     }
 
     // -----------------------------------------------------------------------
     // Remove / Exist
     // -----------------------------------------------------------------------
 
-    /// Remove the object identified by `key`.
     pub async fn remove(&mut self, key: &str) -> StoreResult<()> {
         let request = proto::RemoveRequest { key: key.to_string() };
         self.master
@@ -335,7 +565,6 @@ impl MooncakeClient {
         Ok(())
     }
 
-    /// Check whether a key exists.
     pub async fn exists(&mut self, key: &str) -> StoreResult<bool> {
         let request = proto::ExistKeyRequest { key: key.to_string() };
         let response = self
@@ -348,33 +577,297 @@ impl MooncakeClient {
     }
 
     // -----------------------------------------------------------------------
+    // Batch Remove / Exist
+    // -----------------------------------------------------------------------
+
+    pub async fn batch_remove(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<i32>> {
+        let request = proto::BatchRemoveRequest {
+            keys: keys.to_vec(),
+        };
+        let response = self
+            .master
+            .batch_remove(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.statuses)
+    }
+
+    pub async fn batch_is_exist(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<bool>> {
+        let request = proto::BatchExistKeyRequest {
+            keys: keys.to_vec(),
+        };
+        let response = self
+            .master
+            .batch_exist_key(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.results)
+    }
+
+    // -----------------------------------------------------------------------
+    // Remove by regex / Remove all
+    // -----------------------------------------------------------------------
+
+    pub async fn remove_by_regex(
+        &mut self,
+        pattern: &str,
+    ) -> StoreResult<i64> {
+        let request = proto::RemoveByRegexRequest {
+            pattern: pattern.to_string(),
+        };
+        let response = self
+            .master
+            .remove_by_regex(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.removed_count)
+    }
+
+    pub async fn remove_all(&mut self) -> StoreResult<i64> {
+        self.remove_by_regex(".*").await
+    }
+
+    // -----------------------------------------------------------------------
+    // get_size / get_hostname / health_check / tearDownAll / is_closed
+    // -----------------------------------------------------------------------
+
+    pub async fn get_size(&mut self, key: &str) -> StoreResult<i64> {
+        let replicas = self.fetch_replicas(key).await?;
+        if replicas.is_empty() {
+            return Err(StoreError::KeyNotFound(key.to_string()));
+        }
+        let total: u64 = replicas.iter().map(|r| r.offset).sum();
+        Ok(total as i64)
+    }
+
+    pub fn get_hostname(&self) -> String {
+        self.local_hostname.clone()
+    }
+
+    pub async fn health_check(&mut self) -> StoreResult<()> {
+        let request = proto::PingRequest {
+            client_id: Some(self.client_id_proto()),
+            mounted_segments: vec![],
+        };
+        self.master
+            .ping(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub fn is_closed(&self) -> bool {
+        *self.tear_down.read()
+    }
+
+    pub async fn tear_down_all(&mut self) -> StoreResult<()> {
+        *self.tear_down.write() = true;
+
+        // unregister local buffer
+        unsafe { let _ = self.engine.unregister_local_memory(self.local_buffer.as_ptr() as *mut c_void); }
+
+        // unregister all user-registered buffers
+        let ptrs: Vec<usize> = self.registered_buffers.read().keys().copied().collect();
+        for ptr in &ptrs {
+            unsafe { let _ = self.engine.unregister_local_memory(*ptr as *mut c_void); }
+        }
+        self.registered_buffers.write().clear();
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Upsert
+    // -----------------------------------------------------------------------
+
+    pub async fn upsert(
+        &mut self,
+        key: &str,
+        value: &[u8],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let cfg = config.unwrap_or_default();
+        let request = proto::UpsertRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            slice_length: value.len() as u64,
+            config: Some(proto::ReplicateConfig {
+                replica_num: cfg.replica_num,
+                with_soft_pin: cfg.with_soft_pin,
+                with_hard_pin: cfg.with_hard_pin,
+                preferred_segment: cfg.preferred_segment.clone(),
+                prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+            }),
+        };
+
+        let response = self.master.upsert(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let replicas = self.replicas_from_proto(&response.replicas);
+
+        for replica in &replicas {
+            self.write_to_replica(replica, value).await?;
+        }
+
+        let end_request = proto::PutEndRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            replica_type: 0,
+        };
+        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        Ok(replicas)
+    }
+
+    pub async unsafe fn upsert_from(
+        &mut self,
+        key: &str,
+        buffer: *mut c_void,
+        size: usize,
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let cfg = config.unwrap_or_default();
+        let request = proto::UpsertRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            slice_length: size as u64,
+            config: Some(proto::ReplicateConfig {
+                replica_num: cfg.replica_num,
+                with_soft_pin: cfg.with_soft_pin,
+                with_hard_pin: cfg.with_hard_pin,
+                preferred_segment: cfg.preferred_segment.clone(),
+                prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+            }),
+        };
+
+        let response = self.master.upsert(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let replicas = self.replicas_from_proto(&response.replicas);
+
+        for replica in &replicas {
+            self.zero_copy_write(replica, buffer, size).await?;
+        }
+
+        let end_request = proto::PutEndRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            replica_type: 0,
+        };
+        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+
+        Ok(replicas)
+    }
+
+    pub async unsafe fn batch_upsert_from(
+        &mut self,
+        keys: &[String],
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<Vec<ReplicaDescriptor>>> {
+        let mut results = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            results.push(
+                self.upsert_from(key, buffers[i], sizes[i], config.clone())
+                    .await?
+            );
+        }
+        Ok(results)
+    }
+
+    pub async fn upsert_parts(
+        &mut self,
+        key: &str,
+        values: &[&[u8]],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let total_len: usize = values.iter().map(|v| v.len()).sum();
+        let mut concatenated = Vec::with_capacity(total_len);
+        for v in values {
+            concatenated.extend_from_slice(v);
+        }
+        self.upsert(key, &concatenated, config).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Task management
+    // -----------------------------------------------------------------------
+
+    pub async fn create_copy_task(
+        &mut self,
+        key: &str,
+        targets: &[String],
+    ) -> StoreResult<Uuid> {
+        let request = proto::CreateCopyTaskRequest {
+            key: key.to_string(),
+            targets: targets.to_vec(),
+        };
+        let response = self.master.create_copy_task(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        match response.task_id {
+            Some(id) => Ok(Uuid::from_u64_pair(id.high, id.low)),
+            None => Err(StoreError::OperationFailed(-1)),
+        }
+    }
+
+    pub async fn create_move_task(
+        &mut self,
+        key: &str,
+        source: &str,
+        target: &str,
+    ) -> StoreResult<Uuid> {
+        let request = proto::CreateMoveTaskRequest {
+            key: key.to_string(),
+            source: source.to_string(),
+            target: target.to_string(),
+        };
+        let response = self.master.create_move_task(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        match response.task_id {
+            Some(id) => Ok(Uuid::from_u64_pair(id.high, id.low)),
+            None => Err(StoreError::OperationFailed(-1)),
+        }
+    }
+
+    pub async fn query_task(
+        &mut self,
+        task_id: Uuid,
+    ) -> StoreResult<proto::QueryTaskResponse> {
+        let request = proto::QueryTaskRequest {
+            task_id: Some(proto::Uuid {
+                high: task_id.as_u64_pair().0,
+                low: task_id.as_u64_pair().1,
+            }),
+        };
+        let response = self.master.query_task(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        Ok(response)
+    }
+
+    // -----------------------------------------------------------------------
     // Buffer registration (zero-copy path)
     // -----------------------------------------------------------------------
 
-    /// Register a buffer for RDMA / zero-copy access.
-    ///
-    /// # Safety
-    /// `buffer` must point to valid memory of at least `size` bytes.
     pub unsafe fn register_buffer(
         &self,
         buffer: *mut c_void,
         size: usize,
         location: &str,
     ) -> StoreResult<()> {
-        self.engine
-            .register_local_memory(buffer, size, location, true)?;
+        unsafe {
+            self.engine
+                .register_local_memory(buffer, size, location, true)?;
+        }
         self.registered_buffers
             .write()
             .insert(buffer as usize, (size, location.to_string()));
         Ok(())
     }
 
-    /// Unregister a previously registered buffer.
-    ///
-    /// # Safety
-    /// `buffer` must be the same pointer passed to `register_buffer`.
     pub unsafe fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()> {
-        self.engine.unregister_local_memory(buffer)?;
+        unsafe { self.engine.unregister_local_memory(buffer)?; }
         self.registered_buffers.write().remove(&(buffer as usize));
         Ok(())
     }
@@ -388,7 +881,30 @@ impl MooncakeClient {
         proto::Uuid { high: h, low: l }
     }
 
-    /// Copy-based write to a replica.
+    async fn fetch_replicas(&mut self, key: &str) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let request = proto::GetReplicaListRequest { key: key.to_string() };
+        let response = self
+            .master
+            .get_replica_list(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(self.replicas_from_proto(&response.replicas))
+    }
+
+    fn replicas_from_proto(&self, replicas: &[proto::ReplicaDescriptor]) -> Vec<ReplicaDescriptor> {
+        replicas.iter().filter_map(|r| {
+            let sid = r.segment_id.as_ref()?;
+            Some(ReplicaDescriptor {
+                segment_id: Uuid::from_u64_pair(sid.high, sid.low),
+                segment_name: r.segment_name.clone(),
+                offset: r.offset,
+                status: mooncake_store_core::ReplicaStatus::Allocating,
+                replica_type: mooncake_store_core::ReplicaType::Memory,
+            })
+        }).collect()
+    }
+
     async fn write_to_replica(
         &self,
         replica: &ReplicaDescriptor,
@@ -439,7 +955,6 @@ impl MooncakeClient {
         Ok(())
     }
 
-    /// Zero-copy write from a registered buffer.
     async unsafe fn zero_copy_write(
         &self,
         replica: &ReplicaDescriptor,
@@ -475,7 +990,6 @@ impl MooncakeClient {
         Ok(())
     }
 
-    /// Copy-based read from a replica.
     async fn read_from_replica(
         &self,
         replica: &ReplicaDescriptor,
@@ -515,7 +1029,6 @@ impl MooncakeClient {
         Ok(result)
     }
 
-    /// Zero-copy read into a registered buffer.
     async unsafe fn zero_copy_read(
         &self,
         replica: &ReplicaDescriptor,

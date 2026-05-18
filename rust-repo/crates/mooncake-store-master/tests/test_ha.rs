@@ -18,3 +18,18 @@ fn test_leader_role_clone_eq() {
     assert_eq!(r, LeaderRole::Leader);
     assert_ne!(r, LeaderRole::Standby);
 }
+
+#[test]
+fn test_leader_role_copy() {
+    let r = LeaderRole::Leader;
+    let r2 = r;
+    assert_eq!(r, r2);
+    let s = LeaderRole::Standby;
+    assert_ne!(r, s);
+}
+
+#[test]
+fn test_coordinator_backend_types() {
+    assert_ne!(LeaderRole::Leader, LeaderRole::Standby);
+    assert_eq!(LeaderRole::Leader, LeaderRole::Leader);
+}
