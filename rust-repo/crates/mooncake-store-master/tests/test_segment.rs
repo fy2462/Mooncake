@@ -201,7 +201,6 @@ fn test_allocator_prefers_same_node() {
     let mut allocator = SegmentAllocator::new();
     let cid_same = Uuid::new_v4();
     let cid_other = Uuid::new_v4();
-    let request_client = Uuid::new_v4();
 
     allocator.add_segment(Segment {
         id: Uuid::new_v4(), name: "same:1".into(), size: 10000, used: 0, client_id: cid_same,

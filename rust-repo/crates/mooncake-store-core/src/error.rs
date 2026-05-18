@@ -45,6 +45,7 @@ pub enum StoreError {
     #[error("S3 error: {0}")]
     S3Error(String),
 
+    #[cfg(feature = "transfer-engine")]
     #[error("transfer engine error: {0}")]
     TransferEngine(#[from] transfer_engine_ffi::TransferEngineError),
 

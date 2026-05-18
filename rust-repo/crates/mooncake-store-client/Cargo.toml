@@ -8,7 +8,7 @@ license.workspace = true
 name = "mooncake_store_client"
 
 [dependencies]
-mooncake-store-core = { path = "../mooncake-store-core" }
+mooncake-store-core = { path = "../mooncake-store-core", features = ["transfer-engine"] }
 transfer-engine-ffi = { path = "../transfer-engine-ffi" }
 tonic.workspace = true
 prost.workspace = true

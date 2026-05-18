@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+transfer-engine = ["dep:transfer-engine-ffi"]
+
 [dependencies]
 uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
-transfer-engine-ffi = { path = "../transfer-engine-ffi" }
+transfer-engine-ffi = { path = "../transfer-engine-ffi", optional = true }
