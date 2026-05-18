@@ -1,0 +1,402 @@
+syntax = "proto3";
+
+package mooncake.store;
+
+// ---------------------------------------------------------------
+// Common types
+// ---------------------------------------------------------------
+
+message Uuid {
+  fixed64 high = 1;
+  fixed64 low = 2;
+}
+
+message ReplicaDescriptor {
+  enum ReplicaStatus {
+    UNDEFINED = 0;
+    ALLOCATING = 1;
+    WRITTEN = 2;
+    COMPLETE = 3;
+    FAILED = 4;
+  }
+
+  enum ReplicaType {
+    MEMORY = 0;
+    DISK = 1;
+  }
+
+  Uuid segment_id = 1;
+  string segment_name = 2;
+  bytes slice_key_hash = 3;
+  uint64 offset = 4;
+  ReplicaStatus status = 5;
+  ReplicaType replica_type = 6;
+}
+
+message ReplicateConfig {
+  uint32 replica_num = 1;
+  bool with_soft_pin = 2;
+  bool with_hard_pin = 3;
+  string preferred_segment = 4;
+  bool prefer_alloc_in_same_node = 5;
+}
+
+// ---------------------------------------------------------------
+// Master Service RPC
+// ---------------------------------------------------------------
+
+service MasterService {
+  // Health / ping
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Segment management — clients mount/unmount memory segments
+  rpc MountSegment(MountSegmentRequest) returns (MountSegmentResponse);
+  rpc UnmountSegment(UnmountSegmentRequest) returns (UnmountSegmentResponse);
+  rpc ReMountSegment(ReMountSegmentRequest) returns (ReMountSegmentResponse);
+
+  // Key / object operations
+  rpc ExistKey(ExistKeyRequest) returns (ExistKeyResponse);
+  rpc GetAllKeys(GetAllKeysRequest) returns (GetAllKeysResponse);
+  rpc GetAllSegments(GetAllSegmentsRequest) returns (GetAllSegmentsResponse);
+
+  // Put workflow: start → client writes data → end
+  rpc PutStart(PutStartRequest) returns (PutStartResponse);
+  rpc PutEnd(PutEndRequest) returns (PutEndResponse);
+  rpc AddReplica(AddReplicaRequest) returns (AddReplicaResponse);
+
+  // Get workflow: get replica list → client reads data from peers
+  rpc GetReplicaList(GetReplicaListRequest) returns (GetReplicaListResponse);
+
+  // Remove
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+  rpc RemoveByRegex(RemoveByRegexRequest) returns (RemoveByRegexResponse);
+
+  // Batch queries
+  rpc BatchExistKey(BatchExistKeyRequest) returns (BatchExistKeyResponse);
+  rpc BatchQueryIp(BatchQueryIpRequest) returns (BatchQueryIpResponse);
+  rpc BatchReplicaClear(BatchReplicaClearRequest) returns (BatchReplicaClearResponse);
+  rpc QueryByRegex(QueryByRegexRequest) returns (QueryByRegexResponse);
+
+  // Segment query
+  rpc QuerySegments(QuerySegmentsRequest) returns (QuerySegmentsResponse);
+  rpc QueryIp(QueryIpRequest) returns (QueryIpResponse);
+
+  // Upsert
+  rpc Upsert(UpsertRequest) returns (UpsertResponse);
+
+  // Task management
+  rpc CreateCopyTask(CreateCopyTaskRequest) returns (CreateCopyTaskResponse);
+  rpc CreateMoveTask(CreateMoveTaskRequest) returns (CreateMoveTaskResponse);
+  rpc QueryTask(QueryTaskRequest) returns (QueryTaskResponse);
+
+  // Batch operations (high-throughput paths)
+  rpc BatchPutEnd(BatchPutEndRequest) returns (BatchPutEndResponse);
+  rpc BatchPutRevoke(BatchPutRevokeRequest) returns (BatchPutRevokeResponse);
+  rpc BatchRemove(BatchRemoveRequest) returns (BatchRemoveResponse);
+  rpc BatchUpsertEnd(BatchUpsertEndRequest) returns (BatchUpsertEndResponse);
+}
+
+// ---------------------------------------------------------------
+// Ping
+// ---------------------------------------------------------------
+
+message PingRequest {
+  Uuid client_id = 1;
+  repeated string mounted_segments = 2;
+}
+
+message PingResponse {}
+
+// ---------------------------------------------------------------
+// Mount / Unmount
+// ---------------------------------------------------------------
+
+message MountSegmentRequest {
+  Uuid client_id = 1;
+  string segment_name = 2;
+  uint64 size = 3;
+}
+
+message MountSegmentResponse {}
+
+message UnmountSegmentRequest {
+  Uuid segment_id = 1;
+  Uuid client_id = 2;
+}
+
+message UnmountSegmentResponse {}
+
+message ReMountSegmentRequest {
+  Uuid client_id = 1;
+  repeated string segment_names = 2;
+  repeated uint64 segment_sizes = 3;
+}
+
+message ReMountSegmentResponse {}
+
+// ---------------------------------------------------------------
+// Key existence
+// ---------------------------------------------------------------
+
+message ExistKeyRequest {
+  string key = 1;
+}
+
+message ExistKeyResponse {
+  bool exists = 1;
+}
+
+message BatchExistKeyRequest {
+  repeated string keys = 1;
+}
+
+message BatchExistKeyResponse {
+  repeated bool results = 1;
+}
+
+// ---------------------------------------------------------------
+// Keys / Segments enumeration
+// ---------------------------------------------------------------
+
+message GetAllKeysRequest {}
+
+message GetAllKeysResponse {
+  repeated string keys = 1;
+}
+
+message GetAllSegmentsRequest {}
+
+message GetAllSegmentsResponse {
+  repeated string segments = 1;
+}
+
+// ---------------------------------------------------------------
+// Put workflow
+// ---------------------------------------------------------------
+
+message PutStartRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  uint64 slice_length = 3;
+  ReplicateConfig config = 4;
+}
+
+message PutStartResponse {
+  repeated ReplicaDescriptor replicas = 1;
+}
+
+message PutEndRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  ReplicaDescriptor.ReplicaType replica_type = 3;
+}
+
+message PutEndResponse {}
+
+message BatchPutEndRequest {
+  repeated PutEndEntry entries = 1;
+}
+
+message PutEndEntry {
+  Uuid client_id = 1;
+  string key = 2;
+  ReplicaDescriptor.ReplicaType replica_type = 3;
+}
+
+message BatchPutEndResponse {
+  repeated int32 statuses = 1; // 0 = ok, non-zero = error code
+}
+
+message BatchPutRevokeRequest {
+  repeated string keys = 1;
+  Uuid client_id = 2;
+  string segment_name = 3;
+}
+
+message BatchPutRevokeResponse {
+  repeated int32 statuses = 1;
+}
+
+message BatchRemoveRequest {
+  repeated string keys = 1;
+}
+
+message BatchRemoveResponse {
+  repeated int32 statuses = 1;
+}
+
+message BatchUpsertEndRequest {
+  repeated UpsertEntry entries = 1;
+}
+
+message UpsertEntry {
+  Uuid client_id = 1;
+  string key = 2;
+  uint64 slice_length = 3;
+  ReplicateConfig config = 4;
+}
+
+message BatchUpsertEndResponse {
+  repeated ReplicaDescriptor replicas = 1;
+}
+
+message AddReplicaRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  ReplicaDescriptor replica = 3;
+}
+
+message AddReplicaResponse {}
+
+// ---------------------------------------------------------------
+// Get
+// ---------------------------------------------------------------
+
+message GetReplicaListRequest {
+  string key = 1;
+}
+
+message GetReplicaListResponse {
+  repeated ReplicaDescriptor replicas = 1;
+}
+
+// ---------------------------------------------------------------
+// Remove
+// ---------------------------------------------------------------
+
+message RemoveRequest {
+  string key = 1;
+}
+
+message RemoveResponse {}
+
+message RemoveByRegexRequest {
+  string pattern = 1;
+}
+
+message RemoveByRegexResponse {
+  int64 removed_count = 1;
+}
+
+// ---------------------------------------------------------------
+// Batch queries
+// ---------------------------------------------------------------
+
+message BatchQueryIpRequest {
+  repeated Uuid client_ids = 1;
+}
+
+message BatchQueryIpResponse {
+  map<string, IpList> ips = 1;
+}
+
+message IpList {
+  repeated string addresses = 1;
+}
+
+message BatchReplicaClearRequest {
+  repeated string object_keys = 1;
+  Uuid client_id = 2;
+  string segment_name = 3;
+}
+
+message BatchReplicaClearResponse {
+  repeated string cleared_keys = 1;
+}
+
+message QueryByRegexRequest {
+  string pattern = 1;
+}
+
+message QueryByRegexResponse {
+  message Entry {
+    string key = 1;
+    repeated ReplicaDescriptor replicas = 2;
+  }
+  repeated Entry entries = 1;
+}
+
+// ---------------------------------------------------------------
+// Segment queries
+// ---------------------------------------------------------------
+
+message QuerySegmentsRequest {
+  string segment_name = 1;
+}
+
+message QuerySegmentsResponse {
+  uint64 total_size = 1;
+  uint64 used_size = 2;
+}
+
+message QueryIpRequest {
+  Uuid client_id = 1;
+}
+
+message QueryIpResponse {
+  repeated string addresses = 1;
+}
+
+// ---------------------------------------------------------------
+// Upsert
+// ---------------------------------------------------------------
+
+message UpsertRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  uint64 slice_length = 3;
+  ReplicateConfig config = 4;
+}
+
+message UpsertResponse {
+  repeated ReplicaDescriptor replicas = 1;
+}
+
+// ---------------------------------------------------------------
+// Task management
+// ---------------------------------------------------------------
+
+message CreateCopyTaskRequest {
+  string key = 1;
+  repeated string targets = 2;
+}
+
+message CreateCopyTaskResponse {
+  Uuid task_id = 1;
+}
+
+message CreateMoveTaskRequest {
+  string key = 1;
+  string source = 2;
+  string target = 3;
+}
+
+message CreateMoveTaskResponse {
+  Uuid task_id = 1;
+}
+
+enum TaskType {
+  REPLICA_COPY = 0;
+  REPLICA_MOVE = 1;
+}
+
+enum TaskStatus {
+  TASK_PENDING = 0;
+  TASK_PROCESSING = 1;
+  TASK_SUCCESS = 2;
+  TASK_FAILED = 3;
+}
+
+message QueryTaskRequest {
+  Uuid task_id = 1;
+}
+
+message QueryTaskResponse {
+  Uuid id = 1;
+  TaskType task_type = 2;
+  TaskStatus status = 3;
+  int64 created_at_ms_epoch = 4;
+  int64 last_updated_at_ms_epoch = 5;
+  Uuid assigned_client = 6;
+  string message = 7;
+}

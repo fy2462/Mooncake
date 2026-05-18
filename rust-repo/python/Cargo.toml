@@ -1,0 +1,19 @@
+[package]
+name = "mooncake-store-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python bindings for Mooncake distributed KV-cache store (Rust implementation)"
+
+[lib]
+name = "_mooncake_store"
+crate-type = ["cdylib"]
+
+[dependencies]
+mooncake-store-client = { path = "../crates/mooncake-store-client" }
+mooncake-store-core = { path = "../crates/mooncake-store-core" }
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+uuid.workspace = true

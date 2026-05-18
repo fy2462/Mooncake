@@ -1,0 +1,40 @@
+[package]
+name = "mooncake-store-master"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mooncake-master"
+path = "src/main.rs"
+
+[lib]
+name = "mooncake_store_master"
+
+[dependencies]
+mooncake-store-core = { path = "../mooncake-store-core" }
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+clap.workspace = true
+axum.workspace = true
+etcd-client.workspace = true
+redis.workspace = true
+kube.workspace = true
+k8s-openapi.workspace = true
+prometheus.workspace = true
+lazy_static.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

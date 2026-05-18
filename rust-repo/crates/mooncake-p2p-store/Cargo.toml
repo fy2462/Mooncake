@@ -1,0 +1,17 @@
+[package]
+name = "mooncake-p2p-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust rewrite of Mooncake P2P checkpoint store"
+
+[dependencies]
+transfer-engine-ffi = { path = "../transfer-engine-ffi" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+etcd-client.workspace = true
+tracing.workspace = true

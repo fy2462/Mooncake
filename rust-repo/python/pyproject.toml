@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mooncake-store-rust"
+version = "0.1.0"
+description = "Python bindings for Mooncake distributed KV-cache store (Rust implementation)"
+requires-python = ">=3.8"
+authors = [{ name = "Mooncake Authors" }]
+license = { text = "Apache-2.0" }
+keywords = ["mooncake", "kv-cache", "distributed", "llm-inference"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "numpy"]
+
+[project.urls]
+Homepage = "https://github.com/kvcache-ai/Mooncake"
+Source = "https://github.com/kvcache-ai/Mooncake"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "mooncake_store._mooncake_store"
+bindings = "pyo3"

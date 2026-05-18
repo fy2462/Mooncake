@@ -1,0 +1,14 @@
+pub mod allocator;
+pub mod eviction;
+pub mod ha;
+pub mod http_metadata;
+pub mod metrics;
+pub mod service;
+pub mod storage_backend;
+
+pub use service::MasterServiceImpl;
+
+// Generated protobuf code — compiled by build.rs from proto/mooncake_store.proto
+pub mod proto {
+    tonic::include_proto!("mooncake.store");
+}

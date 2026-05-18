@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/transfer-engine-ffi",
+    "crates/mooncake-store-core",
+    "crates/mooncake-store-master",
+    "crates/mooncake-store-client",
+    "crates/mooncake-p2p-store",
+    "python",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Mooncake Authors"]
+
+[workspace.dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+dashmap = "6"
+parking_lot = "0.12"
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+libc = "0.2"
+bindgen = "0.70"
+etcd-client = "0.14"
+redis = { version = "0.25", features = ["tokio-comp"] }
+kube = { version = "0.93", features = ["runtime", "derive"] }
+k8s-openapi = { version = "0.22", features = ["v1_29"] }
+aws-sdk-s3 = "1"
+aws-config = "1"
+prometheus = "0.13"
+lazy_static = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+tonic-build = "0.12"
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py38"] }
+pyo3-async-runtimes = { version = "0.28", features = ["attributes", "tokio-runtime"] }
