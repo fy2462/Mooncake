@@ -48,6 +48,7 @@ target_link_libraries(
   PUBLIC base
          transport
          rdma_transport
+         mooncake_common
          ibverbs
          glog::glog
          gflags::gflags
@@ -130,6 +131,11 @@ endif()
 if(USE_INTRA_NVLINK)
   message(STATUS "Enabled USE_INTRA_NVLINK support")
   target_compile_definitions(transfer_engine PUBLIC USE_INTRA_NVLINK)
+endif()
+
+if(USE_MLX5DV)
+  message(STATUS "Enabled USE_MLX5DV support (mlx5 direct verbs)")
+  target_link_libraries(transfer_engine PUBLIC mlx5)
 endif()
 
 if(USE_EFA)
