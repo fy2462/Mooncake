@@ -1530,6 +1530,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lazy_static",
+ "libc",
  "mooncake-store-core",
  "parking_lot",
  "prometheus",

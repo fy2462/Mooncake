@@ -1,9 +1,9 @@
+use mooncake_store_core::{ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
 use mooncake_store_master::eviction::EvictionManager;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
-use mooncake_store_core::{ReplicateConfig, Segment};
 use std::time::{Duration, SystemTime};
 use tonic::Request;
 use uuid::Uuid;
@@ -14,10 +14,18 @@ fn test_allocator_random_strategy() {
 
     let cid = Uuid::new_v4();
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "n1:1".into(), size: 1000, used: 0, client_id: cid,
+        id: Uuid::new_v4(),
+        name: "n1:1".into(),
+        size: 1000,
+        used: 0,
+        client_id: cid,
     });
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "n2:1".into(), size: 1000, used: 0, client_id: cid,
+        id: Uuid::new_v4(),
+        name: "n2:1".into(),
+        size: 1000,
+        used: 0,
+        client_id: cid,
     });
 
     let replicas = allocator.allocate("key1", 100, 2, &ReplicateConfig::default());
@@ -37,10 +45,18 @@ fn test_allocator_preferred_segment() {
     let mut allocator = SegmentAllocator::new();
     let cid = Uuid::new_v4();
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "far:1".into(), size: 1000, used: 0, client_id: cid,
+        id: Uuid::new_v4(),
+        name: "far:1".into(),
+        size: 1000,
+        used: 0,
+        client_id: cid,
     });
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "preferred:1".into(), size: 1000, used: 0, client_id: cid,
+        id: Uuid::new_v4(),
+        name: "preferred:1".into(),
+        size: 1000,
+        used: 0,
+        client_id: cid,
     });
 
     let config = ReplicateConfig {
@@ -57,15 +73,106 @@ fn test_allocator_free_ratio_first() {
     let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
     let cid = Uuid::new_v4();
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "fuller:1".into(), size: 1000, used: 800, client_id: cid,
+        id: Uuid::new_v4(),
+        name: "fuller:1".into(),
+        size: 1000,
+        used: 800,
+        client_id: cid,
     });
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "emptier:1".into(), size: 1000, used: 100, client_id: cid,
+        id: Uuid::new_v4(),
+        name: "emptier:1".into(),
+        size: 1000,
+        used: 100,
+        client_id: cid,
     });
 
     let replicas = allocator.allocate("k", 100, 1, &ReplicateConfig::default());
     assert_eq!(replicas.len(), 1);
     assert_eq!(replicas[0].segment_name, "emptier:1");
+}
+
+#[tokio::test]
+async fn test_runtime_config_applies_allocator_strategy() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        allocation_strategy: AllocationStrategy::FreeRatioFirst,
+        ..Default::default()
+    });
+    let fuller_client = Uuid::new_v4();
+    let emptier_client = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto::Uuid {
+                high: fuller_client.as_u64_pair().0,
+                low: fuller_client.as_u64_pair().1,
+            }),
+            segment_name: "fuller:1".into(),
+            size: 1000,
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto::Uuid {
+                high: emptier_client.as_u64_pair().0,
+                low: emptier_client.as_u64_pair().1,
+            }),
+            segment_name: "emptier:1".into(),
+            size: 1000,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let _ = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto::Uuid {
+                high: fuller_client.as_u64_pair().0,
+                low: fuller_client.as_u64_pair().1,
+            }),
+            key: "prefill".into(),
+            slice_length: 800,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: "fuller:1".into(),
+                prefer_alloc_in_same_node: false,
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let response = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto::Uuid {
+                high: fuller_client.as_u64_pair().0,
+                low: fuller_client.as_u64_pair().1,
+            }),
+            key: "strategy-key".into(),
+            slice_length: 100,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: String::new(),
+                prefer_alloc_in_same_node: false,
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.replicas.len(), 1);
+    assert_eq!(response.replicas[0].segment_name, "emptier:1");
 }
 
 #[test]
@@ -102,7 +209,12 @@ fn test_eviction_selects_oldest() {
     let very_old = now - Duration::from_secs(10000);
     let recent = now - Duration::from_secs(10);
 
-    let candidates: Vec<(&str, &[mooncake_store_core::ReplicaDescriptor], bool, SystemTime)> = vec![
+    let candidates: Vec<(
+        &str,
+        &[mooncake_store_core::ReplicaDescriptor],
+        bool,
+        SystemTime,
+    )> = vec![
         ("old_key", &[], false, very_old),
         ("new_key", &[], false, recent),
     ];
@@ -117,9 +229,12 @@ fn test_lease_not_expired_is_skipped() {
     let mgr = EvictionManager::new(Duration::from_secs(1800), Duration::from_secs(3600));
     let fresh = SystemTime::now() - Duration::from_secs(100);
 
-    let candidates: Vec<(&str, &[mooncake_store_core::ReplicaDescriptor], bool, SystemTime)> = vec![
-        ("still_live", &[], false, fresh),
-    ];
+    let candidates: Vec<(
+        &str,
+        &[mooncake_store_core::ReplicaDescriptor],
+        bool,
+        SystemTime,
+    )> = vec![("still_live", &[], false, fresh)];
 
     let evicted = mgr.select_for_eviction(&candidates, 1);
     assert!(evicted.is_empty());
@@ -131,7 +246,12 @@ fn test_eviction_skips_soft_pinned() {
     let now = SystemTime::now();
     let old = now - Duration::from_secs(1000);
 
-    let candidates: Vec<(&str, &[mooncake_store_core::ReplicaDescriptor], bool, SystemTime)> = vec![
+    let candidates: Vec<(
+        &str,
+        &[mooncake_store_core::ReplicaDescriptor],
+        bool,
+        SystemTime,
+    )> = vec![
         ("pinned_key", &[], true, old),
         ("normal_key", &[], false, old),
     ];
@@ -229,13 +349,11 @@ async fn test_remount_segment_is_idempotent_per_client_and_name() {
         .await
         .unwrap();
 
-    let segments = MasterService::get_all_segments(
-        &service,
-        Request::new(proto::GetAllSegmentsRequest {}),
-    )
-    .await
-    .unwrap()
-    .into_inner();
+    let segments =
+        MasterService::get_all_segments(&service, Request::new(proto::GetAllSegmentsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
 
     assert_eq!(segments.segments, vec!["host-a:1111"]);
 }
@@ -280,15 +398,16 @@ async fn test_graceful_unmount_segment_removes_after_delay() {
 
     tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
 
-    let segments = MasterService::get_all_segments(
-        &service,
-        Request::new(proto::GetAllSegmentsRequest {}),
-    )
-    .await
-    .unwrap()
-    .into_inner();
+    let segments =
+        MasterService::get_all_segments(&service, Request::new(proto::GetAllSegmentsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
 
-    assert!(!segments.segments.iter().any(|segment| segment == "host-g:3333"));
+    assert!(!segments
+        .segments
+        .iter()
+        .any(|segment| segment == "host-g:3333"));
 }
 
 #[tokio::test]
@@ -775,7 +894,10 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
         replicas.replicas[0].replica_type,
         proto::replica_descriptor::ReplicaType::LocalDisk as i32
     );
-    assert_eq!(replicas.replicas[0].holder_client_id.as_ref().unwrap().high, client_id.as_u64_pair().0);
+    assert_eq!(
+        replicas.replicas[0].holder_client_id.as_ref().unwrap().high,
+        client_id.as_u64_pair().0
+    );
 }
 
 #[tokio::test]
@@ -885,7 +1007,10 @@ async fn test_promotion_flow_success_and_failure() {
     .await
     .unwrap()
     .into_inner();
-    assert_eq!(alloc.memory_descriptor.as_ref().unwrap().segment_name, "dram-a");
+    assert_eq!(
+        alloc.memory_descriptor.as_ref().unwrap().segment_name,
+        "dram-a"
+    );
 
     MasterService::notify_promotion_success(
         &service,
@@ -907,11 +1032,9 @@ async fn test_promotion_flow_success_and_failure() {
     .await
     .unwrap()
     .into_inner();
-    assert!(promoted
-        .replicas
-        .iter()
-        .any(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32
-            && replica.status == proto::replica_descriptor::ReplicaStatus::Complete as i32));
+    assert!(promoted.replicas.iter().any(|replica| replica.replica_type
+        == proto::replica_descriptor::ReplicaType::Memory as i32
+        && replica.status == proto::replica_descriptor::ReplicaStatus::Complete as i32));
 
     MasterService::promotion_alloc_start(
         &service,
@@ -951,7 +1074,8 @@ async fn test_promotion_flow_success_and_failure() {
         failed
             .replicas
             .iter()
-            .filter(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+            .filter(|replica| replica.replica_type
+                == proto::replica_descriptor::ReplicaType::Memory as i32)
             .count(),
         0
     );
@@ -1432,7 +1556,8 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
         replicas
             .replicas
             .iter()
-            .filter(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+            .filter(|replica| replica.replica_type
+                == proto::replica_descriptor::ReplicaType::Memory as i32)
             .count(),
         1
     );
@@ -1543,7 +1668,8 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
         replicas
             .replicas
             .iter()
-            .filter(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+            .filter(|replica| replica.replica_type
+                == proto::replica_descriptor::ReplicaType::Memory as i32)
             .count(),
         0
     );
@@ -1551,7 +1677,8 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
         replicas
             .replicas
             .iter()
-            .filter(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::LocalDisk as i32)
+            .filter(|replica| replica.replica_type
+                == proto::replica_descriptor::ReplicaType::LocalDisk as i32)
             .count(),
         1
     );
@@ -1661,7 +1788,8 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
         replicas
             .replicas
             .iter()
-            .filter(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+            .filter(|replica| replica.replica_type
+                == proto::replica_descriptor::ReplicaType::Memory as i32)
             .count(),
         1
     );

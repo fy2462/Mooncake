@@ -10,7 +10,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
-        .compile_protos(&[proto_path.join("mooncake_store.proto").to_str().unwrap()], &[proto_path])?;
+        .compile_protos(
+            &[proto_path.join("mooncake_store.proto").to_str().unwrap()],
+            &[proto_path],
+        )?;
 
     Ok(())
 }

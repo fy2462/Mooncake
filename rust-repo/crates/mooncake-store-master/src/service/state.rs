@@ -1,0 +1,111 @@
+use crate::allocator::{AllocationStrategy, MemoryAllocatorKind, SegmentAllocator};
+use crate::storage_backend::StorageBackend;
+use dashmap::DashMap;
+use mooncake_store_core::{ReplicaDescriptor, TaskInfo};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::time::{Duration, Instant, SystemTime};
+use uuid::Uuid;
+
+pub(crate) struct MasterState {
+    pub(crate) clients: DashMap<Uuid, ClientEntry>,
+    pub(crate) objects: DashMap<String, ObjectEntry>,
+    pub(crate) segments: DashMap<Uuid, SegmentEntry>,
+    pub(crate) local_disk_segments: DashMap<Uuid, LocalDiskSegmentEntry>,
+    pub(crate) tasks: DashMap<Uuid, TaskEntry>,
+    pub(crate) offloading_tasks: DashMap<String, OffloadingTaskEntry>,
+    pub(crate) promotion_tasks: DashMap<String, PromotionTaskEntry>,
+    pub(crate) promotion_access_counts: DashMap<String, u8>,
+    pub(crate) allocator: RwLock<SegmentAllocator>,
+    pub(crate) storage_backend: RwLock<Option<StorageBackend>>,
+    pub(crate) promotion_in_flight: AtomicUsize,
+    pub(crate) runtime_config: MasterRuntimeConfig,
+}
+
+pub(crate) struct ClientEntry {
+    pub(crate) info: mooncake_store_core::ClientInfo,
+    pub(crate) last_ping: SystemTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectEntry {
+    pub replicas: Vec<ReplicaDescriptor>,
+    pub size: u64,
+    pub last_access: SystemTime,
+    pub soft_pinned: bool,
+}
+
+pub struct SegmentEntry {
+    pub segment: mooncake_store_core::Segment,
+}
+
+pub(crate) struct LocalDiskSegmentEntry {
+    pub(crate) enable_offloading: bool,
+    pub(crate) offloading_objects: HashMap<String, i64>,
+    pub(crate) promotion_objects: HashMap<String, i64>,
+    pub(crate) ssd_total_capacity_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskEntry {
+    pub info: TaskInfo,
+    pub key: String,
+    pub payload: String,
+    pub max_retry_attempts: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OffloadingTaskEntry {
+    pub(crate) client_id: Uuid,
+    pub(crate) start_time: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PromotionTaskEntry {
+    pub(crate) holder_id: Uuid,
+    pub(crate) object_size: u64,
+    pub(crate) staged_segment_id: Option<Uuid>,
+    pub(crate) staged_offset: Option<u64>,
+    pub(crate) start_time: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct MasterRuntimeConfig {
+    pub put_start_release_timeout: Duration,
+    pub allocation_strategy: AllocationStrategy,
+    pub memory_allocator_kind: MemoryAllocatorKind,
+    pub promotion_on_hit: bool,
+    pub promotion_admission_threshold: u8,
+    pub promotion_queue_limit: usize,
+    pub reaper_interval: Duration,
+    pub eviction_interval: Duration,
+    pub eviction_high_watermark_ratio: f64,
+    pub eviction_ratio: f64,
+    pub soft_pin_ttl: Duration,
+    pub lease_ttl: Duration,
+    pub offload_on_evict: bool,
+    pub offload_force_evict: bool,
+}
+
+impl Default for MasterRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            put_start_release_timeout: Duration::from_secs(30),
+            allocation_strategy: AllocationStrategy::Random,
+            memory_allocator_kind: MemoryAllocatorKind::Offset,
+            promotion_on_hit: true,
+            promotion_admission_threshold: 1,
+            promotion_queue_limit: 1024,
+            reaper_interval: Duration::from_millis(100),
+            eviction_interval: Duration::from_millis(100),
+            eviction_high_watermark_ratio: 0.95,
+            eviction_ratio: 0.05,
+            soft_pin_ttl: Duration::from_secs(1800),
+            lease_ttl: Duration::from_secs(3600),
+            offload_on_evict: false,
+            offload_force_evict: false,
+        }
+    }
+}

@@ -1,7 +1,10 @@
-use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
+use mooncake_store_master::hf3fs::{self, Hf3fsApi};
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
+use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use uuid::Uuid;
 
@@ -9,6 +12,37 @@ fn temp_dir() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("mooncake_test_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+fn hf3fs_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct MockHf3fsApi {
+    reg_calls: AtomicUsize,
+    dereg_calls: AtomicUsize,
+}
+
+impl MockHf3fsApi {
+    fn new() -> Self {
+        Self {
+            reg_calls: AtomicUsize::new(0),
+            dereg_calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Hf3fsApi for MockHf3fsApi {
+    fn reg_fd(&self, _fd: std::os::fd::RawFd, _flags: i32) -> Result<i32, std::io::Error> {
+        self.reg_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(0)
+    }
+
+    fn dereg_fd(&self, _fd: std::os::fd::RawFd) -> Result<i32, std::io::Error> {
+        self.dereg_calls.fetch_add(1, Ordering::Relaxed);
+        Ok(0)
+    }
 }
 
 #[test]
@@ -81,27 +115,39 @@ fn test_storage_backend_multiple_objects() {
     let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
     let sid = Uuid::new_v4();
     let cid = Uuid::new_v4();
-    segments.insert(sid, SegmentEntry {
-        segment: Segment { id: sid, name: "s1".into(), size: 1000, used: 0, client_id: cid },
-    });
+    segments.insert(
+        sid,
+        SegmentEntry {
+            segment: Segment {
+                id: sid,
+                name: "s1".into(),
+                size: 1000,
+                used: 0,
+                client_id: cid,
+            },
+        },
+    );
 
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     for i in 0..5u64 {
         let key = format!("key_{}", i);
-        objects.insert(key.clone(), ObjectEntry {
-            replicas: vec![ReplicaDescriptor {
-                segment_id: sid,
-                segment_name: "s1".into(),
-                offset: i * 100,
+        objects.insert(
+            key.clone(),
+            ObjectEntry {
+                replicas: vec![ReplicaDescriptor {
+                    segment_id: sid,
+                    segment_name: "s1".into(),
+                    offset: i * 100,
+                    size: 100,
+                    status: ReplicaStatus::Complete,
+                    replica_type: ReplicaType::Memory,
+                    holder_client_id: None,
+                }],
                 size: 100,
-                status: ReplicaStatus::Complete,
-                replica_type: ReplicaType::Memory,
-                holder_client_id: None,
-            }],
-            size: 100,
-            last_access: SystemTime::now(),
-            soft_pinned: false,
-        });
+                last_access: SystemTime::now(),
+                soft_pinned: false,
+            },
+        );
     }
 
     backend.save(&segments, &objects).unwrap();
@@ -121,6 +167,60 @@ fn test_storage_backend_clear() {
     assert!(backend.load().unwrap().is_some());
     backend.clear().unwrap();
     assert!(backend.load().unwrap().is_none());
+}
+
+#[test]
+fn test_storage_backend_hf3fs_uses_fd_registration() {
+    let _guard = hf3fs_test_lock().lock().unwrap();
+    let api = Arc::new(MockHf3fsApi::new());
+    hf3fs::set_api_override_for_test(Some(api.clone()));
+
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::Hf3fs, &tmp);
+
+    let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let sid = Uuid::new_v4();
+    let cid = Uuid::new_v4();
+    segments.insert(
+        sid,
+        SegmentEntry {
+            segment: Segment {
+                id: sid,
+                name: "hf3fs-node".into(),
+                size: 4096,
+                used: 128,
+                client_id: cid,
+            },
+        },
+    );
+
+    let objects: DashMap<String, ObjectEntry> = DashMap::new();
+    objects.insert(
+        "hf3fs-key".into(),
+        ObjectEntry {
+            replicas: vec![ReplicaDescriptor {
+                segment_id: sid,
+                segment_name: "hf3fs-node".into(),
+                offset: 64,
+                size: 128,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Disk,
+                holder_client_id: None,
+            }],
+            size: 128,
+            last_access: SystemTime::now(),
+            soft_pinned: false,
+        },
+    );
+
+    backend.save(&segments, &objects).unwrap();
+    let loaded = backend.load().unwrap().unwrap();
+    assert_eq!(loaded.0.len(), 1);
+    assert_eq!(loaded.1.len(), 1);
+    assert!(api.reg_calls.load(Ordering::Relaxed) >= 2);
+    assert!(api.dereg_calls.load(Ordering::Relaxed) >= 2);
+
+    hf3fs::set_api_override_for_test(None);
 }
 
 #[test]

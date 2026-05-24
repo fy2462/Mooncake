@@ -52,7 +52,9 @@ async fn test_metadata_state_set_master_addr() {
 #[tokio::test]
 async fn test_metadata_state_register_node() {
     let state = MetadataState::new("127.0.0.1:50051");
-    state.register_node("node-a".into(), 12345, vec!["mlx5_0".into()]).await;
+    state
+        .register_node("node-a".into(), 12345, vec!["mlx5_0".into()])
+        .await;
     let nodes = state.nodes.read().await;
     assert!(nodes.contains_key("node-a"));
     let registered = nodes.get("node-a").unwrap();
@@ -64,8 +66,12 @@ async fn test_metadata_state_register_node() {
 #[tokio::test]
 async fn test_metadata_state_multiple_nodes() {
     let state = MetadataState::new("master:50051");
-    state.register_node("n1".into(), 10001, vec!["d0".into()]).await;
-    state.register_node("n2".into(), 10002, vec!["d1".into()]).await;
+    state
+        .register_node("n1".into(), 10001, vec!["d0".into()])
+        .await;
+    state
+        .register_node("n2".into(), 10002, vec!["d1".into()])
+        .await;
     state.register_node("n3".into(), 10003, vec![]).await;
 
     let nodes = state.nodes.read().await;
@@ -78,8 +84,12 @@ async fn test_metadata_state_multiple_nodes() {
 #[tokio::test]
 async fn test_metadata_state_overwrite_node() {
     let state = MetadataState::new("m:1");
-    state.register_node("n".into(), 100, vec!["old".into()]).await;
-    state.register_node("n".into(), 200, vec!["new".into()]).await;
+    state
+        .register_node("n".into(), 100, vec!["old".into()])
+        .await;
+    state
+        .register_node("n".into(), 200, vec!["new".into()])
+        .await;
 
     let nodes = state.nodes.read().await;
     assert_eq!(nodes.len(), 1);

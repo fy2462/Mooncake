@@ -1,6 +1,7 @@
 pub mod allocator;
 pub mod eviction;
 pub mod ha;
+pub mod hf3fs;
 pub mod http_metadata;
 pub mod metrics;
 pub mod service;

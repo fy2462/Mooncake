@@ -1,4 +1,5 @@
 use clap::Parser;
+use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole};
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
@@ -9,7 +10,11 @@ use tracing::info;
 use tracing_subscriber::fmt;
 
 #[derive(Parser, Debug)]
-#[command(name = "mooncake-master", version, about = "Mooncake distributed KV cache — Master Service")]
+#[command(
+    name = "mooncake-master",
+    version,
+    about = "Mooncake distributed KV cache — Master Service"
+)]
 struct Args {
     #[arg(long, default_value = "0.0.0.0")]
     rpc_address: String,
@@ -31,6 +36,9 @@ struct Args {
 
     #[arg(long, default_value = "random")]
     allocation_strategy: String,
+
+    #[arg(long, default_value = "offset")]
+    memory_allocator: String,
 
     #[arg(long, default_value_t = 5000)]
     default_kv_lease_ttl_ms: u64,
@@ -68,7 +76,12 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))).init();
+    fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let args = Args::parse();
 
@@ -95,7 +108,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else if !endpoints.is_empty() {
             coordinator = Some(LeaderCoordinator::new_etcd(endpoints).await?);
         } else {
-            tracing::error!("HA mode enabled but neither etcd_endpoints nor k8s_namespace provided");
+            tracing::error!(
+                "HA mode enabled but neither etcd_endpoints nor k8s_namespace provided"
+            );
             return Err("HA requires etcd or K8s configuration".into());
         }
     }
@@ -114,16 +129,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Metrics HTTP server ---
-    let metrics_addr = SocketAddr::new(
-        args.rpc_address.parse()?,
-        args.metrics_port,
-    );
+    let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
     tokio::spawn(metrics::serve_metrics_http(metrics_addr));
 
     // --- Master gRPC service ---
     let snapshot_backend_type = args.snapshot_backend_type.as_deref().and_then(|s| {
         if s == "local-disk" {
             Some(mooncake_store_master::storage_backend::StorageBackendType::LocalDisk)
+        } else if s == "hf3fs" {
+            Some(mooncake_store_master::storage_backend::StorageBackendType::Hf3fs)
         } else {
             None
         }
@@ -137,6 +151,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let runtime_config = MasterRuntimeConfig {
+        allocation_strategy: AllocationStrategy::parse(&args.allocation_strategy)
+            .ok_or("allocation_strategy must be 'random' or 'free_ratio_first'")?,
+        memory_allocator_kind: MemoryAllocatorKind::parse(&args.memory_allocator)
+            .ok_or("memory_allocator must be 'offset' or 'cachelib'")?,
         lease_ttl: Duration::from_millis(args.default_kv_lease_ttl_ms),
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
         eviction_ratio: args.eviction_ratio,
@@ -174,7 +192,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Mooncake Master starting on {}", rpc_addr);
     tonic::transport::Server::builder()
         .add_service(
-            mooncake_store_master::proto::master_service_server::MasterServiceServer::from_arc(service_arc),
+            mooncake_store_master::proto::master_service_server::MasterServiceServer::from_arc(
+                service_arc,
+            ),
         )
         .serve(rpc_addr)
         .await?;

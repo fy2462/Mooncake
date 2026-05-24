@@ -1,7 +1,7 @@
-use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
-use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
-use mooncake_store_master::allocator::{SegmentAllocator, AllocationStrategy};
 use dashmap::DashMap;
+use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
+use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
+use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
 use std::time::SystemTime;
 use uuid::Uuid;
 
@@ -49,12 +49,30 @@ fn test_segment_dashmap_ops() {
     let id2 = Uuid::new_v4();
     let cid = Uuid::new_v4();
 
-    segments.insert(id1, SegmentEntry {
-        segment: Segment { id: id1, name: "s1".into(), size: 1000, used: 0, client_id: cid },
-    });
-    segments.insert(id2, SegmentEntry {
-        segment: Segment { id: id2, name: "s2".into(), size: 2000, used: 100, client_id: cid },
-    });
+    segments.insert(
+        id1,
+        SegmentEntry {
+            segment: Segment {
+                id: id1,
+                name: "s1".into(),
+                size: 1000,
+                used: 0,
+                client_id: cid,
+            },
+        },
+    );
+    segments.insert(
+        id2,
+        SegmentEntry {
+            segment: Segment {
+                id: id2,
+                name: "s2".into(),
+                size: 2000,
+                used: 100,
+                client_id: cid,
+            },
+        },
+    );
 
     assert_eq!(segments.len(), 2);
     assert!(segments.contains_key(&id1));
@@ -215,10 +233,18 @@ fn test_allocator_prefers_same_node() {
     let cid_other = Uuid::new_v4();
 
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "same:1".into(), size: 10000, used: 0, client_id: cid_same,
+        id: Uuid::new_v4(),
+        name: "same:1".into(),
+        size: 10000,
+        used: 0,
+        client_id: cid_same,
     });
     allocator.add_segment(Segment {
-        id: Uuid::new_v4(), name: "same:2".into(), size: 10000, used: 0, client_id: cid_other,
+        id: Uuid::new_v4(),
+        name: "same:2".into(),
+        size: 10000,
+        used: 0,
+        client_id: cid_other,
     });
 
     let config = mooncake_store_core::ReplicateConfig {

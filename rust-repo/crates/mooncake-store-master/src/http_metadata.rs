@@ -30,12 +30,7 @@ impl MetadataState {
         }
     }
 
-    pub async fn register_node(
-        &self,
-        hostname: String,
-        rpc_port: u16,
-        rdma_devices: Vec<String>,
-    ) {
+    pub async fn register_node(&self, hostname: String, rpc_port: u16, rdma_devices: Vec<String>) {
         self.nodes.write().await.insert(
             hostname.clone(),
             MetadataNodeInfo {
@@ -58,10 +53,7 @@ impl MetadataState {
 async fn metadata_handler(State(state): State<MetadataState>) -> Json<MetadataResponse> {
     let nodes = state.nodes.read().await.clone();
     let master_addr = state.get_master_addr().await;
-    Json(MetadataResponse {
-        nodes,
-        master_addr,
-    })
+    Json(MetadataResponse { nodes, master_addr })
 }
 
 pub async fn serve_metadata_http(addr: SocketAddr, state: MetadataState) {

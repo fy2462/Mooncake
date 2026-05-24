@@ -66,10 +66,8 @@ fn test_eviction_all_soft_pinned_no_eviction() {
     let now = SystemTime::now();
     let old = now - Duration::from_secs(1000);
 
-    let candidates: Vec<(&str, &[ReplicaDescriptor], bool, SystemTime)> = vec![
-        ("pinned_a", &[], true, old),
-        ("pinned_b", &[], true, old),
-    ];
+    let candidates: Vec<(&str, &[ReplicaDescriptor], bool, SystemTime)> =
+        vec![("pinned_a", &[], true, old), ("pinned_b", &[], true, old)];
 
     let evicted = mgr.select_for_eviction(&candidates, 2);
     assert!(evicted.is_empty());
@@ -101,10 +99,8 @@ fn test_eviction_target_exceeds_candidates() {
     let mgr = EvictionManager::new(Duration::from_secs(1800), Duration::from_millis(1));
     let old = SystemTime::now() - Duration::from_secs(100);
 
-    let candidates: Vec<(&str, &[ReplicaDescriptor], bool, SystemTime)> = vec![
-        ("a", &[], false, old),
-        ("b", &[], false, old),
-    ];
+    let candidates: Vec<(&str, &[ReplicaDescriptor], bool, SystemTime)> =
+        vec![("a", &[], false, old), ("b", &[], false, old)];
 
     let evicted = mgr.select_for_eviction(&candidates, 10);
     assert_eq!(evicted.len(), 2);
