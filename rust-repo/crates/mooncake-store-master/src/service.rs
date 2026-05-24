@@ -1,13 +1,17 @@
 use crate::allocator::SegmentAllocator;
+use crate::http_metadata::MetadataState;
 use crate::metrics;
 use crate::proto;
 use crate::proto::master_service_server::MasterService;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use dashmap::DashMap;
 use mooncake_store_core::{
-    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
+    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskInfo,
+    TaskStatus, TaskType,
 };
+use chrono::Utc;
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -22,6 +26,7 @@ pub(crate) struct MasterState {
     pub(crate) clients: DashMap<Uuid, ClientEntry>,
     pub(crate) objects: DashMap<String, ObjectEntry>,
     pub(crate) segments: DashMap<Uuid, SegmentEntry>,
+    pub(crate) tasks: DashMap<Uuid, TaskEntry>,
     pub(crate) allocator: RwLock<SegmentAllocator>,
     storage_backend: RwLock<Option<StorageBackend>>,
 }
@@ -31,12 +36,20 @@ pub(crate) struct ClientEntry {
     pub(crate) last_ping: SystemTime,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectEntry {
     pub replicas: Vec<ReplicaDescriptor>,
+    pub size: u64,
 }
 
 pub struct SegmentEntry {
     pub segment: mooncake_store_core::Segment,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskEntry {
+    pub info: TaskInfo,
+    pub key: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +58,7 @@ pub struct SegmentEntry {
 
 pub struct MasterServiceImpl {
     state: Arc<MasterState>,
+    metadata_state: MetadataState,
 }
 
 impl MasterServiceImpl {
@@ -58,9 +72,11 @@ impl MasterServiceImpl {
             clients: DashMap::new(),
             objects: DashMap::new(),
             segments: DashMap::new(),
+            tasks: DashMap::new(),
             allocator: RwLock::new(SegmentAllocator::new()),
             storage_backend,
         });
+        let metadata_state = MetadataState::new("");
 
         // Load existing state from snapshot
         if let Some(ref backend) = *state.storage_backend.read() {
@@ -69,22 +85,34 @@ impl MasterServiceImpl {
                     state.segments.insert(seg.id, SegmentEntry { segment: seg.clone() });
                     state.allocator.write().add_segment(seg);
                 }
-                for (key, replicas) in objects {
-                    state.objects.insert(key, ObjectEntry { replicas });
+                for (key, object) in objects {
+                    state.objects.insert(key, object);
                 }
                 tracing::info!("Restored state from snapshot");
             }
         }
 
-        Self { state }
+        Self {
+            state,
+            metadata_state,
+        }
     }
 
     pub fn save_snapshot(&self) {
+        let start = std::time::Instant::now();
         if let Some(ref backend) = *self.state.storage_backend.read() {
             if let Err(e) = backend.save(&self.state.segments, &self.state.objects) {
+                metrics::SNAPSHOT_FAIL_COUNT.inc();
                 tracing::error!("Failed to save snapshot: {}", e);
+            } else {
+                metrics::SNAPSHOT_DURATION_MS.set(start.elapsed().as_millis() as i64);
+                metrics::SNAPSHOT_SUCCESS_COUNT.inc();
             }
         }
+    }
+
+    pub fn metadata_state(&self) -> MetadataState {
+        self.metadata_state.clone()
     }
 }
 
@@ -115,6 +143,7 @@ fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescriptor {
         status: r.status as i32,
         replica_type: r.replica_type as i32,
         slice_key_hash: vec![],
+        size: r.size,
     }
 }
 
@@ -123,6 +152,7 @@ fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescriptor {
         segment_id: p.segment_id.as_ref().map_or(Uuid::nil(), uuid_from_proto),
         segment_name: p.segment_name.clone(),
         offset: p.offset,
+        size: p.size,
         status: match p.status {
             1 => ReplicaStatus::Allocating,
             2 => ReplicaStatus::Written,
@@ -148,6 +178,117 @@ fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
     }
 }
 
+fn task_type_to_proto(task_type: TaskType) -> i32 {
+    match task_type {
+        TaskType::ReplicaCopy => proto::TaskType::ReplicaCopy as i32,
+        TaskType::ReplicaMove => proto::TaskType::ReplicaMove as i32,
+    }
+}
+
+fn task_status_to_proto(status: TaskStatus) -> i32 {
+    match status {
+        TaskStatus::Pending => proto::TaskStatus::TaskPending as i32,
+        TaskStatus::Processing => proto::TaskStatus::TaskProcessing as i32,
+        TaskStatus::Success => proto::TaskStatus::TaskSuccess as i32,
+        TaskStatus::Failed => proto::TaskStatus::TaskFailed as i32,
+    }
+}
+
+fn host_from_segment_name(name: &str) -> String {
+    name.split(':').next().unwrap_or(name).to_string()
+}
+
+fn port_from_segment_name(name: &str) -> u16 {
+    name.split(':')
+        .nth(1)
+        .and_then(|part| part.parse::<u16>().ok())
+        .unwrap_or(0)
+}
+
+fn merge_addresses(existing: &[String], new_addresses: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut merged = existing.to_vec();
+    for address in new_addresses {
+        if !address.is_empty() && !merged.iter().any(|v| v == &address) {
+            merged.push(address);
+        }
+    }
+    merged
+}
+
+fn upsert_client_addresses(state: &MasterState, client_id: Uuid, addresses: Vec<String>) {
+    let now = Utc::now();
+    if let Some(mut entry) = state.clients.get_mut(&client_id) {
+        entry.info.addresses = merge_addresses(&entry.info.addresses, addresses);
+        entry.info.last_seen = now;
+        entry.last_ping = SystemTime::now();
+        return;
+    }
+
+    state.clients.insert(client_id, ClientEntry {
+        info: mooncake_store_core::ClientInfo {
+            id: client_id,
+            addresses,
+            segments: vec![],
+            last_seen: now,
+        },
+        last_ping: SystemTime::now(),
+    });
+}
+
+async fn register_metadata_segments(metadata_state: &MetadataState, segment_names: &[String]) {
+    for segment_name in segment_names {
+        let host = host_from_segment_name(segment_name);
+        if host.is_empty() {
+            continue;
+        }
+        metadata_state
+            .register_node(host, port_from_segment_name(segment_name), vec![])
+            .await;
+    }
+}
+
+fn client_id_by_segment_name(state: &MasterState, segment_name: &str) -> Option<Uuid> {
+    state
+        .segments
+        .iter()
+        .find(|entry| entry.segment.name == segment_name)
+        .map(|entry| entry.segment.client_id)
+}
+
+fn addresses_for_client(state: &MasterState, client_id: Uuid) -> Vec<String> {
+    if let Some(entry) = state.clients.get(&client_id) {
+        if !entry.info.addresses.is_empty() {
+            return entry.info.addresses.clone();
+        }
+    }
+
+    let mut addresses = Vec::new();
+    for segment in state.segments.iter() {
+        if segment.segment.client_id == client_id {
+            let host = host_from_segment_name(&segment.segment.name);
+            if !host.is_empty() && !addresses.iter().any(|v| v == &host) {
+                addresses.push(host);
+            }
+        }
+    }
+    addresses
+}
+
+fn sync_segment_usage(
+    state: &MasterState,
+    segment_ids: impl IntoIterator<Item = Uuid>,
+) {
+    let allocator = state.allocator.read();
+    for segment_id in segment_ids {
+        let Some(used) = allocator.used_bytes(&segment_id) else {
+            continue;
+        };
+        if let Some(mut entry) = state.segments.get_mut(&segment_id) {
+            entry.segment.used = used;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // gRPC service impl
 // ---------------------------------------------------------------------------
@@ -161,10 +302,20 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::PingResponse>, Status> {
         let req = request.into_inner();
         let client_id = uuid_from_proto(req.client_id.as_ref().ok_or(Status::invalid_argument("missing client_id"))?);
+        let derived_addresses = req
+            .mounted_segments
+            .iter()
+            .map(|segment| host_from_segment_name(segment))
+            .collect::<Vec<_>>();
+        if !derived_addresses.is_empty() {
+            upsert_client_addresses(&self.state, client_id, derived_addresses);
+        }
 
         if let Some(mut entry) = self.state.clients.get_mut(&client_id) {
             entry.last_ping = SystemTime::now();
+            entry.info.last_seen = Utc::now();
         }
+        register_metadata_segments(&self.metadata_state, &req.mounted_segments).await;
         metrics::PING_REQUESTS.inc();
         Ok(Response::new(proto::PingResponse {}))
     }
@@ -177,6 +328,7 @@ impl MasterService for MasterServiceImpl {
         let req = request.into_inner();
         let client_id = uuid_from_proto(req.client_id.as_ref().ok_or(Status::invalid_argument("missing client_id"))?);
         let segment_id = Uuid::new_v4();
+        let host = host_from_segment_name(&req.segment_name);
 
         let segment = mooncake_store_core::Segment {
             id: segment_id,
@@ -187,6 +339,8 @@ impl MasterService for MasterServiceImpl {
         };
 
         self.state.segments.insert(segment_id, SegmentEntry { segment: segment.clone() });
+        upsert_client_addresses(&self.state, client_id, vec![host]);
+        register_metadata_segments(&self.metadata_state, &[req.segment_name.clone()]).await;
 
         let mut allocator = self.state.allocator.write();
         allocator.add_segment(segment);
@@ -215,8 +369,43 @@ impl MasterService for MasterServiceImpl {
     // ---- ReMountSegment ----
     async fn re_mount_segment(
         &self,
-        _request: Request<proto::ReMountSegmentRequest>,
+        request: Request<proto::ReMountSegmentRequest>,
     ) -> Result<Response<proto::ReMountSegmentResponse>, Status> {
+        let req = request.into_inner();
+        let client_id = uuid_from_proto(req.client_id.as_ref().ok_or(Status::invalid_argument("missing client_id"))?);
+        if req.segment_names.len() != req.segment_sizes.len() {
+            return Err(Status::invalid_argument("segment_names and segment_sizes must have same length"));
+        }
+
+        let addresses = req
+            .segment_names
+            .iter()
+            .map(|name| host_from_segment_name(name))
+            .collect::<Vec<_>>();
+        upsert_client_addresses(&self.state, client_id, addresses);
+        register_metadata_segments(&self.metadata_state, &req.segment_names).await;
+
+        for (segment_name, size) in req.segment_names.iter().zip(req.segment_sizes.iter()) {
+            let exists = self
+                .state
+                .segments
+                .iter()
+                .any(|entry| entry.segment.client_id == client_id && entry.segment.name == *segment_name);
+            if exists {
+                continue;
+            }
+
+            let segment = mooncake_store_core::Segment {
+                id: Uuid::new_v4(),
+                name: segment_name.clone(),
+                size: *size,
+                used: 0,
+                client_id,
+            };
+            self.state.segments.insert(segment.id, SegmentEntry { segment: segment.clone() });
+            self.state.allocator.write().add_segment(segment);
+        }
+        metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
         Ok(Response::new(proto::ReMountSegmentResponse {}))
     }
 
@@ -265,14 +454,16 @@ impl MasterService for MasterServiceImpl {
         let replica_count = if config.replica_num == 0 { 1 } else { config.replica_num as usize };
 
         let replicas = {
-            let allocator = self.state.allocator.read();
+            let mut allocator = self.state.allocator.write();
             allocator.allocate(&key, req.slice_length, replica_count, &config)
         };
+        sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
         let proto_replicas: Vec<proto::ReplicaDescriptor> = replicas.iter().map(replica_to_proto).collect();
 
         self.state.objects.insert(key, ObjectEntry {
             replicas,
+            size: req.slice_length,
         });
 
         metrics::PUT_START_REQUESTS.inc();
@@ -330,7 +521,11 @@ impl MasterService for MasterServiceImpl {
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
-        self.state.objects.remove(&req.key);
+        if let Some((_, object)) = self.state.objects.remove(&req.key) {
+            let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
+            self.state.allocator.write().release(&object.replicas);
+            sync_segment_usage(&self.state, segment_ids);
+        }
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
     }
@@ -354,8 +549,12 @@ impl MasterService for MasterServiceImpl {
             .collect();
 
         for key in keys_to_remove {
-            self.state.objects.remove(&key);
-            removed += 1;
+            if let Some((_, object)) = self.state.objects.remove(&key) {
+                let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
+                self.state.allocator.write().release(&object.replicas);
+                sync_segment_usage(&self.state, segment_ids);
+                removed += 1;
+            }
         }
 
         metrics::REMOVE_BY_REGEX_REQUESTS.inc();
@@ -382,10 +581,11 @@ impl MasterService for MasterServiceImpl {
         let mut ips = std::collections::HashMap::new();
         for cid in &req.client_ids {
             let id = uuid_from_proto(cid);
-            if let Some(entry) = self.state.clients.get(&id) {
+            let addresses = addresses_for_client(&self.state, id);
+            if !addresses.is_empty() {
                 ips.insert(
                     id.to_string(),
-                    proto::IpList { addresses: entry.info.addresses.clone() },
+                    proto::IpList { addresses },
                 );
             }
         }
@@ -400,7 +600,10 @@ impl MasterService for MasterServiceImpl {
         let req = request.into_inner();
         let mut cleared = vec![];
         for key in &req.object_keys {
-            if self.state.objects.remove(key).is_some() {
+            if let Some((_, object)) = self.state.objects.remove(key) {
+                let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
+                self.state.allocator.write().release(&object.replicas);
+                sync_segment_usage(&self.state, segment_ids);
                 cleared.push(key.clone());
             }
         }
@@ -453,10 +656,11 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::QueryIpResponse>, Status> {
         let req = request.into_inner();
         let client_id = uuid_from_proto(req.client_id.as_ref().ok_or(Status::invalid_argument("missing client_id"))?);
-        if let Some(entry) = self.state.clients.get(&client_id) {
-            Ok(Response::new(proto::QueryIpResponse { addresses: entry.info.addresses.clone() }))
-        } else {
+        let addresses = addresses_for_client(&self.state, client_id);
+        if addresses.is_empty() {
             Err(Status::not_found("client not found"))
+        } else {
+            Ok(Response::new(proto::QueryIpResponse { addresses }))
         }
     }
 
@@ -469,18 +673,31 @@ impl MasterService for MasterServiceImpl {
         let config = req.config.as_ref().map(config_from_proto).unwrap_or_default();
         let replica_count = if config.replica_num == 0 { 1 } else { config.replica_num as usize };
 
-        // If object exists, reuse existing placement; otherwise allocate new.
+        // Match the C++ store behavior: only reuse placement when the object
+        // size stays the same, otherwise release old space and allocate again.
         let replicas = if let Some(existing) = self.state.objects.get(&req.key) {
-            existing.replicas.clone()
+            if existing.size == req.slice_length {
+                existing.replicas.clone()
+            } else {
+                let old_replicas = existing.replicas.clone();
+                drop(existing);
+                let segment_ids: Vec<Uuid> = old_replicas.iter().map(|r| r.segment_id).collect();
+                self.state.allocator.write().release(&old_replicas);
+                sync_segment_usage(&self.state, segment_ids);
+                let mut allocator = self.state.allocator.write();
+                allocator.allocate(&req.key, req.slice_length, replica_count, &config)
+            }
         } else {
-            let allocator = self.state.allocator.read();
+            let mut allocator = self.state.allocator.write();
             allocator.allocate(&req.key, req.slice_length, replica_count, &config)
         };
+        sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
         let proto_replicas: Vec<proto::ReplicaDescriptor> = replicas.iter().map(replica_to_proto).collect();
 
         self.state.objects.insert(req.key.clone(), ObjectEntry {
             replicas,
+            size: req.slice_length,
         });
 
         Ok(Response::new(proto::UpsertResponse { replicas: proto_replicas }))
@@ -489,18 +706,83 @@ impl MasterService for MasterServiceImpl {
     // ---- CreateCopyTask ----
     async fn create_copy_task(
         &self,
-        _request: Request<proto::CreateCopyTaskRequest>,
+        request: Request<proto::CreateCopyTaskRequest>,
     ) -> Result<Response<proto::CreateCopyTaskResponse>, Status> {
+        let req = request.into_inner();
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("missing key"));
+        }
+        if req.targets.is_empty() {
+            return Err(Status::invalid_argument("missing targets"));
+        }
+        let object = self.state.objects.get(&req.key).ok_or(Status::not_found("key not found"))?;
+        if object.replicas.is_empty() {
+            return Err(Status::failed_precondition("object has no source replicas"));
+        }
+        for target in &req.targets {
+            if client_id_by_segment_name(&self.state, target).is_none() {
+                return Err(Status::invalid_argument(format!("target segment not mounted: {target}")));
+            }
+        }
+        let assigned_client = client_id_by_segment_name(&self.state, &object.replicas[0].segment_name)
+            .ok_or(Status::failed_precondition("source segment missing"))?;
+        drop(object);
+        if !self.state.objects.contains_key(&req.key) {
+            return Err(Status::not_found("key not found"));
+        }
         let task_id = Uuid::new_v4();
+        let now = Utc::now();
+        self.state.tasks.insert(task_id, TaskEntry {
+            info: TaskInfo {
+                id: task_id,
+                task_type: TaskType::ReplicaCopy,
+                status: TaskStatus::Pending,
+                created_at: now,
+                last_updated_at: now,
+                assigned_client: Some(assigned_client),
+                message: format!("copy {} to {} target(s)", req.key, req.targets.len()),
+            },
+            key: req.key,
+        });
         Ok(Response::new(proto::CreateCopyTaskResponse { task_id: Some(uuid_to_proto(task_id)) }))
     }
 
     // ---- CreateMoveTask ----
     async fn create_move_task(
         &self,
-        _request: Request<proto::CreateMoveTaskRequest>,
+        request: Request<proto::CreateMoveTaskRequest>,
     ) -> Result<Response<proto::CreateMoveTaskResponse>, Status> {
+        let req = request.into_inner();
+        if req.key.is_empty() || req.source.is_empty() || req.target.is_empty() {
+            return Err(Status::invalid_argument("missing key/source/target"));
+        }
+        if req.source == req.target {
+            return Err(Status::invalid_argument("source and target must differ"));
+        }
+        let object = self.state.objects.get(&req.key).ok_or(Status::not_found("key not found"))?;
+        if !object.replicas.iter().any(|replica| replica.segment_name == req.source) {
+            return Err(Status::invalid_argument("source segment not found"));
+        }
+        let assigned_client = client_id_by_segment_name(&self.state, &req.source)
+            .ok_or(Status::failed_precondition("source segment missing"))?;
+        if client_id_by_segment_name(&self.state, &req.target).is_none() {
+            return Err(Status::invalid_argument("target segment not mounted"));
+        }
+        drop(object);
         let task_id = Uuid::new_v4();
+        let now = Utc::now();
+        self.state.tasks.insert(task_id, TaskEntry {
+            info: TaskInfo {
+                id: task_id,
+                task_type: TaskType::ReplicaMove,
+                status: TaskStatus::Pending,
+                created_at: now,
+                last_updated_at: now,
+                assigned_client: Some(assigned_client),
+                message: format!("move {} from {} to {}", req.key, req.source, req.target),
+            },
+            key: req.key,
+        });
         Ok(Response::new(proto::CreateMoveTaskResponse { task_id: Some(uuid_to_proto(task_id)) }))
     }
 
@@ -511,14 +793,15 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::QueryTaskResponse>, Status> {
         let req = request.into_inner();
         let task_id = uuid_from_proto(req.task_id.as_ref().ok_or(Status::invalid_argument("missing task_id"))?);
+        let task = self.state.tasks.get(&task_id).ok_or(Status::not_found("task not found"))?;
         Ok(Response::new(proto::QueryTaskResponse {
-            id: Some(uuid_to_proto(task_id)),
-            task_type: proto::TaskType::ReplicaCopy as i32,
-            status: proto::TaskStatus::TaskPending as i32,
-            created_at_ms_epoch: 0,
-            last_updated_at_ms_epoch: 0,
-            assigned_client: None,
-            message: String::new(),
+            id: Some(uuid_to_proto(task.info.id)),
+            task_type: task_type_to_proto(task.info.task_type),
+            status: task_status_to_proto(task.info.status),
+            created_at_ms_epoch: task.info.created_at.timestamp_millis(),
+            last_updated_at_ms_epoch: task.info.last_updated_at.timestamp_millis(),
+            assigned_client: task.info.assigned_client.map(uuid_to_proto),
+            message: task.info.message.clone(),
         }))
     }
 
@@ -557,7 +840,10 @@ impl MasterService for MasterServiceImpl {
             .keys
             .iter()
             .map(|key| {
-                if self.state.objects.remove(key).is_some() {
+                if let Some((_, object)) = self.state.objects.remove(key) {
+                    let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
+                    self.state.allocator.write().release(&object.replicas);
+                    sync_segment_usage(&self.state, segment_ids);
                     0
                 } else {
                     -1
@@ -577,7 +863,11 @@ impl MasterService for MasterServiceImpl {
             .keys
             .iter()
             .map(|key| {
-                self.state.objects.remove(key);
+                if let Some((_, object)) = self.state.objects.remove(key) {
+                    let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
+                    self.state.allocator.write().release(&object.replicas);
+                    sync_segment_usage(&self.state, segment_ids);
+                }
                 0
             })
             .collect();
@@ -598,14 +888,28 @@ impl MasterService for MasterServiceImpl {
             let replica_count = if config.replica_num == 0 { 1 } else { config.replica_num as usize };
 
             let replicas = if let Some(existing) = self.state.objects.get(&entry.key) {
-                existing.replicas.clone()
+                if existing.size == entry.slice_length {
+                    existing.replicas.clone()
+                } else {
+                    let old_replicas = existing.replicas.clone();
+                    drop(existing);
+                    let segment_ids: Vec<Uuid> = old_replicas.iter().map(|r| r.segment_id).collect();
+                    self.state.allocator.write().release(&old_replicas);
+                    sync_segment_usage(&self.state, segment_ids);
+                    let mut allocator = self.state.allocator.write();
+                    allocator.allocate(&entry.key, entry.slice_length, replica_count, &config)
+                }
             } else {
-                let allocator = self.state.allocator.read();
+                let mut allocator = self.state.allocator.write();
                 allocator.allocate(&entry.key, entry.slice_length, replica_count, &config)
             };
 
             let proto_r: Vec<proto::ReplicaDescriptor> = replicas.iter().map(replica_to_proto).collect();
-            self.state.objects.insert(entry.key.clone(), ObjectEntry { replicas });
+            sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
+            self.state.objects.insert(entry.key.clone(), ObjectEntry {
+                replicas,
+                size: entry.slice_length,
+            });
             all_replicas.extend(proto_r);
         }
 

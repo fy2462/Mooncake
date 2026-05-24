@@ -39,9 +39,11 @@ fn test_storage_backend_save_and_load() {
                 segment_id: sid,
                 segment_name: "node1:12345".into(),
                 offset: 0x1000,
+                size: 256,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
             }],
+            size: 256,
         },
     );
 
@@ -53,9 +55,10 @@ fn test_storage_backend_save_and_load() {
     assert_eq!(loaded_segs[0].size, 1024 * 1024);
     assert_eq!(loaded_objs.len(), 1);
     assert_eq!(loaded_objs[0].0, "key1");
-    assert_eq!(loaded_objs[0].1.len(), 1);
-    assert_eq!(loaded_objs[0].1[0].segment_name, "node1:12345");
-    assert_eq!(loaded_objs[0].1[0].offset, 0x1000);
+    assert_eq!(loaded_objs[0].1.replicas.len(), 1);
+    assert_eq!(loaded_objs[0].1.replicas[0].segment_name, "node1:12345");
+    assert_eq!(loaded_objs[0].1.replicas[0].offset, 0x1000);
+    assert_eq!(loaded_objs[0].1.size, 256);
 }
 
 #[test]
@@ -86,9 +89,11 @@ fn test_storage_backend_multiple_objects() {
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: i * 100,
+                size: 100,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
             }],
+            size: 100,
         });
     }
 
@@ -117,11 +122,13 @@ fn test_serialize_replica_status_roundtrip() {
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
         offset: 0x2000,
+        size: 512,
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
     };
     assert_eq!(rd.segment_name, "node1:12345");
     assert_eq!(rd.offset, 0x2000);
+    assert_eq!(rd.size, 512);
     assert_eq!(rd.status, ReplicaStatus::Written);
     assert_eq!(rd.replica_type, ReplicaType::Disk);
 }

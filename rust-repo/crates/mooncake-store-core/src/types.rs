@@ -39,6 +39,7 @@ pub struct ReplicaDescriptor {
     pub segment_id: Uuid,
     pub segment_name: String,
     pub offset: u64,
+    pub size: u64,
     pub status: ReplicaStatus,
     pub replica_type: ReplicaType,
 }

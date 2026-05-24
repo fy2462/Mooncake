@@ -31,6 +31,7 @@ message ReplicaDescriptor {
   uint64 offset = 4;
   ReplicaStatus status = 5;
   ReplicaType replica_type = 6;
+  uint64 size = 7;
 }
 
 message ReplicateConfig {

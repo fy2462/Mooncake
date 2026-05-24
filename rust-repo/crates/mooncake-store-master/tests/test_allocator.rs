@@ -35,7 +35,7 @@ fn test_multiple_segments_partially_filled() {
 
 #[test]
 fn test_no_segment_has_enough_space() {
-    let a = SegmentAllocator::new();
+    let mut a = SegmentAllocator::new();
     let repls = a.allocate("k", 1000, 1, &ReplicateConfig::default());
     assert!(repls.is_empty());
 }
@@ -138,7 +138,7 @@ fn test_remove_segment_and_reallocate() {
 
 #[test]
 fn test_allocator_new_is_empty() {
-    let a = SegmentAllocator::new();
+    let mut a = SegmentAllocator::new();
     let repls = a.allocate("k", 1, 1, &ReplicateConfig::default());
     assert!(repls.is_empty());
 }

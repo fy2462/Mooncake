@@ -37,8 +37,16 @@ fn test_metadata_node_info_clone() {
 #[test]
 fn test_metadata_state_new() {
     let state = MetadataState::new("192.168.1.1:50051");
-    let master = state.master_addr.clone();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let master = runtime.block_on(state.get_master_addr());
     assert_eq!(master, "192.168.1.1:50051");
+}
+
+#[tokio::test]
+async fn test_metadata_state_set_master_addr() {
+    let state = MetadataState::new("old:1");
+    state.set_master_addr("new:2").await;
+    assert_eq!(state.get_master_addr().await, "new:2");
 }
 
 #[tokio::test]

@@ -19,14 +19,14 @@ struct MetadataResponse {
 #[derive(Clone)]
 pub struct MetadataState {
     pub nodes: std::sync::Arc<tokio::sync::RwLock<HashMap<String, MetadataNodeInfo>>>,
-    pub master_addr: String,
+    pub master_addr: std::sync::Arc<tokio::sync::RwLock<String>>,
 }
 
 impl MetadataState {
     pub fn new(master_addr: impl Into<String>) -> Self {
         Self {
             nodes: std::sync::Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            master_addr: master_addr.into(),
+            master_addr: std::sync::Arc::new(tokio::sync::RwLock::new(master_addr.into())),
         }
     }
 
@@ -45,13 +45,22 @@ impl MetadataState {
             },
         );
     }
+
+    pub async fn set_master_addr(&self, master_addr: impl Into<String>) {
+        *self.master_addr.write().await = master_addr.into();
+    }
+
+    pub async fn get_master_addr(&self) -> String {
+        self.master_addr.read().await.clone()
+    }
 }
 
 async fn metadata_handler(State(state): State<MetadataState>) -> Json<MetadataResponse> {
     let nodes = state.nodes.read().await.clone();
+    let master_addr = state.get_master_addr().await;
     Json(MetadataResponse {
         nodes,
-        master_addr: state.master_addr.clone(),
+        master_addr,
     })
 }
 

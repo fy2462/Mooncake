@@ -200,10 +200,12 @@ fn test_replica_descriptor() {
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
         offset: 0x1000,
+        size: 256,
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
     };
     assert_eq!(rd.offset, 0x1000);
+    assert_eq!(rd.size, 256);
 }
 
 #[test]
@@ -212,6 +214,7 @@ fn test_replica_descriptor_disk() {
         segment_id: Uuid::new_v4(),
         segment_name: "disk-node:1".into(),
         offset: 65536,
+        size: 4096,
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
     };
@@ -233,6 +236,7 @@ fn test_replica_descriptor_all_statuses() {
             segment_id: Uuid::new_v4(),
             segment_name: "s1".into(),
             offset: 0,
+            size: 1,
             status: *status,
             replica_type: ReplicaType::Memory,
         };
@@ -246,6 +250,7 @@ fn test_replica_descriptor_clone() {
         segment_id: Uuid::new_v4(),
         segment_name: "cl".into(),
         offset: 777,
+        size: 64,
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
     };
@@ -263,6 +268,7 @@ fn test_replica_descriptor_serde_roundtrip() {
         segment_id: sid,
         segment_name: "serde-rep:1".into(),
         offset: 0xFACE,
+        size: 1024,
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
     };
@@ -271,6 +277,7 @@ fn test_replica_descriptor_serde_roundtrip() {
     assert_eq!(rd.segment_id, restored.segment_id);
     assert_eq!(rd.segment_name, restored.segment_name);
     assert_eq!(rd.offset, restored.offset);
+    assert_eq!(rd.size, restored.size);
     assert_eq!(rd.status, restored.status);
     assert_eq!(rd.replica_type, restored.replica_type);
 }

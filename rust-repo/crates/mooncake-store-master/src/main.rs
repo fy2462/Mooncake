@@ -1,5 +1,6 @@
 use clap::Parser;
 use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole};
+use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
 use mooncake_store_master::MasterServiceImpl;
 use std::net::SocketAddr;
@@ -122,8 +123,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let snapshot_dir = args.snapshot_backup_dir.map(std::path::PathBuf::from);
 
+    let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);
+    let metadata_addr = SocketAddr::new(
+        args.http_metadata_server_host.parse()?,
+        args.http_metadata_server_port,
+    );
+
     let service = MasterServiceImpl::new(snapshot_backend_type, snapshot_dir);
     let service_arc = std::sync::Arc::new(service);
+    service_arc
+        .metadata_state()
+        .set_master_addr(format!("http://{}", rpc_addr))
+        .await;
+
+    tokio::spawn(serve_metadata_http(
+        metadata_addr,
+        service_arc.metadata_state(),
+    ));
 
     // Periodic snapshot
     {
@@ -135,8 +151,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
-
-    let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);
 
     info!("Mooncake Master starting on {}", rpc_addr);
     tonic::transport::Server::builder()

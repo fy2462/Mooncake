@@ -112,6 +112,7 @@ fn test_replica_descriptor_full() {
         segment_id: sid,
         segment_name: "node1:12345".into(),
         offset: 0xDEAD,
+        size: 128,
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
     };
@@ -129,6 +130,7 @@ fn test_replica_descriptor_clone() {
         segment_id: Uuid::new_v4(),
         segment_name: "s1".into(),
         offset: 100,
+        size: 64,
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
     };
@@ -178,6 +180,7 @@ fn test_object_entry_creation() {
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: 0,
+                size: 128,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
             },
@@ -185,10 +188,12 @@ fn test_object_entry_creation() {
                 segment_id: sid,
                 segment_name: "s2".into(),
                 offset: 128,
+                size: 128,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
             },
         ],
+        size: 256,
     };
 
     assert_eq!(entry.replicas.len(), 2);
@@ -221,7 +226,7 @@ fn test_allocator_prefers_same_node() {
 
 #[test]
 fn test_allocator_no_space() {
-    let allocator = SegmentAllocator::new();
+    let mut allocator = SegmentAllocator::new();
     let replicas = allocator.allocate("k", 1000000000, 1, &Default::default());
     assert!(replicas.is_empty());
 }

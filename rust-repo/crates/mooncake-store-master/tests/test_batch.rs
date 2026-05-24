@@ -5,13 +5,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 struct ObjectEntry {
     replicas: Vec<ReplicaDescriptor>,
+    size: u64,
 }
 
 #[test]
 fn test_batch_remove_logic() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     for i in 0..5 {
-        objects.insert(format!("batch_key_{}", i), ObjectEntry { replicas: vec![] });
+        objects.insert(format!("batch_key_{}", i), ObjectEntry { replicas: vec![], size: 0 });
     }
     assert_eq!(objects.len(), 5);
 
@@ -32,8 +33,8 @@ fn test_batch_remove_empty() {
 #[test]
 fn test_batch_put_revoke_logic() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    objects.insert("k1".into(), ObjectEntry { replicas: vec![] });
-    objects.insert("k2".into(), ObjectEntry { replicas: vec![] });
+    objects.insert("k1".into(), ObjectEntry { replicas: vec![], size: 0 });
+    objects.insert("k2".into(), ObjectEntry { replicas: vec![], size: 0 });
 
     let keys: Vec<String> = vec!["k1".into(), "k2".into(), "k3".into()];
     let statuses: Vec<i32> = keys
@@ -58,9 +59,11 @@ fn test_batch_put_end_status_transition() {
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: 0,
+                size: 128,
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
             }],
+            size: 128,
         },
     );
 
@@ -96,9 +99,11 @@ fn test_batch_upsert_end_allocates_new() {
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: *size,
+                size: *size,
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
             }],
+            size: *size,
         });
     }
 
@@ -112,12 +117,15 @@ fn test_batch_upsert_end_allocates_new() {
             segment_id: sid,
             segment_name: "s1".into(),
             offset: 999,
+            size: 200,
             status: ReplicaStatus::Complete,
             replica_type: ReplicaType::Memory,
         }],
+        size: 200,
     });
 
     let obj = objects.get("new_key_1").unwrap();
     assert_eq!(obj.replicas[0].offset, 999);
+    assert_eq!(obj.size, 200);
     assert_eq!(obj.replicas[0].status, ReplicaStatus::Complete);
 }

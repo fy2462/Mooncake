@@ -1,5 +1,4 @@
 use dashmap::DashMap;
-use mooncake_store_core::ReplicaDescriptor;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::BufReader;
@@ -22,7 +21,7 @@ struct SnapshotSegment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotObject {
-    replicas: Vec<ReplicaDescriptor>,
+    object: crate::service::ObjectEntry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +64,7 @@ impl StorageBackend {
                 .iter()
                 .map(|entry| {
                     let obj = SnapshotObject {
-                        replicas: entry.replicas.clone(),
+                        object: entry.clone(),
                     };
                     (entry.key().clone(), obj)
                 })
@@ -93,7 +92,7 @@ impl StorageBackend {
     pub fn load(
         &self,
     ) -> Result<
-        Option<(Vec<mooncake_store_core::Segment>, Vec<(String, Vec<ReplicaDescriptor>)>)>,
+        Option<(Vec<mooncake_store_core::Segment>, Vec<(String, crate::service::ObjectEntry)>)>,
         Box<dyn std::error::Error>,
     > {
         match self.backend_type {
@@ -118,10 +117,10 @@ impl StorageBackend {
                     })
                     .collect();
 
-                let objects: Vec<(String, Vec<ReplicaDescriptor>)> = snap
+                let objects: Vec<(String, crate::service::ObjectEntry)> = snap
                     .objects
                     .into_iter()
-                    .map(|(key, obj)| (key, obj.replicas))
+                    .map(|(key, obj)| (key, obj.object))
                     .collect();
 
                 tracing::info!(

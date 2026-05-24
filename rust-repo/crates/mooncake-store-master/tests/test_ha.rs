@@ -1,4 +1,4 @@
-use mooncake_store_master::ha::LeaderRole;
+use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole};
 
 #[test]
 fn test_leader_role_values() {
@@ -32,4 +32,23 @@ fn test_leader_role_copy() {
 fn test_coordinator_backend_types() {
     assert_ne!(LeaderRole::Leader, LeaderRole::Standby);
     assert_eq!(LeaderRole::Leader, LeaderRole::Leader);
+}
+
+#[tokio::test]
+async fn test_manual_coordinator_waits_for_promotion() {
+    let (coordinator, tx) = LeaderCoordinator::new_manual(LeaderRole::Standby);
+    assert_eq!(coordinator.wait_for_role().await.unwrap(), LeaderRole::Standby);
+
+    let watcher = tokio::spawn(async move {
+        coordinator.watch_leadership_change().await;
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    assert!(!watcher.is_finished());
+
+    tx.send(LeaderRole::Leader).unwrap();
+    tokio::time::timeout(tokio::time::Duration::from_secs(1), watcher)
+        .await
+        .unwrap()
+        .unwrap();
 }

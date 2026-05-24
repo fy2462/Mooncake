@@ -645,8 +645,7 @@ impl MooncakeClient {
         if replicas.is_empty() {
             return Err(StoreError::KeyNotFound(key.to_string()));
         }
-        let total: u64 = replicas.iter().map(|r| r.offset).sum();
-        Ok(total as i64)
+        Ok(replicas[0].size as i64)
     }
 
     pub fn get_hostname(&self) -> String {
@@ -899,6 +898,7 @@ impl MooncakeClient {
                 segment_id: Uuid::from_u64_pair(sid.high, sid.low),
                 segment_name: r.segment_name.clone(),
                 offset: r.offset,
+                size: r.size,
                 status: mooncake_store_core::ReplicaStatus::Allocating,
                 replica_type: mooncake_store_core::ReplicaType::Memory,
             })
@@ -994,9 +994,16 @@ impl MooncakeClient {
         &self,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
+        if replica.size > self.local_buffer.len() as u64 {
+            return Err(StoreError::InvalidParams(format!(
+                "object size {} exceeds local buffer size {}",
+                replica.size,
+                self.local_buffer.len()
+            )));
+        }
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
 
-        let read_len = self.local_buffer.len();
+        let read_len = replica.size as usize;
         let batch_id = self.engine.allocate_batch_id(1)?;
 
         let request = TransferRequest {
