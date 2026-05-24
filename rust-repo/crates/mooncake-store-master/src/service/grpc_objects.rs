@@ -199,6 +199,11 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
+        if self.state.replication_tasks.contains_key(&req.key) {
+            return Err(Status::failed_precondition(
+                "object has an ongoing replication task",
+            ));
+        }
         if let Some((_, object)) = self.state.objects.remove(&req.key) {
             clear_offloading_task(&self.state, &req.key);
             clear_promotion_task(&self.state, &req.key);
@@ -229,6 +234,9 @@ impl MasterServiceImpl {
             .collect();
 
         for key in keys_to_remove {
+            if self.state.replication_tasks.contains_key(&key) {
+                continue;
+            }
             if let Some((_, object)) = self.state.objects.remove(&key) {
                 clear_offloading_task(&self.state, &key);
                 clear_promotion_task(&self.state, &key);

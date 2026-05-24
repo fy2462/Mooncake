@@ -128,6 +128,13 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::put_end_impl(self, request).await
     }
 
+    async fn put_revoke(
+        &self,
+        request: Request<proto::PutRevokeRequest>,
+    ) -> Result<Response<proto::PutRevokeResponse>, Status> {
+        MasterServiceImpl::put_revoke_impl(self, request).await
+    }
+
     async fn add_replica(
         &self,
         request: Request<proto::AddReplicaRequest>,
@@ -154,6 +161,13 @@ impl MasterService for MasterServiceImpl {
         request: Request<proto::RemoveByRegexRequest>,
     ) -> Result<Response<proto::RemoveByRegexResponse>, Status> {
         MasterServiceImpl::remove_by_regex_impl(self, request).await
+    }
+
+    async fn remove_all(
+        &self,
+        request: Request<proto::RemoveAllRequest>,
+    ) -> Result<Response<proto::RemoveAllResponse>, Status> {
+        MasterServiceImpl::remove_all_impl(self, request).await
     }
 
     async fn batch_exist_key(
@@ -198,11 +212,60 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::query_ip_impl(self, request).await
     }
 
+    async fn get_storage_config(
+        &self,
+        request: Request<proto::GetStorageConfigRequest>,
+    ) -> Result<Response<proto::GetStorageConfigResponse>, Status> {
+        MasterServiceImpl::get_storage_config_impl(self, request).await
+    }
+
     async fn upsert(
         &self,
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
         MasterServiceImpl::upsert_impl(self, request).await
+    }
+
+    async fn copy_start(
+        &self,
+        request: Request<proto::CopyStartRequest>,
+    ) -> Result<Response<proto::CopyStartResponse>, Status> {
+        MasterServiceImpl::copy_start_impl(self, request).await
+    }
+
+    async fn copy_end(
+        &self,
+        request: Request<proto::CopyEndRequest>,
+    ) -> Result<Response<proto::CopyEndResponse>, Status> {
+        MasterServiceImpl::copy_end_impl(self, request).await
+    }
+
+    async fn copy_revoke(
+        &self,
+        request: Request<proto::CopyRevokeRequest>,
+    ) -> Result<Response<proto::CopyRevokeResponse>, Status> {
+        MasterServiceImpl::copy_revoke_impl(self, request).await
+    }
+
+    async fn move_start(
+        &self,
+        request: Request<proto::MoveStartRequest>,
+    ) -> Result<Response<proto::MoveStartResponse>, Status> {
+        MasterServiceImpl::move_start_impl(self, request).await
+    }
+
+    async fn move_end(
+        &self,
+        request: Request<proto::MoveEndRequest>,
+    ) -> Result<Response<proto::MoveEndResponse>, Status> {
+        MasterServiceImpl::move_end_impl(self, request).await
+    }
+
+    async fn move_revoke(
+        &self,
+        request: Request<proto::MoveRevokeRequest>,
+    ) -> Result<Response<proto::MoveRevokeResponse>, Status> {
+        MasterServiceImpl::move_revoke_impl(self, request).await
     }
 
     async fn create_copy_task(

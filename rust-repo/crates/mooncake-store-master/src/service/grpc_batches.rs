@@ -135,6 +135,9 @@ impl MasterServiceImpl {
             .keys
             .iter()
             .map(|key| {
+                if self.state.replication_tasks.contains_key(key) {
+                    return -2;
+                }
                 if let Some((_, object)) = self.state.objects.remove(key) {
                     clear_offloading_task(&self.state, key);
                     clear_promotion_task(&self.state, key);
@@ -161,6 +164,9 @@ impl MasterServiceImpl {
             .keys
             .iter()
             .map(|key| {
+                if self.state.replication_tasks.contains_key(key) {
+                    return -2;
+                }
                 if let Some((_, object)) = self.state.objects.remove(key) {
                     clear_offloading_task(&self.state, key);
                     clear_promotion_task(&self.state, key);

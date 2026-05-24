@@ -2,6 +2,7 @@ mod background_ops;
 mod grpc_batches;
 mod grpc_cluster;
 mod grpc_objects;
+mod grpc_replication;
 mod grpc_tasks;
 mod grpc_trait;
 mod helpers;
@@ -44,9 +45,13 @@ use self::proto_conv::{
     config_from_proto, replica_from_proto, replica_to_proto, task_status_from_proto,
     task_status_to_proto, task_type_to_proto, uuid_from_proto, uuid_to_proto,
 };
-use self::state::{LocalDiskSegmentEntry, MasterState, TaskEntry};
+use self::state::{
+    LocalDiskSegmentEntry, MasterState, ReplicationTaskEntry, ReplicationTaskKind, TaskEntry,
+};
 pub use self::state::{MasterRuntimeConfig, ObjectEntry, SegmentEntry};
-use self::workers::{EvictionWorker, GracefulUnmountScheduler, ProcessingReaper};
+use self::workers::{
+    ClientMonitorWorker, EvictionWorker, GracefulUnmountScheduler, ProcessingReaper,
+};
 
 pub struct MasterServiceImpl {
     state: Arc<MasterState>,
@@ -54,6 +59,7 @@ pub struct MasterServiceImpl {
     graceful_unmount_scheduler: GracefulUnmountScheduler,
     processing_reaper: ProcessingReaper,
     eviction_worker: EvictionWorker,
+    client_monitor_worker: ClientMonitorWorker,
 }
 
 #[derive(Serialize)]
@@ -95,6 +101,7 @@ impl MasterServiceImpl {
             segments: DashMap::new(),
             local_disk_segments: DashMap::new(),
             tasks: DashMap::new(),
+            replication_tasks: DashMap::new(),
             offloading_tasks: DashMap::new(),
             promotion_tasks: DashMap::new(),
             promotion_access_counts: DashMap::new(),
@@ -111,6 +118,7 @@ impl MasterServiceImpl {
         let graceful_unmount_scheduler = GracefulUnmountScheduler::new(state.clone());
         let processing_reaper = ProcessingReaper::new(state.clone());
         let eviction_worker = EvictionWorker::new(state.clone());
+        let client_monitor_worker = ClientMonitorWorker::new(state.clone());
 
         if let Some(ref backend) = *state.storage_backend.read() {
             if let Ok(Some((segments, objects))) = backend.load() {
@@ -136,6 +144,7 @@ impl MasterServiceImpl {
             graceful_unmount_scheduler,
             processing_reaper,
             eviction_worker,
+            client_monitor_worker,
         }
     }
 
@@ -178,6 +187,7 @@ impl Drop for MasterServiceImpl {
         self.graceful_unmount_scheduler.stop();
         self.processing_reaper.stop();
         self.eviction_worker.stop();
+        self.client_monitor_worker.stop();
     }
 }
 

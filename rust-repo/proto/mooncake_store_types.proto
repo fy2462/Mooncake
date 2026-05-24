@@ -45,72 +45,6 @@ message ReplicateConfig {
 }
 
 // ---------------------------------------------------------------
-// Master Service RPC
-// ---------------------------------------------------------------
-
-service MasterService {
-  // Health / ping
-  rpc Ping(PingRequest) returns (PingResponse);
-
-  // Segment management — clients mount/unmount memory segments
-  rpc MountSegment(MountSegmentRequest) returns (MountSegmentResponse);
-  rpc UnmountSegment(UnmountSegmentRequest) returns (UnmountSegmentResponse);
-  rpc GracefulUnmountSegment(GracefulUnmountSegmentRequest) returns (GracefulUnmountSegmentResponse);
-  rpc ReMountSegment(ReMountSegmentRequest) returns (ReMountSegmentResponse);
-  rpc MountLocalDiskSegment(MountLocalDiskSegmentRequest) returns (MountLocalDiskSegmentResponse);
-  rpc OffloadObjectHeartbeat(OffloadObjectHeartbeatRequest) returns (OffloadObjectHeartbeatResponse);
-  rpc ReportSsdCapacity(ReportSsdCapacityRequest) returns (ReportSsdCapacityResponse);
-  rpc NotifyOffloadSuccess(NotifyOffloadSuccessRequest) returns (NotifyOffloadSuccessResponse);
-  rpc PromotionObjectHeartbeat(PromotionObjectHeartbeatRequest) returns (PromotionObjectHeartbeatResponse);
-  rpc PromotionAllocStart(PromotionAllocStartRequest) returns (PromotionAllocStartResponse);
-  rpc NotifyPromotionSuccess(NotifyPromotionSuccessRequest) returns (NotifyPromotionSuccessResponse);
-  rpc NotifyPromotionFailure(NotifyPromotionFailureRequest) returns (NotifyPromotionFailureResponse);
-
-  // Key / object operations
-  rpc ExistKey(ExistKeyRequest) returns (ExistKeyResponse);
-  rpc GetAllKeys(GetAllKeysRequest) returns (GetAllKeysResponse);
-  rpc GetAllSegments(GetAllSegmentsRequest) returns (GetAllSegmentsResponse);
-
-  // Put workflow: start → client writes data → end
-  rpc PutStart(PutStartRequest) returns (PutStartResponse);
-  rpc PutEnd(PutEndRequest) returns (PutEndResponse);
-  rpc AddReplica(AddReplicaRequest) returns (AddReplicaResponse);
-
-  // Get workflow: get replica list → client reads data from peers
-  rpc GetReplicaList(GetReplicaListRequest) returns (GetReplicaListResponse);
-
-  // Remove
-  rpc Remove(RemoveRequest) returns (RemoveResponse);
-  rpc RemoveByRegex(RemoveByRegexRequest) returns (RemoveByRegexResponse);
-
-  // Batch queries
-  rpc BatchExistKey(BatchExistKeyRequest) returns (BatchExistKeyResponse);
-  rpc BatchQueryIp(BatchQueryIpRequest) returns (BatchQueryIpResponse);
-  rpc BatchReplicaClear(BatchReplicaClearRequest) returns (BatchReplicaClearResponse);
-  rpc QueryByRegex(QueryByRegexRequest) returns (QueryByRegexResponse);
-
-  // Segment query
-  rpc QuerySegments(QuerySegmentsRequest) returns (QuerySegmentsResponse);
-  rpc QueryIp(QueryIpRequest) returns (QueryIpResponse);
-
-  // Upsert
-  rpc Upsert(UpsertRequest) returns (UpsertResponse);
-
-  // Task management
-  rpc CreateCopyTask(CreateCopyTaskRequest) returns (CreateCopyTaskResponse);
-  rpc CreateMoveTask(CreateMoveTaskRequest) returns (CreateMoveTaskResponse);
-  rpc QueryTask(QueryTaskRequest) returns (QueryTaskResponse);
-  rpc FetchTasks(FetchTasksRequest) returns (FetchTasksResponse);
-  rpc MarkTaskToComplete(MarkTaskToCompleteRequest) returns (MarkTaskToCompleteResponse);
-
-  // Batch operations (high-throughput paths)
-  rpc BatchPutEnd(BatchPutEndRequest) returns (BatchPutEndResponse);
-  rpc BatchPutRevoke(BatchPutRevokeRequest) returns (BatchPutRevokeResponse);
-  rpc BatchRemove(BatchRemoveRequest) returns (BatchRemoveResponse);
-  rpc BatchUpsertEnd(BatchUpsertEndRequest) returns (BatchUpsertEndResponse);
-}
-
-// ---------------------------------------------------------------
 // Ping
 // ---------------------------------------------------------------
 
@@ -287,6 +221,13 @@ message PutEndRequest {
 
 message PutEndResponse {}
 
+message PutRevokeRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message PutRevokeResponse {}
+
 message BatchPutEndRequest {
   repeated PutEndEntry entries = 1;
 }
@@ -372,6 +313,12 @@ message RemoveByRegexResponse {
   int64 removed_count = 1;
 }
 
+message RemoveAllRequest {}
+
+message RemoveAllResponse {
+  int64 removed_count = 1;
+}
+
 // ---------------------------------------------------------------
 // Batch queries
 // ---------------------------------------------------------------
@@ -431,6 +378,14 @@ message QueryIpResponse {
   repeated string addresses = 1;
 }
 
+message GetStorageConfigRequest {}
+
+message GetStorageConfigResponse {
+  string fs_dir = 1;
+  bool enable_disk_eviction = 2;
+  uint64 quota_bytes = 3;
+}
+
 // ---------------------------------------------------------------
 // Upsert
 // ---------------------------------------------------------------
@@ -445,6 +400,58 @@ message UpsertRequest {
 message UpsertResponse {
   repeated ReplicaDescriptor replicas = 1;
 }
+
+message CopyStartRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  string source = 3;
+  repeated string targets = 4;
+}
+
+message CopyStartResponse {
+  ReplicaDescriptor source = 1;
+  repeated ReplicaDescriptor targets = 2;
+}
+
+message CopyEndRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message CopyEndResponse {}
+
+message CopyRevokeRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message CopyRevokeResponse {}
+
+message MoveStartRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  string source = 3;
+  string target = 4;
+}
+
+message MoveStartResponse {
+  ReplicaDescriptor source = 1;
+  ReplicaDescriptor target = 2;
+}
+
+message MoveEndRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message MoveEndResponse {}
+
+message MoveRevokeRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message MoveRevokeResponse {}
 
 // ---------------------------------------------------------------
 // Task management

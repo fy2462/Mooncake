@@ -1,0 +1,80 @@
+syntax = "proto3";
+
+package mooncake.store;
+
+import "mooncake_store_types.proto";
+
+// ---------------------------------------------------------------
+// Master Service RPC
+// ---------------------------------------------------------------
+
+service MasterService {
+  // Health / ping
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // Segment management — clients mount/unmount memory segments
+  rpc MountSegment(MountSegmentRequest) returns (MountSegmentResponse);
+  rpc UnmountSegment(UnmountSegmentRequest) returns (UnmountSegmentResponse);
+  rpc GracefulUnmountSegment(GracefulUnmountSegmentRequest) returns (GracefulUnmountSegmentResponse);
+  rpc ReMountSegment(ReMountSegmentRequest) returns (ReMountSegmentResponse);
+  rpc MountLocalDiskSegment(MountLocalDiskSegmentRequest) returns (MountLocalDiskSegmentResponse);
+  rpc OffloadObjectHeartbeat(OffloadObjectHeartbeatRequest) returns (OffloadObjectHeartbeatResponse);
+  rpc ReportSsdCapacity(ReportSsdCapacityRequest) returns (ReportSsdCapacityResponse);
+  rpc NotifyOffloadSuccess(NotifyOffloadSuccessRequest) returns (NotifyOffloadSuccessResponse);
+  rpc PromotionObjectHeartbeat(PromotionObjectHeartbeatRequest) returns (PromotionObjectHeartbeatResponse);
+  rpc PromotionAllocStart(PromotionAllocStartRequest) returns (PromotionAllocStartResponse);
+  rpc NotifyPromotionSuccess(NotifyPromotionSuccessRequest) returns (NotifyPromotionSuccessResponse);
+  rpc NotifyPromotionFailure(NotifyPromotionFailureRequest) returns (NotifyPromotionFailureResponse);
+
+  // Key / object operations
+  rpc ExistKey(ExistKeyRequest) returns (ExistKeyResponse);
+  rpc GetAllKeys(GetAllKeysRequest) returns (GetAllKeysResponse);
+  rpc GetAllSegments(GetAllSegmentsRequest) returns (GetAllSegmentsResponse);
+
+  // Put workflow: start → client writes data → end
+  rpc PutStart(PutStartRequest) returns (PutStartResponse);
+  rpc PutEnd(PutEndRequest) returns (PutEndResponse);
+  rpc PutRevoke(PutRevokeRequest) returns (PutRevokeResponse);
+  rpc AddReplica(AddReplicaRequest) returns (AddReplicaResponse);
+
+  // Get workflow: get replica list → client reads data from peers
+  rpc GetReplicaList(GetReplicaListRequest) returns (GetReplicaListResponse);
+
+  // Remove
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+  rpc RemoveByRegex(RemoveByRegexRequest) returns (RemoveByRegexResponse);
+  rpc RemoveAll(RemoveAllRequest) returns (RemoveAllResponse);
+
+  // Batch queries
+  rpc BatchExistKey(BatchExistKeyRequest) returns (BatchExistKeyResponse);
+  rpc BatchQueryIp(BatchQueryIpRequest) returns (BatchQueryIpResponse);
+  rpc BatchReplicaClear(BatchReplicaClearRequest) returns (BatchReplicaClearResponse);
+  rpc QueryByRegex(QueryByRegexRequest) returns (QueryByRegexResponse);
+
+  // Segment query
+  rpc QuerySegments(QuerySegmentsRequest) returns (QuerySegmentsResponse);
+  rpc QueryIp(QueryIpRequest) returns (QueryIpResponse);
+  rpc GetStorageConfig(GetStorageConfigRequest) returns (GetStorageConfigResponse);
+
+  // Upsert
+  rpc Upsert(UpsertRequest) returns (UpsertResponse);
+  rpc CopyStart(CopyStartRequest) returns (CopyStartResponse);
+  rpc CopyEnd(CopyEndRequest) returns (CopyEndResponse);
+  rpc CopyRevoke(CopyRevokeRequest) returns (CopyRevokeResponse);
+  rpc MoveStart(MoveStartRequest) returns (MoveStartResponse);
+  rpc MoveEnd(MoveEndRequest) returns (MoveEndResponse);
+  rpc MoveRevoke(MoveRevokeRequest) returns (MoveRevokeResponse);
+
+  // Task management
+  rpc CreateCopyTask(CreateCopyTaskRequest) returns (CreateCopyTaskResponse);
+  rpc CreateMoveTask(CreateMoveTaskRequest) returns (CreateMoveTaskResponse);
+  rpc QueryTask(QueryTaskRequest) returns (QueryTaskResponse);
+  rpc FetchTasks(FetchTasksRequest) returns (FetchTasksResponse);
+  rpc MarkTaskToComplete(MarkTaskToCompleteRequest) returns (MarkTaskToCompleteResponse);
+
+  // Batch operations (high-throughput paths)
+  rpc BatchPutEnd(BatchPutEndRequest) returns (BatchPutEndResponse);
+  rpc BatchPutRevoke(BatchPutRevokeRequest) returns (BatchPutRevokeResponse);
+  rpc BatchRemove(BatchRemoveRequest) returns (BatchRemoveResponse);
+  rpc BatchUpsertEnd(BatchUpsertEndRequest) returns (BatchUpsertEndResponse);
+}

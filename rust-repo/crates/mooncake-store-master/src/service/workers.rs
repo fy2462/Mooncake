@@ -2,11 +2,18 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-use super::background_ops::{reap_expired_background_tasks, run_automatic_eviction_once};
-use super::helpers::unmount_segment_owned;
+use mooncake_store_core::ReplicaType;
+
+use super::background_ops::{
+    clear_offloading_task, clear_promotion_task, reap_expired_background_tasks,
+    run_automatic_eviction_once,
+};
+use super::helpers::{
+    client_id_by_segment_name, sync_client_segments, sync_segment_usage, unmount_segment_owned,
+};
 use super::state::MasterState;
 
 #[derive(Debug, Clone)]
@@ -70,6 +77,16 @@ struct EvictionWorkerInner {
 
 pub(crate) struct EvictionWorker {
     inner: Arc<EvictionWorkerInner>,
+    worker: Option<JoinHandle<()>>,
+}
+
+struct ClientMonitorInner {
+    state: Mutex<bool>,
+    condvar: Condvar,
+}
+
+pub(crate) struct ClientMonitorWorker {
+    inner: Arc<ClientMonitorInner>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -248,6 +265,135 @@ impl EvictionWorker {
     pub(crate) fn stop(&mut self) {
         {
             let mut stopping = self.inner.state.lock().expect("eviction mutex poisoned");
+            if *stopping {
+                return;
+            }
+            *stopping = true;
+        }
+        self.inner.condvar.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn purge_expired_client(state: &MasterState, client_id: Uuid) {
+    let mut released_memory_replicas = Vec::new();
+    let mut emptied_keys = Vec::new();
+
+    for mut object in state.objects.iter_mut() {
+        let key = object.key().clone();
+        let mut removed_any = false;
+        object.replicas.retain(|replica| {
+            let owner = replica
+                .holder_client_id
+                .or_else(|| client_id_by_segment_name(state, &replica.segment_name));
+            let keep = owner != Some(client_id);
+            if !keep {
+                removed_any = true;
+                if replica.replica_type == ReplicaType::Memory {
+                    released_memory_replicas.push(replica.clone());
+                }
+            }
+            keep
+        });
+        if removed_any && object.replicas.is_empty() {
+            emptied_keys.push(key);
+        }
+    }
+
+    if !released_memory_replicas.is_empty() {
+        let segment_ids = released_memory_replicas
+            .iter()
+            .map(|r| r.segment_id)
+            .collect::<Vec<_>>();
+        state.allocator.write().release(&released_memory_replicas);
+        sync_segment_usage(state, segment_ids);
+    }
+
+    for key in emptied_keys {
+        state.objects.remove(&key);
+        clear_offloading_task(state, &key);
+        clear_promotion_task(state, &key);
+        state.replication_tasks.remove(&key);
+    }
+
+    let task_ids = state
+        .tasks
+        .iter()
+        .filter(|entry| entry.info.assigned_client == Some(client_id))
+        .map(|entry| *entry.key())
+        .collect::<Vec<_>>();
+    for task_id in task_ids {
+        state.tasks.remove(&task_id);
+    }
+
+    state.local_disk_segments.remove(&client_id);
+
+    let segment_ids = state
+        .segments
+        .iter()
+        .filter(|entry| entry.segment.client_id == client_id)
+        .map(|entry| entry.segment.id)
+        .collect::<Vec<_>>();
+    for segment_id in segment_ids {
+        unmount_segment_owned(state, segment_id, client_id);
+    }
+    sync_client_segments(state, client_id);
+    state.clients.remove(&client_id);
+}
+
+impl ClientMonitorWorker {
+    pub(crate) fn new(state: Arc<MasterState>) -> Self {
+        let inner = Arc::new(ClientMonitorInner {
+            state: Mutex::new(false),
+            condvar: Condvar::new(),
+        });
+        let worker_inner = inner.clone();
+        let interval = state.runtime_config.client_monitor_interval;
+        let ttl = state.runtime_config.client_live_ttl;
+        let worker = thread::spawn(move || loop {
+            let guard = worker_inner
+                .state
+                .lock()
+                .expect("client monitor mutex poisoned");
+            let (guard, _) = worker_inner
+                .condvar
+                .wait_timeout(guard, interval)
+                .expect("client monitor condvar timeout failed");
+            if *guard {
+                break;
+            }
+            drop(guard);
+
+            let now = SystemTime::now();
+            let expired = state
+                .clients
+                .iter()
+                .filter_map(|entry| {
+                    now.duration_since(entry.last_ping)
+                        .ok()
+                        .filter(|elapsed| *elapsed >= ttl)
+                        .map(|_| *entry.key())
+                })
+                .collect::<Vec<_>>();
+            for client_id in expired {
+                purge_expired_client(&state, client_id);
+            }
+        });
+        Self {
+            inner,
+            worker: Some(worker),
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        {
+            let mut stopping = self
+                .inner
+                .state
+                .lock()
+                .expect("client monitor mutex poisoned");
             if *stopping {
                 return;
             }

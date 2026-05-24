@@ -15,6 +15,7 @@ pub(crate) struct MasterState {
     pub(crate) segments: DashMap<Uuid, SegmentEntry>,
     pub(crate) local_disk_segments: DashMap<Uuid, LocalDiskSegmentEntry>,
     pub(crate) tasks: DashMap<Uuid, TaskEntry>,
+    pub(crate) replication_tasks: DashMap<String, ReplicationTaskEntry>,
     pub(crate) offloading_tasks: DashMap<String, OffloadingTaskEntry>,
     pub(crate) promotion_tasks: DashMap<String, PromotionTaskEntry>,
     pub(crate) promotion_access_counts: DashMap<String, u8>,
@@ -58,6 +59,21 @@ pub struct TaskEntry {
     pub max_retry_attempts: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplicationTaskKind {
+    Copy,
+    Move,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReplicationTaskEntry {
+    pub(crate) client_id: Uuid,
+    pub(crate) kind: ReplicationTaskKind,
+    pub(crate) source: ReplicaDescriptor,
+    pub(crate) targets: Vec<ReplicaDescriptor>,
+    pub(crate) start_time: Instant,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OffloadingTaskEntry {
     pub(crate) client_id: Uuid,
@@ -89,6 +105,11 @@ pub struct MasterRuntimeConfig {
     pub lease_ttl: Duration,
     pub offload_on_evict: bool,
     pub offload_force_evict: bool,
+    pub client_live_ttl: Duration,
+    pub client_monitor_interval: Duration,
+    pub storage_fs_dir: String,
+    pub enable_disk_eviction: bool,
+    pub quota_bytes: u64,
 }
 
 impl Default for MasterRuntimeConfig {
@@ -108,6 +129,11 @@ impl Default for MasterRuntimeConfig {
             lease_ttl: Duration::from_secs(3600),
             offload_on_evict: false,
             offload_force_evict: false,
+            client_live_ttl: Duration::from_secs(30),
+            client_monitor_interval: Duration::from_secs(1),
+            storage_fs_dir: String::new(),
+            enable_disk_eviction: false,
+            quota_bytes: 0,
         }
     }
 }

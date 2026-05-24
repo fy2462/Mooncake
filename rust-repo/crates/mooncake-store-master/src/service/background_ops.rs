@@ -153,6 +153,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
     let candidate_data = state
         .objects
         .iter()
+        .filter(|entry| !state.replication_tasks.contains_key(entry.key()))
         .map(|entry| {
             (
                 entry.key().clone(),
