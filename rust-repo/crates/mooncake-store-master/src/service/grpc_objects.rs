@@ -47,6 +47,11 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::PutStartResponse>, Status> {
         let req = request.into_inner();
         let key = req.key.clone();
+        let _client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
 
         if self.state.objects.contains_key(&key) {
             return Err(Status::already_exists(format!(
@@ -82,6 +87,7 @@ impl MasterServiceImpl {
                 size: req.slice_length,
                 last_access: SystemTime::now(),
                 soft_pinned: config.with_soft_pin,
+                hard_pinned: config.with_hard_pin,
             },
         );
 
@@ -121,6 +127,11 @@ impl MasterServiceImpl {
         request: Request<proto::AddReplicaRequest>,
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
         let req = request.into_inner();
+        let _client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
         let replica = req
             .replica
             .as_ref()
@@ -147,6 +158,7 @@ impl MasterServiceImpl {
                     replicas: vec![replica],
                     last_access: SystemTime::now(),
                     soft_pinned: false,
+                    hard_pinned: false,
                 },
             );
         }
@@ -298,6 +310,11 @@ impl MasterServiceImpl {
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
         let req = request.into_inner();
+        let _client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
         let config = req
             .config
             .as_ref()
@@ -309,21 +326,37 @@ impl MasterServiceImpl {
             config.replica_num as usize
         };
 
-        let replicas = if let Some(existing) = self.state.objects.get(&req.key) {
+        let (replicas, previous_soft_pinned, previous_hard_pinned) = if let Some(existing) =
+            self.state.objects.get(&req.key)
+        {
             if existing.size == req.slice_length {
-                existing.replicas.clone()
+                (
+                    existing.replicas.clone(),
+                    existing.soft_pinned,
+                    existing.hard_pinned,
+                )
             } else {
+                let previous_soft_pinned = existing.soft_pinned;
+                let previous_hard_pinned = existing.hard_pinned;
                 let old_replicas = existing.replicas.clone();
                 drop(existing);
                 let segment_ids: Vec<Uuid> = old_replicas.iter().map(|r| r.segment_id).collect();
                 self.state.allocator.write().release(&old_replicas);
                 sync_segment_usage(&self.state, segment_ids);
                 let mut allocator = self.state.allocator.write();
-                allocator.allocate(&req.key, req.slice_length, replica_count, &config)
+                (
+                    allocator.allocate(&req.key, req.slice_length, replica_count, &config),
+                    previous_soft_pinned,
+                    previous_hard_pinned,
+                )
             }
         } else {
             let mut allocator = self.state.allocator.write();
-            allocator.allocate(&req.key, req.slice_length, replica_count, &config)
+            (
+                allocator.allocate(&req.key, req.slice_length, replica_count, &config),
+                false,
+                false,
+            )
         };
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
@@ -336,7 +369,8 @@ impl MasterServiceImpl {
                 replicas,
                 size: req.slice_length,
                 last_access: SystemTime::now(),
-                soft_pinned: config.with_soft_pin,
+                soft_pinned: config.with_soft_pin || previous_soft_pinned,
+                hard_pinned: config.with_hard_pin || previous_hard_pinned,
             },
         );
 

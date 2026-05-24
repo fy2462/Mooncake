@@ -14,12 +14,12 @@ use self::cachelib::{
     align_up, allocate_cachelib, generate_cachelib_class_sizes, release_cachelib,
     CachelibSegmentState,
 };
+use self::types::DEFAULT_CACHELIB_POOL_NAME;
 pub use self::types::{
     cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
     AllocationStrategy, CachelibAllocInfo, CachelibAllocationVisit, ClassId, MemoryAllocatorKind,
     PoolId, SlabReleaseContext, SlabReleaseMode, CACHELIB_MIN_ALLOC_SIZE, CACHELIB_SLAB_SIZE,
 };
-use self::types::DEFAULT_CACHELIB_POOL_NAME;
 
 #[derive(Debug, Clone)]
 struct OffsetSegmentState {

@@ -138,6 +138,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
             size: 512,
             last_access: SystemTime::now(),
             soft_pinned: false,
+            hard_pinned: false,
         },
     );
     backend.save(&segments, &objects).unwrap();

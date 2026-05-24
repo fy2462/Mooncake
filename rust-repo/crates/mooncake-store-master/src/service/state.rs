@@ -35,6 +35,8 @@ pub struct ObjectEntry {
     pub size: u64,
     pub last_access: SystemTime,
     pub soft_pinned: bool,
+    #[serde(default)]
+    pub hard_pinned: bool,
 }
 
 pub struct SegmentEntry {

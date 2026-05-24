@@ -306,6 +306,7 @@ impl MasterServiceImpl {
                         size: metadata.data_size.max(0) as u64,
                         last_access: SystemTime::now(),
                         soft_pinned: false,
+                        hard_pinned: false,
                     },
                 );
             }

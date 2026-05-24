@@ -219,6 +219,7 @@ fn test_object_entry_creation() {
         size: 256,
         last_access: SystemTime::now(),
         soft_pinned: false,
+        hard_pinned: false,
     };
 
     assert_eq!(entry.replicas.len(), 2);

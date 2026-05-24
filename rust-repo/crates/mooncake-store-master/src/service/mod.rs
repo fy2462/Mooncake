@@ -37,8 +37,8 @@ use self::background_ops::{
 };
 use self::helpers::{
     addresses_for_client, client_id_by_segment_name, host_from_segment_name,
-    register_metadata_segments, sync_client_segments, sync_segment_usage, unmount_segment_owned,
-    upsert_client_addresses,
+    object_owner_client_id, register_metadata_segments, sync_client_segments, sync_segment_usage,
+    unmount_segment_owned, upsert_client_addresses,
 };
 use self::proto_conv::{
     config_from_proto, replica_from_proto, replica_to_proto, task_status_from_proto,

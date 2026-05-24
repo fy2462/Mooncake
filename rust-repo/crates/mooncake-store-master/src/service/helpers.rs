@@ -4,7 +4,7 @@ use chrono::Utc;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use super::state::{ClientEntry, MasterState};
+use super::state::{ClientEntry, MasterState, ObjectEntry};
 
 pub(crate) fn host_from_segment_name(name: &str) -> String {
     name.split(':').next().unwrap_or(name).to_string()
@@ -91,6 +91,14 @@ pub(crate) fn client_id_by_segment_name(state: &MasterState, segment_name: &str)
         .iter()
         .find(|entry| entry.segment.name == segment_name)
         .map(|entry| entry.segment.client_id)
+}
+
+pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) -> Option<Uuid> {
+    object.replicas.iter().find_map(|replica| {
+        replica
+            .holder_client_id
+            .or_else(|| client_id_by_segment_name(state, &replica.segment_name))
+    })
 }
 
 pub(crate) fn unmount_segment_owned(

@@ -8,6 +8,11 @@ use std::time::{Duration, SystemTime};
 use tonic::Request;
 use uuid::Uuid;
 
+fn proto_uuid(id: Uuid) -> proto::Uuid {
+    let (high, low) = id.as_u64_pair();
+    proto::Uuid { high, low }
+}
+
 #[test]
 fn test_allocator_random_strategy() {
     let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::Random);
@@ -1793,4 +1798,185 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn test_batch_replica_clear_respects_client_and_segment_name() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let other_client_id = Uuid::new_v4();
+
+    for (cid, name) in [
+        (client_id, "node-a:1"),
+        (client_id, "node-b:1"),
+        (other_client_id, "node-c:1"),
+    ] {
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(cid)),
+                segment_name: name.into(),
+                size: 1024,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let put = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "batch-clear-key".into(),
+            slice_length: 128,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 2,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: String::new(),
+                prefer_alloc_in_same_node: false,
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(put.replicas.len(), 2);
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "batch-clear-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let cleared = MasterService::batch_replica_clear(
+        &service,
+        Request::new(proto::BatchReplicaClearRequest {
+            object_keys: vec!["batch-clear-key".into()],
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: put.replicas[0].segment_name.clone(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(cleared.cleared_keys, vec!["batch-clear-key".to_string()]);
+
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "batch-clear-key".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(replicas.replicas.len(), 1);
+    assert_ne!(
+        replicas.replicas[0].segment_name,
+        put.replicas[0].segment_name
+    );
+
+    let denied = MasterService::batch_replica_clear(
+        &service,
+        Request::new(proto::BatchReplicaClearRequest {
+            object_keys: vec!["batch-clear-key".into()],
+            client_id: Some(proto_uuid(other_client_id)),
+            segment_name: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(denied.cleared_keys.is_empty());
+
+    let still_exists = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "batch-clear-key".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(still_exists.replicas.len(), 1);
+}
+
+#[tokio::test]
+async fn test_hard_pinned_object_survives_eviction_cycle() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::ZERO,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "hardpin:1".into(),
+            size: 4096,
+        }),
+    )
+    .await
+    .unwrap();
+
+    for (key, with_hard_pin) in [("hard-key", true), ("normal-key", false)] {
+        MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                slice_length: 512,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    with_soft_pin: false,
+                    with_hard_pin,
+                    preferred_segment: String::new(),
+                    prefer_alloc_in_same_node: false,
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let evicted = service.run_eviction_cycle_for_test(2);
+    assert!(evicted.iter().any(|key| key == "normal-key"));
+    assert!(!evicted.iter().any(|key| key == "hard-key"));
+
+    let hard_key = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "hard-key".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(hard_key.replicas.len(), 1);
+
+    let normal_key = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "normal-key".into(),
+        }),
+    )
+    .await;
+    assert!(normal_key.is_err());
 }

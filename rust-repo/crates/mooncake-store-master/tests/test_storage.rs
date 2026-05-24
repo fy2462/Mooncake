@@ -82,6 +82,7 @@ fn test_storage_backend_save_and_load() {
             size: 256,
             last_access: SystemTime::now(),
             soft_pinned: false,
+            hard_pinned: false,
         },
     );
 
@@ -146,6 +147,7 @@ fn test_storage_backend_multiple_objects() {
                 size: 100,
                 last_access: SystemTime::now(),
                 soft_pinned: false,
+                hard_pinned: false,
             },
         );
     }
@@ -210,6 +212,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
             size: 128,
             last_access: SystemTime::now(),
             soft_pinned: false,
+            hard_pinned: false,
         },
     );
 

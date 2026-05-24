@@ -38,14 +38,55 @@ impl MasterServiceImpl {
         request: Request<proto::BatchReplicaClearRequest>,
     ) -> Result<Response<proto::BatchReplicaClearResponse>, Status> {
         let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
+        let clear_all_segments = req.segment_name.is_empty();
         let mut cleared = vec![];
         for key in &req.object_keys {
-            if let Some((_, object)) = self.state.objects.remove(key) {
+            let mut remove_entire_object = false;
+            let mut removed_replicas = Vec::new();
+            let mut had_match = false;
+            if let Some(mut object) = self.state.objects.get_mut(key) {
+                if object_owner_client_id(&self.state, &object) != Some(client_id) {
+                    continue;
+                }
+                if object
+                    .replicas
+                    .iter()
+                    .any(|replica| replica.status != ReplicaStatus::Complete)
+                {
+                    continue;
+                }
+                if clear_all_segments {
+                    had_match = !object.replicas.is_empty();
+                    removed_replicas = object.replicas.clone();
+                    remove_entire_object = had_match;
+                } else {
+                    let segment_name = req.segment_name.as_str();
+                    object.replicas.retain(|replica| {
+                        let matches = replica.segment_name == segment_name;
+                        if matches {
+                            had_match = true;
+                            removed_replicas.push(replica.clone());
+                        }
+                        !matches
+                    });
+                    remove_entire_object = object.replicas.is_empty() && had_match;
+                }
+            }
+            if had_match {
                 clear_offloading_task(&self.state, key);
                 clear_promotion_task(&self.state, key);
-                let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
-                self.state.allocator.write().release(&object.replicas);
+                let segment_ids: Vec<Uuid> =
+                    removed_replicas.iter().map(|r| r.segment_id).collect();
+                self.state.allocator.write().release(&removed_replicas);
                 sync_segment_usage(&self.state, segment_ids);
+                if remove_entire_object {
+                    self.state.objects.remove(key);
+                }
                 cleared.push(key.clone());
             }
         }
@@ -183,6 +224,7 @@ impl MasterServiceImpl {
                     size: entry.slice_length,
                     last_access: SystemTime::now(),
                     soft_pinned: config.with_soft_pin,
+                    hard_pinned: config.with_hard_pin,
                 },
             );
             all_replicas.extend(proto_r);

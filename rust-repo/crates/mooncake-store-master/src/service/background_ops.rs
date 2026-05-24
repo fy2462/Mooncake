@@ -158,22 +158,24 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
                 entry.key().clone(),
                 entry.replicas.clone(),
                 entry.soft_pinned,
+                entry.hard_pinned,
                 entry.last_access,
             )
         })
         .collect::<Vec<_>>();
     let candidate_refs = candidate_data
         .iter()
-        .map(|(key, replicas, soft_pinned, last_access)| {
+        .map(|(key, replicas, soft_pinned, hard_pinned, last_access)| {
             (
                 key.as_str(),
                 replicas.as_slice(),
                 *soft_pinned,
+                *hard_pinned,
                 *last_access,
             )
         })
         .collect::<Vec<_>>();
-    let selected = manager.select_for_eviction(&candidate_refs, target_count);
+    let selected = manager.select_for_eviction_with_hard_pin(&candidate_refs, target_count);
 
     let mut evicted = Vec::new();
     for key in selected {
