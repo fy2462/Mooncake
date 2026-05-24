@@ -23,6 +23,7 @@ message ReplicaDescriptor {
   enum ReplicaType {
     MEMORY = 0;
     DISK = 1;
+    LOCAL_DISK = 2;
   }
 
   Uuid segment_id = 1;
@@ -32,6 +33,7 @@ message ReplicaDescriptor {
   ReplicaStatus status = 5;
   ReplicaType replica_type = 6;
   uint64 size = 7;
+  Uuid holder_client_id = 8;
 }
 
 message ReplicateConfig {
@@ -53,7 +55,16 @@ service MasterService {
   // Segment management — clients mount/unmount memory segments
   rpc MountSegment(MountSegmentRequest) returns (MountSegmentResponse);
   rpc UnmountSegment(UnmountSegmentRequest) returns (UnmountSegmentResponse);
+  rpc GracefulUnmountSegment(GracefulUnmountSegmentRequest) returns (GracefulUnmountSegmentResponse);
   rpc ReMountSegment(ReMountSegmentRequest) returns (ReMountSegmentResponse);
+  rpc MountLocalDiskSegment(MountLocalDiskSegmentRequest) returns (MountLocalDiskSegmentResponse);
+  rpc OffloadObjectHeartbeat(OffloadObjectHeartbeatRequest) returns (OffloadObjectHeartbeatResponse);
+  rpc ReportSsdCapacity(ReportSsdCapacityRequest) returns (ReportSsdCapacityResponse);
+  rpc NotifyOffloadSuccess(NotifyOffloadSuccessRequest) returns (NotifyOffloadSuccessResponse);
+  rpc PromotionObjectHeartbeat(PromotionObjectHeartbeatRequest) returns (PromotionObjectHeartbeatResponse);
+  rpc PromotionAllocStart(PromotionAllocStartRequest) returns (PromotionAllocStartResponse);
+  rpc NotifyPromotionSuccess(NotifyPromotionSuccessRequest) returns (NotifyPromotionSuccessResponse);
+  rpc NotifyPromotionFailure(NotifyPromotionFailureRequest) returns (NotifyPromotionFailureResponse);
 
   // Key / object operations
   rpc ExistKey(ExistKeyRequest) returns (ExistKeyResponse);
@@ -89,6 +100,8 @@ service MasterService {
   rpc CreateCopyTask(CreateCopyTaskRequest) returns (CreateCopyTaskResponse);
   rpc CreateMoveTask(CreateMoveTaskRequest) returns (CreateMoveTaskResponse);
   rpc QueryTask(QueryTaskRequest) returns (QueryTaskResponse);
+  rpc FetchTasks(FetchTasksRequest) returns (FetchTasksResponse);
+  rpc MarkTaskToComplete(MarkTaskToCompleteRequest) returns (MarkTaskToCompleteResponse);
 
   // Batch operations (high-throughput paths)
   rpc BatchPutEnd(BatchPutEndRequest) returns (BatchPutEndResponse);
@@ -127,6 +140,14 @@ message UnmountSegmentRequest {
 
 message UnmountSegmentResponse {}
 
+message GracefulUnmountSegmentRequest {
+  Uuid segment_id = 1;
+  Uuid client_id = 2;
+  uint64 grace_period_ms = 3;
+}
+
+message GracefulUnmountSegmentResponse {}
+
 message ReMountSegmentRequest {
   Uuid client_id = 1;
   repeated string segment_names = 2;
@@ -134,6 +155,78 @@ message ReMountSegmentRequest {
 }
 
 message ReMountSegmentResponse {}
+
+message MountLocalDiskSegmentRequest {
+  Uuid client_id = 1;
+  bool enable_offloading = 2;
+}
+
+message MountLocalDiskSegmentResponse {}
+
+message OffloadObjectHeartbeatRequest {
+  Uuid client_id = 1;
+  bool enable_offloading = 2;
+}
+
+message OffloadObjectHeartbeatResponse {
+  map<string, int64> objects = 1;
+}
+
+message ReportSsdCapacityRequest {
+  Uuid client_id = 1;
+  int64 ssd_total_capacity_bytes = 2;
+}
+
+message ReportSsdCapacityResponse {}
+
+message StorageObjectMetadata {
+  int64 bucket_id = 1;
+  int64 offset = 2;
+  int64 key_size = 3;
+  int64 data_size = 4;
+  string transport_endpoint = 5;
+}
+
+message NotifyOffloadSuccessRequest {
+  Uuid client_id = 1;
+  repeated string keys = 2;
+  repeated StorageObjectMetadata metadatas = 3;
+}
+
+message NotifyOffloadSuccessResponse {}
+
+message PromotionObjectHeartbeatRequest {
+  Uuid client_id = 1;
+}
+
+message PromotionObjectHeartbeatResponse {
+  map<string, int64> objects = 1;
+}
+
+message PromotionAllocStartRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  uint64 size = 3;
+  repeated string preferred_segments = 4;
+}
+
+message PromotionAllocStartResponse {
+  ReplicaDescriptor memory_descriptor = 1;
+}
+
+message NotifyPromotionSuccessRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message NotifyPromotionSuccessResponse {}
+
+message NotifyPromotionFailureRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message NotifyPromotionFailureResponse {}
 
 // ---------------------------------------------------------------
 // Key existence
@@ -401,3 +494,33 @@ message QueryTaskResponse {
   Uuid assigned_client = 6;
   string message = 7;
 }
+
+message TaskAssignment {
+  Uuid id = 1;
+  TaskType type = 2;
+  string payload = 3;
+  int64 created_at_ms_epoch = 4;
+  uint32 max_retry_attempts = 5;
+}
+
+message FetchTasksRequest {
+  Uuid client_id = 1;
+  uint32 batch_size = 2;
+}
+
+message FetchTasksResponse {
+  repeated TaskAssignment tasks = 1;
+}
+
+message TaskCompleteRequest {
+  Uuid id = 1;
+  TaskStatus status = 2;
+  string message = 3;
+}
+
+message MarkTaskToCompleteRequest {
+  Uuid client_id = 1;
+  TaskCompleteRequest request = 2;
+}
+
+message MarkTaskToCompleteResponse {}

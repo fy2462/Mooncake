@@ -6,7 +6,7 @@ pub mod metrics;
 pub mod service;
 pub mod storage_backend;
 
-pub use service::MasterServiceImpl;
+pub use service::{MasterRuntimeConfig, MasterServiceImpl};
 
 // Generated protobuf code — compiled by build.rs from proto/mooncake_store.proto
 pub mod proto {

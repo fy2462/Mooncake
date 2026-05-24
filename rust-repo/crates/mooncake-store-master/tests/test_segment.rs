@@ -2,6 +2,7 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
 use mooncake_store_master::allocator::{SegmentAllocator, AllocationStrategy};
 use dashmap::DashMap;
+use std::time::SystemTime;
 use uuid::Uuid;
 
 #[test]
@@ -115,6 +116,7 @@ fn test_replica_descriptor_full() {
         size: 128,
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
+        holder_client_id: None,
     };
 
     assert_eq!(rd.segment_id, sid);
@@ -133,6 +135,7 @@ fn test_replica_descriptor_clone() {
         size: 64,
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
+        holder_client_id: None,
     };
     let cloned = rd.clone();
     assert_eq!(rd.segment_id, cloned.segment_id);
@@ -183,6 +186,7 @@ fn test_object_entry_creation() {
                 size: 128,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             },
             ReplicaDescriptor {
                 segment_id: sid,
@@ -191,9 +195,12 @@ fn test_object_entry_creation() {
                 size: 128,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             },
         ],
         size: 256,
+        last_access: SystemTime::now(),
+        soft_pinned: false,
     };
 
     assert_eq!(entry.replicas.len(), 2);

@@ -122,6 +122,7 @@ impl SegmentAllocator {
                 size: slice_size,
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             });
         }
         replicas
@@ -143,6 +144,15 @@ impl SegmentAllocator {
 
     pub fn used_bytes(&self, segment_id: &Uuid) -> Option<u64> {
         self.segments.get(segment_id).map(|state| state.segment.used)
+    }
+
+    pub fn usage_totals(&self) -> (u64, u64) {
+        self.segments.values().fold((0, 0), |(total, used), state| {
+            (
+                total.saturating_add(state.segment.size),
+                used.saturating_add(state.segment.used),
+            )
+        })
     }
 }
 

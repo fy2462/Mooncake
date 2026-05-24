@@ -2,8 +2,9 @@ use clap::Parser;
 use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole};
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
-use mooncake_store_master::MasterServiceImpl;
+use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::fmt;
 
@@ -39,6 +40,12 @@ struct Args {
 
     #[arg(long, default_value_t = 0.05)]
     eviction_ratio: f64,
+
+    #[arg(long)]
+    offload_on_evict: bool,
+
+    #[arg(long)]
+    offload_force_evict: bool,
 
     #[arg(long)]
     enable_ha: bool,
@@ -129,7 +136,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.http_metadata_server_port,
     );
 
-    let service = MasterServiceImpl::new(snapshot_backend_type, snapshot_dir);
+    let runtime_config = MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(args.default_kv_lease_ttl_ms),
+        eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
+        eviction_ratio: args.eviction_ratio,
+        offload_on_evict: args.offload_on_evict,
+        offload_force_evict: args.offload_force_evict,
+        ..Default::default()
+    };
+    let service = MasterServiceImpl::new_with_runtime_config(
+        snapshot_backend_type,
+        snapshot_dir,
+        runtime_config,
+    );
     let service_arc = std::sync::Arc::new(service);
     service_arc
         .metadata_state()

@@ -62,6 +62,7 @@ fn test_batch_put_end_status_transition() {
                 size: 128,
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             }],
             size: 128,
         },
@@ -102,6 +103,7 @@ fn test_batch_upsert_end_allocates_new() {
                 size: *size,
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             }],
             size: *size,
         });
@@ -120,6 +122,7 @@ fn test_batch_upsert_end_allocates_new() {
             size: 200,
             status: ReplicaStatus::Complete,
             replica_type: ReplicaType::Memory,
+            holder_client_id: None,
         }],
         size: 200,
     });

@@ -2,6 +2,7 @@ use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType}
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
+use std::time::SystemTime;
 use uuid::Uuid;
 
 fn temp_dir() -> std::path::PathBuf {
@@ -42,8 +43,11 @@ fn test_storage_backend_save_and_load() {
                 size: 256,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             }],
             size: 256,
+            last_access: SystemTime::now(),
+            soft_pinned: false,
         },
     );
 
@@ -92,8 +96,11 @@ fn test_storage_backend_multiple_objects() {
                 size: 100,
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
+                holder_client_id: None,
             }],
             size: 100,
+            last_access: SystemTime::now(),
+            soft_pinned: false,
         });
     }
 
@@ -125,6 +132,7 @@ fn test_serialize_replica_status_roundtrip() {
         size: 512,
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
+        holder_client_id: None,
     };
     assert_eq!(rd.segment_name, "node1:12345");
     assert_eq!(rd.offset, 0x2000);

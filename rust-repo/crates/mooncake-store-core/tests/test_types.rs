@@ -1,6 +1,6 @@
 use mooncake_store_core::{
-    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment, TaskInfo,
-    TaskStatus, TaskType,
+    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment, StorageObjectMetadata,
+    TaskAssignment, TaskCompleteRequest, TaskInfo, TaskStatus, TaskType,
 };
 use uuid::Uuid;
 
@@ -203,6 +203,7 @@ fn test_replica_descriptor() {
         size: 256,
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
+        holder_client_id: None,
     };
     assert_eq!(rd.offset, 0x1000);
     assert_eq!(rd.size, 256);
@@ -217,6 +218,7 @@ fn test_replica_descriptor_disk() {
         size: 4096,
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
+        holder_client_id: None,
     };
     assert_eq!(rd.replica_type, ReplicaType::Disk);
     assert_eq!(rd.status, ReplicaStatus::Written);
@@ -239,6 +241,7 @@ fn test_replica_descriptor_all_statuses() {
             size: 1,
             status: *status,
             replica_type: ReplicaType::Memory,
+            holder_client_id: None,
         };
         assert_eq!(rd.status, *status);
     }
@@ -253,6 +256,7 @@ fn test_replica_descriptor_clone() {
         size: 64,
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
+        holder_client_id: None,
     };
     let cloned = rd.clone();
     assert_eq!(rd.segment_id, cloned.segment_id);
@@ -271,6 +275,7 @@ fn test_replica_descriptor_serde_roundtrip() {
         size: 1024,
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
+        holder_client_id: None,
     };
     let json = serde_json::to_string(&rd).unwrap();
     let restored: ReplicaDescriptor = serde_json::from_str(&json).unwrap();
@@ -439,6 +444,52 @@ fn test_task_info_serde_no_assigned_client() {
     assert!(restored.assigned_client.is_none());
     assert_eq!(restored.message, "error");
     assert_eq!(restored.status, TaskStatus::Failed);
+}
+
+#[test]
+fn test_task_assignment_roundtrip() {
+    let assignment = TaskAssignment {
+        id: Uuid::new_v4(),
+        task_type: TaskType::ReplicaCopy,
+        payload: r#"{"key":"k","source":"s0","targets":["s1"]}"#.into(),
+        created_at_ms_epoch: 123456,
+        max_retry_attempts: 3,
+    };
+    let json = serde_json::to_string(&assignment).unwrap();
+    let restored: TaskAssignment = serde_json::from_str(&json).unwrap();
+    assert_eq!(assignment.id, restored.id);
+    assert_eq!(assignment.task_type, restored.task_type);
+    assert_eq!(assignment.payload, restored.payload);
+    assert_eq!(assignment.max_retry_attempts, restored.max_retry_attempts);
+}
+
+#[test]
+fn test_task_complete_request_roundtrip() {
+    let request = TaskCompleteRequest {
+        id: Uuid::new_v4(),
+        status: TaskStatus::Success,
+        message: "done".into(),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    let restored: TaskCompleteRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(request.id, restored.id);
+    assert_eq!(request.status, restored.status);
+    assert_eq!(request.message, restored.message);
+}
+
+#[test]
+fn test_storage_object_metadata_roundtrip() {
+    let metadata = StorageObjectMetadata {
+        bucket_id: 1,
+        offset: 64,
+        key_size: 8,
+        data_size: 1024,
+        transport_endpoint: "holder-a".into(),
+    };
+    let json = serde_json::to_string(&metadata).unwrap();
+    let restored: StorageObjectMetadata = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.data_size, 1024);
+    assert_eq!(restored.transport_endpoint, "holder-a");
 }
 
 // =========================================================================

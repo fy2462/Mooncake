@@ -845,6 +845,156 @@ impl MooncakeClient {
         Ok(response)
     }
 
+    pub async fn fetch_tasks(
+        &mut self,
+        batch_size: u32,
+    ) -> StoreResult<Vec<proto::TaskAssignment>> {
+        let request = proto::FetchTasksRequest {
+            client_id: Some(self.client_id_proto()),
+            batch_size,
+        };
+        let response = self.master.fetch_tasks(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        Ok(response.tasks)
+    }
+
+    pub async fn mark_task_to_complete(
+        &mut self,
+        task_id: Uuid,
+        status: proto::TaskStatus,
+        message: &str,
+    ) -> StoreResult<()> {
+        let request = proto::MarkTaskToCompleteRequest {
+            client_id: Some(self.client_id_proto()),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(proto::Uuid {
+                    high: task_id.as_u64_pair().0,
+                    low: task_id.as_u64_pair().1,
+                }),
+                status: status as i32,
+                message: message.to_string(),
+            }),
+        };
+        self.master
+            .mark_task_to_complete(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn mount_local_disk_segment(&mut self, enable_offloading: bool) -> StoreResult<()> {
+        self.master
+            .mount_local_disk_segment(proto::MountLocalDiskSegmentRequest {
+                client_id: Some(self.client_id_proto()),
+                enable_offloading,
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn offload_object_heartbeat(
+        &mut self,
+        enable_offloading: bool,
+    ) -> StoreResult<std::collections::HashMap<String, i64>> {
+        let response = self
+            .master
+            .offload_object_heartbeat(proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(self.client_id_proto()),
+                enable_offloading,
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.objects)
+    }
+
+    pub async fn report_ssd_capacity(&mut self, bytes: i64) -> StoreResult<()> {
+        self.master
+            .report_ssd_capacity(proto::ReportSsdCapacityRequest {
+                client_id: Some(self.client_id_proto()),
+                ssd_total_capacity_bytes: bytes,
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn notify_offload_success(
+        &mut self,
+        keys: Vec<String>,
+        metadatas: Vec<proto::StorageObjectMetadata>,
+    ) -> StoreResult<()> {
+        self.master
+            .notify_offload_success(proto::NotifyOffloadSuccessRequest {
+                client_id: Some(self.client_id_proto()),
+                keys,
+                metadatas,
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn promotion_object_heartbeat(
+        &mut self,
+    ) -> StoreResult<std::collections::HashMap<String, i64>> {
+        let response = self
+            .master
+            .promotion_object_heartbeat(proto::PromotionObjectHeartbeatRequest {
+                client_id: Some(self.client_id_proto()),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.objects)
+    }
+
+    pub async fn promotion_alloc_start(
+        &mut self,
+        key: &str,
+        size: u64,
+        preferred_segments: Vec<String>,
+    ) -> StoreResult<ReplicaDescriptor> {
+        let response = self
+            .master
+            .promotion_alloc_start(proto::PromotionAllocStartRequest {
+                client_id: Some(self.client_id_proto()),
+                key: key.to_string(),
+                size,
+                preferred_segments,
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        let descriptor = response
+            .memory_descriptor
+            .as_ref()
+            .ok_or(StoreError::OperationFailed(-1))?;
+        Ok(self.replicas_from_proto(std::slice::from_ref(descriptor)).remove(0))
+    }
+
+    pub async fn notify_promotion_success(&mut self, key: &str) -> StoreResult<()> {
+        self.master
+            .notify_promotion_success(proto::NotifyPromotionSuccessRequest {
+                client_id: Some(self.client_id_proto()),
+                key: key.to_string(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn notify_promotion_failure(&mut self, key: &str) -> StoreResult<()> {
+        self.master
+            .notify_promotion_failure(proto::NotifyPromotionFailureRequest {
+                client_id: Some(self.client_id_proto()),
+                key: key.to_string(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Buffer registration (zero-copy path)
     // -----------------------------------------------------------------------
@@ -899,8 +1049,22 @@ impl MooncakeClient {
                 segment_name: r.segment_name.clone(),
                 offset: r.offset,
                 size: r.size,
-                status: mooncake_store_core::ReplicaStatus::Allocating,
-                replica_type: mooncake_store_core::ReplicaType::Memory,
+                status: match r.status {
+                    1 => mooncake_store_core::ReplicaStatus::Allocating,
+                    2 => mooncake_store_core::ReplicaStatus::Written,
+                    3 => mooncake_store_core::ReplicaStatus::Complete,
+                    4 => mooncake_store_core::ReplicaStatus::Failed,
+                    _ => mooncake_store_core::ReplicaStatus::Undefined,
+                },
+                replica_type: match r.replica_type {
+                    1 => mooncake_store_core::ReplicaType::Disk,
+                    2 => mooncake_store_core::ReplicaType::LocalDisk,
+                    _ => mooncake_store_core::ReplicaType::Memory,
+                },
+                holder_client_id: r
+                    .holder_client_id
+                    .as_ref()
+                    .map(|id| Uuid::from_u64_pair(id.high, id.low)),
             })
         }).collect()
     }

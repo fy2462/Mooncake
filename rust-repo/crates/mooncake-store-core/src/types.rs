@@ -32,6 +32,7 @@ pub enum ReplicaStatus {
 pub enum ReplicaType {
     Memory = 0,
     Disk = 1,
+    LocalDisk = 2,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +43,7 @@ pub struct ReplicaDescriptor {
     pub size: u64,
     pub status: ReplicaStatus,
     pub replica_type: ReplicaType,
+    pub holder_client_id: Option<Uuid>,
 }
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,15 @@ pub struct ReplicateConfig {
     pub with_hard_pin: bool,
     pub preferred_segment: String,
     pub prefer_alloc_in_same_node: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageObjectMetadata {
+    pub bucket_id: i64,
+    pub offset: i64,
+    pub key_size: i64,
+    pub data_size: i64,
+    pub transport_endpoint: String,
 }
 
 impl Default for ReplicateConfig {
@@ -95,6 +106,22 @@ pub struct TaskInfo {
     pub created_at: DateTime<Utc>,
     pub last_updated_at: DateTime<Utc>,
     pub assigned_client: Option<Uuid>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAssignment {
+    pub id: Uuid,
+    pub task_type: TaskType,
+    pub payload: String,
+    pub created_at_ms_epoch: i64,
+    pub max_retry_attempts: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCompleteRequest {
+    pub id: Uuid,
+    pub status: TaskStatus,
     pub message: String,
 }
 
