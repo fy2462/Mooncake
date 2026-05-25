@@ -88,7 +88,7 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: true,
+                prefer_alloc_in_same_node: true, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -153,7 +153,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: true,
+                prefer_alloc_in_same_node: true, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -198,7 +198,7 @@ async fn test_client_monitor_reaps_expired_clients() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "ttl:1".into(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )

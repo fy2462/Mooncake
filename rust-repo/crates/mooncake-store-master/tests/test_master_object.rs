@@ -41,7 +41,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -153,11 +153,11 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
                 slice_length: 512,
                 config: Some(proto::ReplicateConfig {
                     replica_num: 1,
-                nof_replica_num: 0,
+                    nof_replica_num: 0,
                     with_soft_pin: false,
                     with_hard_pin,
                     preferred_segment: String::new(),
-                    prefer_alloc_in_same_node: false,
+                    prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
                 }),
             }),
         )
@@ -229,7 +229,7 @@ async fn test_copy_move_and_revoke_workflow() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "copy-src:1".into(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -396,11 +396,11 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 slice_length: 128,
                 config: Some(proto::ReplicateConfig {
                     replica_num: 1,
-                nof_replica_num: 0,
+                    nof_replica_num: 0,
                     with_soft_pin: false,
                     with_hard_pin: false,
                     preferred_segment: "revoke:1".into(),
-                    prefer_alloc_in_same_node: false,
+                    prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
                 }),
             }),
         )
@@ -437,7 +437,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .await
     .is_err());
 
-    let removed = MasterService::remove_all(&service, Request::new(proto::RemoveAllRequest {}))
+    let removed = MasterService::remove_all(&service, Request::new(proto::RemoveAllRequest { force: false }))
         .await
         .unwrap()
         .into_inner();

@@ -85,6 +85,7 @@ fn test_storage_backend_save_and_load() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
+            data_type: Default::default(),
         },
     );
 
@@ -153,6 +154,7 @@ fn test_storage_backend_multiple_objects() {
                 last_access: SystemTime::now(),
                 soft_pinned: false,
                 hard_pinned: false,
+                data_type: Default::default(),
             },
         );
     }
@@ -223,6 +225,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
+            data_type: Default::default(),
         },
     );
 

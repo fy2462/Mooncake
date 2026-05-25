@@ -79,7 +79,10 @@ impl ReplicateConfigPy {
             with_soft_pin: self.with_soft_pin,
             with_hard_pin: self.with_hard_pin,
             preferred_segment: self.preferred_segment.clone(),
+            preferred_segments: vec![],
+            preferred_nof_segments: vec![],
             prefer_alloc_in_same_node: self.prefer_alloc_in_same_node,
+            data_type: Default::default(),
         }
     }
 }

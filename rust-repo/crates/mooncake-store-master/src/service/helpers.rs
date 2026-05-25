@@ -2,11 +2,16 @@ use crate::http_metadata::MetadataState;
 use crate::metrics;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
 use chrono::Utc;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use tonic::Status;
 use uuid::Uuid;
 
 use super::state::{ClientEntry, MasterState, ObjectEntry};
+
+pub(crate) fn bump_view_version(state: &MasterState) -> i64 {
+    state.view_version.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 pub(crate) fn host_from_segment_name(name: &str) -> String {
     name.split(':').next().unwrap_or(name).to_string()

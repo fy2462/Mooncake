@@ -143,7 +143,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "fuller:1".into(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -165,7 +165,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )

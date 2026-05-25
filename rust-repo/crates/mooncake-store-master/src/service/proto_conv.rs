@@ -1,7 +1,7 @@
 use crate::proto;
 use mooncake_store_core::{
-    NoFSegment, NoFSegmentOwnerInfo, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
-    TaskStatus, TaskType,
+    NoFSegment, NoFSegmentOwnerInfo, ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType,
+    ReplicateConfig, TaskStatus, TaskType,
 };
 use uuid::Uuid;
 
@@ -24,6 +24,10 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         slice_key_hash: vec![],
         size: r.size,
         holder_client_id: r.holder_client_id.map(uuid_to_proto),
+        transport_endpoint: r.segment_name.clone(),
+        file_path: String::new(),
+        object_size: r.size,
+        local_disk_client_id: r.holder_client_id.map(uuid_to_proto),
     }
 }
 
@@ -51,13 +55,46 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
 }
 
 pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
+    let preferred_segment = c.preferred_segment.clone();
+    let preferred_segments = if !c.preferred_segments.is_empty() {
+        c.preferred_segments.clone()
+    } else if !preferred_segment.is_empty() {
+        vec![preferred_segment.clone()]
+    } else {
+        vec![]
+    };
+
     ReplicateConfig {
         replica_num: c.replica_num,
         nof_replica_num: c.nof_replica_num,
         with_soft_pin: c.with_soft_pin,
         with_hard_pin: c.with_hard_pin,
-        preferred_segment: c.preferred_segment.clone(),
+        preferred_segment,
+        preferred_segments,
+        preferred_nof_segments: c.preferred_nof_segments.clone(),
         prefer_alloc_in_same_node: c.prefer_alloc_in_same_node,
+        data_type: match c.data_type {
+            x if x == proto::ObjectDataType::Kvcache as i32 => {
+                ObjectDataType::Kvcache
+            }
+            x if x == proto::ObjectDataType::Tensor as i32 => ObjectDataType::Tensor,
+            x if x == proto::ObjectDataType::Weight as i32 => ObjectDataType::Weight,
+            x if x == proto::ObjectDataType::Sample as i32 => ObjectDataType::Sample,
+            x if x == proto::ObjectDataType::Activation as i32 => {
+                ObjectDataType::Activation
+            }
+            x if x == proto::ObjectDataType::Gradient as i32 => {
+                ObjectDataType::Gradient
+            }
+            x if x == proto::ObjectDataType::OptimizerState as i32 => {
+                ObjectDataType::OptimizerState
+            }
+            x if x == proto::ObjectDataType::Metadata as i32 => {
+                ObjectDataType::Metadata
+            }
+            x if x == proto::ObjectDataType::General as i32 => ObjectDataType::General,
+            _ => ObjectDataType::Unknown,
+        },
     }
 }
 

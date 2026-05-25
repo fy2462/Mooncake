@@ -19,14 +19,14 @@ use crate::storage_backend::{StorageBackend, StorageBackendType};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{
-    NoFSegmentOwnerInfo, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
+    NoFSegmentOwnerInfo, ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
     TaskInfo, TaskStatus, TaskType,
 };
 use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tonic::{Request, Response, Status};
@@ -38,7 +38,8 @@ use self::background_ops::{
     try_push_promotion_queue,
 };
 use self::helpers::{
-    addresses_for_client, allocate_nof_replicas, client_id_by_nof_segment_name,
+    addresses_for_client, allocate_nof_replicas, bump_view_version,
+    client_id_by_nof_segment_name,
     client_id_by_replica_segment_name, client_id_by_segment_name, host_from_segment_name,
     object_owner_client_id, preferred_nof_segment_names, register_metadata_segments,
     release_replicas, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
@@ -123,6 +124,7 @@ impl MasterServiceImpl {
             ),
             storage_backend,
             promotion_in_flight: AtomicUsize::new(0),
+            view_version: AtomicI64::new(0),
             runtime_config: runtime_config.clone(),
         });
         let metadata_state = MetadataState::new("");

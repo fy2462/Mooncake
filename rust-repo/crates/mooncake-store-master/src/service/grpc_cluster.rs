@@ -12,14 +12,13 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        let existed = self.state.clients.contains_key(&client_id);
         let derived_addresses = req
             .mounted_segments
             .iter()
             .map(|segment| host_from_segment_name(segment))
             .collect::<Vec<_>>();
-        if !derived_addresses.is_empty() {
-            upsert_client_addresses(&self.state, client_id, derived_addresses);
-        }
+        upsert_client_addresses(&self.state, client_id, derived_addresses);
 
         if let Some(mut entry) = self.state.clients.get_mut(&client_id) {
             entry.last_ping = SystemTime::now();
@@ -27,7 +26,20 @@ impl MasterServiceImpl {
         }
         register_metadata_segments(&self.metadata_state, &req.mounted_segments).await;
         metrics::PING_REQUESTS.inc();
-        Ok(Response::new(proto::PingResponse {}))
+        let view_version_id = if existed {
+            self.state.view_version.load(std::sync::atomic::Ordering::Relaxed)
+        } else {
+            bump_view_version(&self.state)
+        };
+        let client_status = if existed {
+            proto::ClientStatus::Ok as i32
+        } else {
+            proto::ClientStatus::NeedRemount as i32
+        };
+        Ok(Response::new(proto::PingResponse {
+            view_version_id,
+            client_status,
+        }))
     }
 
     // ---- MountSegment ----
@@ -65,6 +77,7 @@ impl MasterServiceImpl {
         let mut allocator = self.state.allocator.write();
         allocator.add_segment(segment);
 
+        bump_view_version(&self.state);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
         Ok(Response::new(proto::MountSegmentResponse {}))
     }
@@ -101,6 +114,7 @@ impl MasterServiceImpl {
             used: 0,
             client_id,
         });
+        bump_view_version(&self.state);
         Ok(Response::new(proto::MountNoFSegmentResponse {}))
     }
 
@@ -124,6 +138,7 @@ impl MasterServiceImpl {
         if !unmount_segment_owned(&self.state, segment_id, client_id) {
             return Err(Status::not_found("segment not found for client"));
         }
+        bump_view_version(&self.state);
         Ok(Response::new(proto::UnmountSegmentResponse {}))
     }
 
@@ -146,6 +161,7 @@ impl MasterServiceImpl {
         if !unmount_nof_segment_owned(&self.state, segment_id, client_id) {
             return Err(Status::not_found("NoF segment not found for client"));
         }
+        bump_view_version(&self.state);
         Ok(Response::new(proto::UnmountNoFSegmentResponse {}))
     }
 
@@ -404,6 +420,7 @@ impl MasterServiceImpl {
                         last_access: SystemTime::now(),
                         soft_pinned: false,
                         hard_pinned: false,
+                        data_type: ObjectDataType::Unknown,
                     },
                 );
             }

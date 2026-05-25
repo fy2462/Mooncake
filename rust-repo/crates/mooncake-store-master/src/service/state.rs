@@ -1,11 +1,11 @@
 use crate::allocator::{AllocationStrategy, MemoryAllocatorKind, SegmentAllocator};
 use crate::storage_backend::StorageBackend;
 use dashmap::DashMap;
-use mooncake_store_core::{NoFSegment, ReplicaDescriptor, TaskInfo};
+use mooncake_store_core::{NoFSegment, ObjectDataType, ReplicaDescriptor, TaskInfo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
@@ -24,6 +24,7 @@ pub(crate) struct MasterState {
     pub(crate) nof_allocator: RwLock<SegmentAllocator>,
     pub(crate) storage_backend: RwLock<Option<StorageBackend>>,
     pub(crate) promotion_in_flight: AtomicUsize,
+    pub(crate) view_version: AtomicI64,
     pub(crate) runtime_config: MasterRuntimeConfig,
 }
 
@@ -40,6 +41,8 @@ pub struct ObjectEntry {
     pub soft_pinned: bool,
     #[serde(default)]
     pub hard_pinned: bool,
+    #[serde(default)]
+    pub data_type: ObjectDataType,
 }
 
 #[derive(Debug, Clone)]

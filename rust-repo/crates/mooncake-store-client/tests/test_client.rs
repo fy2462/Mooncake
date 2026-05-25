@@ -18,6 +18,7 @@ fn test_replicate_config_fields() {
         with_hard_pin: false,
         preferred_segment: "test:12345".into(),
         prefer_alloc_in_same_node: true,
+        ..Default::default()
     };
     assert_eq!(cfg.replica_num, 3);
     assert_eq!(cfg.preferred_segment, "test:12345");

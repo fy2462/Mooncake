@@ -57,7 +57,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "".into(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -168,7 +168,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "evict-localdisk".into(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )
@@ -295,7 +295,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "".into(),
-                prefer_alloc_in_same_node: false,
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
             }),
         }),
     )

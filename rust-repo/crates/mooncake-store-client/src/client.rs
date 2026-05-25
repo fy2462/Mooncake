@@ -136,6 +136,9 @@ impl MooncakeClient {
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
                 prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                preferred_segments: cfg.preferred_segments.clone(),
+                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                data_type: cfg.data_type as i32,
             }),
         };
 
@@ -188,6 +191,9 @@ impl MooncakeClient {
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
                 prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                preferred_segments: cfg.preferred_segments.clone(),
+                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                data_type: cfg.data_type as i32,
             }),
         };
 
@@ -232,6 +238,9 @@ impl MooncakeClient {
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
                 prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                preferred_segments: cfg.preferred_segments.clone(),
+                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                data_type: cfg.data_type as i32,
             }),
         };
 
@@ -560,7 +569,7 @@ impl MooncakeClient {
     // -----------------------------------------------------------------------
 
     pub async fn remove(&mut self, key: &str) -> StoreResult<()> {
-        let request = proto::RemoveRequest { key: key.to_string() };
+        let request = proto::RemoveRequest { key: key.to_string(), force: false };
         self.master
             .remove(request)
             .await
@@ -589,6 +598,7 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<i32>> {
         let request = proto::BatchRemoveRequest {
             keys: keys.to_vec(),
+            force: false,
         };
         let response = self
             .master
@@ -625,6 +635,7 @@ impl MooncakeClient {
     ) -> StoreResult<i64> {
         let request = proto::RemoveByRegexRequest {
             pattern: pattern.to_string(),
+            force: false,
         };
         let response = self
             .master
@@ -708,6 +719,9 @@ impl MooncakeClient {
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
                 prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                preferred_segments: cfg.preferred_segments.clone(),
+                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                data_type: cfg.data_type as i32,
             }),
         };
 
@@ -747,6 +761,9 @@ impl MooncakeClient {
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
                 prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                preferred_segments: cfg.preferred_segments.clone(),
+                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                data_type: cfg.data_type as i32,
             }),
         };
 

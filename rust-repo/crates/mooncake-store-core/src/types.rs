@@ -52,6 +52,26 @@ pub enum ReplicaType {
     NoFSsd = 3,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectDataType {
+    Unknown = 0,
+    Kvcache = 1,
+    Tensor = 2,
+    Weight = 3,
+    Sample = 4,
+    Activation = 5,
+    Gradient = 6,
+    OptimizerState = 7,
+    Metadata = 8,
+    General = 9,
+}
+
+impl Default for ObjectDataType {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicaDescriptor {
     pub segment_id: Uuid,
@@ -74,7 +94,10 @@ pub struct ReplicateConfig {
     pub with_soft_pin: bool,
     pub with_hard_pin: bool,
     pub preferred_segment: String,
+    pub preferred_segments: Vec<String>,
+    pub preferred_nof_segments: Vec<String>,
     pub prefer_alloc_in_same_node: bool,
+    pub data_type: ObjectDataType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +117,10 @@ impl Default for ReplicateConfig {
             with_soft_pin: false,
             with_hard_pin: false,
             preferred_segment: String::new(),
+            preferred_segments: vec![],
+            preferred_nof_segments: vec![],
             prefer_alloc_in_same_node: false,
+            data_type: ObjectDataType::Unknown,
         }
     }
 }

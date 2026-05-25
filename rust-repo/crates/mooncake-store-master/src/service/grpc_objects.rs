@@ -151,6 +151,7 @@ impl MasterServiceImpl {
                 last_access: SystemTime::now(),
                 soft_pinned: config.with_soft_pin,
                 hard_pinned: config.with_hard_pin,
+                data_type: config.data_type,
             },
         );
 
@@ -232,6 +233,7 @@ impl MasterServiceImpl {
                     last_access: SystemTime::now(),
                     soft_pinned: false,
                     hard_pinned: false,
+                    data_type: ObjectDataType::Unknown,
                 },
             );
         }
@@ -260,7 +262,8 @@ impl MasterServiceImpl {
                     try_push_promotion_queue(&self.state, &req.key);
                 }
                 metrics::GET_REQUESTS.inc();
-                Ok(Response::new(proto::GetReplicaListResponse { replicas }))
+                let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
+                Ok(Response::new(proto::GetReplicaListResponse { replicas, lease_ttl_ms }))
             }
             None => Err(Status::not_found(format!("key not found: {}", req.key))),
         }
@@ -272,7 +275,7 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
-        if self.state.replication_tasks.contains_key(&req.key) {
+        if !req.force && self.state.replication_tasks.contains_key(&req.key) {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
             ));
@@ -305,7 +308,7 @@ impl MasterServiceImpl {
             .collect();
 
         for key in keys_to_remove {
-            if self.state.replication_tasks.contains_key(&key) {
+            if !req.force && self.state.replication_tasks.contains_key(&key) {
                 continue;
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
@@ -481,6 +484,7 @@ impl MasterServiceImpl {
                 last_access: SystemTime::now(),
                 soft_pinned: config.with_soft_pin || previous_soft_pinned,
                 hard_pinned: config.with_hard_pin || previous_hard_pinned,
+                data_type: config.data_type,
             },
         );
 

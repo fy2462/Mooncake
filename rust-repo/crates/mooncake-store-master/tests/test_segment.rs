@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment};
+use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
 use std::time::SystemTime;
@@ -220,6 +220,7 @@ fn test_object_entry_creation() {
         last_access: SystemTime::now(),
         soft_pinned: false,
         hard_pinned: false,
+        data_type: ObjectDataType::Unknown,
     };
 
     assert_eq!(entry.replicas.len(), 2);
@@ -257,7 +258,7 @@ fn test_allocator_prefers_same_node() {
     });
 
     let config = ReplicateConfig {
-        prefer_alloc_in_same_node: true,
+        prefer_alloc_in_same_node: true, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: mooncake_store_core::ObjectDataType::Unknown, 
         replica_num: 1,
         nof_replica_num: 0,
         ..Default::default()

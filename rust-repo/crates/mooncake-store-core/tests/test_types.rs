@@ -27,6 +27,7 @@ fn test_replicate_config_custom() {
         with_hard_pin: false,
         preferred_segment: "node1:12345".into(),
         prefer_alloc_in_same_node: true,
+        ..Default::default()
     };
     assert_eq!(cfg.replica_num, 3);
     assert!(cfg.with_soft_pin);
@@ -44,6 +45,7 @@ fn test_replicate_config_clone() {
         with_hard_pin: true,
         preferred_segment: "seg-x".into(),
         prefer_alloc_in_same_node: false,
+        ..Default::default()
     };
     let cloned = cfg.clone();
     assert_eq!(cfg.replica_num, cloned.replica_num);
@@ -60,6 +62,7 @@ fn test_replicate_config_all_fields_false() {
         with_hard_pin: false,
         preferred_segment: String::new(),
         prefer_alloc_in_same_node: false,
+        ..Default::default()
     };
     assert_eq!(cfg.replica_num, 0);
     assert!(!cfg.with_soft_pin);
@@ -77,6 +80,7 @@ fn test_replicate_config_all_fields_true() {
         with_hard_pin: true,
         preferred_segment: "host:9999".into(),
         prefer_alloc_in_same_node: true,
+        ..Default::default()
     };
     assert_eq!(cfg.replica_num, 10);
     assert!(cfg.with_soft_pin);

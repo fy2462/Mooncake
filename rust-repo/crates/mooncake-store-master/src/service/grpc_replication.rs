@@ -107,13 +107,14 @@ impl MasterServiceImpl {
 
     pub(super) async fn remove_all_impl(
         &self,
-        _request: Request<proto::RemoveAllRequest>,
+        request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
+        let req = request.into_inner();
         let keys = self
             .state
             .objects
             .iter()
-            .filter(|entry| !self.state.replication_tasks.contains_key(entry.key()))
+            .filter(|entry| req.force || !self.state.replication_tasks.contains_key(entry.key()))
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         let mut removed_count = 0i64;

@@ -2,6 +2,25 @@ syntax = "proto3";
 
 package mooncake.store;
 
+enum ClientStatus {
+  CLIENT_STATUS_UNDEFINED = 0;
+  CLIENT_STATUS_OK = 1;
+  CLIENT_STATUS_NEED_REMOUNT = 2;
+}
+
+enum ObjectDataType {
+  OBJECT_DATA_TYPE_UNKNOWN = 0;
+  OBJECT_DATA_TYPE_KVCACHE = 1;
+  OBJECT_DATA_TYPE_TENSOR = 2;
+  OBJECT_DATA_TYPE_WEIGHT = 3;
+  OBJECT_DATA_TYPE_SAMPLE = 4;
+  OBJECT_DATA_TYPE_ACTIVATION = 5;
+  OBJECT_DATA_TYPE_GRADIENT = 6;
+  OBJECT_DATA_TYPE_OPTIMIZER_STATE = 7;
+  OBJECT_DATA_TYPE_METADATA = 8;
+  OBJECT_DATA_TYPE_GENERAL = 9;
+}
+
 // ---------------------------------------------------------------
 // Common types
 // ---------------------------------------------------------------
@@ -36,6 +55,10 @@ message ReplicaDescriptor {
   ReplicaType replica_type = 6;
   uint64 size = 7;
   Uuid holder_client_id = 8;
+  string transport_endpoint = 9;
+  string file_path = 10;
+  uint64 object_size = 11;
+  Uuid local_disk_client_id = 12;
 }
 
 message ReplicateConfig {
@@ -45,6 +68,9 @@ message ReplicateConfig {
   bool with_hard_pin = 4;
   string preferred_segment = 5;
   bool prefer_alloc_in_same_node = 6;
+  repeated string preferred_segments = 7;
+  repeated string preferred_nof_segments = 8;
+  ObjectDataType data_type = 9;
 }
 
 message NoFSegment {
@@ -70,7 +96,10 @@ message PingRequest {
   repeated string mounted_segments = 2;
 }
 
-message PingResponse {}
+message PingResponse {
+  int64 view_version_id = 1;
+  ClientStatus client_status = 2;
+}
 
 // ---------------------------------------------------------------
 // Mount / Unmount
@@ -307,6 +336,7 @@ message BatchPutRevokeResponse {
 
 message BatchRemoveRequest {
   repeated string keys = 1;
+  bool force = 2;
 }
 
 message BatchRemoveResponse {
@@ -346,6 +376,7 @@ message GetReplicaListRequest {
 
 message GetReplicaListResponse {
   repeated ReplicaDescriptor replicas = 1;
+  uint64 lease_ttl_ms = 2;
 }
 
 // ---------------------------------------------------------------
@@ -354,19 +385,23 @@ message GetReplicaListResponse {
 
 message RemoveRequest {
   string key = 1;
+  bool force = 2;
 }
 
 message RemoveResponse {}
 
 message RemoveByRegexRequest {
   string pattern = 1;
+  bool force = 2;
 }
 
 message RemoveByRegexResponse {
   int64 removed_count = 1;
 }
 
-message RemoveAllRequest {}
+message RemoveAllRequest {
+  bool force = 1;
+}
 
 message RemoveAllResponse {
   int64 removed_count = 1;

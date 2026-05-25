@@ -197,7 +197,7 @@ impl MasterServiceImpl {
             .keys
             .iter()
             .map(|key| {
-                if self.state.replication_tasks.contains_key(key) {
+                if !req.force && self.state.replication_tasks.contains_key(key) {
                     return -2;
                 }
                 if let Some((_, object)) = self.state.objects.remove(key) {
@@ -289,6 +289,7 @@ impl MasterServiceImpl {
                     last_access: SystemTime::now(),
                     soft_pinned: config.with_soft_pin,
                     hard_pinned: config.with_hard_pin,
+                    data_type: config.data_type,
                 },
             );
             all_replicas.extend(proto_r);
