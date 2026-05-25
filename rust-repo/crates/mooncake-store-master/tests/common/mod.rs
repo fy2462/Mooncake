@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use mooncake_store_core::Segment;
 use std::path::PathBuf;
 use uuid::Uuid;
