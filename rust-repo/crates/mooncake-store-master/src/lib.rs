@@ -11,7 +11,8 @@ pub mod storage_backend;
 
 pub use service::{MasterRuntimeConfig, MasterServiceImpl};
 
-// Generated protobuf code — compiled by build.rs from proto/mooncake_store.proto
+// Generated protobuf code — compiled by build.rs from
+// proto/mooncake_store_grpc.proto + proto/mooncake_store_types.proto
 pub mod proto {
     tonic::include_proto!("mooncake.store");
 }
