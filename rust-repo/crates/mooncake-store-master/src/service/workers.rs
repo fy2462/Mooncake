@@ -165,20 +165,6 @@ impl GracefulUnmountScheduler {
         self.inner.condvar.notify_all();
     }
 
-    #[allow(dead_code)]
-    fn remove_client_records(&self, client_id: Uuid) {
-        let mut guard = self.inner.state.lock().expect("scheduler mutex poisoned");
-        let mut retained = BinaryHeap::new();
-        while let Some(record) = guard.queue.pop() {
-            if record.client_id != client_id {
-                retained.push(record);
-            }
-        }
-        guard.queue = retained;
-        drop(guard);
-        self.inner.condvar.notify_all();
-    }
-
     pub(crate) fn stop(&mut self) {
         {
             let mut guard = self.inner.state.lock().expect("scheduler mutex poisoned");

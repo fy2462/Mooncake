@@ -1,23 +1,20 @@
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
+mod common;
+use common::temp_dir;
+
 use mooncake_store_master::ha::{
     build_standby_runtime_capabilities, parse_ha_backend_type, CapabilityDrivenStandbyController,
-    HABackendSpec, HABackendType, InMemoryOpLogManager, LeaderCoordinator, LeaderRole,
+    HABackendSpec, HABackendType, LeaderCoordinator, LeaderRole,
     LocalSnapshotProvider, MasterRuntimeState, MasterServiceSupervisor,
     MasterServiceSupervisorConfig, MasterView, SnapshotProvider, StandbyController,
     StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
-use std::path::PathBuf;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-fn temp_dir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mooncake_ha_test_{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 #[test]
 fn test_leader_role_values() {
@@ -250,10 +247,11 @@ fn test_master_service_supervisor_tracks_runtime_state() {
 
 #[test]
 fn test_in_memory_oplog_manager_appends_and_polls() {
-    let mut manager = InMemoryOpLogManager::new(4);
-    assert_eq!(manager.append(1, "first"), 1);
-    assert_eq!(manager.append(1, "second"), 2);
-    assert_eq!(manager.get_last_sequence_id(), 2);
+    use mooncake_store_master::oplog::{InMemoryOpLog, OpLogStore};
+    let mut manager = InMemoryOpLog::new(4);
+    assert_eq!(manager.append_payload(1, "first"), 1);
+    assert_eq!(manager.append_payload(1, "second"), 2);
+    assert_eq!(manager.last_seq(), 2);
 
     let poll = manager.poll_from(1, 8);
     assert_eq!(poll.records.len(), 2);

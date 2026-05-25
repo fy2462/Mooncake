@@ -1,3 +1,5 @@
+mod common;
+use common::proto_uuid;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
@@ -5,10 +7,6 @@ use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
-fn proto_uuid(id: Uuid) -> proto::Uuid {
-    let (high, low) = id.as_u64_pair();
-    proto::Uuid { high, low }
-}
 
 #[tokio::test]
 async fn test_batch_replica_clear_respects_client_and_segment_name() {

@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use tonic::Status;
 use uuid::Uuid;
 
+use super::background_ops::{clear_offloading_task, clear_promotion_task};
 use super::state::{ClientEntry, MasterState, ObjectEntry};
 
 pub(crate) fn bump_view_version(state: &MasterState) -> i64 {
@@ -308,10 +309,20 @@ pub(crate) fn memory_usage_ratio(state: &MasterState) -> f64 {
     used_bytes as f64 / total_bytes as f64
 }
 
-pub(crate) fn release_replicas_scheduled(
-    state: &MasterState,
-    replicas: Vec<ReplicaDescriptor>,
-    _deadline: SystemTime,
-) {
+pub(crate) fn release_replicas_scheduled(state: &MasterState, replicas: Vec<ReplicaDescriptor>) {
     release_replicas(state, &replicas);
+}
+
+/// Helper: release replicas and clear associated offloading/promotion tasks.
+pub(crate) fn release_object_replicas(
+    state: &MasterState,
+    key: &str,
+    replicas: &[ReplicaDescriptor],
+) {
+    if replicas.is_empty() {
+        return;
+    }
+    clear_offloading_task(state, key);
+    clear_promotion_task(state, key);
+    release_replicas(state, replicas);
 }

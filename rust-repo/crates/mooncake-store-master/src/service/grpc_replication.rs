@@ -1,15 +1,4 @@
-use std::time::Instant;
-
 use super::*;
-
-fn release_object_replicas(state: &MasterState, key: &str, replicas: &[ReplicaDescriptor]) {
-    if replicas.is_empty() {
-        return;
-    }
-    clear_offloading_task(state, key);
-    clear_promotion_task(state, key);
-    release_replicas(state, replicas);
-}
 
 fn allocate_replica_on_segment(
     state: &MasterState,
@@ -204,7 +193,6 @@ impl MasterServiceImpl {
                 kind: ReplicationTaskKind::Copy,
                 source: source.clone(),
                 targets: allocated.clone(),
-                start_time: Instant::now(),
             },
         );
 
@@ -367,7 +355,6 @@ impl MasterServiceImpl {
                 kind: ReplicationTaskKind::Move,
                 source: source.clone(),
                 targets,
-                start_time: Instant::now(),
             },
         );
         Ok(Response::new(proto::MoveStartResponse {

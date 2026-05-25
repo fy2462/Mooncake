@@ -110,11 +110,7 @@ impl MasterServiceImpl {
                         self.state.processing_keys.remove(&key);
                         drop(existing);
                         if !expired.is_empty() {
-                            release_replicas_scheduled(
-                                &self.state,
-                                expired,
-                                Self::now_plus(&self.state.runtime_config.put_start_release_timeout),
-                            );
+                            release_replicas_scheduled(&self.state, expired);
                         } else if !old_replicas.is_empty() {
                             release_replicas(&self.state, &old_replicas);
                         }
@@ -213,12 +209,6 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::PutStartResponse {
             replicas: proto_replicas,
         }))
-    }
-
-    fn now_plus(timeout: &Duration) -> SystemTime {
-        SystemTime::now()
-            .checked_add(*timeout)
-            .unwrap_or(SystemTime::UNIX_EPOCH)
     }
 
     // ---- PutEnd ----

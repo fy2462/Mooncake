@@ -1,3 +1,5 @@
+mod common;
+use common::proto_uuid;
 use mooncake_store_master::{
     proto::{
         master_service_server::MasterService,
@@ -5,11 +7,6 @@ use mooncake_store_master::{
     MasterServiceImpl,
 };
 use tonic::Request;
-
-fn proto_uuid(id: uuid::Uuid) -> mooncake_store_master::proto::Uuid {
-    let (high, low) = id.as_u64_pair();
-    mooncake_store_master::proto::Uuid { high, low }
-}
 
 #[tokio::test]
 async fn test_create_and_query_drain_job() {

@@ -1,11 +1,10 @@
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use std::collections::VecDeque;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Trait for persistent operation log stores.
-pub(crate) trait OpLogStore: Send + Sync {
+pub trait OpLogStore: Send + Sync {
     /// Append an entry and return its assigned sequence number.
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError>;
 
@@ -24,7 +23,7 @@ pub(crate) trait OpLogStore: Send + Sync {
 }
 
 /// In-memory oplog with bounded capacity — used when no persistence backend is configured.
-pub(crate) struct InMemoryOpLog {
+pub struct InMemoryOpLog {
     buffer: VecDeque<OpLogRecord>,
     last_seq: u64,
     max_entries: usize,
@@ -37,6 +36,28 @@ impl InMemoryOpLog {
             last_seq: 0,
             max_entries: max_entries.max(1),
         }
+    }
+}
+
+impl InMemoryOpLog {
+    /// Convenience: append a payload with `producer_view_version` and return the assigned seq.
+    pub fn append_payload(
+        &mut self,
+        producer_view_version: u64,
+        payload: impl Into<String>,
+    ) -> u64 {
+        match self.append(&OpLogRecord {
+            seq: 0,
+            producer_view_version,
+            payload: payload.into(),
+        }) {
+            Ok(seq) => seq,
+            Err(_) => 0,
+        }
+    }
+
+    pub fn last_seq(&self) -> u64 {
+        self.last_seq
     }
 }
 

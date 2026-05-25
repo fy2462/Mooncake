@@ -1,5 +1,8 @@
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
+mod common;
+use common::temp_dir;
+
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
@@ -9,11 +12,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use uuid::Uuid;
 
-fn temp_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("mooncake_test_{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn hf3fs_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

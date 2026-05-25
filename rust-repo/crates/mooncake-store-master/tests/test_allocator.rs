@@ -1,5 +1,8 @@
 use std::cell::Cell;
 
+mod common;
+use common::make_seg;
+
 use mooncake_store_core::{ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{
     cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
@@ -7,15 +10,6 @@ use mooncake_store_master::allocator::{
 };
 use uuid::Uuid;
 
-fn make_seg(name: &str, size: u64, used: u64) -> Segment {
-    Segment {
-        id: Uuid::new_v4(),
-        name: name.into(),
-        size,
-        used,
-        client_id: Uuid::new_v4(),
-    }
-}
 
 #[test]
 fn test_single_segment_single_replica() {

@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -40,7 +40,7 @@ use self::background_ops::{
 };
 use self::helpers::{
     addresses_for_client, allocate_nof_replicas, bump_view_version,
-    client_id_by_nof_segment_name,
+    client_id_by_nof_segment_name, release_object_replicas,
     client_id_by_replica_segment_name, client_id_by_segment_name, host_from_segment_name,
     object_owner_client_id, preferred_nof_segment_names, register_metadata_segments,
     release_replicas, release_replicas_scheduled, sync_client_segments,

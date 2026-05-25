@@ -3,7 +3,6 @@ use crate::service::NoFSegmentEntry;
 use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use mooncake_store_core::Segment;
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -593,58 +592,6 @@ pub struct OpLogPollResult {
     pub records: Vec<OpLogRecord>,
     pub next_seq: u64,
     pub timed_out: bool,
-}
-
-pub struct InMemoryOpLogManager {
-    buffer: VecDeque<OpLogRecord>,
-    last_seq: u64,
-    max_entries: usize,
-}
-
-impl InMemoryOpLogManager {
-    pub fn new(max_entries: usize) -> Self {
-        Self {
-            buffer: VecDeque::new(),
-            last_seq: 0,
-            max_entries: max_entries.max(1),
-        }
-    }
-
-    pub fn append(&mut self, producer_view_version: u64, payload: impl Into<String>) -> u64 {
-        self.last_seq += 1;
-        if self.buffer.len() >= self.max_entries {
-            self.buffer.pop_front();
-        }
-        self.buffer.push_back(OpLogRecord {
-            seq: self.last_seq,
-            producer_view_version,
-            payload: payload.into(),
-        });
-        self.last_seq
-    }
-
-    pub fn get_last_sequence_id(&self) -> u64 {
-        self.last_seq
-    }
-
-    pub fn poll_from(&self, next_seq: u64, max_records: usize) -> OpLogPollResult {
-        let records = self
-            .buffer
-            .iter()
-            .filter(|record| record.seq >= next_seq)
-            .take(max_records)
-            .cloned()
-            .collect::<Vec<_>>();
-        let next_seq = records
-            .last()
-            .map(|record| record.seq + 1)
-            .unwrap_or(next_seq);
-        OpLogPollResult {
-            records,
-            next_seq,
-            timed_out: false,
-        }
-    }
 }
 
 /// Result of an attempt to acquire leadership.
