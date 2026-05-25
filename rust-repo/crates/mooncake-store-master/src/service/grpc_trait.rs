@@ -365,4 +365,67 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::BatchUpsertEndResponse>, Status> {
         MasterServiceImpl::batch_upsert_end_impl(self, request).await
     }
+
+    async fn batch_put_start(
+        &self,
+        request: Request<proto::BatchPutStartRequest>,
+    ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
+        MasterServiceImpl::batch_put_start_impl(self, request).await
+    }
+
+    async fn evict_disk_replica(
+        &self,
+        request: Request<proto::EvictDiskReplicaRequest>,
+    ) -> Result<Response<proto::EvictDiskReplicaResponse>, Status> {
+        MasterServiceImpl::evict_disk_replica_impl(self, request).await
+    }
+
+    async fn batch_evict_disk_replica(
+        &self,
+        request: Request<proto::BatchEvictDiskReplicaRequest>,
+    ) -> Result<Response<proto::BatchEvictDiskReplicaResponse>, Status> {
+        MasterServiceImpl::batch_evict_disk_replica_impl(self, request).await
+    }
+
+    async fn query_segment_status(
+        &self,
+        request: Request<proto::QuerySegmentStatusRequest>,
+    ) -> Result<Response<proto::QuerySegmentStatusResponse>, Status> {
+        MasterServiceImpl::query_segment_status_impl(self, request).await
+    }
+
+    async fn query_segment_status_by_id(
+        &self,
+        request: Request<proto::QuerySegmentStatusByIdRequest>,
+    ) -> Result<Response<proto::QuerySegmentStatusByIdResponse>, Status> {
+        MasterServiceImpl::query_segment_status_by_id_impl(self, request).await
+    }
+
+    async fn create_drain_job(
+        &self,
+        request: Request<proto::CreateDrainJobRequest>,
+    ) -> Result<Response<proto::CreateDrainJobResponse>, Status> {
+        MasterServiceImpl::create_drain_job_impl(self, request).await
+    }
+
+    async fn query_drain_job(
+        &self,
+        request: Request<proto::QueryDrainJobRequest>,
+    ) -> Result<Response<proto::QueryDrainJobResponse>, Status> {
+        MasterServiceImpl::query_drain_job_impl(self, request).await
+    }
+
+    async fn cancel_drain_job(
+        &self,
+        request: Request<proto::CancelDrainJobRequest>,
+    ) -> Result<Response<proto::CancelDrainJobResponse>, Status> {
+        MasterServiceImpl::cancel_drain_job_impl(self, request).await
+    }
+
+    async fn get_fsdir(
+        &self,
+        request: Request<proto::GetFsdirRequest>,
+    ) -> Result<Response<proto::GetFsdirResponse>, Status> {
+        MasterServiceImpl::get_fsdir_impl(self, request).await
+    }
 }

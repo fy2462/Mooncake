@@ -119,6 +119,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
                 used: 512,
                 client_id,
             },
+            status: mooncake_store_master::proto::SegmentStatus::Active,
         },
     );
 
@@ -141,7 +142,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(),
+            data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
         },
     );
     backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();

@@ -11,6 +11,7 @@ mod state;
 mod workers;
 
 use crate::allocator::SegmentAllocator;
+use crate::count_min_sketch::CountMinSketch;
 use crate::http_metadata::MetadataState;
 use crate::metrics;
 use crate::proto;
@@ -24,11 +25,11 @@ use mooncake_store_core::{
 };
 use parking_lot::RwLock;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -42,7 +43,8 @@ use self::helpers::{
     client_id_by_nof_segment_name,
     client_id_by_replica_segment_name, client_id_by_segment_name, host_from_segment_name,
     object_owner_client_id, preferred_nof_segment_names, register_metadata_segments,
-    release_replicas, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
+    release_replicas, release_replicas_scheduled, sync_client_segments,
+    sync_nof_segment_usage, sync_segment_usage,
     unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
 };
 use self::proto_conv::{
@@ -51,7 +53,8 @@ use self::proto_conv::{
     task_type_to_proto, uuid_from_proto, uuid_to_proto,
 };
 use self::state::{
-    LocalDiskSegmentEntry, MasterState, ReplicationTaskEntry, ReplicationTaskKind,
+    ActiveDrainTask, DrainJobEntry, LocalDiskSegmentEntry, MasterState,
+    ReplicationTaskEntry, ReplicationTaskKind,
 };
 pub use self::state::{MasterRuntimeConfig, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use self::workers::{
@@ -66,6 +69,8 @@ pub struct MasterServiceImpl {
     eviction_worker: EvictionWorker,
     client_monitor_worker: ClientMonitorWorker,
 }
+
+const PUT_NO_SPACE_HELPER_STR: &str = " due to insufficient space. Consider lowering eviction_high_watermark_ratio or mounting more segments.";
 
 #[derive(Serialize)]
 struct ReplicaCopyPayload<'a> {
@@ -104,6 +109,7 @@ impl MasterServiceImpl {
         let state = Arc::new(MasterState {
             clients: DashMap::new(),
             objects: DashMap::new(),
+            processing_keys: DashMap::new(),
             segments: DashMap::new(),
             nof_segments: DashMap::new(),
             local_disk_segments: DashMap::new(),
@@ -111,7 +117,8 @@ impl MasterServiceImpl {
             replication_tasks: DashMap::new(),
             offloading_tasks: DashMap::new(),
             promotion_tasks: DashMap::new(),
-            promotion_access_counts: DashMap::new(),
+            promotion_sketch: RwLock::new(CountMinSketch::new()),
+            drain_jobs: DashMap::new(),
             allocator: RwLock::new(
                 SegmentAllocator::new()
                     .with_strategy(runtime_config.allocation_strategy)
@@ -151,6 +158,7 @@ impl MasterServiceImpl {
                         seg.id,
                         SegmentEntry {
                             segment: seg.clone(),
+                            status: proto::SegmentStatus::Active,
                         },
                     );
                     state.allocator.write().add_segment(seg);
@@ -161,6 +169,7 @@ impl MasterServiceImpl {
                         NoFSegmentEntry {
                             segment: seg.segment.clone(),
                             used: seg.used,
+                            status: proto::SegmentStatus::Active,
                         },
                     );
                     state.nof_allocator.write().add_segment(mooncake_store_core::Segment {

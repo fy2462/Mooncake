@@ -258,16 +258,7 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
         return;
     }
 
-    let current_freq = {
-        let mut entry = state
-            .promotion_access_counts
-            .entry(key.to_string())
-            .or_insert(0);
-        if *entry < u8::MAX {
-            *entry += 1;
-        }
-        *entry
-    };
+    let current_freq = state.promotion_sketch.write().increment(key);
     let threshold = state.runtime_config.promotion_admission_threshold.max(1);
     if current_freq < threshold {
         return;

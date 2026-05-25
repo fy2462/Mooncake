@@ -290,6 +290,9 @@ impl MasterServiceImpl {
                     soft_pinned: config.with_soft_pin,
                     hard_pinned: config.with_hard_pin,
                     data_type: config.data_type,
+                    put_start_time: Some(SystemTime::now()),
+                    lease_timeout: None,
+                    soft_pin_timeout: None,
                 },
             );
             all_replicas.extend(proto_r);
@@ -298,5 +301,98 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::BatchUpsertEndResponse {
             replicas: all_replicas,
         }))
+    }
+
+    // ---- BatchPutStart ----
+    pub(super) async fn batch_put_start_impl(
+        &self,
+        request: Request<proto::BatchPutStartRequest>,
+    ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
+        let req = request.into_inner();
+        if req.keys.len() != req.slice_lengths.len() || req.keys.is_empty() {
+            return Err(Status::invalid_argument("keys and slice_lengths mismatch or empty"));
+        }
+        let config = req
+            .config
+            .as_ref()
+            .map(config_from_proto)
+            .unwrap_or_default();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
+        let replica_count = config.replica_num.max(1) as usize;
+        let mut all_replicas = Vec::new();
+        for (key, slice_len) in req.keys.iter().zip(req.slice_lengths.iter()) {
+            if self.state.objects.contains_key(key) {
+                continue;
+            }
+            let replicas = {
+                let mut allocator = self.state.allocator.write();
+                allocator.allocate_for_client(key, Some(client_id), *slice_len, replica_count, &config)
+            };
+            if !replicas.is_empty() {
+                let proto_r: Vec<_> = replicas.iter().map(replica_to_proto).collect();
+                sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
+                let now = SystemTime::now();
+                self.state.objects.insert(
+                    key.clone(),
+                    ObjectEntry {
+                        replicas,
+                        size: *slice_len,
+                        last_access: now,
+                        soft_pinned: config.with_soft_pin,
+                        hard_pinned: config.with_hard_pin,
+                        data_type: config.data_type,
+                        put_start_time: Some(now),
+                        lease_timeout: None,
+                        soft_pin_timeout: None,
+                    },
+                );
+                self.state.processing_keys.insert(key.clone(), ());
+                all_replicas.extend(proto_r);
+            }
+        }
+        metrics::PUT_START_REQUESTS.inc_by(req.keys.len() as u64);
+        Ok(Response::new(proto::BatchPutStartResponse { replicas: all_replicas }))
+    }
+
+    // ---- EvictDiskReplica ----
+    pub(super) async fn evict_disk_replica_impl(
+        &self,
+        request: Request<proto::EvictDiskReplicaRequest>,
+    ) -> Result<Response<proto::EvictDiskReplicaResponse>, Status> {
+        let req = request.into_inner();
+        if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+            entry.replicas.retain(|r| {
+                !(r.replica_type == ReplicaType::LocalDisk
+                    || r.replica_type == ReplicaType::Disk)
+            });
+            if entry.replicas.is_empty() {
+                self.state.objects.remove(&req.key);
+            }
+        }
+        Ok(Response::new(proto::EvictDiskReplicaResponse {}))
+    }
+
+    // ---- BatchEvictDiskReplica ----
+    pub(super) async fn batch_evict_disk_replica_impl(
+        &self,
+        request: Request<proto::BatchEvictDiskReplicaRequest>,
+    ) -> Result<Response<proto::BatchEvictDiskReplicaResponse>, Status> {
+        let req = request.into_inner();
+        for key in &req.keys {
+            if let Some(mut entry) = self.state.objects.get_mut(key) {
+                entry.replicas.retain(|r| {
+                    !(r.replica_type == ReplicaType::LocalDisk
+                        || r.replica_type == ReplicaType::Disk)
+                });
+                if entry.replicas.is_empty() {
+                    self.state.objects.remove(key);
+                }
+            }
+        }
+        Ok(Response::new(proto::BatchEvictDiskReplicaResponse {}))
     }
 }

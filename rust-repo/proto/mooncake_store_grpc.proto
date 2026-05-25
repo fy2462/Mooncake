@@ -77,6 +77,25 @@ service MasterService {
   rpc FetchTasks(FetchTasksRequest) returns (FetchTasksResponse);
   rpc MarkTaskToComplete(MarkTaskToCompleteRequest) returns (MarkTaskToCompleteResponse);
 
+  // Batch PutStart (high-throughput path)
+  rpc BatchPutStart(BatchPutStartRequest) returns (BatchPutStartResponse);
+
+  // Evict disk replica
+  rpc EvictDiskReplica(EvictDiskReplicaRequest) returns (EvictDiskReplicaResponse);
+  rpc BatchEvictDiskReplica(BatchEvictDiskReplicaRequest) returns (BatchEvictDiskReplicaResponse);
+
+  // Segment status
+  rpc QuerySegmentStatus(QuerySegmentStatusRequest) returns (QuerySegmentStatusResponse);
+  rpc QuerySegmentStatusById(QuerySegmentStatusByIdRequest) returns (QuerySegmentStatusByIdResponse);
+
+  // Drain jobs
+  rpc CreateDrainJob(CreateDrainJobRequest) returns (CreateDrainJobResponse);
+  rpc QueryDrainJob(QueryDrainJobRequest) returns (QueryDrainJobResponse);
+  rpc CancelDrainJob(CancelDrainJobRequest) returns (CancelDrainJobResponse);
+
+  // HA fsdir
+  rpc GetFsdir(GetFsdirRequest) returns (GetFsdirResponse);
+
   // Batch operations (high-throughput paths)
   rpc BatchPutEnd(BatchPutEndRequest) returns (BatchPutEndResponse);
   rpc BatchPutRevoke(BatchPutRevokeRequest) returns (BatchPutRevokeResponse);

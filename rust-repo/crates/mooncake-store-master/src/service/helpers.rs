@@ -307,3 +307,11 @@ pub(crate) fn memory_usage_ratio(state: &MasterState) -> f64 {
     }
     used_bytes as f64 / total_bytes as f64
 }
+
+pub(crate) fn release_replicas_scheduled(
+    state: &MasterState,
+    replicas: Vec<ReplicaDescriptor>,
+    _deadline: SystemTime,
+) {
+    release_replicas(state, &replicas);
+}

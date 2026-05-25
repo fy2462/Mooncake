@@ -255,6 +255,7 @@ impl StorageBackend {
                     client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
                 },
                 used: s.used,
+                status: crate::proto::SegmentStatus::Active,
             })
             .collect();
 

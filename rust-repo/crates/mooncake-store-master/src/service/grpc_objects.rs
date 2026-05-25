@@ -82,17 +82,60 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::PutStartResponse>, Status> {
         let req = request.into_inner();
         let key = req.key.clone();
-        let _client_id = uuid_from_proto(
+        let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
 
-        if self.state.objects.contains_key(&key) {
-            return Err(Status::already_exists(format!(
-                "object already exists: {}",
-                key
-            )));
+        if let Some(existing) = self.state.objects.get_mut(&key) {
+            let has_completed = existing
+                .replicas
+                .iter()
+                .any(|r| r.status == ReplicaStatus::Complete);
+            if !has_completed {
+                if let Some(start) = existing.put_start_time {
+                    let elapsed = SystemTime::now()
+                        .duration_since(start)
+                        .unwrap_or_default();
+                    if elapsed >= self.state.runtime_config.put_start_discard_timeout {
+                        let old_replicas = existing.replicas.clone();
+                        let expired = existing
+                            .replicas
+                            .iter()
+                            .filter(|r| r.status == ReplicaStatus::Allocating)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        self.state.objects.remove(&key);
+                        self.state.processing_keys.remove(&key);
+                        drop(existing);
+                        if !expired.is_empty() {
+                            release_replicas_scheduled(
+                                &self.state,
+                                expired,
+                                Self::now_plus(&self.state.runtime_config.put_start_release_timeout),
+                            );
+                        } else if !old_replicas.is_empty() {
+                            release_replicas(&self.state, &old_replicas);
+                        }
+                    } else {
+                        return Err(Status::already_exists(format!(
+                            "object already exists: {}",
+                            key
+                        )));
+                    }
+                } else {
+                    return Err(Status::already_exists(format!(
+                        "object already exists: {}",
+                        key
+                    )));
+                }
+            } else {
+                return Err(Status::already_exists(format!(
+                    "object already exists: {}",
+                    key
+                )));
+            }
         }
 
         let config = req
@@ -111,12 +154,18 @@ impl MasterServiceImpl {
             let mut allocator = self.state.allocator.write();
             allocator.allocate_for_client(
                 &key,
-                Some(_client_id),
+                Some(client_id),
                 req.slice_length,
                 replica_count,
                 &config,
             )
         };
+        if replicas.is_empty() && replica_count > 0 {
+            return Err(Status::resource_exhausted(format!(
+                "failed to allocate {replica_count} replica(s) for key {key}{}",
+                PUT_NO_SPACE_HELPER_STR,
+            )));
+        }
         if config.nof_replica_num > 0 {
             let preferred_nof = if config.prefer_alloc_in_same_node {
                 preferred_nof_segment_names(&self.state, &replicas)
@@ -143,22 +192,33 @@ impl MasterServiceImpl {
         let proto_replicas: Vec<proto::ReplicaDescriptor> =
             replicas.iter().map(replica_to_proto).collect();
 
+        let now = SystemTime::now();
         self.state.objects.insert(
-            key,
+            key.clone(),
             ObjectEntry {
                 replicas,
                 size: req.slice_length,
-                last_access: SystemTime::now(),
+                last_access: now,
                 soft_pinned: config.with_soft_pin,
                 hard_pinned: config.with_hard_pin,
                 data_type: config.data_type,
+                put_start_time: Some(now),
+                lease_timeout: None,
+                soft_pin_timeout: None,
             },
         );
+        self.state.processing_keys.insert(key, ());
 
         metrics::PUT_START_REQUESTS.inc();
         Ok(Response::new(proto::PutStartResponse {
             replicas: proto_replicas,
         }))
+    }
+
+    fn now_plus(timeout: &Duration) -> SystemTime {
+        SystemTime::now()
+            .checked_add(*timeout)
+            .unwrap_or(SystemTime::UNIX_EPOCH)
     }
 
     // ---- PutEnd ----
@@ -183,14 +243,35 @@ impl MasterServiceImpl {
                     r.status = ReplicaStatus::Complete;
                 }
             }
+            let now = SystemTime::now();
+            let new_lease = now
+                .checked_add(self.state.runtime_config.lease_ttl)
+                .unwrap_or(now);
+            entry.lease_timeout = Some(match entry.lease_timeout {
+                Some(current) if current > new_lease => current,
+                _ => new_lease,
+            });
+            if entry.soft_pinned {
+                let new_soft_pin = now
+                    .checked_add(self.state.runtime_config.soft_pin_ttl)
+                    .unwrap_or(now);
+                entry.soft_pin_timeout = Some(match entry.soft_pin_timeout {
+                    Some(current) if current > new_soft_pin => current,
+                    _ => new_soft_pin,
+                });
+            }
             let size = entry.size;
+            let offload_enabled = !self.state.runtime_config.offload_on_evict;
             drop(entry);
             let client_id = uuid_from_proto(
                 req.client_id
                     .as_ref()
                     .ok_or(Status::invalid_argument("missing client_id"))?,
             );
-            push_offloading_queue(&self.state, client_id, &req.key, size);
+            if offload_enabled {
+                push_offloading_queue(&self.state, client_id, &req.key, size);
+            }
+            self.state.processing_keys.remove(&req.key);
         }
         Ok(Response::new(proto::PutEndResponse {}))
     }
@@ -234,6 +315,9 @@ impl MasterServiceImpl {
                     soft_pinned: false,
                     hard_pinned: false,
                     data_type: ObjectDataType::Unknown,
+                    put_start_time: None,
+                    lease_timeout: None,
+                    soft_pin_timeout: None,
                 },
             );
         }
@@ -249,6 +333,23 @@ impl MasterServiceImpl {
         match self.state.objects.get_mut(&req.key) {
             Some(mut entry) => {
                 entry.last_access = SystemTime::now();
+                let now = SystemTime::now();
+                let new_lease = now
+                    .checked_add(self.state.runtime_config.lease_ttl)
+                    .unwrap_or(now);
+                entry.lease_timeout = Some(match entry.lease_timeout {
+                    Some(current) if current > new_lease => current,
+                    _ => new_lease,
+                });
+                if entry.soft_pinned {
+                    let new_soft_pin = now
+                        .checked_add(self.state.runtime_config.soft_pin_ttl)
+                        .unwrap_or(now);
+                    entry.soft_pin_timeout = Some(match entry.soft_pin_timeout {
+                        Some(current) if current > new_soft_pin => current,
+                        _ => new_soft_pin,
+                    });
+                }
                 let replicas = entry.replicas.iter().map(replica_to_proto).collect();
                 let promotion_eligible = !entry.replicas.iter().any(|replica| {
                     replica.replica_type == ReplicaType::Memory
@@ -485,6 +586,9 @@ impl MasterServiceImpl {
                 soft_pinned: config.with_soft_pin || previous_soft_pinned,
                 hard_pinned: config.with_hard_pin || previous_hard_pinned,
                 data_type: config.data_type,
+                put_start_time: Some(SystemTime::now()),
+                lease_timeout: None,
+                soft_pin_timeout: None,
             },
         );
 

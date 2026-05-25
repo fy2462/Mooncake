@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
+use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use std::time::SystemTime;
 use uuid::Uuid;
 
@@ -36,6 +37,7 @@ fn test_segment_entry_wrapper() {
             used: 100,
             client_id: cid,
         },
+        status: ProtoSegmentStatus::Active,
     };
 
     assert_eq!(entry.segment.name, "n1:1");
@@ -59,6 +61,7 @@ fn test_segment_dashmap_ops() {
                 used: 0,
                 client_id: cid,
             },
+            status: ProtoSegmentStatus::Active,
         },
     );
     segments.insert(
@@ -71,6 +74,7 @@ fn test_segment_dashmap_ops() {
                 used: 100,
                 client_id: cid,
             },
+            status: ProtoSegmentStatus::Active,
         },
     );
 
@@ -220,7 +224,7 @@ fn test_object_entry_creation() {
         last_access: SystemTime::now(),
         soft_pinned: false,
         hard_pinned: false,
-        data_type: ObjectDataType::Unknown,
+        data_type: ObjectDataType::Unknown, put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
     };
 
     assert_eq!(entry.replicas.len(), 2);
@@ -258,7 +262,7 @@ fn test_allocator_prefers_same_node() {
     });
 
     let config = ReplicateConfig {
-        prefer_alloc_in_same_node: true, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: mooncake_store_core::ObjectDataType::Unknown, 
+        prefer_alloc_in_same_node: true,
         replica_num: 1,
         nof_replica_num: 0,
         ..Default::default()

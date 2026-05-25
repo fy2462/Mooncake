@@ -619,3 +619,127 @@ message MarkTaskToCompleteRequest {
 }
 
 message MarkTaskToCompleteResponse {}
+
+// ---------------------------------------------------------------
+// Batch PutStart
+// ---------------------------------------------------------------
+
+message BatchPutStartRequest {
+  Uuid client_id = 1;
+  repeated string keys = 2;
+  repeated uint64 slice_lengths = 3;
+  ReplicateConfig config = 4;
+}
+
+message BatchPutStartResponse {
+  repeated ReplicaDescriptor replicas = 1;
+}
+
+// ---------------------------------------------------------------
+// Evict disk replica
+// ---------------------------------------------------------------
+
+message EvictDiskReplicaRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  ReplicaDescriptor.ReplicaType replica_type = 3;
+}
+
+message EvictDiskReplicaResponse {}
+
+message BatchEvictDiskReplicaRequest {
+  Uuid client_id = 1;
+  repeated string keys = 2;
+  ReplicaDescriptor.ReplicaType replica_type = 3;
+}
+
+message BatchEvictDiskReplicaResponse {}
+
+// ---------------------------------------------------------------
+// Segment status
+// ---------------------------------------------------------------
+
+enum SegmentStatus {
+  SEGMENT_STATUS_UNDEFINED = 0;
+  SEGMENT_STATUS_ACTIVE = 1;
+  SEGMENT_STATUS_DRAINING = 2;
+  SEGMENT_STATUS_UNAVAILABLE = 3;
+}
+
+message QuerySegmentStatusRequest {
+  string segment_name = 1;
+}
+
+message QuerySegmentStatusResponse {
+  SegmentStatus status = 1;
+}
+
+message QuerySegmentStatusByIdRequest {
+  Uuid segment_id = 1;
+}
+
+message QuerySegmentStatusByIdResponse {
+  SegmentStatus status = 1;
+}
+
+// ---------------------------------------------------------------
+// Drain job
+// ---------------------------------------------------------------
+
+message CreateDrainJobRequest {
+  repeated string segments = 1;
+  repeated string target_segments = 2;
+  uint32 max_concurrency = 3;
+}
+
+message CreateDrainJobResponse {
+  Uuid job_id = 1;
+}
+
+enum JobType {
+  JOB_TYPE_DRAIN = 0;
+}
+
+enum JobStatus {
+  JOB_STATUS_CREATED = 0;
+  JOB_STATUS_PLANNING = 1;
+  JOB_STATUS_RUNNING = 2;
+  JOB_STATUS_SUCCEEDED = 3;
+  JOB_STATUS_FAILED = 4;
+  JOB_STATUS_CANCELED = 5;
+}
+
+message QueryDrainJobRequest {
+  Uuid job_id = 1;
+}
+
+message QueryDrainJobResponse {
+  Uuid id = 1;
+  JobType type = 2;
+  JobStatus status = 3;
+  int64 created_at_ms_epoch = 4;
+  int64 last_updated_at_ms_epoch = 5;
+  repeated string segments = 6;
+  uint64 succeeded_units = 7;
+  uint64 failed_units = 8;
+  uint64 blocked_units = 9;
+  uint64 active_units = 10;
+  uint64 migrated_bytes = 11;
+  string message = 12;
+}
+
+message CancelDrainJobRequest {
+  Uuid job_id = 1;
+}
+
+message CancelDrainJobResponse {}
+
+// ---------------------------------------------------------------
+// Get FS dir (HA support)
+// ---------------------------------------------------------------
+
+message GetFsdirRequest {}
+
+message GetFsdirResponse {
+  string fs_dir = 1;
+}

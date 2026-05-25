@@ -37,5 +37,8 @@ thiserror.workspace = true
 rand.workspace = true
 libc.workspace = true
 
+[dev-dependencies]
+tempfile = "3"
+
 [build-dependencies]
 tonic-build.workspace = true

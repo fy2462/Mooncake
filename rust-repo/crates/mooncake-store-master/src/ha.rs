@@ -6,10 +6,10 @@ use mooncake_store_core::Segment;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing::info;
+use tracing::{error, info, warn};
 
 pub type RuntimeStateCallback = Arc<dyn Fn(MasterRuntimeState) + Send + Sync>;
 
@@ -647,6 +647,27 @@ impl InMemoryOpLogManager {
     }
 }
 
+/// Result of an attempt to acquire leadership.
+#[derive(Debug, Clone)]
+pub struct AcquireLeadershipResult {
+    pub acquired: bool,
+    pub view: Option<MasterView>,
+    pub lease_id: Option<i64>,
+}
+
+/// Handle for actively held leadership — cancels keepalive on drop.
+pub struct LeadershipHandle {
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for LeadershipHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 pub struct LeaderCoordinator {
     backend: CoordinatorBackend,
     role_tx: watch::Sender<LeaderRole>,
@@ -655,9 +676,7 @@ pub struct LeaderCoordinator {
 
 enum CoordinatorBackend {
     Etcd {
-        #[allow(dead_code)]
         client: etcd_client::Client,
-        #[allow(dead_code)]
         election_key: String,
     },
     K8s {
@@ -684,7 +703,7 @@ impl LeaderCoordinator {
                 client,
                 election_key: "/mooncake/master/leader".to_string(),
             },
-            LeaderRole::Leader,
+            LeaderRole::Standby,
         ))
     }
 
@@ -697,7 +716,7 @@ impl LeaderCoordinator {
                 namespace: namespace.to_string(),
                 lease_name: lease_name.to_string(),
             },
-            LeaderRole::Leader,
+            LeaderRole::Standby,
         ))
     }
 
@@ -713,9 +732,200 @@ impl LeaderCoordinator {
         )
     }
 
+    /// Read the current master view from etcd election.
+    pub async fn read_current_view(&self) -> Result<Option<MasterView>, HaError> {
+        match &self.backend {
+            CoordinatorBackend::Etcd {
+                client,
+                election_key,
+            } => {
+                let mut client = client.clone();
+                match client.leader(election_key.clone()).await {
+                    Ok(resp) => match resp.kv() {
+                        Some(kv) => {
+                            let addr = kv.value_str().unwrap_or("").to_string();
+                            Ok(Some(MasterView {
+                                leader_address: addr,
+                                view_version: kv.version() as u64,
+                            }))
+                        }
+                        None => Ok(None),
+                    },
+                    Err(_) => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Try to acquire leadership using etcd election API (campaign).
+    pub async fn try_acquire_leadership(
+        &self,
+        leader_address: &str,
+        lease_ttl_secs: i64,
+    ) -> Result<AcquireLeadershipResult, HaError> {
+        match &self.backend {
+            CoordinatorBackend::Etcd {
+                client,
+                election_key,
+            } => {
+                let mut client = client.clone();
+                let current = self.read_current_view().await?;
+
+                // Grant a TTL lease
+                let lease_resp = client.lease_grant(lease_ttl_secs, None).await.map_err(|e| {
+                    HaError::InvalidBackend(format!("etcd lease grant error: {e}"))
+                })?;
+                let lease_id = lease_resp.id();
+
+                // Campaign for leadership
+                let name = election_key.clone();
+                let value = leader_address.to_string();
+                match client.campaign(name, value, lease_id).await {
+                    Ok(resp) => {
+                        let acquired = resp
+                            .leader()
+                            .and_then(|l| l.name_str().ok())
+                            .map(|n| n == leader_address)
+                            .unwrap_or(false);
+                        if acquired {
+                            let _ = self.role_tx.send(LeaderRole::Leader);
+                            info!(
+                                "Leadership acquired: address={}, lease_id={}",
+                                leader_address, lease_id
+                            );
+                            Ok(AcquireLeadershipResult {
+                                acquired: true,
+                                view: Some(MasterView {
+                                    leader_address: leader_address.to_string(),
+                                    view_version: 1,
+                                }),
+                                lease_id: Some(lease_id),
+                            })
+                        } else {
+                            Ok(AcquireLeadershipResult {
+                                acquired: false,
+                                view: current,
+                                lease_id: None,
+                            })
+                        }
+                    }
+                    Err(e) => {
+                        warn!("etcd campaign failed: {}", e);
+                        Ok(AcquireLeadershipResult {
+                            acquired: false,
+                            view: current,
+                            lease_id: None,
+                        })
+                    }
+                }
+            }
+            CoordinatorBackend::Manual => {
+                let _ = self.role_tx.send(LeaderRole::Leader);
+                Ok(AcquireLeadershipResult {
+                    acquired: true,
+                    view: Some(MasterView {
+                        leader_address: leader_address.to_string(),
+                        view_version: 1,
+                    }),
+                    lease_id: None,
+                })
+            }
+            _ => Err(HaError::InvalidBackend(
+                "backend does not support leadership acquisition".into(),
+            )),
+        }
+    }
+
+    /// Start keepalive task for the given lease. Handle stops on drop.
+    pub async fn start_leadership_keepalive(
+        &self,
+        lease_id: i64,
+    ) -> Result<LeadershipHandle, HaError> {
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        match &self.backend {
+            CoordinatorBackend::Etcd { client, .. } => {
+                let mut client = client.clone();
+                let role_tx = self.role_tx.clone();
+                tokio::spawn(async move {
+                    // Create the keepalive stream
+                    let (mut keeper, _stream) = match client.lease_keep_alive(lease_id).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            error!("Failed to create lease keepalive: {}", e);
+                            let _ = role_tx.send(LeaderRole::Standby);
+                            return;
+                        }
+                    };
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                                if let Err(e) = keeper.keep_alive().await {
+                                    error!("Lease keepalive error: {}, leadership lost", e);
+                                    let _ = role_tx.send(LeaderRole::Standby);
+                                    return;
+                                }
+                            }
+                            _ = &mut cancel_rx => {
+                                info!("Leadership keepalive cancelled");
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+            _ => {}
+        }
+        Ok(LeadershipHandle {
+            cancel_tx: Some(cancel_tx),
+        })
+    }
+
+    /// Release leadership via etcd resign.
+    pub async fn release_leadership(&self, _lease_id: i64) -> Result<(), HaError> {
+        match &self.backend {
+            CoordinatorBackend::Etcd { client, .. } => {
+                let mut client = client.clone();
+                client.resign(None).await.map_err(|e| {
+                    HaError::InvalidBackend(format!("etcd resign error: {e}"))
+                })?;
+                let _ = self.role_tx.send(LeaderRole::Standby);
+                info!("Leadership released via resign");
+                Ok(())
+            }
+            CoordinatorBackend::Manual => {
+                let _ = self.role_tx.send(LeaderRole::Standby);
+                Ok(())
+            }
+            _ => Err(HaError::InvalidBackend(
+                "backend does not support leadership release".into(),
+            )),
+        }
+    }
+
+    /// Poll for a view change from known_version, up to timeout.
+    pub async fn wait_for_view_change(
+        &self,
+        known_version: u64,
+        timeout: Duration,
+    ) -> Result<Option<MasterView>, HaError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            if let Some(view) = self.read_current_view().await? {
+                if view.view_version != known_version {
+                    return Ok(Some(view));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     pub async fn wait_for_role(&self) -> Result<LeaderRole, Box<dyn std::error::Error>> {
         match &self.backend {
-            CoordinatorBackend::Etcd { client: _, .. } => {
+            CoordinatorBackend::Etcd { .. } => {
                 info!("Etcd leader election initialized");
                 Ok(*self.role_rx.borrow())
             }
@@ -737,7 +947,6 @@ impl LeaderCoordinator {
         if *self.role_rx.borrow() == LeaderRole::Leader {
             return;
         }
-
         let mut role_rx = self.role_rx.clone();
         loop {
             if role_rx.changed().await.is_err() {
@@ -754,3 +963,4 @@ impl LeaderCoordinator {
         let _ = self.role_tx.send(role);
     }
 }
+

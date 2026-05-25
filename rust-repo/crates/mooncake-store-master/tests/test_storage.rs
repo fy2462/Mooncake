@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
+use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,6 +64,7 @@ fn test_storage_backend_save_and_load() {
                 used: 100,
                 client_id: cid,
             },
+            status: ProtoSegmentStatus::Active,
         },
     );
 
@@ -85,7 +87,7 @@ fn test_storage_backend_save_and_load() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(),
+            data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
         },
     );
 
@@ -130,6 +132,7 @@ fn test_storage_backend_multiple_objects() {
                 used: 0,
                 client_id: cid,
             },
+            status: ProtoSegmentStatus::Active,
         },
     );
 
@@ -154,7 +157,7 @@ fn test_storage_backend_multiple_objects() {
                 last_access: SystemTime::now(),
                 soft_pinned: false,
                 hard_pinned: false,
-                data_type: Default::default(),
+                data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
             },
         );
     }
@@ -203,6 +206,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
                 used: 128,
                 client_id: cid,
             },
+            status: ProtoSegmentStatus::Active,
         },
     );
 
@@ -225,7 +229,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(),
+            data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
         },
     );
 

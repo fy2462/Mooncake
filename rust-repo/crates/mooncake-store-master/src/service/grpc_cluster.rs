@@ -68,6 +68,7 @@ impl MasterServiceImpl {
             segment_id,
             SegmentEntry {
                 segment: segment.clone(),
+                status: proto::SegmentStatus::Active,
             },
         );
         upsert_client_addresses(&self.state, client_id, vec![host]);
@@ -105,6 +106,7 @@ impl MasterServiceImpl {
             NoFSegmentEntry {
                 segment: segment.clone(),
                 used: 0,
+                status: proto::SegmentStatus::Active,
             },
         );
         self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
@@ -239,6 +241,7 @@ impl MasterServiceImpl {
                 segment.id,
                 SegmentEntry {
                     segment: segment.clone(),
+                    status: proto::SegmentStatus::Active,
                 },
             );
             self.state.allocator.write().add_segment(segment);
@@ -275,6 +278,7 @@ impl MasterServiceImpl {
                 NoFSegmentEntry {
                     segment: segment.clone(),
                     used: 0,
+                    status: proto::SegmentStatus::Active,
                 },
             );
             self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
@@ -421,6 +425,9 @@ impl MasterServiceImpl {
                         soft_pinned: false,
                         hard_pinned: false,
                         data_type: ObjectDataType::Unknown,
+                        put_start_time: None,
+                        lease_timeout: None,
+                        soft_pin_timeout: None,
                     },
                 );
             }
@@ -604,5 +611,322 @@ impl MasterServiceImpl {
             local_disk.promotion_objects.remove(&req.key);
         }
         Ok(Response::new(proto::NotifyPromotionFailureResponse {}))
+    }
+
+    // ---- QuerySegmentStatus ----
+    pub(super) async fn query_segment_status_impl(
+        &self,
+        request: Request<proto::QuerySegmentStatusRequest>,
+    ) -> Result<Response<proto::QuerySegmentStatusResponse>, Status> {
+        let req = request.into_inner();
+        if let Some(entry) = self.state.segments.iter().find(|e| e.segment.name == req.segment_name) {
+            return Ok(Response::new(proto::QuerySegmentStatusResponse {
+                status: entry.status as i32,
+            }));
+        }
+        if let Some(entry) = self.state.nof_segments.iter().find(|e| e.segment.name == req.segment_name) {
+            return Ok(Response::new(proto::QuerySegmentStatusResponse {
+                status: entry.status as i32,
+            }));
+        }
+        Err(Status::not_found("segment not found"))
+    }
+
+    // ---- QuerySegmentStatusById ----
+    pub(super) async fn query_segment_status_by_id_impl(
+        &self,
+        request: Request<proto::QuerySegmentStatusByIdRequest>,
+    ) -> Result<Response<proto::QuerySegmentStatusByIdResponse>, Status> {
+        let req = request.into_inner();
+        let seg_id = uuid_from_proto(
+            req.segment_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing segment_id"))?,
+        );
+        if let Some(entry) = self.state.segments.get(&seg_id) {
+            return Ok(Response::new(proto::QuerySegmentStatusByIdResponse {
+                status: entry.status as i32,
+            }));
+        }
+        if let Some(entry) = self.state.nof_segments.get(&seg_id) {
+            return Ok(Response::new(proto::QuerySegmentStatusByIdResponse {
+                status: entry.status as i32,
+            }));
+        }
+        Err(Status::not_found("segment not found"))
+    }
+
+    // ---- CreateDrainJob ----
+    pub(super) async fn create_drain_job_impl(
+        &self,
+        request: Request<proto::CreateDrainJobRequest>,
+    ) -> Result<Response<proto::CreateDrainJobResponse>, Status> {
+        let req = request.into_inner();
+        if req.segments.is_empty() {
+            return Err(Status::invalid_argument("segments cannot be empty"));
+        }
+        if req.target_segments.is_empty() {
+            return Err(Status::invalid_argument("target_segments cannot be empty"));
+        }
+        // Validate that all source segments exist and are in ACTIVE state
+        for seg_name in &req.segments {
+            let found = self.state.segments.iter().any(|e| {
+                e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
+            }) || self.state.nof_segments.iter().any(|e| {
+                e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
+            });
+            if !found {
+                return Err(Status::failed_precondition(format!(
+                    "segment not found or not active: {seg_name}"
+                )));
+            }
+        }
+        // Validate that all target segments exist
+        for tgt_name in &req.target_segments {
+            let found = self.state.segments.iter().any(|e| {
+                e.segment.name == *tgt_name && e.status == proto::SegmentStatus::Active
+            });
+            if !found {
+                return Err(Status::failed_precondition(format!(
+                    "target segment not found or not active: {tgt_name}"
+                )));
+            }
+        }
+        // Transition source segments to DRAINING
+        for seg_name in &req.segments {
+            for mut entry in self.state.segments.iter_mut() {
+                if entry.segment.name == *seg_name {
+                    entry.status = proto::SegmentStatus::Draining;
+                }
+            }
+            for mut entry in self.state.nof_segments.iter_mut() {
+                if entry.segment.name == *seg_name {
+                    entry.status = proto::SegmentStatus::Draining;
+                }
+            }
+        }
+        let job_id = Uuid::new_v4();
+        let now = SystemTime::now();
+        self.state.drain_jobs.insert(
+            job_id,
+            DrainJobEntry {
+                id: job_id,
+                status: proto::JobStatus::Created,
+                segments: req.segments.clone(),
+                target_segments: req.target_segments.clone(),
+                max_concurrency: req.max_concurrency.max(1),
+                created_at: now,
+                last_updated_at: now,
+                message: String::new(),
+                succeeded_units: 0,
+                failed_units: 0,
+                blocked_units: 0,
+                migrated_bytes: 0,
+                active_tasks: HashMap::new(),
+                completed_unit_keys: HashSet::new(),
+                retry_counts: HashMap::new(),
+                terminal_failed_unit_keys: HashSet::new(),
+            },
+        );
+        // Start planning immediately (find objects to drain)
+        if let Some(mut job) = self.state.drain_jobs.get_mut(&job_id) {
+            job.status = proto::JobStatus::Planning;
+        }
+        self.schedule_drain_job_tasks(job_id);
+        tracing::info!(
+            "Drain job created: id={}, segments={:?}, targets={:?}",
+            job_id,
+            req.segments,
+            req.target_segments
+        );
+        Ok(Response::new(proto::CreateDrainJobResponse {
+            job_id: Some(uuid_to_proto(job_id)),
+        }))
+    }
+
+    // ---- QueryDrainJob ----
+    pub(super) async fn query_drain_job_impl(
+        &self,
+        request: Request<proto::QueryDrainJobRequest>,
+    ) -> Result<Response<proto::QueryDrainJobResponse>, Status> {
+        let req = request.into_inner();
+        let job_id = uuid_from_proto(
+            req.job_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing job_id"))?,
+        );
+        let job = self
+            .state
+            .drain_jobs
+            .get(&job_id)
+            .ok_or(Status::not_found("drain job not found"))?;
+        Ok(Response::new(proto::QueryDrainJobResponse {
+            id: Some(uuid_to_proto(job.id)),
+            r#type: proto::JobType::Drain as i32,
+            status: job.status as i32,
+            created_at_ms_epoch: job
+                .created_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+            last_updated_at_ms_epoch: job
+                .last_updated_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+            segments: job.segments.clone(),
+            succeeded_units: job.succeeded_units,
+            failed_units: job.failed_units,
+            blocked_units: job.blocked_units,
+            active_units: job.active_tasks.len() as u64,
+            migrated_bytes: job.migrated_bytes,
+            message: job.message.clone(),
+        }))
+    }
+
+    // ---- CancelDrainJob ----
+    pub(super) async fn cancel_drain_job_impl(
+        &self,
+        request: Request<proto::CancelDrainJobRequest>,
+    ) -> Result<Response<proto::CancelDrainJobResponse>, Status> {
+        let req = request.into_inner();
+        let job_id = uuid_from_proto(
+            req.job_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing job_id"))?,
+        );
+        let mut job = self
+            .state
+            .drain_jobs
+            .get_mut(&job_id)
+            .ok_or(Status::not_found("drain job not found"))?;
+        if job.status == proto::JobStatus::Succeeded
+            || job.status == proto::JobStatus::Failed
+            || job.status == proto::JobStatus::Canceled
+        {
+            return Err(Status::failed_precondition(
+                "drain job already in terminal state",
+            ));
+        }
+        // Restore draining segments back to ACTIVE
+        for seg_name in &job.segments {
+            for mut entry in self.state.segments.iter_mut() {
+                if entry.segment.name == *seg_name {
+                    entry.status = proto::SegmentStatus::Active;
+                }
+            }
+            for mut entry in self.state.nof_segments.iter_mut() {
+                if entry.segment.name == *seg_name {
+                    entry.status = proto::SegmentStatus::Active;
+                }
+            }
+        }
+        job.status = proto::JobStatus::Canceled;
+        job.last_updated_at = SystemTime::now();
+        job.message = "job canceled".into();
+        tracing::info!("Drain job canceled: id={}", job_id);
+        Ok(Response::new(proto::CancelDrainJobResponse {}))
+    }
+
+    /// Helper: find objects on draining segments and create drain tasks.
+    fn schedule_drain_job_tasks(&self, job_id: Uuid) {
+        let mut job = match self.state.drain_jobs.get_mut(&job_id) {
+            Some(j) => j,
+            None => return,
+        };
+        let draining_segments: HashSet<String> = job.segments.iter().cloned().collect();
+        let targets = job.target_segments.clone();
+        let max_concurrency = job.max_concurrency as usize;
+
+        // Find objects with replicas on draining segments
+        let mut units: Vec<(String, String, u64)> = Vec::new(); // (key, source_seg, bytes)
+        for entry in self.state.objects.iter() {
+            let key = entry.key().clone();
+            for replica in &entry.replicas {
+                if draining_segments.contains(&replica.segment_name)
+                    && replica.status == ReplicaStatus::Complete
+                {
+                    units.push((key.clone(), replica.segment_name.clone(), replica.size));
+                    break; // one unit per key
+                }
+            }
+        }
+
+        // Pick a target for each unit (round-robin)
+        let num_targets = targets.len().max(1);
+        for (i, (key, source_seg, bytes)) in units.into_iter().enumerate() {
+            if job.active_tasks.len() >= max_concurrency {
+                break;
+            }
+            let unit_key = format!("{key}@{source_seg}");
+            if job.completed_unit_keys.contains(&unit_key)
+                || job.terminal_failed_unit_keys.contains(&unit_key)
+            {
+                continue;
+            }
+            let target_seg = targets[i % num_targets].clone();
+            let task_id = Uuid::new_v4();
+            job.active_tasks.insert(
+                task_id,
+                ActiveDrainTask {
+                    task_id,
+                    key: key.clone(),
+                    source_segment: source_seg,
+                    target_segment: target_seg,
+                    bytes,
+                    unit_key: unit_key.clone(),
+                },
+            );
+
+            // Create a copy task for this drain unit
+            let payload = serde_json::to_string(&ReplicaCopyPayload {
+                key: &key,
+                source: &job.active_tasks.get(&task_id).unwrap().source_segment,
+                targets: &[job.active_tasks.get(&task_id).unwrap().target_segment.clone()],
+            })
+            .unwrap_or_default();
+            let now = Utc::now();
+            self.state.tasks.insert(
+                task_id,
+                TaskEntry {
+                    info: TaskInfo {
+                        id: task_id,
+                        task_type: TaskType::ReplicaCopy,
+                        status: TaskStatus::Pending,
+                        created_at: now,
+                        last_updated_at: now,
+                        assigned_client: client_id_by_segment_name(
+                            &self.state,
+                            &job.active_tasks.get(&task_id).unwrap().source_segment,
+                        ),
+                        message: format!(
+                            "drain {} from {} to {}",
+                            key,
+                            job.active_tasks.get(&task_id).unwrap().source_segment,
+                            job.active_tasks.get(&task_id).unwrap().target_segment
+                        ),
+                    },
+                    key: key.clone(),
+                    payload,
+                    max_retry_attempts: 3,
+                },
+            );
+        }
+
+        job.status = if job.active_tasks.is_empty() {
+            proto::JobStatus::Succeeded
+        } else {
+            proto::JobStatus::Running
+        };
+        job.last_updated_at = SystemTime::now();
+    }
+
+    // ---- GetFsdir ----
+    pub(super) async fn get_fsdir_impl(
+        &self,
+        _request: Request<proto::GetFsdirRequest>,
+    ) -> Result<Response<proto::GetFsdirResponse>, Status> {
+        let fs_dir = self.state.runtime_config.storage_fs_dir.clone();
+        Ok(Response::new(proto::GetFsdirResponse { fs_dir }))
     }
 }
