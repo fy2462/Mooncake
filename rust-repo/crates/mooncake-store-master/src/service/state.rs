@@ -80,6 +80,7 @@ pub(crate) struct ReplicationTaskEntry {
     pub(crate) kind: ReplicationTaskKind,
     pub(crate) source: ReplicaDescriptor,
     pub(crate) targets: Vec<ReplicaDescriptor>,
+    #[allow(dead_code)]
     pub(crate) start_time: Instant,
 }
 

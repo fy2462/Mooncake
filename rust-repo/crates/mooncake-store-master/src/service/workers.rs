@@ -5,8 +5,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-use mooncake_store_core::ReplicaType;
-
 use super::background_ops::{
     clear_offloading_task, clear_promotion_task, reap_expired_background_tasks,
     run_automatic_eviction_once,

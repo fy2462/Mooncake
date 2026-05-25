@@ -30,6 +30,8 @@ struct ReplicateConfigPy {
     preferred_segment: String,
     #[pyo3(get, set)]
     prefer_alloc_in_same_node: bool,
+    #[pyo3(get, set)]
+    nof_replica_num: u32,
 }
 
 #[pymethods]
@@ -37,6 +39,7 @@ impl ReplicateConfigPy {
     #[new]
     #[pyo3(signature = (
         replica_num = 1,
+        nof_replica_num = 0,
         with_soft_pin = false,
         with_hard_pin = false,
         preferred_segment = String::new(),
@@ -44,6 +47,7 @@ impl ReplicateConfigPy {
     ))]
     fn new(
         replica_num: u32,
+        nof_replica_num: u32,
         with_soft_pin: bool,
         with_hard_pin: bool,
         preferred_segment: String,
@@ -51,6 +55,7 @@ impl ReplicateConfigPy {
     ) -> Self {
         Self {
             replica_num,
+            nof_replica_num,
             with_soft_pin,
             with_hard_pin,
             preferred_segment,
@@ -70,6 +75,7 @@ impl ReplicateConfigPy {
     fn to_core(&self) -> ReplicateConfig {
         ReplicateConfig {
             replica_num: self.replica_num,
+            nof_replica_num: self.nof_replica_num,
             with_soft_pin: self.with_soft_pin,
             with_hard_pin: self.with_hard_pin,
             preferred_segment: self.preferred_segment.clone(),

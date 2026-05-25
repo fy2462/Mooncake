@@ -19,7 +19,7 @@ use crate::storage_backend::{StorageBackend, StorageBackendType};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{
-    NoFSegment, NoFSegmentOwnerInfo, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
+    NoFSegmentOwnerInfo, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
     TaskInfo, TaskStatus, TaskType,
 };
 use parking_lot::RwLock;

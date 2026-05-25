@@ -131,6 +131,7 @@ impl MooncakeClient {
             slice_length: value.len() as u64,
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
+                nof_replica_num: cfg.nof_replica_num,
                 with_soft_pin: cfg.with_soft_pin,
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
@@ -182,6 +183,7 @@ impl MooncakeClient {
             slice_length: size as u64,
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
+                nof_replica_num: cfg.nof_replica_num,
                 with_soft_pin: cfg.with_soft_pin,
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
@@ -225,6 +227,7 @@ impl MooncakeClient {
             slice_length: total_len as u64,
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
+                nof_replica_num: cfg.nof_replica_num,
                 with_soft_pin: cfg.with_soft_pin,
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
@@ -700,6 +703,7 @@ impl MooncakeClient {
             slice_length: value.len() as u64,
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
+                nof_replica_num: cfg.nof_replica_num,
                 with_soft_pin: cfg.with_soft_pin,
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),
@@ -738,6 +742,7 @@ impl MooncakeClient {
             slice_length: size as u64,
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
+                nof_replica_num: cfg.nof_replica_num,
                 with_soft_pin: cfg.with_soft_pin,
                 with_hard_pin: cfg.with_hard_pin,
                 preferred_segment: cfg.preferred_segment.clone(),

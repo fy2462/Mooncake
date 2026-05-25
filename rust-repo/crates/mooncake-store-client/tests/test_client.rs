@@ -13,6 +13,7 @@ fn test_client_struct_creation() {
 fn test_replicate_config_fields() {
     let cfg = ReplicateConfig {
         replica_num: 3,
+        nof_replica_num: 0,
         with_soft_pin: true,
         with_hard_pin: false,
         preferred_segment: "test:12345".into(),

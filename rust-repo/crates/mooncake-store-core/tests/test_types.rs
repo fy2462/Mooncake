@@ -22,6 +22,7 @@ fn test_replicate_config_default() {
 fn test_replicate_config_custom() {
     let cfg = ReplicateConfig {
         replica_num: 3,
+        nof_replica_num: 0,
         with_soft_pin: true,
         with_hard_pin: false,
         preferred_segment: "node1:12345".into(),
@@ -38,6 +39,7 @@ fn test_replicate_config_custom() {
 fn test_replicate_config_clone() {
     let cfg = ReplicateConfig {
         replica_num: 5,
+        nof_replica_num: 0,
         with_soft_pin: false,
         with_hard_pin: true,
         preferred_segment: "seg-x".into(),
@@ -53,6 +55,7 @@ fn test_replicate_config_clone() {
 fn test_replicate_config_all_fields_false() {
     let cfg = ReplicateConfig {
         replica_num: 0,
+        nof_replica_num: 0,
         with_soft_pin: false,
         with_hard_pin: false,
         preferred_segment: String::new(),
@@ -69,6 +72,7 @@ fn test_replicate_config_all_fields_false() {
 fn test_replicate_config_all_fields_true() {
     let cfg = ReplicateConfig {
         replica_num: 10,
+        nof_replica_num: 0,
         with_soft_pin: true,
         with_hard_pin: true,
         preferred_segment: "host:9999".into(),

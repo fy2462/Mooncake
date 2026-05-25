@@ -5,7 +5,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use super::helpers::{
-    client_id_by_segment_name, memory_usage_ratio, release_replicas, sync_segment_usage,
+    client_id_by_segment_name, memory_usage_ratio, release_replicas,
 };
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
