@@ -7,7 +7,7 @@ use mooncake_store_master::ha::{
     MasterServiceSupervisorConfig, MasterView, SnapshotProvider, StandbyController,
     StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
 };
-use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
+use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -122,6 +122,8 @@ fn test_local_snapshot_provider_loads_snapshot() {
         },
     );
 
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     objects.insert(
         "ha-key".into(),
@@ -141,11 +143,12 @@ fn test_local_snapshot_provider_loads_snapshot() {
             hard_pinned: false,
         },
     );
-    backend.save(&segments, &objects).unwrap();
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
 
     let provider = LocalSnapshotProvider::new(root, StorageBackendType::LocalDisk);
     let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
     assert_eq!(snapshot.segments.len(), 1);
+    assert!(snapshot.nof_segments.is_empty());
     assert_eq!(snapshot.objects.len(), 1);
     assert_eq!(snapshot.objects[0].0, "ha-key");
 }
@@ -156,8 +159,10 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
     let cluster_id = "cluster-b";
     let backend = StorageBackend::new(StorageBackendType::LocalDisk, &root.join(cluster_id));
     let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    backend.save(&segments, &objects).unwrap();
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
 
     let spec = HABackendSpec {
         backend_type: HABackendType::Redis,

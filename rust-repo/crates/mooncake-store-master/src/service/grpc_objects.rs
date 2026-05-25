@@ -40,6 +40,41 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::GetAllSegmentsResponse { segments }))
     }
 
+    // ---- GetAllNoFSegments ----
+    pub(super) async fn get_all_nof_segments_impl(
+        &self,
+        _request: Request<proto::GetAllNoFSegmentsRequest>,
+    ) -> Result<Response<proto::GetAllNoFSegmentsResponse>, Status> {
+        let segments = self
+            .state
+            .nof_segments
+            .iter()
+            .map(|entry| nof_segment_to_proto(&entry.segment))
+            .collect();
+        Ok(Response::new(proto::GetAllNoFSegmentsResponse { segments }))
+    }
+
+    // ---- GetNoFSegmentsByName ----
+    pub(super) async fn get_nof_segments_by_name_impl(
+        &self,
+        request: Request<proto::GetNoFSegmentsByNameRequest>,
+    ) -> Result<Response<proto::GetNoFSegmentsByNameResponse>, Status> {
+        let req = request.into_inner();
+        let owners = self
+            .state
+            .nof_segments
+            .iter()
+            .filter(|entry| entry.segment.name == req.segment_name)
+            .map(|entry| {
+                nof_segment_owner_to_proto(&NoFSegmentOwnerInfo {
+                    segment_id: entry.segment.id,
+                    client_id: entry.segment.client_id,
+                })
+            })
+            .collect();
+        Ok(Response::new(proto::GetNoFSegmentsByNameResponse { owners }))
+    }
+
     // ---- PutStart ----
     pub(super) async fn put_start_impl(
         &self,
@@ -65,16 +100,44 @@ impl MasterServiceImpl {
             .as_ref()
             .map(config_from_proto)
             .unwrap_or_default();
-        let replica_count = if config.replica_num == 0 {
-            1
-        } else {
-            config.replica_num as usize
-        };
+        if config.replica_num == 0 && config.nof_replica_num == 0 {
+            return Err(Status::invalid_argument(
+                "replica_num and nof_replica_num cannot both be zero",
+            ));
+        }
+        let replica_count = config.replica_num.max(1) as usize;
 
-        let replicas = {
+        let mut replicas = {
             let mut allocator = self.state.allocator.write();
-            allocator.allocate(&key, req.slice_length, replica_count, &config)
+            allocator.allocate_for_client(
+                &key,
+                Some(_client_id),
+                req.slice_length,
+                replica_count,
+                &config,
+            )
         };
+        if config.nof_replica_num > 0 {
+            let preferred_nof = if config.prefer_alloc_in_same_node {
+                preferred_nof_segment_names(&self.state, &replicas)
+            } else {
+                Vec::new()
+            };
+            if config.prefer_alloc_in_same_node && preferred_nof.is_empty() {
+                release_replicas(&self.state, &replicas);
+                return Err(Status::invalid_argument(
+                    "prefer_alloc_in_same_node requires matching NoF segment",
+                ));
+            }
+            let nof_replicas = allocate_nof_replicas(
+                &self.state,
+                &key,
+                req.slice_length,
+                config.nof_replica_num as usize,
+                &preferred_nof,
+            )?;
+            replicas.extend(nof_replicas);
+        }
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
         let proto_replicas: Vec<proto::ReplicaDescriptor> =
@@ -105,7 +168,17 @@ impl MasterServiceImpl {
         let req = request.into_inner();
         if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
             for r in &mut entry.replicas {
-                if r.status == ReplicaStatus::Allocating {
+                let matches_type = match req.replica_type {
+                    x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
+                    x if x == proto::replica_descriptor::ReplicaType::Memory as i32 => {
+                        r.replica_type == ReplicaType::Memory
+                    }
+                    x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
+                        r.replica_type == ReplicaType::NoFSsd
+                    }
+                    _ => r.replica_type == ReplicaType::Memory,
+                };
+                if matches_type && r.status == ReplicaStatus::Allocating {
                     r.status = ReplicaStatus::Complete;
                 }
             }
@@ -207,9 +280,7 @@ impl MasterServiceImpl {
         if let Some((_, object)) = self.state.objects.remove(&req.key) {
             clear_offloading_task(&self.state, &req.key);
             clear_promotion_task(&self.state, &req.key);
-            let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
-            self.state.allocator.write().release(&object.replicas);
-            sync_segment_usage(&self.state, segment_ids);
+            release_replicas(&self.state, &object.replicas);
         }
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
@@ -240,9 +311,7 @@ impl MasterServiceImpl {
             if let Some((_, object)) = self.state.objects.remove(&key) {
                 clear_offloading_task(&self.state, &key);
                 clear_promotion_task(&self.state, &key);
-                let segment_ids: Vec<Uuid> = object.replicas.iter().map(|r| r.segment_id).collect();
-                self.state.allocator.write().release(&object.replicas);
-                sync_segment_usage(&self.state, segment_ids);
+                release_replicas(&self.state, &object.replicas);
                 removed += 1;
             }
         }
@@ -328,11 +397,12 @@ impl MasterServiceImpl {
             .as_ref()
             .map(config_from_proto)
             .unwrap_or_default();
-        let replica_count = if config.replica_num == 0 {
-            1
-        } else {
-            config.replica_num as usize
-        };
+        if config.replica_num == 0 && config.nof_replica_num == 0 {
+            return Err(Status::invalid_argument(
+                "replica_num and nof_replica_num cannot both be zero",
+            ));
+        }
+        let replica_count = config.replica_num.max(1) as usize;
 
         let (replicas, previous_soft_pinned, previous_hard_pinned) = if let Some(existing) =
             self.state.objects.get(&req.key)
@@ -348,12 +418,16 @@ impl MasterServiceImpl {
                 let previous_hard_pinned = existing.hard_pinned;
                 let old_replicas = existing.replicas.clone();
                 drop(existing);
-                let segment_ids: Vec<Uuid> = old_replicas.iter().map(|r| r.segment_id).collect();
-                self.state.allocator.write().release(&old_replicas);
-                sync_segment_usage(&self.state, segment_ids);
+                release_replicas(&self.state, &old_replicas);
                 let mut allocator = self.state.allocator.write();
                 (
-                    allocator.allocate(&req.key, req.slice_length, replica_count, &config),
+                    allocator.allocate_for_client(
+                        &req.key,
+                        Some(_client_id),
+                        req.slice_length,
+                        replica_count,
+                        &config,
+                    ),
                     previous_soft_pinned,
                     previous_hard_pinned,
                 )
@@ -361,11 +435,39 @@ impl MasterServiceImpl {
         } else {
             let mut allocator = self.state.allocator.write();
             (
-                allocator.allocate(&req.key, req.slice_length, replica_count, &config),
+                allocator.allocate_for_client(
+                    &req.key,
+                    Some(_client_id),
+                    req.slice_length,
+                    replica_count,
+                    &config,
+                ),
                 false,
                 false,
             )
         };
+        let mut replicas = replicas;
+        if config.nof_replica_num > 0 {
+            let preferred_nof = if config.prefer_alloc_in_same_node {
+                preferred_nof_segment_names(&self.state, &replicas)
+            } else {
+                Vec::new()
+            };
+            if config.prefer_alloc_in_same_node && preferred_nof.is_empty() {
+                release_replicas(&self.state, &replicas);
+                return Err(Status::invalid_argument(
+                    "prefer_alloc_in_same_node requires matching NoF segment",
+                ));
+            }
+            let nof_replicas = allocate_nof_replicas(
+                &self.state,
+                &req.key,
+                req.slice_length,
+                config.nof_replica_num as usize,
+                &preferred_nof,
+            )?;
+            replicas.extend(nof_replicas);
+        }
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
         let proto_replicas: Vec<proto::ReplicaDescriptor> =

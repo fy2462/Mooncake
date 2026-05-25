@@ -69,6 +69,41 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::MountSegmentResponse {}))
     }
 
+    // ---- MountNoFSegment ----
+    pub(super) async fn mount_nof_segment_impl(
+        &self,
+        request: Request<proto::MountNoFSegmentRequest>,
+    ) -> Result<Response<proto::MountNoFSegmentResponse>, Status> {
+        let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
+        let mut segment = req
+            .segment
+            .as_ref()
+            .map(nof_segment_from_proto)
+            .ok_or(Status::invalid_argument("missing segment"))?;
+        segment.client_id = client_id;
+
+        self.state.nof_segments.insert(
+            segment.id,
+            NoFSegmentEntry {
+                segment: segment.clone(),
+                used: 0,
+            },
+        );
+        self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
+            id: segment.id,
+            name: segment.name.clone(),
+            size: segment.size,
+            used: 0,
+            client_id,
+        });
+        Ok(Response::new(proto::MountNoFSegmentResponse {}))
+    }
+
     // ---- UnmountSegment ----
     pub(super) async fn unmount_segment_impl(
         &self,
@@ -90,6 +125,28 @@ impl MasterServiceImpl {
             return Err(Status::not_found("segment not found for client"));
         }
         Ok(Response::new(proto::UnmountSegmentResponse {}))
+    }
+
+    // ---- UnmountNoFSegment ----
+    pub(super) async fn unmount_nof_segment_impl(
+        &self,
+        request: Request<proto::UnmountNoFSegmentRequest>,
+    ) -> Result<Response<proto::UnmountNoFSegmentResponse>, Status> {
+        let req = request.into_inner();
+        let segment_id = uuid_from_proto(
+            req.segment_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing segment_id"))?,
+        );
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
+        if !unmount_nof_segment_owned(&self.state, segment_id, client_id) {
+            return Err(Status::not_found("NoF segment not found for client"));
+        }
+        Ok(Response::new(proto::UnmountNoFSegmentResponse {}))
     }
 
     // ---- GracefulUnmountSegment ----
@@ -173,6 +230,46 @@ impl MasterServiceImpl {
         sync_client_segments(&self.state, client_id);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
         Ok(Response::new(proto::ReMountSegmentResponse {}))
+    }
+
+    // ---- ReMountNoFSegment ----
+    pub(super) async fn re_mount_nof_segment_impl(
+        &self,
+        request: Request<proto::ReMountNoFSegmentRequest>,
+    ) -> Result<Response<proto::ReMountNoFSegmentResponse>, Status> {
+        let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
+        for proto_segment in &req.segments {
+            let mut segment = nof_segment_from_proto(proto_segment);
+            segment.client_id = client_id;
+            let exists = self
+                .state
+                .nof_segments
+                .iter()
+                .any(|entry| entry.segment.id == segment.id || entry.segment.name == segment.name);
+            if exists {
+                continue;
+            }
+            self.state.nof_segments.insert(
+                segment.id,
+                NoFSegmentEntry {
+                    segment: segment.clone(),
+                    used: 0,
+                },
+            );
+            self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
+                id: segment.id,
+                name: segment.name.clone(),
+                size: segment.size,
+                used: 0,
+                client_id,
+            });
+        }
+        Ok(Response::new(proto::ReMountNoFSegmentResponse {}))
     }
 
     // ---- MountLocalDiskSegment ----
@@ -380,7 +477,7 @@ impl MasterServiceImpl {
         }
         let replicas = {
             let mut allocator = self.state.allocator.write();
-            allocator.allocate(&req.key, req.size, 1, &config)
+            allocator.allocate_for_client(&req.key, Some(client_id), req.size, 1, &config)
         };
         let Some(mut staged) = replicas.into_iter().next() else {
             return Err(Status::resource_exhausted("no available memory segment"));

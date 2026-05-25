@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
 use std::time::SystemTime;
@@ -232,6 +232,7 @@ fn test_allocator_prefers_same_node() {
     let mut allocator = SegmentAllocator::new();
     let cid_same = Uuid::new_v4();
     let cid_other = Uuid::new_v4();
+    let cid_third = Uuid::new_v4();
 
     allocator.add_segment(Segment {
         id: Uuid::new_v4(),
@@ -242,20 +243,29 @@ fn test_allocator_prefers_same_node() {
     });
     allocator.add_segment(Segment {
         id: Uuid::new_v4(),
-        name: "same:2".into(),
+        name: "other:1".into(),
         size: 10000,
         used: 0,
         client_id: cid_other,
     });
+    allocator.add_segment(Segment {
+        id: Uuid::new_v4(),
+        name: "third:1".into(),
+        size: 10000,
+        used: 0,
+        client_id: cid_third,
+    });
 
-    let config = mooncake_store_core::ReplicateConfig {
+    let config = ReplicateConfig {
         prefer_alloc_in_same_node: true,
         replica_num: 1,
+        nof_replica_num: 0,
         ..Default::default()
     };
 
-    let replicas = allocator.allocate("k", 100, 1, &config);
+    let replicas = allocator.allocate_for_client("k", Some(cid_same), 100, 1, &config);
     assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].segment_name, "same:1");
 }
 
 #[test]

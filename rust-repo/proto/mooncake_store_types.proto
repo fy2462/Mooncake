@@ -24,6 +24,8 @@ message ReplicaDescriptor {
     MEMORY = 0;
     DISK = 1;
     LOCAL_DISK = 2;
+    NOF_SSD = 3;
+    ALL = 4;
   }
 
   Uuid segment_id = 1;
@@ -38,10 +40,25 @@ message ReplicaDescriptor {
 
 message ReplicateConfig {
   uint32 replica_num = 1;
-  bool with_soft_pin = 2;
-  bool with_hard_pin = 3;
-  string preferred_segment = 4;
-  bool prefer_alloc_in_same_node = 5;
+  uint32 nof_replica_num = 2;
+  bool with_soft_pin = 3;
+  bool with_hard_pin = 4;
+  string preferred_segment = 5;
+  bool prefer_alloc_in_same_node = 6;
+}
+
+message NoFSegment {
+  Uuid id = 1;
+  string name = 2;
+  uint64 base = 3;
+  uint64 size = 4;
+  string te_endpoint = 5;
+  Uuid client_id = 6;
+}
+
+message NoFSegmentOwnerInfo {
+  Uuid segment_id = 1;
+  Uuid client_id = 2;
 }
 
 // ---------------------------------------------------------------
@@ -67,12 +84,26 @@ message MountSegmentRequest {
 
 message MountSegmentResponse {}
 
+message MountNoFSegmentRequest {
+  Uuid client_id = 1;
+  NoFSegment segment = 2;
+}
+
+message MountNoFSegmentResponse {}
+
 message UnmountSegmentRequest {
   Uuid segment_id = 1;
   Uuid client_id = 2;
 }
 
 message UnmountSegmentResponse {}
+
+message UnmountNoFSegmentRequest {
+  Uuid segment_id = 1;
+  Uuid client_id = 2;
+}
+
+message UnmountNoFSegmentResponse {}
 
 message GracefulUnmountSegmentRequest {
   Uuid segment_id = 1;
@@ -89,6 +120,13 @@ message ReMountSegmentRequest {
 }
 
 message ReMountSegmentResponse {}
+
+message ReMountNoFSegmentRequest {
+  Uuid client_id = 1;
+  repeated NoFSegment segments = 2;
+}
+
+message ReMountNoFSegmentResponse {}
 
 message MountLocalDiskSegmentRequest {
   Uuid client_id = 1;
@@ -198,6 +236,20 @@ message GetAllSegmentsResponse {
   repeated string segments = 1;
 }
 
+message GetAllNoFSegmentsRequest {}
+
+message GetAllNoFSegmentsResponse {
+  repeated NoFSegment segments = 1;
+}
+
+message GetNoFSegmentsByNameRequest {
+  string segment_name = 1;
+}
+
+message GetNoFSegmentsByNameResponse {
+  repeated NoFSegmentOwnerInfo owners = 1;
+}
+
 // ---------------------------------------------------------------
 // Put workflow
 // ---------------------------------------------------------------
@@ -224,6 +276,7 @@ message PutEndResponse {}
 message PutRevokeRequest {
   Uuid client_id = 1;
   string key = 2;
+  ReplicaDescriptor.ReplicaType replica_type = 3;
 }
 
 message PutRevokeResponse {}

@@ -1,7 +1,7 @@
 use crate::allocator::{AllocationStrategy, MemoryAllocatorKind, SegmentAllocator};
 use crate::storage_backend::StorageBackend;
 use dashmap::DashMap;
-use mooncake_store_core::{ReplicaDescriptor, TaskInfo};
+use mooncake_store_core::{NoFSegment, ReplicaDescriptor, TaskInfo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -13,6 +13,7 @@ pub(crate) struct MasterState {
     pub(crate) clients: DashMap<Uuid, ClientEntry>,
     pub(crate) objects: DashMap<String, ObjectEntry>,
     pub(crate) segments: DashMap<Uuid, SegmentEntry>,
+    pub(crate) nof_segments: DashMap<Uuid, NoFSegmentEntry>,
     pub(crate) local_disk_segments: DashMap<Uuid, LocalDiskSegmentEntry>,
     pub(crate) tasks: DashMap<Uuid, TaskEntry>,
     pub(crate) replication_tasks: DashMap<String, ReplicationTaskEntry>,
@@ -20,6 +21,7 @@ pub(crate) struct MasterState {
     pub(crate) promotion_tasks: DashMap<String, PromotionTaskEntry>,
     pub(crate) promotion_access_counts: DashMap<String, u8>,
     pub(crate) allocator: RwLock<SegmentAllocator>,
+    pub(crate) nof_allocator: RwLock<SegmentAllocator>,
     pub(crate) storage_backend: RwLock<Option<StorageBackend>>,
     pub(crate) promotion_in_flight: AtomicUsize,
     pub(crate) runtime_config: MasterRuntimeConfig,
@@ -40,8 +42,15 @@ pub struct ObjectEntry {
     pub hard_pinned: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct SegmentEntry {
     pub segment: mooncake_store_core::Segment,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoFSegmentEntry {
+    pub segment: NoFSegment,
+    pub used: u64,
 }
 
 pub(crate) struct LocalDiskSegmentEntry {

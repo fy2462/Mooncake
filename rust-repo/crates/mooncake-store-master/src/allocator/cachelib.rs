@@ -28,6 +28,7 @@ pub(super) struct CachelibPoolState {
     pub(super) configured_size_bytes: u64,
     pub(super) reserved_slabs: Vec<u32>,
     pub(super) class_slabs: HashMap<u64, Vec<SlabClassState>>,
+    pub(super) advised_slabs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +43,9 @@ pub(super) struct CachelibSegmentState {
     pub(super) allocations: HashMap<u64, CachelibAllocation>,
     pub(super) pending_releases: HashMap<u64, PendingSlabRelease>,
     pub(super) next_release_token: u64,
+    pub(super) n_slab_resize: u64,
+    pub(super) n_slab_rebalance: u64,
+    pub(super) n_slab_release_aborted: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +392,7 @@ impl CachelibSegmentState {
 
         match pending.mode {
             SlabReleaseMode::Resize => {
+                self.n_slab_resize = self.n_slab_resize.saturating_add(1);
                 pool.reserved_slabs
                     .retain(|slab| *slab != pending.slab_index);
                 self.unreserved_slab_indices.push(pending.slab_index);
@@ -395,6 +400,7 @@ impl CachelibSegmentState {
                     .sort_unstable_by(|a, b| b.cmp(a));
             }
             SlabReleaseMode::Rebalance => {
+                self.n_slab_rebalance = self.n_slab_rebalance.saturating_add(1);
                 if let Some(receiver_class_size) = pending.receiver_class_size {
                     let capacity = (CACHELIB_SLAB_SIZE / receiver_class_size) as u32;
                     let free_slots = (0..capacity).rev().collect::<Vec<_>>();
@@ -458,6 +464,7 @@ impl CachelibSegmentState {
         if context.is_released {
             return Ok(());
         }
+        self.n_slab_release_aborted = self.n_slab_release_aborted.saturating_add(1);
         let pending = self
             .pending_releases
             .remove(&context.token)
@@ -523,6 +530,7 @@ impl CachelibSegmentState {
                 configured_size_bytes: size_bytes,
                 reserved_slabs: Vec::new(),
                 class_slabs: HashMap::new(),
+                advised_slabs: 0,
             },
         );
         Ok(pool_id)
@@ -747,11 +755,57 @@ impl CachelibSegmentState {
             alloc_size: allocation.class_size,
         })
     }
+
+    pub(super) fn current_alloc_size_for_pool(&self, pool_id: PoolId) -> u64 {
+        self.allocations
+            .values()
+            .filter(|alloc| alloc.pool_id == pool_id)
+            .map(|alloc| alloc.class_size)
+            .sum()
+    }
+
+    pub(super) fn pool_advised_size(&self, pool_id: PoolId) -> Option<u64> {
+        self.pools.get(&pool_id).map(|p| p.get_pool_advised_size())
+    }
+
+    pub(super) fn pool_usable_size(&self, pool_id: PoolId) -> Option<u64> {
+        self.pools.get(&pool_id).map(|p| p.get_pool_usable_size())
+    }
+
+    pub(super) fn pool_unallocated_slab_memory(&self, pool_id: PoolId) -> Option<u64> {
+        self.pools.get(&pool_id).map(|p| p.get_unallocated_slab_memory())
+    }
+
+    pub(super) fn advised_memory_size(&self) -> u64 {
+        self.pools.values().map(|p| p.get_pool_advised_size()).sum()
+    }
 }
 
 impl CachelibPoolState {
     pub(super) fn current_used_size(&self) -> u64 {
         self.reserved_slabs.len() as u64 * CACHELIB_SLAB_SIZE
+    }
+
+    pub(super) fn get_pool_advised_size(&self) -> u64 {
+        self.advised_slabs * CACHELIB_SLAB_SIZE
+    }
+
+    pub(super) fn get_pool_usable_size(&self) -> u64 {
+        let advised = self.get_pool_advised_size();
+        if self.configured_size_bytes <= advised {
+            0
+        } else {
+            self.configured_size_bytes - advised
+        }
+    }
+
+    pub(super) fn get_unallocated_slab_memory(&self) -> u64 {
+        let total = self.current_used_size() + self.get_pool_advised_size();
+        if total >= self.configured_size_bytes {
+            0
+        } else {
+            self.configured_size_bytes - total
+        }
     }
 
     pub(super) fn releasable_slabs(&self) -> Vec<u32> {

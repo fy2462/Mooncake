@@ -15,6 +15,22 @@ pub struct Segment {
     pub client_id: Uuid,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoFSegment {
+    pub id: Uuid,
+    pub name: String,
+    pub base: u64,
+    pub size: u64,
+    pub te_endpoint: String,
+    pub client_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoFSegmentOwnerInfo {
+    pub segment_id: Uuid,
+    pub client_id: Uuid,
+}
+
 // ---------------------------------------------------------------------------
 // Replica
 // ---------------------------------------------------------------------------
@@ -33,6 +49,7 @@ pub enum ReplicaType {
     Memory = 0,
     Disk = 1,
     LocalDisk = 2,
+    NoFSsd = 3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +70,7 @@ pub struct ReplicaDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicateConfig {
     pub replica_num: u32,
+    pub nof_replica_num: u32,
     pub with_soft_pin: bool,
     pub with_hard_pin: bool,
     pub preferred_segment: String,
@@ -72,6 +90,7 @@ impl Default for ReplicateConfig {
     fn default() -> Self {
         Self {
             replica_num: 1,
+            nof_replica_num: 0,
             with_soft_pin: false,
             with_hard_pin: false,
             preferred_segment: String::new(),

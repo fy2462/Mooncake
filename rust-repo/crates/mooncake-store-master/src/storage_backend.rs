@@ -1,5 +1,7 @@
 use crate::hf3fs;
+use chrono::Utc;
 use dashmap::DashMap;
+use mooncake_store_core::{TaskInfo, TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -23,14 +25,40 @@ struct SnapshotSegment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotNoFSegment {
+    id: String,
+    name: String,
+    base: u64,
+    size: u64,
+    te_endpoint: String,
+    client_id: String,
+    used: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SnapshotObject {
     object: crate::service::ObjectEntry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotTask {
+    id: String,
+    task_type: i32,
+    status: i32,
+    created_at_ms: i64,
+    last_updated_at_ms: i64,
+    assigned_client: Option<String>,
+    message: String,
+    key: String,
+    payload: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Snapshot {
     segments: Vec<SnapshotSegment>,
+    nof_segments: Vec<SnapshotNoFSegment>,
     objects: Vec<(String, SnapshotObject)>,
+    tasks: Vec<(String, SnapshotTask)>,
 }
 
 pub struct StorageBackend {
@@ -107,7 +135,9 @@ impl StorageBackend {
     pub fn save(
         &self,
         segments: &DashMap<Uuid, crate::service::SegmentEntry>,
+        nof_segments: &DashMap<Uuid, crate::service::NoFSegmentEntry>,
         objects: &DashMap<String, crate::service::ObjectEntry>,
+        tasks: &DashMap<Uuid, crate::service::TaskEntry>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let snap = Snapshot {
             segments: segments
@@ -120,6 +150,18 @@ impl StorageBackend {
                     client_id: entry.segment.client_id.to_string(),
                 })
                 .collect(),
+            nof_segments: nof_segments
+                .iter()
+                .map(|entry| SnapshotNoFSegment {
+                    id: entry.segment.id.to_string(),
+                    name: entry.segment.name.clone(),
+                    base: entry.segment.base,
+                    size: entry.segment.size,
+                    te_endpoint: entry.segment.te_endpoint.clone(),
+                    client_id: entry.segment.client_id.to_string(),
+                    used: entry.used,
+                })
+                .collect(),
             objects: objects
                 .iter()
                 .map(|entry| {
@@ -127,6 +169,25 @@ impl StorageBackend {
                         object: entry.clone(),
                     };
                     (entry.key().clone(), obj)
+                })
+                .collect(),
+            tasks: tasks
+                .iter()
+                .map(|entry| {
+                    let info = &entry.info;
+                    let id_str = info.id.to_string();
+                    let task = SnapshotTask {
+                        id: id_str.clone(),
+                        task_type: info.task_type as i32,
+                        status: info.status as i32,
+                        created_at_ms: info.created_at.timestamp_millis(),
+                        last_updated_at_ms: info.last_updated_at.timestamp_millis(),
+                        assigned_client: info.assigned_client.map(|id| id.to_string()),
+                        message: info.message.clone(),
+                        key: entry.key.clone(),
+                        payload: entry.payload.clone(),
+                    };
+                    (id_str, task)
                 })
                 .collect(),
         };
@@ -144,7 +205,7 @@ impl StorageBackend {
             "Snapshot saved to {} via {:?} ({} segments, {} objects)",
             path.display(),
             self.backend_type,
-            snap.segments.len(),
+            snap.segments.len() + snap.nof_segments.len(),
             snap.objects.len()
         );
         Ok(())
@@ -155,7 +216,9 @@ impl StorageBackend {
     ) -> Result<
         Option<(
             Vec<mooncake_store_core::Segment>,
+            Vec<crate::service::NoFSegmentEntry>,
             Vec<(String, crate::service::ObjectEntry)>,
+            Vec<crate::service::TaskEntry>,
         )>,
         Box<dyn std::error::Error>,
     > {
@@ -179,21 +242,68 @@ impl StorageBackend {
             })
             .collect();
 
+        let nof_segments: Vec<crate::service::NoFSegmentEntry> = snap
+            .nof_segments
+            .into_iter()
+            .map(|s| crate::service::NoFSegmentEntry {
+                segment: mooncake_store_core::NoFSegment {
+                    id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
+                    name: s.name,
+                    base: s.base,
+                    size: s.size,
+                    te_endpoint: s.te_endpoint,
+                    client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
+                },
+                used: s.used,
+            })
+            .collect();
+
         let objects: Vec<(String, crate::service::ObjectEntry)> = snap
             .objects
             .into_iter()
             .map(|(key, obj)| (key, obj.object))
             .collect();
 
+        let tasks: Vec<crate::service::TaskEntry> = snap
+            .tasks
+            .into_iter()
+            .map(|(_id_str, t)| crate::service::TaskEntry {
+                info: TaskInfo {
+                    id: Uuid::parse_str(&t.id).unwrap_or_else(|_| Uuid::new_v4()),
+                    task_type: match t.task_type {
+                        1 => TaskType::ReplicaCopy,
+                        2 => TaskType::ReplicaMove,
+                        _ => TaskType::ReplicaCopy,
+                    },
+                    status: match t.status {
+                        1 => TaskStatus::Processing,
+                        2 => TaskStatus::Success,
+                        3 => TaskStatus::Failed,
+                        _ => TaskStatus::Pending,
+                    },
+                    created_at: chrono::DateTime::from_timestamp_millis(t.created_at_ms)
+                        .unwrap_or_else(|| Utc::now()),
+                    last_updated_at: chrono::DateTime::from_timestamp_millis(t.last_updated_at_ms)
+                        .unwrap_or_else(|| Utc::now()),
+                    assigned_client: t.assigned_client.and_then(|id| Uuid::parse_str(&id).ok()),
+                    message: t.message,
+                },
+                key: t.key,
+                payload: t.payload,
+                max_retry_attempts: 3,
+            })
+            .collect();
+
         tracing::info!(
-            "Snapshot loaded from {} via {:?} ({} segments, {} objects)",
+            "Snapshot loaded from {} via {:?} ({} segments, {} objects, {} tasks)",
             path.display(),
             self.backend_type,
-            segments.len(),
-            objects.len()
+            segments.len() + nof_segments.len(),
+            objects.len(),
+            tasks.len()
         );
 
-        Ok(Some((segments, objects)))
+        Ok(Some((segments, nof_segments, objects, tasks)))
     }
 
     pub fn clear(&self) -> Result<(), Box<dyn std::error::Error>> {

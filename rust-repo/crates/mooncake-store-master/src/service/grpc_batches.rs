@@ -80,10 +80,7 @@ impl MasterServiceImpl {
             if had_match {
                 clear_offloading_task(&self.state, key);
                 clear_promotion_task(&self.state, key);
-                let segment_ids: Vec<Uuid> =
-                    removed_replicas.iter().map(|r| r.segment_id).collect();
-                self.state.allocator.write().release(&removed_replicas);
-                sync_segment_usage(&self.state, segment_ids);
+                release_replicas(&self.state, &removed_replicas);
                 if remove_entire_object {
                     self.state.objects.remove(key);
                 }
@@ -108,7 +105,17 @@ impl MasterServiceImpl {
                 if let Some(mut obj) = self.state.objects.get_mut(&entry.key) {
                     let size = obj.size;
                     for r in &mut obj.replicas {
-                        if r.status == ReplicaStatus::Allocating {
+                        let matches_type = match entry.replica_type {
+                            x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
+                            x if x == proto::replica_descriptor::ReplicaType::Memory as i32 => {
+                                r.replica_type == ReplicaType::Memory
+                            }
+                            x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
+                                r.replica_type == ReplicaType::NoFSsd
+                            }
+                            _ => r.replica_type == ReplicaType::Memory,
+                        };
+                        if matches_type && r.status == ReplicaStatus::Allocating {
                             r.status = ReplicaStatus::Complete;
                         }
                     }
@@ -131,6 +138,15 @@ impl MasterServiceImpl {
         request: Request<proto::BatchPutRevokeRequest>,
     ) -> Result<Response<proto::BatchPutRevokeResponse>, Status> {
         let req = request.into_inner();
+        let client_id = req
+            .client_id
+            .as_ref()
+            .map(uuid_from_proto);
+        let segment_name = if req.segment_name.is_empty() {
+            None
+        } else {
+            Some(req.segment_name.clone())
+        };
         let statuses: Vec<i32> = req
             .keys
             .iter()
@@ -138,13 +154,30 @@ impl MasterServiceImpl {
                 if self.state.replication_tasks.contains_key(key) {
                     return -2;
                 }
-                if let Some((_, object)) = self.state.objects.remove(key) {
+                if let Some(mut object) = self.state.objects.get_mut(key) {
+                    if let Some(cid) = client_id {
+                        if object_owner_client_id(&self.state, &object) != Some(cid) {
+                            return -3;
+                        }
+                    }
+                    let mut removed = Vec::new();
+                    object.replicas.retain(|replica| {
+                        let matched = segment_name
+                            .as_ref()
+                            .map_or(true, |seg| replica.segment_name == *seg);
+                        if matched {
+                            removed.push(replica.clone());
+                        }
+                        !matched
+                    });
+                    let remove_object = object.replicas.is_empty();
+                    drop(object);
                     clear_offloading_task(&self.state, key);
                     clear_promotion_task(&self.state, key);
-                    let segment_ids: Vec<Uuid> =
-                        object.replicas.iter().map(|r| r.segment_id).collect();
-                    self.state.allocator.write().release(&object.replicas);
-                    sync_segment_usage(&self.state, segment_ids);
+                    release_replicas(&self.state, &removed);
+                    if remove_object {
+                        self.state.objects.remove(key);
+                    }
                     0
                 } else {
                     -1
@@ -170,10 +203,7 @@ impl MasterServiceImpl {
                 if let Some((_, object)) = self.state.objects.remove(key) {
                     clear_offloading_task(&self.state, key);
                     clear_promotion_task(&self.state, key);
-                    let segment_ids: Vec<Uuid> =
-                        object.replicas.iter().map(|r| r.segment_id).collect();
-                    self.state.allocator.write().release(&object.replicas);
-                    sync_segment_usage(&self.state, segment_ids);
+                    release_replicas(&self.state, &object.replicas);
                 }
                 0
             })
@@ -196,11 +226,10 @@ impl MasterServiceImpl {
                 .as_ref()
                 .map(config_from_proto)
                 .unwrap_or_default();
-            let replica_count = if config.replica_num == 0 {
-                1
-            } else {
-                config.replica_num as usize
-            };
+            if config.replica_num == 0 && config.nof_replica_num == 0 {
+                continue;
+            }
+            let replica_count = config.replica_num.max(1) as usize;
 
             let replicas = if let Some(existing) = self.state.objects.get(&entry.key) {
                 if existing.size == entry.slice_length {
@@ -208,18 +237,47 @@ impl MasterServiceImpl {
                 } else {
                     let old_replicas = existing.replicas.clone();
                     drop(existing);
-                    let segment_ids: Vec<Uuid> =
-                        old_replicas.iter().map(|r| r.segment_id).collect();
-                    self.state.allocator.write().release(&old_replicas);
-                    sync_segment_usage(&self.state, segment_ids);
+                    release_replicas(&self.state, &old_replicas);
                     let mut allocator = self.state.allocator.write();
-                    allocator.allocate(&entry.key, entry.slice_length, replica_count, &config)
+                    allocator.allocate_for_client(
+                        &entry.key,
+                        entry.client_id.as_ref().map(uuid_from_proto),
+                        entry.slice_length,
+                        replica_count,
+                        &config,
+                    )
                 }
             } else {
                 let mut allocator = self.state.allocator.write();
-                allocator.allocate(&entry.key, entry.slice_length, replica_count, &config)
+                allocator.allocate_for_client(
+                    &entry.key,
+                    entry.client_id.as_ref().map(uuid_from_proto),
+                    entry.slice_length,
+                    replica_count,
+                    &config,
+                )
             };
 
+            let mut replicas = replicas;
+            if config.nof_replica_num > 0 {
+                let preferred_nof = if config.prefer_alloc_in_same_node {
+                    preferred_nof_segment_names(&self.state, &replicas)
+                } else {
+                    Vec::new()
+                };
+                if config.prefer_alloc_in_same_node && preferred_nof.is_empty() {
+                    release_replicas(&self.state, &replicas);
+                    continue;
+                }
+                let nof_replicas = allocate_nof_replicas(
+                    &self.state,
+                    &entry.key,
+                    entry.slice_length,
+                    config.nof_replica_num as usize,
+                    &preferred_nof,
+                )?;
+                replicas.extend(nof_replicas);
+            }
             let proto_r: Vec<proto::ReplicaDescriptor> =
                 replicas.iter().map(replica_to_proto).collect();
             sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));

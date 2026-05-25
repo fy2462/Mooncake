@@ -1,0 +1,147 @@
+use mooncake_store_master::proto;
+use mooncake_store_master::proto::master_service_server::MasterService;
+use mooncake_store_master::MasterServiceImpl;
+use tonic::Request;
+use uuid::Uuid;
+
+#[tokio::test]
+async fn test_query_ip_derives_address_from_mounted_segment() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            segment_name: "10.0.0.1:1234".into(),
+            size: 1024,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let resp = MasterService::query_ip(
+        &service,
+        Request::new(proto::QueryIpRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(resp.addresses, vec!["10.0.0.1"]);
+}
+
+#[tokio::test]
+async fn test_mount_segment_updates_http_metadata_state() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            segment_name: "10.0.0.2:4321".into(),
+            size: 1024,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let metadata_state = service.metadata_state();
+    let nodes = metadata_state.nodes.read().await;
+    let node = nodes.get("10.0.0.2").unwrap();
+    assert_eq!(node.rpc_port, 4321);
+}
+
+#[tokio::test]
+async fn test_remount_segment_is_idempotent_per_client_and_name() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+
+    let req = proto::ReMountSegmentRequest {
+        client_id: Some(proto::Uuid {
+            high: client_id.as_u64_pair().0,
+            low: client_id.as_u64_pair().1,
+        }),
+        segment_names: vec!["host-a:1111".into()],
+        segment_sizes: vec![2048],
+    };
+
+    MasterService::re_mount_segment(&service, Request::new(req.clone()))
+        .await
+        .unwrap();
+    MasterService::re_mount_segment(&service, Request::new(req))
+        .await
+        .unwrap();
+
+    let segments =
+        MasterService::get_all_segments(&service, Request::new(proto::GetAllSegmentsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+    assert_eq!(segments.segments, vec!["host-a:1111"]);
+}
+
+#[tokio::test]
+async fn test_graceful_unmount_segment_removes_after_delay() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            segment_name: "host-g:3333".into(),
+            size: 1024,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mounted_segment_id = service.segment_id_by_name("host-g:3333").unwrap();
+
+    MasterService::graceful_unmount_segment(
+        &service,
+        Request::new(proto::GracefulUnmountSegmentRequest {
+            segment_id: Some(proto::Uuid {
+                high: mounted_segment_id.as_u64_pair().0,
+                low: mounted_segment_id.as_u64_pair().1,
+            }),
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            grace_period_ms: 20,
+        }),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+
+    let segments =
+        MasterService::get_all_segments(&service, Request::new(proto::GetAllSegmentsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+    assert!(!segments
+        .segments
+        .iter()
+        .any(|segment| segment == "host-g:3333"));
+}

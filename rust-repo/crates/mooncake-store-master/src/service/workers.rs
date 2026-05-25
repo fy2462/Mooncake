@@ -12,7 +12,8 @@ use super::background_ops::{
     run_automatic_eviction_once,
 };
 use super::helpers::{
-    client_id_by_segment_name, sync_client_segments, sync_segment_usage, unmount_segment_owned,
+    client_id_by_replica_segment_name, release_replicas, sync_client_segments,
+    unmount_nof_segment_owned, unmount_segment_owned,
 };
 use super::state::MasterState;
 
@@ -278,7 +279,7 @@ impl EvictionWorker {
 }
 
 fn purge_expired_client(state: &MasterState, client_id: Uuid) {
-    let mut released_memory_replicas = Vec::new();
+    let mut released_replicas = Vec::new();
     let mut emptied_keys = Vec::new();
 
     for mut object in state.objects.iter_mut() {
@@ -287,13 +288,11 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         object.replicas.retain(|replica| {
             let owner = replica
                 .holder_client_id
-                .or_else(|| client_id_by_segment_name(state, &replica.segment_name));
+                .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name));
             let keep = owner != Some(client_id);
             if !keep {
                 removed_any = true;
-                if replica.replica_type == ReplicaType::Memory {
-                    released_memory_replicas.push(replica.clone());
-                }
+                released_replicas.push(replica.clone());
             }
             keep
         });
@@ -302,13 +301,8 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         }
     }
 
-    if !released_memory_replicas.is_empty() {
-        let segment_ids = released_memory_replicas
-            .iter()
-            .map(|r| r.segment_id)
-            .collect::<Vec<_>>();
-        state.allocator.write().release(&released_memory_replicas);
-        sync_segment_usage(state, segment_ids);
+    if !released_replicas.is_empty() {
+        release_replicas(state, &released_replicas);
     }
 
     for key in emptied_keys {
@@ -329,6 +323,16 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
     }
 
     state.local_disk_segments.remove(&client_id);
+
+    let nof_segment_ids = state
+        .nof_segments
+        .iter()
+        .filter(|entry| entry.segment.client_id == client_id)
+        .map(|entry| entry.segment.id)
+        .collect::<Vec<_>>();
+    for segment_id in nof_segment_ids {
+        unmount_nof_segment_owned(state, segment_id, client_id);
+    }
 
     let segment_ids = state
         .segments

@@ -1,6 +1,7 @@
 use crate::proto;
 use mooncake_store_core::{
-    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskStatus, TaskType,
+    NoFSegment, NoFSegmentOwnerInfo, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
+    TaskStatus, TaskType,
 };
 use uuid::Uuid;
 
@@ -42,6 +43,7 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
         replica_type: match p.replica_type {
             1 => ReplicaType::Disk,
             2 => ReplicaType::LocalDisk,
+            3 => ReplicaType::NoFSsd,
             _ => ReplicaType::Memory,
         },
         holder_client_id: p.holder_client_id.as_ref().map(uuid_from_proto),
@@ -51,10 +53,40 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
 pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
     ReplicateConfig {
         replica_num: c.replica_num,
+        nof_replica_num: c.nof_replica_num,
         with_soft_pin: c.with_soft_pin,
         with_hard_pin: c.with_hard_pin,
         preferred_segment: c.preferred_segment.clone(),
         prefer_alloc_in_same_node: c.prefer_alloc_in_same_node,
+    }
+}
+
+pub(crate) fn nof_segment_to_proto(segment: &NoFSegment) -> proto::NoFSegment {
+    proto::NoFSegment {
+        id: Some(uuid_to_proto(segment.id)),
+        name: segment.name.clone(),
+        base: segment.base,
+        size: segment.size,
+        te_endpoint: segment.te_endpoint.clone(),
+        client_id: Some(uuid_to_proto(segment.client_id)),
+    }
+}
+
+pub(crate) fn nof_segment_from_proto(segment: &proto::NoFSegment) -> NoFSegment {
+    NoFSegment {
+        id: segment.id.as_ref().map_or(Uuid::new_v4(), uuid_from_proto),
+        name: segment.name.clone(),
+        base: segment.base,
+        size: segment.size,
+        te_endpoint: segment.te_endpoint.clone(),
+        client_id: segment.client_id.as_ref().map_or(Uuid::nil(), uuid_from_proto),
+    }
+}
+
+pub(crate) fn nof_segment_owner_to_proto(owner: &NoFSegmentOwnerInfo) -> proto::NoFSegmentOwnerInfo {
+    proto::NoFSegmentOwnerInfo {
+        segment_id: Some(uuid_to_proto(owner.segment_id)),
+        client_id: Some(uuid_to_proto(owner.client_id)),
     }
 }
 

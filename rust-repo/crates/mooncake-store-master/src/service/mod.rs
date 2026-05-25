@@ -19,7 +19,8 @@ use crate::storage_backend::{StorageBackend, StorageBackendType};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{
-    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskInfo, TaskStatus, TaskType,
+    NoFSegment, NoFSegmentOwnerInfo, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
+    TaskInfo, TaskStatus, TaskType,
 };
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -37,18 +38,21 @@ use self::background_ops::{
     try_push_promotion_queue,
 };
 use self::helpers::{
-    addresses_for_client, client_id_by_segment_name, host_from_segment_name,
-    object_owner_client_id, register_metadata_segments, sync_client_segments, sync_segment_usage,
-    unmount_segment_owned, upsert_client_addresses,
+    addresses_for_client, allocate_nof_replicas, client_id_by_nof_segment_name,
+    client_id_by_replica_segment_name, client_id_by_segment_name, host_from_segment_name,
+    object_owner_client_id, preferred_nof_segment_names, register_metadata_segments,
+    release_replicas, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
+    unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
 };
 use self::proto_conv::{
-    config_from_proto, replica_from_proto, replica_to_proto, task_status_from_proto,
-    task_status_to_proto, task_type_to_proto, uuid_from_proto, uuid_to_proto,
+    config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
+    replica_from_proto, replica_to_proto, task_status_from_proto, task_status_to_proto,
+    task_type_to_proto, uuid_from_proto, uuid_to_proto,
 };
 use self::state::{
-    LocalDiskSegmentEntry, MasterState, ReplicationTaskEntry, ReplicationTaskKind, TaskEntry,
+    LocalDiskSegmentEntry, MasterState, ReplicationTaskEntry, ReplicationTaskKind,
 };
-pub use self::state::{MasterRuntimeConfig, ObjectEntry, SegmentEntry};
+pub use self::state::{MasterRuntimeConfig, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use self::workers::{
     ClientMonitorWorker, EvictionWorker, GracefulUnmountScheduler, ProcessingReaper,
 };
@@ -90,6 +94,7 @@ impl MasterServiceImpl {
         backup_dir: Option<PathBuf>,
         runtime_config: MasterRuntimeConfig,
     ) -> Self {
+        let snapshot_backup_dir = backup_dir.clone();
         let storage_backend = match (backend_type, backup_dir) {
             (Some(btype), Some(dir)) => RwLock::new(Some(StorageBackend::new(btype, &dir))),
             _ => RwLock::new(None),
@@ -99,6 +104,7 @@ impl MasterServiceImpl {
             clients: DashMap::new(),
             objects: DashMap::new(),
             segments: DashMap::new(),
+            nof_segments: DashMap::new(),
             local_disk_segments: DashMap::new(),
             tasks: DashMap::new(),
             replication_tasks: DashMap::new(),
@@ -106,6 +112,11 @@ impl MasterServiceImpl {
             promotion_tasks: DashMap::new(),
             promotion_access_counts: DashMap::new(),
             allocator: RwLock::new(
+                SegmentAllocator::new()
+                    .with_strategy(runtime_config.allocation_strategy)
+                    .with_memory_allocator(runtime_config.memory_allocator_kind),
+            ),
+            nof_allocator: RwLock::new(
                 SegmentAllocator::new()
                     .with_strategy(runtime_config.allocation_strategy)
                     .with_memory_allocator(runtime_config.memory_allocator_kind),
@@ -121,7 +132,18 @@ impl MasterServiceImpl {
         let client_monitor_worker = ClientMonitorWorker::new(state.clone());
 
         if let Some(ref backend) = *state.storage_backend.read() {
-            if let Ok(Some((segments, objects))) = backend.load() {
+            if let Some(ref backup_dir) = snapshot_backup_dir {
+                let snapshot_path = backup_dir.join("master_snapshot.json");
+                if snapshot_path.exists() {
+                    let backup_path = backup_dir.join("mooncake_snapshot_restore_backup");
+                    if let Err(e) = std::fs::create_dir_all(&backup_path) {
+                        tracing::warn!("Failed to create snapshot backup dir: {}", e);
+                    } else if let Err(e) = std::fs::copy(&snapshot_path, backup_path.join("master_snapshot.json")) {
+                        tracing::warn!("Failed to backup snapshot: {}", e);
+                    }
+                }
+            }
+            if let Ok(Some((segments, nof_segments, objects, tasks))) = backend.load() {
                 for seg in segments {
                     state.segments.insert(
                         seg.id,
@@ -131,8 +153,27 @@ impl MasterServiceImpl {
                     );
                     state.allocator.write().add_segment(seg);
                 }
+                for seg in nof_segments {
+                    state.nof_segments.insert(
+                        seg.segment.id,
+                        NoFSegmentEntry {
+                            segment: seg.segment.clone(),
+                            used: seg.used,
+                        },
+                    );
+                    state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
+                        id: seg.segment.id,
+                        name: seg.segment.name.clone(),
+                        size: seg.segment.size,
+                        used: seg.used,
+                        client_id: seg.segment.client_id,
+                    });
+                }
                 for (key, object) in objects {
                     state.objects.insert(key, object);
+                }
+                for task in tasks {
+                    state.tasks.insert(task.info.id, task);
                 }
                 tracing::info!("Restored state from snapshot");
             }
@@ -151,7 +192,12 @@ impl MasterServiceImpl {
     pub fn save_snapshot(&self) {
         let start = std::time::Instant::now();
         if let Some(ref backend) = *self.state.storage_backend.read() {
-            if let Err(e) = backend.save(&self.state.segments, &self.state.objects) {
+            if let Err(e) = backend.save(
+                &self.state.segments,
+                &self.state.nof_segments,
+                &self.state.objects,
+                &self.state.tasks,
+            ) {
                 metrics::SNAPSHOT_FAIL_COUNT.inc();
                 tracing::error!("Failed to save snapshot: {}", e);
             } else {

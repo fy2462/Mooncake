@@ -14,9 +14,12 @@ service MasterService {
 
   // Segment management — clients mount/unmount memory segments
   rpc MountSegment(MountSegmentRequest) returns (MountSegmentResponse);
+  rpc MountNoFSegment(MountNoFSegmentRequest) returns (MountNoFSegmentResponse);
   rpc UnmountSegment(UnmountSegmentRequest) returns (UnmountSegmentResponse);
+  rpc UnmountNoFSegment(UnmountNoFSegmentRequest) returns (UnmountNoFSegmentResponse);
   rpc GracefulUnmountSegment(GracefulUnmountSegmentRequest) returns (GracefulUnmountSegmentResponse);
   rpc ReMountSegment(ReMountSegmentRequest) returns (ReMountSegmentResponse);
+  rpc ReMountNoFSegment(ReMountNoFSegmentRequest) returns (ReMountNoFSegmentResponse);
   rpc MountLocalDiskSegment(MountLocalDiskSegmentRequest) returns (MountLocalDiskSegmentResponse);
   rpc OffloadObjectHeartbeat(OffloadObjectHeartbeatRequest) returns (OffloadObjectHeartbeatResponse);
   rpc ReportSsdCapacity(ReportSsdCapacityRequest) returns (ReportSsdCapacityResponse);
@@ -30,6 +33,8 @@ service MasterService {
   rpc ExistKey(ExistKeyRequest) returns (ExistKeyResponse);
   rpc GetAllKeys(GetAllKeysRequest) returns (GetAllKeysResponse);
   rpc GetAllSegments(GetAllSegmentsRequest) returns (GetAllSegmentsResponse);
+  rpc GetAllNoFSegments(GetAllNoFSegmentsRequest) returns (GetAllNoFSegmentsResponse);
+  rpc GetNoFSegmentsByName(GetNoFSegmentsByNameRequest) returns (GetNoFSegmentsByNameResponse);
 
   // Put workflow: start → client writes data → end
   rpc PutStart(PutStartRequest) returns (PutStartResponse);

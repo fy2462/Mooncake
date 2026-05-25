@@ -8,9 +8,7 @@ fn release_object_replicas(state: &MasterState, key: &str, replicas: &[ReplicaDe
     }
     clear_offloading_task(state, key);
     clear_promotion_task(state, key);
-    let segment_ids = replicas.iter().map(|r| r.segment_id).collect::<Vec<_>>();
-    state.allocator.write().release(replicas);
-    sync_segment_usage(state, segment_ids);
+    release_replicas(state, replicas);
 }
 
 fn allocate_replica_on_segment(
@@ -19,6 +17,28 @@ fn allocate_replica_on_segment(
     size: u64,
     segment_name: &str,
 ) -> Result<ReplicaDescriptor, Status> {
+    let is_nof = client_id_by_nof_segment_name(state, segment_name).is_some();
+    if is_nof {
+        let config = ReplicateConfig {
+            preferred_segment: segment_name.to_string(),
+            replica_num: 1,
+            ..Default::default()
+        };
+        let replicas = state.nof_allocator.write().allocate(key, size, 1, &config);
+        if replicas.len() == 1 && replicas[0].segment_name == segment_name {
+            sync_nof_segment_usage(state, replicas.iter().map(|r| r.segment_id));
+            let mut replica = replicas[0].clone();
+            replica.replica_type = ReplicaType::NoFSsd;
+            return Ok(replica);
+        }
+        if !replicas.is_empty() {
+            release_replicas(state, &replicas);
+        }
+        return Err(Status::resource_exhausted(format!(
+            "failed to allocate on NoF target segment: {segment_name}"
+        )));
+    }
+
     let config = ReplicateConfig {
         preferred_segment: segment_name.to_string(),
         replica_num: 1,
@@ -30,9 +50,7 @@ fn allocate_replica_on_segment(
         return Ok(replicas[0].clone());
     }
     if !replicas.is_empty() {
-        let segment_ids = replicas.iter().map(|r| r.segment_id).collect::<Vec<_>>();
-        state.allocator.write().release(&replicas);
-        sync_segment_usage(state, segment_ids);
+        release_replicas(state, &replicas);
     }
     Err(Status::resource_exhausted(format!(
         "failed to allocate on target segment: {segment_name}"
@@ -49,7 +67,7 @@ impl MasterServiceImpl {
         request: Request<proto::PutRevokeRequest>,
     ) -> Result<Response<proto::PutRevokeResponse>, Status> {
         let req = request.into_inner();
-        let _client_id = uuid_from_proto(
+        let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
@@ -59,8 +77,30 @@ impl MasterServiceImpl {
                 "object has an ongoing replication task",
             ));
         }
-        if let Some((_, object)) = self.state.objects.remove(&req.key) {
-            release_object_replicas(&self.state, &req.key, &object.replicas);
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if object_owner_client_id(&self.state, &object) != Some(client_id) {
+                return Err(Status::permission_denied("object owned by different client"));
+            }
+            let mut removed = Vec::new();
+            object.replicas.retain(|replica| {
+                let matches = match req.replica_type {
+                    x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
+                    x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
+                        replica.replica_type == ReplicaType::NoFSsd
+                    }
+                    _ => replica.replica_type == ReplicaType::Memory,
+                };
+                if matches {
+                    removed.push(replica.clone());
+                }
+                !matches
+            });
+            let remove_object = object.replicas.is_empty();
+            drop(object);
+            release_object_replicas(&self.state, &req.key, &removed);
+            if remove_object {
+                self.state.objects.remove(&req.key);
+            }
         }
         Ok(Response::new(proto::PutRevokeResponse {}))
     }
@@ -139,7 +179,7 @@ impl MasterServiceImpl {
             {
                 continue;
             }
-            if client_id_by_segment_name(&self.state, target).is_none() {
+            if client_id_by_replica_segment_name(&self.state, target).is_none() {
                 release_object_replicas(&self.state, &req.key, &allocated);
                 return Err(Status::invalid_argument(format!(
                     "target segment not mounted: {target}"
@@ -301,7 +341,7 @@ impl MasterServiceImpl {
         let target = match existing_target.clone() {
             Some(replica) => replica,
             None => {
-                if client_id_by_segment_name(&self.state, &req.target).is_none() {
+                if client_id_by_replica_segment_name(&self.state, &req.target).is_none() {
                     return Err(Status::invalid_argument("target segment not mounted"));
                 }
                 let replica =

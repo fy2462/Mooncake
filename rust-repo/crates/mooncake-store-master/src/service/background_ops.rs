@@ -4,7 +4,9 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::Instant;
 use uuid::Uuid;
 
-use super::helpers::{client_id_by_segment_name, memory_usage_ratio, sync_segment_usage};
+use super::helpers::{
+    client_id_by_segment_name, memory_usage_ratio, release_replicas, sync_segment_usage,
+};
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
 pub(crate) fn release_staged_promotion_replica(
@@ -27,8 +29,7 @@ pub(crate) fn release_staged_promotion_replica(
         });
         drop(object);
         if !removed.is_empty() {
-            state.allocator.write().release(&removed);
-            sync_segment_usage(state, [segment_id]);
+            release_replicas(state, &removed);
         }
     }
 }
@@ -211,12 +212,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
             let became_empty = object.replicas.is_empty();
             drop(object);
             if !removed.is_empty() {
-                let segment_ids = removed
-                    .iter()
-                    .map(|replica| replica.segment_id)
-                    .collect::<Vec<_>>();
-                state.allocator.write().release(&removed);
-                sync_segment_usage(state, segment_ids);
+                release_replicas(state, &removed);
                 evicted.push(key.clone());
             }
             if became_empty {

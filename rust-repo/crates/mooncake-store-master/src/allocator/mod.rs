@@ -98,6 +98,9 @@ impl SegmentAllocator {
                     allocations: HashMap::new(),
                     pending_releases: HashMap::new(),
                     next_release_token: 1,
+                    n_slab_resize: 0,
+                    n_slab_rebalance: 0,
+                    n_slab_release_aborted: 0,
                 };
                 let main_pool_id = cachelib
                     .create_pool(DEFAULT_CACHELIB_POOL_NAME.to_string(), total_capacity_bytes)
@@ -116,7 +119,18 @@ impl SegmentAllocator {
 
     pub fn allocate(
         &mut self,
+        key: &str,
+        slice_size: u64,
+        replica_count: usize,
+        config: &ReplicateConfig,
+    ) -> Vec<ReplicaDescriptor> {
+        self.allocate_for_client(key, None, slice_size, replica_count, config)
+    }
+
+    pub fn allocate_for_client(
+        &mut self,
         _key: &str,
+        client_id: Option<Uuid>,
         slice_size: u64,
         replica_count: usize,
         config: &ReplicateConfig,
@@ -155,6 +169,21 @@ impl SegmentAllocator {
                     1
                 }
             });
+        }
+
+        if config.prefer_alloc_in_same_node {
+            let preferred_host = client_id.and_then(|client_id| {
+                self.segments
+                    .values()
+                    .find(|state| state.segment.client_id == client_id)
+                    .map(|state| segment_host(&state.segment.name))
+            });
+            if let Some(preferred_host) = preferred_host {
+                candidates.sort_by_key(|segment_id| {
+                    let host = segment_host(&self.segments[segment_id].segment.name);
+                    if host == preferred_host { 0 } else { 1 }
+                });
+            }
         }
 
         let count = replica_count.min(candidates.len());
@@ -366,6 +395,76 @@ impl SegmentAllocator {
         }
     }
 
+    pub fn pool_advised_size(&self, segment_id: &Uuid, pool_id: PoolId) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => cachelib.pool_advised_size(pool_id),
+        }
+    }
+
+    pub fn pool_usable_size(&self, segment_id: &Uuid, pool_id: PoolId) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => cachelib.pool_usable_size(pool_id),
+        }
+    }
+
+    pub fn pool_current_alloc_size(&self, segment_id: &Uuid, pool_id: PoolId) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => {
+                Some(cachelib.current_alloc_size_for_pool(pool_id))
+            }
+        }
+    }
+
+    pub fn pool_unallocated_slab_memory(
+        &self,
+        segment_id: &Uuid,
+        pool_id: PoolId,
+    ) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => cachelib.pool_unallocated_slab_memory(pool_id),
+        }
+    }
+
+    pub fn advised_memory_size(&self, segment_id: &Uuid) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => Some(cachelib.advised_memory_size()),
+        }
+    }
+
+    pub fn n_slab_resize(&self, segment_id: &Uuid) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => Some(cachelib.n_slab_resize),
+        }
+    }
+
+    pub fn n_slab_rebalance(&self, segment_id: &Uuid) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => Some(cachelib.n_slab_rebalance),
+        }
+    }
+
+    pub fn n_slab_release_aborted(&self, segment_id: &Uuid) -> Option<u64> {
+        let state = self.segments.get(segment_id)?;
+        match &state.layout {
+            SegmentLayout::Offset(_) => None,
+            SegmentLayout::Cachelib(cachelib) => Some(cachelib.n_slab_release_aborted),
+        }
+    }
+
     pub fn is_alloc_freed(
         &self,
         segment_id: &Uuid,
@@ -568,6 +667,10 @@ impl SegmentAllocator {
             SegmentLayout::Cachelib(cachelib) => cachelib.abort_slab_release(context),
         }
     }
+}
+
+fn segment_host(name: &str) -> &str {
+    name.split(':').next().unwrap_or(name)
 }
 
 impl SegmentState {

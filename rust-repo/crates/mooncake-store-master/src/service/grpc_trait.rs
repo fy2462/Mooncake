@@ -16,11 +16,25 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::mount_segment_impl(self, request).await
     }
 
+    async fn mount_no_f_segment(
+        &self,
+        request: Request<proto::MountNoFSegmentRequest>,
+    ) -> Result<Response<proto::MountNoFSegmentResponse>, Status> {
+        MasterServiceImpl::mount_nof_segment_impl(self, request).await
+    }
+
     async fn unmount_segment(
         &self,
         request: Request<proto::UnmountSegmentRequest>,
     ) -> Result<Response<proto::UnmountSegmentResponse>, Status> {
         MasterServiceImpl::unmount_segment_impl(self, request).await
+    }
+
+    async fn unmount_no_f_segment(
+        &self,
+        request: Request<proto::UnmountNoFSegmentRequest>,
+    ) -> Result<Response<proto::UnmountNoFSegmentResponse>, Status> {
+        MasterServiceImpl::unmount_nof_segment_impl(self, request).await
     }
 
     async fn graceful_unmount_segment(
@@ -35,6 +49,13 @@ impl MasterService for MasterServiceImpl {
         request: Request<proto::ReMountSegmentRequest>,
     ) -> Result<Response<proto::ReMountSegmentResponse>, Status> {
         MasterServiceImpl::re_mount_segment_impl(self, request).await
+    }
+
+    async fn re_mount_no_f_segment(
+        &self,
+        request: Request<proto::ReMountNoFSegmentRequest>,
+    ) -> Result<Response<proto::ReMountNoFSegmentResponse>, Status> {
+        MasterServiceImpl::re_mount_nof_segment_impl(self, request).await
     }
 
     async fn mount_local_disk_segment(
@@ -112,6 +133,20 @@ impl MasterService for MasterServiceImpl {
         request: Request<proto::GetAllSegmentsRequest>,
     ) -> Result<Response<proto::GetAllSegmentsResponse>, Status> {
         MasterServiceImpl::get_all_segments_impl(self, request).await
+    }
+
+    async fn get_all_no_f_segments(
+        &self,
+        request: Request<proto::GetAllNoFSegmentsRequest>,
+    ) -> Result<Response<proto::GetAllNoFSegmentsResponse>, Status> {
+        MasterServiceImpl::get_all_nof_segments_impl(self, request).await
+    }
+
+    async fn get_no_f_segments_by_name(
+        &self,
+        request: Request<proto::GetNoFSegmentsByNameRequest>,
+    ) -> Result<Response<proto::GetNoFSegmentsByNameResponse>, Status> {
+        MasterServiceImpl::get_nof_segments_by_name_impl(self, request).await
     }
 
     async fn put_start(

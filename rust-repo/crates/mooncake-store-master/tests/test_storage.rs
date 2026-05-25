@@ -1,7 +1,7 @@
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
-use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
+use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -66,6 +66,8 @@ fn test_storage_backend_save_and_load() {
         },
     );
 
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     objects.insert(
         "key1".into(),
@@ -86,10 +88,11 @@ fn test_storage_backend_save_and_load() {
         },
     );
 
-    backend.save(&segments, &objects).unwrap();
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
 
-    let (loaded_segs, loaded_objs) = backend.load().unwrap().unwrap();
+    let (loaded_segs, loaded_nof_segs, loaded_objs, _loaded_tasks) = backend.load().unwrap().unwrap();
     assert_eq!(loaded_segs.len(), 1);
+    assert!(loaded_nof_segs.is_empty());
     assert_eq!(loaded_segs[0].name, "node1:12345");
     assert_eq!(loaded_segs[0].size, 1024 * 1024);
     assert_eq!(loaded_objs.len(), 1);
@@ -129,6 +132,8 @@ fn test_storage_backend_multiple_objects() {
         },
     );
 
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     for i in 0..5u64 {
         let key = format!("key_{}", i);
@@ -152,8 +157,9 @@ fn test_storage_backend_multiple_objects() {
         );
     }
 
-    backend.save(&segments, &objects).unwrap();
-    let (_, loaded_objs) = backend.load().unwrap().unwrap();
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    let (_, loaded_nof_segs, loaded_objs, _loaded_tasks) = backend.load().unwrap().unwrap();
+    assert!(loaded_nof_segs.is_empty());
     assert_eq!(loaded_objs.len(), 5);
 }
 
@@ -163,8 +169,10 @@ fn test_storage_backend_clear() {
     let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
 
     let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    backend.save(&segments, &objects).unwrap();
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
 
     assert!(backend.load().unwrap().is_some());
     backend.clear().unwrap();
@@ -196,6 +204,8 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
         },
     );
 
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     objects.insert(
         "hf3fs-key".into(),
@@ -216,10 +226,11 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
         },
     );
 
-    backend.save(&segments, &objects).unwrap();
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
     let loaded = backend.load().unwrap().unwrap();
     assert_eq!(loaded.0.len(), 1);
-    assert_eq!(loaded.1.len(), 1);
+    assert!(loaded.1.is_empty());
+    assert_eq!(loaded.2.len(), 1);
     assert!(api.reg_calls.load(Ordering::Relaxed) >= 2);
     assert!(api.dereg_calls.load(Ordering::Relaxed) >= 2);
 

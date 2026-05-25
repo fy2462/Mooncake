@@ -1,7 +1,9 @@
 use crate::http_metadata::MetadataState;
 use crate::metrics;
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
 use chrono::Utc;
 use std::time::SystemTime;
+use tonic::Status;
 use uuid::Uuid;
 
 use super::state::{ClientEntry, MasterState, ObjectEntry};
@@ -97,8 +99,48 @@ pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) 
     object.replicas.iter().find_map(|replica| {
         replica
             .holder_client_id
-            .or_else(|| client_id_by_segment_name(state, &replica.segment_name))
+            .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name))
     })
+}
+
+pub(crate) fn preferred_nof_segment_names(
+    state: &MasterState,
+    replicas: &[ReplicaDescriptor],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for replica in replicas {
+        if replica.replica_type != ReplicaType::Memory {
+            continue;
+        }
+        let host = host_from_segment_name(&replica.segment_name);
+        for segment in state.nof_segments.iter() {
+            if host_from_segment_name(&segment.segment.name) == host
+                && !names.iter().any(|name| name == &segment.segment.name)
+            {
+                names.push(segment.segment.name.clone());
+            }
+        }
+    }
+    names
+}
+
+pub(crate) fn client_id_by_nof_segment_name(
+    state: &MasterState,
+    segment_name: &str,
+) -> Option<Uuid> {
+    state
+        .nof_segments
+        .iter()
+        .find(|entry| entry.segment.name == segment_name)
+        .map(|entry| entry.segment.client_id)
+}
+
+pub(crate) fn client_id_by_replica_segment_name(
+    state: &MasterState,
+    segment_name: &str,
+) -> Option<Uuid> {
+    client_id_by_segment_name(state, segment_name)
+        .or_else(|| client_id_by_nof_segment_name(state, segment_name))
 }
 
 pub(crate) fn unmount_segment_owned(
@@ -119,6 +161,21 @@ pub(crate) fn unmount_segment_owned(
     state.allocator.write().remove_segment(&segment_id);
     sync_client_segments(state, client_id);
     metrics::SEGMENT_COUNT.set(state.segments.len() as i64);
+    true
+}
+
+pub(crate) fn unmount_nof_segment_owned(state: &MasterState, segment_id: Uuid, client_id: Uuid) -> bool {
+    let owned = state
+        .nof_segments
+        .get(&segment_id)
+        .map(|entry| entry.segment.client_id == client_id)
+        .unwrap_or(false);
+    if !owned {
+        return false;
+    }
+
+    state.nof_segments.remove(&segment_id);
+    state.nof_allocator.write().remove_segment(&segment_id);
     true
 }
 
@@ -151,6 +208,91 @@ pub(crate) fn sync_segment_usage(state: &MasterState, segment_ids: impl IntoIter
             entry.segment.used = used;
         }
     }
+}
+
+pub(crate) fn sync_nof_segment_usage(
+    state: &MasterState,
+    segment_ids: impl IntoIterator<Item = Uuid>,
+) {
+    let allocator = state.nof_allocator.read();
+    for segment_id in segment_ids {
+        let Some(used) = allocator.used_bytes(&segment_id) else {
+            continue;
+        };
+        if let Some(mut entry) = state.nof_segments.get_mut(&segment_id) {
+            entry.used = used;
+        }
+    }
+}
+
+pub(crate) fn release_replicas(state: &MasterState, replicas: &[ReplicaDescriptor]) {
+    let memory = replicas
+        .iter()
+        .filter(|r| r.replica_type == ReplicaType::Memory)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !memory.is_empty() {
+        let segment_ids = memory.iter().map(|r| r.segment_id).collect::<Vec<_>>();
+        state.allocator.write().release(&memory);
+        sync_segment_usage(state, segment_ids);
+    }
+
+    let nof = replicas
+        .iter()
+        .filter(|r| r.replica_type == ReplicaType::NoFSsd)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !nof.is_empty() {
+        let segment_ids = nof.iter().map(|r| r.segment_id).collect::<Vec<_>>();
+        state.nof_allocator.write().release(&nof);
+        sync_nof_segment_usage(state, segment_ids);
+    }
+}
+
+pub(crate) fn allocate_nof_replicas(
+    state: &MasterState,
+    key: &str,
+    size: u64,
+    count: usize,
+    preferred_segment_names: &[String],
+) -> Result<Vec<ReplicaDescriptor>, Status> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if state.nof_segments.is_empty() {
+        return Err(Status::failed_precondition("no NoF segments mounted"));
+    }
+
+    let mut replicas = Vec::with_capacity(count);
+    let mut used_names = Vec::new();
+    for idx in 0..count {
+        let preferred_segment = preferred_segment_names
+            .iter()
+            .find(|name| !used_names.iter().any(|used| used == *name))
+            .cloned()
+            .unwrap_or_default();
+        let config = ReplicateConfig {
+            preferred_segment,
+            replica_num: 1,
+            ..Default::default()
+        };
+        let allocated = state
+            .nof_allocator
+            .write()
+            .allocate(key, size, 1, &config)
+            .into_iter()
+            .next()
+            .ok_or(Status::resource_exhausted("no available NoF segment"))?;
+        used_names.push(allocated.segment_name.clone());
+        let mut replica = allocated;
+        replica.replica_type = ReplicaType::NoFSsd;
+        replicas.push(replica);
+        if idx + 1 >= state.nof_segments.len() {
+            break;
+        }
+    }
+    sync_nof_segment_usage(state, replicas.iter().map(|r| r.segment_id));
+    Ok(replicas)
 }
 
 pub(crate) fn memory_usage_ratio(state: &MasterState) -> f64 {

@@ -1,4 +1,6 @@
 use crate::service::ObjectEntry;
+use crate::service::NoFSegmentEntry;
+use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use mooncake_store_core::Segment;
 use std::collections::VecDeque;
@@ -145,7 +147,9 @@ pub struct LoadedSnapshot {
     pub snapshot_id: String,
     pub snapshot_sequence_id: u64,
     pub segments: Vec<Segment>,
+    pub nof_segments: Vec<NoFSegmentEntry>,
     pub objects: Vec<(String, ObjectEntry)>,
+    pub tasks: Vec<TaskEntry>,
 }
 
 pub trait SnapshotProvider: Send + Sync {
@@ -182,7 +186,7 @@ impl SnapshotProvider for LocalSnapshotProvider {
             self.root_dir.join(cluster_id)
         };
         let backend = StorageBackend::new(self.backend_type, &dir);
-        let Some((segments, objects)) = backend
+        let Some((segments, nof_segments, objects, tasks)) = backend
             .load()
             .map_err(|error| HaError::Snapshot(error.to_string()))?
         else {
@@ -201,7 +205,9 @@ impl SnapshotProvider for LocalSnapshotProvider {
             snapshot_id,
             snapshot_sequence_id: 0,
             segments,
+            nof_segments,
             objects,
+            tasks,
         }))
     }
 }
