@@ -133,6 +133,10 @@ pub struct MasterRuntimeConfig {
     pub storage_fs_dir: String,
     pub enable_disk_eviction: bool,
     pub quota_bytes: u64,
+    /// CXL memory path (e.g., "/dev/dax0.0"). Empty means CXL is disabled.
+    pub cxl_path: String,
+    pub cxl_size: u64,
+    pub enable_cxl: bool,
 }
 
 impl Default for MasterRuntimeConfig {
@@ -158,6 +162,9 @@ impl Default for MasterRuntimeConfig {
             storage_fs_dir: String::new(),
             enable_disk_eviction: false,
             quota_bytes: 0,
+            cxl_path: String::new(),
+            cxl_size: 8 * 1024 * 1024 * 1024,
+            enable_cxl: false,
         }
     }
 }

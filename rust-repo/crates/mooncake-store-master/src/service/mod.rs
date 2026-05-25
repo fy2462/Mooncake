@@ -153,23 +153,24 @@ impl MasterServiceImpl {
                 }
             }
             if let Ok(Some((segments, nof_segments, objects, tasks))) = backend.load() {
-                for seg in segments {
+                for (seg, status) in segments {
                     state.segments.insert(
                         seg.id,
                         SegmentEntry {
                             segment: seg.clone(),
-                            status: proto::SegmentStatus::Active,
+                            status,
                         },
                     );
                     state.allocator.write().add_segment(seg);
                 }
                 for seg in nof_segments {
+                    let status = seg.status;
                     state.nof_segments.insert(
                         seg.segment.id,
                         NoFSegmentEntry {
                             segment: seg.segment.clone(),
                             used: seg.used,
-                            status: proto::SegmentStatus::Active,
+                            status,
                         },
                     );
                     state.nof_allocator.write().add_segment(mooncake_store_core::Segment {

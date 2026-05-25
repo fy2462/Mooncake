@@ -107,7 +107,8 @@ fn evict_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescriptor> {
     let mut removed = Vec::new();
     object.replicas.retain(|replica| {
         let should_remove = replica.replica_type == ReplicaType::Memory
-            && replica.status == ReplicaStatus::Complete;
+            && replica.status == ReplicaStatus::Complete
+            && !replica.is_busy(); // skip in-use replicas
         if should_remove {
             removed.push(replica.clone());
         }
@@ -121,7 +122,9 @@ fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescr
         .replicas
         .iter()
         .filter(|replica| {
-            replica.replica_type == ReplicaType::Memory && replica.status == ReplicaStatus::Complete
+            replica.replica_type == ReplicaType::Memory
+                && replica.status == ReplicaStatus::Complete
+                && !replica.is_busy()
         })
         .count();
     if total_memory <= 1 {
@@ -132,7 +135,8 @@ fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescr
     let mut removed = Vec::new();
     object.replicas.retain(|replica| {
         let is_memory_complete = replica.replica_type == ReplicaType::Memory
-            && replica.status == ReplicaStatus::Complete;
+            && replica.status == ReplicaStatus::Complete
+            && !replica.is_busy();
         if !is_memory_complete {
             return true;
         }

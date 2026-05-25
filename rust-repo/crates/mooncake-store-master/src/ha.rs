@@ -3,6 +3,7 @@ use crate::service::NoFSegmentEntry;
 use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use mooncake_store_core::Segment;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -203,7 +204,7 @@ impl SnapshotProvider for LocalSnapshotProvider {
         Ok(Some(LoadedSnapshot {
             snapshot_id,
             snapshot_sequence_id: 0,
-            segments,
+            segments: segments.into_iter().map(|(s, _)| s).collect(),
             nof_segments,
             objects,
             tasks,
@@ -580,7 +581,7 @@ impl MasterServiceSupervisor {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpLogRecord {
     pub seq: u64,
     pub producer_view_version: u64,
@@ -626,6 +627,10 @@ enum CoordinatorBackend {
         client: etcd_client::Client,
         election_key: String,
     },
+    Redis {
+        client: redis::Client,
+        election_key: String,
+    },
     K8s {
         namespace: String,
         lease_name: String,
@@ -649,6 +654,17 @@ impl LeaderCoordinator {
             CoordinatorBackend::Etcd {
                 client,
                 election_key: "/mooncake/master/leader".to_string(),
+            },
+            LeaderRole::Standby,
+        ))
+    }
+
+    pub async fn new_redis(connstring: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let client = redis::Client::open(connstring)?;
+        Ok(Self::with_backend(
+            CoordinatorBackend::Redis {
+                client,
+                election_key: "mooncake:master:leader".to_string(),
             },
             LeaderRole::Standby,
         ))
@@ -700,6 +716,26 @@ impl LeaderCoordinator {
                     },
                     Err(_) => Ok(None),
                 }
+            }
+            CoordinatorBackend::Redis {
+                client,
+                election_key,
+            } => {
+                let mut conn = client.get_multiplexed_async_connection().await
+                    .map_err(|e| HaError::InvalidBackend(format!("redis connect: {e}")))?;
+                let result: Option<String> = redis::cmd("GET")
+                    .arg(election_key)
+                    .query_async(&mut conn)
+                    .await
+                    .ok();
+                if let Some(ref v) = result {
+                    let parts: Vec<&str> = v.splitn(2, '|').collect();
+                    return Ok(Some(MasterView {
+                        leader_address: parts.first().copied().unwrap_or("").to_string(),
+                        view_version: parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+                    }));
+                }
+                Ok(None)
             }
             _ => Ok(None),
         }
@@ -767,6 +803,41 @@ impl LeaderCoordinator {
                     }
                 }
             }
+            CoordinatorBackend::Redis {
+                client,
+                election_key,
+            } => {
+                let mut conn = client.get_multiplexed_async_connection().await
+                    .map_err(|e| HaError::InvalidBackend(format!("redis connect: {e}")))?;
+                let ttl_ms = (lease_ttl_secs * 1000) as usize;
+                let value = format!("{}|{}", leader_address, "1");
+                let result: Option<String> = redis::cmd("SET")
+                    .arg(election_key)
+                    .arg(&value)
+                    .arg("NX")
+                    .arg("PX")
+                    .arg(ttl_ms)
+                    .query_async(&mut conn)
+                    .await
+                    .ok();
+                if result.as_deref() == Some("OK") {
+                    let _ = self.role_tx.send(LeaderRole::Leader);
+                    Ok(AcquireLeadershipResult {
+                        acquired: true,
+                        view: Some(MasterView {
+                            leader_address: leader_address.to_string(),
+                            view_version: 1,
+                        }),
+                        lease_id: Some(lease_ttl_secs),
+                    })
+                } else {
+                    Ok(AcquireLeadershipResult {
+                        acquired: false,
+                        view: self.read_current_view().await?,
+                        lease_id: None,
+                    })
+                }
+            }
             CoordinatorBackend::Manual => {
                 let _ = self.role_tx.send(LeaderRole::Leader);
                 Ok(AcquireLeadershipResult {
@@ -821,6 +892,46 @@ impl LeaderCoordinator {
                     }
                 });
             }
+            CoordinatorBackend::Redis {
+                client,
+                election_key,
+            } => {
+                let _conn = match client.get_multiplexed_async_connection().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("Redis keepalive connection failed: {}", e);
+                        let _ = self.role_tx.send(LeaderRole::Standby);
+                        return Ok(LeadershipHandle { cancel_tx: Some(cancel_tx) });
+                    }
+                };
+                let lease_ms = lease_id * 1000;
+                let role_tx = self.role_tx.clone();
+                let ek = election_key.clone();
+                let client2 = client.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(3)) => {
+                                if let Ok(mut c) = client2.get_multiplexed_async_connection().await {
+                                    let result: Result<(), _> = redis::cmd("PEXPIRE")
+                                        .arg(&ek)
+                                        .arg(lease_ms)
+                                        .query_async(&mut c)
+                                        .await;
+                                    if result.is_err() {
+                                        let _ = role_tx.send(LeaderRole::Standby);
+                                        return;
+                                    }
+                                }
+                            }
+                            _ = &mut cancel_rx => {
+                                info!("Redis leadership keepalive cancelled");
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
             _ => {}
         }
         Ok(LeadershipHandle {
@@ -838,6 +949,20 @@ impl LeaderCoordinator {
                 })?;
                 let _ = self.role_tx.send(LeaderRole::Standby);
                 info!("Leadership released via resign");
+                Ok(())
+            }
+            CoordinatorBackend::Redis {
+                client,
+                election_key,
+            } => {
+                let mut conn = client.get_multiplexed_async_connection().await
+                    .map_err(|e| HaError::InvalidBackend(format!("redis connect: {e}")))?;
+                let _: Result<(), _> = redis::cmd("DEL")
+                    .arg(election_key)
+                    .query_async(&mut conn)
+                    .await;
+                let _ = self.role_tx.send(LeaderRole::Standby);
+                info!("Redis leadership released");
                 Ok(())
             }
             CoordinatorBackend::Manual => {
@@ -884,6 +1009,10 @@ impl LeaderCoordinator {
                     "K8s Lease election initialized: namespace={}, lease={}",
                     namespace, lease_name
                 );
+                Ok(*self.role_rx.borrow())
+            }
+            CoordinatorBackend::Redis { .. } => {
+                info!("Redis leader election initialized");
                 Ok(*self.role_rx.borrow())
             }
             CoordinatorBackend::Manual => Ok(*self.role_rx.borrow()),

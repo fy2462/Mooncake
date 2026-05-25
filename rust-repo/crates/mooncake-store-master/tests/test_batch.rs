@@ -72,6 +72,7 @@ fn test_batch_put_end_status_transition() {
         "pending_key".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: 0,
@@ -112,6 +113,7 @@ fn test_batch_upsert_end_allocates_new() {
             key.to_string(),
             ObjectEntry {
                 replicas: vec![ReplicaDescriptor {
+                    refcnt: 0,
                     segment_id: sid,
                     segment_name: "s1".into(),
                     offset: *size,
@@ -134,6 +136,7 @@ fn test_batch_upsert_end_allocates_new() {
         "new_key_1".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: 999,

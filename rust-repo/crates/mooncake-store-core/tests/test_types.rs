@@ -205,6 +205,7 @@ fn test_segment_serde_json_keys() {
 #[test]
 fn test_replica_descriptor() {
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
         offset: 0x1000,
@@ -220,6 +221,7 @@ fn test_replica_descriptor() {
 #[test]
 fn test_replica_descriptor_disk() {
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "disk-node:1".into(),
         offset: 65536,
@@ -243,6 +245,7 @@ fn test_replica_descriptor_all_statuses() {
         ReplicaStatus::Failed,
     ] {
         let rd = ReplicaDescriptor {
+            refcnt: 0,
             segment_id: Uuid::new_v4(),
             segment_name: "s1".into(),
             offset: 0,
@@ -258,6 +261,7 @@ fn test_replica_descriptor_all_statuses() {
 #[test]
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "cl".into(),
         offset: 777,
@@ -277,6 +281,7 @@ fn test_replica_descriptor_clone() {
 fn test_replica_descriptor_serde_roundtrip() {
     let sid = Uuid::new_v4();
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: sid,
         segment_name: "serde-rep:1".into(),
         offset: 0xFACE,

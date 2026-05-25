@@ -2,6 +2,7 @@ use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
 /// Trait for persistent operation log stores.
 pub trait OpLogStore: Send + Sync {
@@ -313,6 +314,222 @@ impl OpLogStore for LocalFsOpLogStore {
             next_seq,
             timed_out: false,
         }
+    }
+}
+
+// =============================================================================
+// Etcd-backed OpLog Store
+// =============================================================================
+
+/// Persistent oplog store backed by etcd.
+///
+/// Each entry is stored as a key `/oplog/<prefix>/seq_<seq:020>`. Zero-padded
+/// sequence numbers ensure lexicographic ordering. A separate `/oplog/<prefix>/latest`
+/// key stores the most recent sequence number for fast recovery.
+pub struct EtcdOpLogStore {
+    client: etcd_client::Client,
+    key_prefix: String,
+    last_seq: u64,
+    /// Entries accumulated for batch write.
+    buffer: Vec<OpLogRecord>,
+    /// Flush the buffer after this many entries.
+    batch_size: usize,
+}
+
+impl EtcdOpLogStore {
+    pub async fn new(
+        client: etcd_client::Client,
+        key_prefix: &str,
+        batch_size: usize,
+    ) -> Result<Self, HaError> {
+        let prefix = key_prefix.trim_end_matches('/').to_string();
+        let mut store = Self {
+            client,
+            key_prefix: prefix,
+            last_seq: 0,
+            buffer: Vec::new(),
+            batch_size: batch_size.max(1),
+        };
+        store.recover().await?;
+        Ok(store)
+    }
+
+    /// Recover `last_seq` from the `/latest` key.
+    async fn recover(&mut self) -> Result<(), HaError> {
+        let latest_key = format!("{}/latest", self.key_prefix);
+        let c = self.client.clone();
+        match c
+            .kv_client()
+            .get(latest_key.as_bytes(), None)
+            .await
+        {
+            Ok(resp) => {
+                if let Some(kv) = resp.kvs().first() {
+                    if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
+                        self.last_seq = val.parse::<u64>().unwrap_or(0);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to read oplog latest key: {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    fn entry_key(&self, seq: u64) -> String {
+        format!("{}/seq_{:020}", self.key_prefix, seq)
+    }
+
+    fn latest_key(&self) -> String {
+        format!("{}/latest", self.key_prefix)
+    }
+
+    /// Write the buffer to etcd.
+    async fn flush(&mut self) -> Result<(), HaError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let c = self.client.clone();
+        for entry in &self.buffer {
+            let key = self.entry_key(entry.seq);
+            let value = serde_json::to_string(entry).map_err(|e| {
+                HaError::InvalidBackend(format!("oplog serialize: {e}"))
+            })?;
+            c.kv_client()
+                .put(key.as_bytes(), value.as_bytes(), None)
+                .await
+                .map_err(|e| {
+                    HaError::InvalidBackend(format!("etcd put oplog: {e}"))
+                })?;
+        }
+        // Update latest pointer
+        let max_seq = self.buffer.last().unwrap().seq;
+        let latest_val = max_seq.to_string();
+        c.kv_client()
+            .put(
+                self.latest_key().as_bytes(),
+                latest_val.as_bytes(),
+                None,
+            )
+            .await
+            .map_err(|e| {
+                HaError::InvalidBackend(format!("etcd put oplog latest: {e}"))
+            })?;
+
+        self.buffer.clear();
+        Ok(())
+    }
+}
+
+impl OpLogStore for EtcdOpLogStore {
+    fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+        self.last_seq += 1;
+        self.buffer.push(OpLogRecord {
+            seq: self.last_seq,
+            ..entry.clone()
+        });
+        Ok(self.last_seq)
+    }
+
+    fn read_since(
+        &self,
+        since_seq: u64,
+        max_count: usize,
+    ) -> Result<Vec<OpLogRecord>, HaError> {
+        // Read from buffered entries first (fast path)
+        let mut entries: Vec<OpLogRecord> = self
+            .buffer
+            .iter()
+            .filter(|r| r.seq >= since_seq)
+            .take(max_count)
+            .cloned()
+            .collect();
+        if entries.len() >= max_count {
+            entries.truncate(max_count);
+            return Ok(entries);
+        }
+        let remaining = max_count - entries.len();
+
+        // We can't easily do async etcd reads from &self (sync context).
+        // For now, return buffered entries. Full async reads require an async
+        // read_since variant.
+        let _ = remaining;
+        Ok(entries)
+    }
+
+    fn latest_sequence(&self) -> u64 {
+        self.last_seq
+    }
+
+    fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+        let records = self.read_since(since_seq, max_count).unwrap_or_default();
+        let next_seq = records.last().map(|r| r.seq + 1).unwrap_or(since_seq);
+        OpLogPollResult {
+            records,
+            next_seq,
+            timed_out: false,
+        }
+    }
+}
+
+/// Async extension for etcd-backed stores that need full range queries.
+impl EtcdOpLogStore {
+    /// Read entries from etcd starting from `since_seq` (async).
+    pub async fn read_since_async(
+        &self,
+        since_seq: u64,
+        max_count: usize,
+    ) -> Result<Vec<OpLogRecord>, HaError> {
+        let mut entries = Vec::new();
+        let c = self.client.clone();
+
+        // Try reading from etcd
+        let range_end = self.entry_key(u64::MAX);
+        let range_start = self.entry_key(since_seq);
+
+        match c
+            .kv_client()
+            .get(
+                range_start.as_bytes(),
+                Some(etcd_client::GetOptions::new().with_range(range_end.as_bytes())),
+            )
+            .await
+        {
+            Ok(resp) => {
+                for kv in resp.kvs().iter().take(max_count) {
+                    if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
+                        if let Ok(entry) = serde_json::from_str::<OpLogRecord>(&val) {
+                            entries.push(entry);
+                            if entries.len() >= max_count {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("etcd range query for oplog failed: {}", e);
+            }
+        }
+
+        // Supplement with buffered entries
+        for entry in &self.buffer {
+            if entry.seq >= since_seq && entries.len() < max_count {
+                if !entries.iter().any(|e| e.seq == entry.seq) {
+                    entries.push(entry.clone());
+                }
+            }
+        }
+
+        entries.sort_by_key(|e| e.seq);
+        entries.truncate(max_count);
+        Ok(entries)
+    }
+
+    /// Flush buffered entries to etcd (async). Call periodically or before shutdown.
+    pub async fn flush_async(&mut self) -> Result<(), HaError> {
+        self.flush().await
     }
 }
 

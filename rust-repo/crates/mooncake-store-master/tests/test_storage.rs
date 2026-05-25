@@ -73,6 +73,7 @@ fn test_storage_backend_save_and_load() {
         "key1".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: sid,
                 segment_name: "node1:12345".into(),
                 offset: 0x1000,
@@ -92,6 +93,7 @@ fn test_storage_backend_save_and_load() {
     backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
 
     let (loaded_segs, loaded_nof_segs, loaded_objs, _loaded_tasks) = backend.load().unwrap().unwrap();
+    let loaded_segs: Vec<_> = loaded_segs.into_iter().map(|(s, _)| s).collect();
     assert_eq!(loaded_segs.len(), 1);
     assert!(loaded_nof_segs.is_empty());
     assert_eq!(loaded_segs[0].name, "node1:12345");
@@ -143,6 +145,7 @@ fn test_storage_backend_multiple_objects() {
             key.clone(),
             ObjectEntry {
                 replicas: vec![ReplicaDescriptor {
+                    refcnt: 0,
                     segment_id: sid,
                     segment_name: "s1".into(),
                     offset: i * 100,
@@ -215,6 +218,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
         "hf3fs-key".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: sid,
                 segment_name: "hf3fs-node".into(),
                 offset: 64,
@@ -245,6 +249,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
 #[test]
 fn test_serialize_replica_status_roundtrip() {
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
         offset: 0x2000,

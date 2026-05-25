@@ -186,6 +186,12 @@ impl MasterServiceImpl {
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
             object.replicas.extend(allocated.clone());
         }
+        // Pin source replica via refcnt
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &source)) {
+                src.inc_refcnt();
+            }
+        }
         self.state.replication_tasks.insert(
             req.key.clone(),
             ReplicationTaskEntry {
@@ -236,6 +242,12 @@ impl MasterServiceImpl {
         } else {
             all_present = false;
         }
+        // Release source replica refcnt
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+                src.dec_refcnt();
+            }
+        }
         self.state.replication_tasks.remove(&req.key);
         if !all_present {
             return Err(Status::failed_precondition(
@@ -283,6 +295,12 @@ impl MasterServiceImpl {
         release_object_replicas(&self.state, &req.key, &removed);
         if remove_object {
             self.state.objects.remove(&req.key);
+        }
+        // Release source replica refcnt
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+                src.dec_refcnt();
+            }
         }
         self.state.replication_tasks.remove(&req.key);
         Ok(Response::new(proto::CopyRevokeResponse {}))
@@ -348,6 +366,12 @@ impl MasterServiceImpl {
         } else {
             vec![target.clone()]
         };
+        // Pin source replica via refcnt
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &source)) {
+                src.inc_refcnt();
+            }
+        }
         self.state.replication_tasks.insert(
             req.key.clone(),
             ReplicationTaskEntry {
@@ -406,6 +430,12 @@ impl MasterServiceImpl {
         if remove_object {
             self.state.objects.remove(&req.key);
         }
+        // Release source replica refcnt
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+                src.dec_refcnt();
+            }
+        }
         self.state.replication_tasks.remove(&req.key);
         Ok(Response::new(proto::MoveEndResponse {}))
     }
@@ -443,6 +473,12 @@ impl MasterServiceImpl {
             });
         }
         release_object_replicas(&self.state, &req.key, &removed);
+        // Release source replica refcnt
+        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+                src.dec_refcnt();
+            }
+        }
         self.state.replication_tasks.remove(&req.key);
         Ok(Response::new(proto::MoveRevokeResponse {}))
     }

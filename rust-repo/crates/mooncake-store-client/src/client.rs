@@ -1067,6 +1067,7 @@ impl MooncakeClient {
         replicas.iter().filter_map(|r| {
             let sid = r.segment_id.as_ref()?;
             Some(ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: Uuid::from_u64_pair(sid.high, sid.low),
                 segment_name: r.segment_name.clone(),
                 offset: r.offset,

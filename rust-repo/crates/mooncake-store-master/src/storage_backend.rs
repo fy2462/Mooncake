@@ -22,6 +22,8 @@ struct SnapshotSegment {
     size: u64,
     used: u64,
     client_id: String,
+    #[serde(default)]
+    status: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,8 @@ struct SnapshotNoFSegment {
     te_endpoint: String,
     client_id: String,
     used: u64,
+    #[serde(default)]
+    status: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +152,7 @@ impl StorageBackend {
                     size: entry.segment.size,
                     used: entry.segment.used,
                     client_id: entry.segment.client_id.to_string(),
+                    status: entry.status as i32,
                 })
                 .collect(),
             nof_segments: nof_segments
@@ -160,6 +165,7 @@ impl StorageBackend {
                     te_endpoint: entry.segment.te_endpoint.clone(),
                     client_id: entry.segment.client_id.to_string(),
                     used: entry.used,
+                    status: entry.status as i32,
                 })
                 .collect(),
             objects: objects
@@ -215,7 +221,7 @@ impl StorageBackend {
         &self,
     ) -> Result<
         Option<(
-            Vec<mooncake_store_core::Segment>,
+            Vec<(mooncake_store_core::Segment, crate::proto::SegmentStatus)>,
             Vec<crate::service::NoFSegmentEntry>,
             Vec<(String, crate::service::ObjectEntry)>,
             Vec<crate::service::TaskEntry>,
@@ -230,15 +236,23 @@ impl StorageBackend {
         let reader = BufReader::new(BackendFile::open(&path, self.backend_type)?);
         let snap: Snapshot = serde_json::from_reader(reader)?;
 
-        let segments: Vec<mooncake_store_core::Segment> = snap
+        let segments: Vec<(mooncake_store_core::Segment, crate::proto::SegmentStatus)> = snap
             .segments
             .into_iter()
-            .map(|s| mooncake_store_core::Segment {
-                id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
-                name: s.name,
-                size: s.size,
-                used: s.used,
-                client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
+            .map(|s| {
+                let status = match s.status {
+                    1 => crate::proto::SegmentStatus::Active,
+                    2 => crate::proto::SegmentStatus::Draining,
+                    3 => crate::proto::SegmentStatus::Unavailable,
+                    _ => crate::proto::SegmentStatus::Active,
+                };
+                (mooncake_store_core::Segment {
+                    id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
+                    name: s.name,
+                    size: s.size,
+                    used: s.used,
+                    client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
+                }, status)
             })
             .collect();
 
@@ -255,7 +269,12 @@ impl StorageBackend {
                     client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
                 },
                 used: s.used,
-                status: crate::proto::SegmentStatus::Active,
+                status: match s.status {
+                    1 => crate::proto::SegmentStatus::Active,
+                    2 => crate::proto::SegmentStatus::Draining,
+                    3 => crate::proto::SegmentStatus::Unavailable,
+                    _ => crate::proto::SegmentStatus::Active,
+                },
             })
             .collect();
 

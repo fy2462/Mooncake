@@ -397,6 +397,7 @@ impl MasterServiceImpl {
         for (key, metadata) in req.keys.iter().zip(req.metadatas.iter()) {
             clear_offloading_task(&self.state, key);
             let replica = ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: Uuid::nil(),
                 segment_name: metadata.transport_endpoint.clone(),
                 offset: 0,

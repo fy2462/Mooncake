@@ -197,6 +197,7 @@ impl SegmentAllocator {
             };
             state.segment.used = state.segment.used.saturating_add(accounted_size);
             replicas.push(ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: state.segment.id,
                 segment_name: state.segment.name.clone(),
                 offset,

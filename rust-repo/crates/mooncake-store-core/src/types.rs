@@ -72,7 +72,7 @@ impl Default for ObjectDataType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ReplicaDescriptor {
     pub segment_id: Uuid,
     pub segment_name: String,
@@ -81,6 +81,44 @@ pub struct ReplicaDescriptor {
     pub status: ReplicaStatus,
     pub replica_type: ReplicaType,
     pub holder_client_id: Option<Uuid>,
+    /// Reference count — tracks in-flight operations (copy/move/promotion).
+    /// Eviction and release MUST check `is_busy()` before freeing.
+    #[serde(skip, default = "default_refcnt")]
+    pub refcnt: u32,
+}
+
+fn default_refcnt() -> u32 { 0 }
+
+impl Clone for ReplicaDescriptor {
+    fn clone(&self) -> Self {
+        Self {
+            segment_id: self.segment_id,
+            segment_name: self.segment_name.clone(),
+            offset: self.offset,
+            size: self.size,
+            status: self.status,
+            replica_type: self.replica_type,
+            holder_client_id: self.holder_client_id,
+            refcnt: 0,
+        }
+    }
+}
+
+impl ReplicaDescriptor {
+    /// Returns true if any in-flight operation holds a reference to this replica.
+    pub fn is_busy(&self) -> bool {
+        self.refcnt > 0
+    }
+
+    /// Increment the reference count.
+    pub fn inc_refcnt(&mut self) {
+        self.refcnt = self.refcnt.saturating_add(1);
+    }
+
+    /// Decrement the reference count.
+    pub fn dec_refcnt(&mut self) {
+        self.refcnt = self.refcnt.saturating_sub(1);
+    }
 }
 
 // ---------------------------------------------------------------------------

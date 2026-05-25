@@ -132,6 +132,7 @@ fn test_replica_type_serde_roundtrip() {
 fn test_replica_descriptor_full() {
     let sid = Uuid::new_v4();
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: sid,
         segment_name: "node1:12345".into(),
         offset: 0xDEAD,
@@ -151,6 +152,7 @@ fn test_replica_descriptor_full() {
 #[test]
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {
+        refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "s1".into(),
         offset: 100,
@@ -202,6 +204,7 @@ fn test_object_entry_creation() {
     let entry = ObjectEntry {
         replicas: vec![
             ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: sid,
                 segment_name: "s1".into(),
                 offset: 0,
@@ -211,6 +214,7 @@ fn test_object_entry_creation() {
                 holder_client_id: None,
             },
             ReplicaDescriptor {
+                refcnt: 0,
                 segment_id: sid,
                 segment_name: "s2".into(),
                 offset: 128,
