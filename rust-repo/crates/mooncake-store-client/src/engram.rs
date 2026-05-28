@@ -1,7 +1,6 @@
 use crate::client::MooncakeClient;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicateConfig, StoreError};
-use std::ffi::c_void;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -25,30 +24,25 @@ impl Default for EngramStoreConfig {
 }
 
 pub trait EngramClient {
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    fn register_buffer(
-        &self,
-        buffer: *mut c_void,
-        size: usize,
-        location: &str,
-    ) -> StoreResult<()>;
+    fn register_buffer(&self, buffer: &[u8], location: &str) -> StoreResult<()>;
 
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()>;
+    fn unregister_buffer(&self, buffer: &[u8]) -> StoreResult<()>;
 
-    fn batch_is_exist<'a>(&'a mut self, keys: &'a [String]) -> ClientFuture<'a, StoreResult<Vec<bool>>>;
+    fn batch_is_exist<'a>(
+        &'a mut self,
+        keys: &'a [String],
+    ) -> ClientFuture<'a, StoreResult<Vec<bool>>>;
 
     fn batch_put_from<'a>(
         &'a mut self,
         keys: &'a [String],
-        buffers: &'a [*mut c_void],
-        sizes: &'a [usize],
+        buffers: &'a [&'a [u8]],
         config: Option<ReplicateConfig>,
     ) -> ClientFuture<'a, StoreResult<Vec<i32>>>;
 
     fn get_into_ranges<'a>(
         &'a mut self,
-        buffers: &'a [*mut c_void],
+        buffer: &'a mut [u8],
         keys: &'a [Vec<String>],
         dst_offsets: &'a [Vec<Vec<usize>>],
         src_offsets: &'a [Vec<Vec<usize>>],
@@ -59,45 +53,50 @@ pub trait EngramClient {
 }
 
 impl EngramClient for MooncakeClient {
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    fn register_buffer(
-        &self,
-        buffer: *mut c_void,
-        size: usize,
-        location: &str,
-    ) -> StoreResult<()> {
-        unsafe { MooncakeClient::register_buffer(self, buffer, size, location) }
+    fn register_buffer(&self, buffer: &[u8], location: &str) -> StoreResult<()> {
+        let ptr = buffer.as_ptr() as *mut std::ffi::c_void;
+        unsafe { MooncakeClient::register_buffer(self, ptr, buffer.len(), location) }
     }
 
-    #[allow(clippy::not_unsafe_ptr_arg_deref)]
-    fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()> {
-        unsafe { MooncakeClient::unregister_buffer(self, buffer) }
+    fn unregister_buffer(&self, buffer: &[u8]) -> StoreResult<()> {
+        let ptr = buffer.as_ptr() as *mut std::ffi::c_void;
+        unsafe { MooncakeClient::unregister_buffer(self, ptr) }
     }
 
-    fn batch_is_exist<'a>(&'a mut self, keys: &'a [String]) -> ClientFuture<'a, StoreResult<Vec<bool>>> {
+    fn batch_is_exist<'a>(
+        &'a mut self,
+        keys: &'a [String],
+    ) -> ClientFuture<'a, StoreResult<Vec<bool>>> {
         Box::pin(async move { MooncakeClient::batch_is_exist(self, keys).await })
     }
 
     fn batch_put_from<'a>(
         &'a mut self,
         keys: &'a [String],
-        buffers: &'a [*mut c_void],
-        sizes: &'a [usize],
+        buffers: &'a [&'a [u8]],
         config: Option<ReplicateConfig>,
     ) -> ClientFuture<'a, StoreResult<Vec<i32>>> {
-        Box::pin(async move { unsafe { MooncakeClient::batch_put_from(self, keys, buffers, sizes, config).await } })
+        Box::pin(async move {
+            let ptrs: Vec<*mut std::ffi::c_void> =
+                buffers.iter().map(|b| b.as_ptr() as *mut std::ffi::c_void).collect();
+            let sizes: Vec<usize> = buffers.iter().map(|b| b.len()).collect();
+            unsafe { MooncakeClient::batch_put_from(self, keys, &ptrs, &sizes, config).await }
+        })
     }
 
     fn get_into_ranges<'a>(
         &'a mut self,
-        buffers: &'a [*mut c_void],
+        buffer: &'a mut [u8],
         keys: &'a [Vec<String>],
         dst_offsets: &'a [Vec<Vec<usize>>],
         src_offsets: &'a [Vec<Vec<usize>>],
         sizes: &'a [Vec<Vec<usize>>],
     ) -> ClientFuture<'a, StoreResult<Vec<Vec<Vec<i64>>>>> {
+        let ptr = buffer.as_mut_ptr() as *mut std::ffi::c_void;
         Box::pin(async move {
-            unsafe { MooncakeClient::get_into_ranges(self, buffers, keys, dst_offsets, src_offsets, sizes).await }
+            unsafe {
+                MooncakeClient::get_into_ranges(self, &[ptr], keys, dst_offsets, src_offsets, sizes).await
+            }
         })
     }
 
@@ -270,26 +269,18 @@ impl<C: EngramClient> EngramStore<C> {
             }
         }
 
-        let buffer_ptr = output_buffer.as_mut_ptr() as *mut c_void;
         self.store
-            .register_buffer(buffer_ptr, expected_size, &self.buffer_location)
+            .register_buffer(&output_buffer[..expected_size], &self.buffer_location)
             .map_err(|err| {
                 output_buffer[..expected_size].fill(0);
                 err
             })?;
 
-        let buffers = [buffer_ptr];
         let result = self
             .store
-            .get_into_ranges(
-                &buffers,
-                &all_keys,
-                &all_dst_offsets,
-                &all_src_offsets,
-                &all_sizes,
-            )
+            .get_into_ranges(output_buffer, &all_keys, &all_dst_offsets, &all_src_offsets, &all_sizes)
             .await;
-        let unregister_result = self.store.unregister_buffer(buffer_ptr);
+        let unregister_result = self.store.unregister_buffer(&output_buffer[..expected_size]);
 
         let results = match result {
             Ok(results) => results,
@@ -364,7 +355,6 @@ impl<C: EngramClient> EngramStore<C> {
             )));
         }
 
-        let mut sizes = Vec::with_capacity(embedding_buffers.len());
         for (head_id, buffer) in embedding_buffers.iter().enumerate() {
             let expected = self.table_vocab_sizes[head_id] as usize
                 * self.embedding_dim
@@ -375,7 +365,6 @@ impl<C: EngramClient> EngramStore<C> {
                     buffer.len()
                 )));
             }
-            sizes.push(buffer.len());
         }
 
         let exists_results = self.store.batch_is_exist(&self.embed_keys).await?;
@@ -390,35 +379,31 @@ impl<C: EngramClient> EngramStore<C> {
             }
         }
 
-        let mut buffer_ptrs = Vec::with_capacity(embedding_buffers.len());
         for (index, buffer) in embedding_buffers.iter().enumerate() {
-            let buffer_ptr = buffer.as_ptr() as *mut c_void;
             if let Err(err) = self
                 .store
-                .register_buffer(buffer_ptr, buffer.len(), &self.buffer_location)
+                .register_buffer(buffer, &self.buffer_location)
             {
-                for registered in &buffer_ptrs {
-                    let _ = self.store.unregister_buffer(*registered);
+                for registered in &embedding_buffers[..index] {
+                    let _ = self.store.unregister_buffer(registered);
                 }
                 return Err(StoreError::Internal(format!(
                     "failed to register embedding buffer {index}: {err}"
                 )));
             }
-            buffer_ptrs.push(buffer_ptr);
         }
 
         let put_results = self
             .store
             .batch_put_from(
                 &self.embed_keys,
-                &buffer_ptrs,
-                &sizes,
+                embedding_buffers,
                 Some(ReplicateConfig::default()),
             )
             .await;
-        let unregister_errors = buffer_ptrs
+        let unregister_errors = embedding_buffers
             .iter()
-            .filter_map(|buffer_ptr| self.store.unregister_buffer(*buffer_ptr).err())
+            .filter_map(|buf| self.store.unregister_buffer(buf).err())
             .collect::<Vec<_>>();
 
         let put_results = put_results?;

@@ -184,6 +184,13 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::get_replica_list_impl(self, request).await
     }
 
+    async fn get_replica_list_by_regex(
+        &self,
+        request: Request<proto::GetReplicaListByRegexRequest>,
+    ) -> Result<Response<proto::GetReplicaListByRegexResponse>, Status> {
+        MasterServiceImpl::get_replica_list_by_regex_impl(self, request).await
+    }
+
     async fn remove(
         &self,
         request: Request<proto::RemoveRequest>,

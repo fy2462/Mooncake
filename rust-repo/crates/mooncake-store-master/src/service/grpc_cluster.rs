@@ -424,6 +424,7 @@ impl MasterServiceImpl {
             clear_offloading_task(&self.state, key);
             let replica = ReplicaDescriptor {
                 refcnt: 0,
+                handle_valid: true,
                 segment_id: Uuid::nil(),
                 segment_name: metadata.transport_endpoint.clone(),
                 offset: 0,

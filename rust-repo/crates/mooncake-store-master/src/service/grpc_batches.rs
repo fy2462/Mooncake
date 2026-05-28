@@ -372,9 +372,21 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::EvictDiskReplicaResponse>, Status> {
         let req = request.into_inner();
         if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+            // C++ 根据请求的 replica_type 参数过滤要驱逐的 replica 类型
             entry.replicas.retain(|r| {
-                !(r.replica_type == ReplicaType::LocalDisk
-                    || r.replica_type == ReplicaType::Disk)
+                match req.replica_type {
+                    // DISK = 1: only evict Disk replicas
+                    x if x == proto::replica_descriptor::ReplicaType::Disk as i32 => {
+                        r.replica_type != ReplicaType::Disk
+                    }
+                    // LOCAL_DISK = 2: only evict LocalDisk replicas
+                    x if x == proto::replica_descriptor::ReplicaType::LocalDisk as i32 => {
+                        r.replica_type != ReplicaType::LocalDisk
+                    }
+                    // ALL (4) or default: evict both Disk and LocalDisk
+                    _ => !(r.replica_type == ReplicaType::LocalDisk
+                        || r.replica_type == ReplicaType::Disk),
+                }
             });
             if entry.replicas.is_empty() {
                 self.state.objects.remove(&req.key);
@@ -392,8 +404,19 @@ impl MasterServiceImpl {
         for key in &req.keys {
             if let Some(mut entry) = self.state.objects.get_mut(key) {
                 entry.replicas.retain(|r| {
-                    !(r.replica_type == ReplicaType::LocalDisk
-                        || r.replica_type == ReplicaType::Disk)
+                    match req.replica_type {
+                        // DISK = 1: only evict Disk replicas
+                        x if x == proto::replica_descriptor::ReplicaType::Disk as i32 => {
+                            r.replica_type != ReplicaType::Disk
+                        }
+                        // LOCAL_DISK = 2: only evict LocalDisk replicas
+                        x if x == proto::replica_descriptor::ReplicaType::LocalDisk as i32 => {
+                            r.replica_type != ReplicaType::LocalDisk
+                        }
+                        // ALL (4) or default: evict both Disk and LocalDisk
+                        _ => !(r.replica_type == ReplicaType::LocalDisk
+                            || r.replica_type == ReplicaType::Disk),
+                    }
                 });
                 if entry.replicas.is_empty() {
                     self.state.objects.remove(key);

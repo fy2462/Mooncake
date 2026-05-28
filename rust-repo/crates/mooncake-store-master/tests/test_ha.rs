@@ -131,6 +131,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
                 refcnt: 0,
+                handle_valid: true,
                 segment_id,
                 segment_name: "leader:50051".into(),
                 offset: 128,

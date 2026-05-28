@@ -220,6 +220,7 @@ fn test_replica_descriptor() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+                handle_valid: true,
     };
     assert_eq!(rd.offset, 0x1000);
     assert_eq!(rd.size, 256);
@@ -236,6 +237,7 @@ fn test_replica_descriptor_disk() {
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+                handle_valid: true,
     };
     assert_eq!(rd.replica_type, ReplicaType::Disk);
     assert_eq!(rd.status, ReplicaStatus::Written);
@@ -260,6 +262,7 @@ fn test_replica_descriptor_all_statuses() {
             status: *status,
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
+                handle_valid: true,
         };
         assert_eq!(rd.status, *status);
     }
@@ -276,6 +279,7 @@ fn test_replica_descriptor_clone() {
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+                handle_valid: true,
     };
     let cloned = rd.clone();
     assert_eq!(rd.segment_id, cloned.segment_id);
@@ -296,6 +300,7 @@ fn test_replica_descriptor_serde_roundtrip() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+                handle_valid: true,
     };
     let json = serde_json::to_string(&rd).unwrap();
     let restored: ReplicaDescriptor = serde_json::from_str(&json).unwrap();

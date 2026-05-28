@@ -44,6 +44,7 @@ service MasterService {
 
   // Get workflow: get replica list → client reads data from peers
   rpc GetReplicaList(GetReplicaListRequest) returns (GetReplicaListResponse);
+  rpc GetReplicaListByRegex(GetReplicaListByRegexRequest) returns (GetReplicaListByRegexResponse);
 
   // Remove
   rpc Remove(RemoveRequest) returns (RemoveResponse);

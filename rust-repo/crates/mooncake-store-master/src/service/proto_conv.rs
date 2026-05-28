@@ -34,6 +34,7 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
 pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescriptor {
     ReplicaDescriptor {
         refcnt: 0,
+        handle_valid: true,
         segment_id: p.segment_id.as_ref().map_or(Uuid::nil(), uuid_from_proto),
         segment_name: p.segment_name.clone(),
         offset: p.offset,

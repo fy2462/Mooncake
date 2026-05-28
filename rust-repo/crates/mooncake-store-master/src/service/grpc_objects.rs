@@ -81,6 +81,15 @@ impl MasterServiceImpl {
         request: Request<proto::PutStartRequest>,
     ) -> Result<Response<proto::PutStartResponse>, Status> {
         let req = request.into_inner();
+
+        // C++ master_service.cpp:1287-1294 对空 key 和零长度 slice 进行校验
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("empty key"));
+        }
+        if req.slice_length == 0 {
+            return Err(Status::invalid_argument("zero slice_length"));
+        }
+
         let key = req.key.clone();
         let client_id = uuid_from_proto(
             req.client_id
@@ -224,9 +233,13 @@ impl MasterServiceImpl {
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
         if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+            // C++ master_service.cpp:1368-1372 校验调用者身份，防止其他 client 越权 PutEnd
             if entry.client_id != client_id {
                 return Err(Status::permission_denied("illegal client"));
             }
+            // C++ master_service.cpp:1368-1372 校验 handle 有效性，若 handle 已失效则保留 Allocating 状态
+            // C++ checks !replica.has_invalid_mem_handle() and !replica.has_invalid_nof_handle()
+            // before marking replicas Complete. If handle became invalid, replica stays in Allocating.
             for r in &mut entry.replicas {
                 let matches_type = match req.replica_type {
                     x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
@@ -239,7 +252,11 @@ impl MasterServiceImpl {
                     _ => r.replica_type == ReplicaType::Memory,
                 };
                 if matches_type && r.status == ReplicaStatus::Allocating {
-                    r.status = ReplicaStatus::Complete;
+                    // C++ master_service.cpp:1368-1372 检查 !replica.has_invalid_mem_handle()
+                    // 和 !replica.has_invalid_nof_handle()。handle 失效时 replica 保持在 Allocating 状态。
+                    if r.handle_valid {
+                        r.status = ReplicaStatus::Complete;
+                    }
                 }
             }
             let now = SystemTime::now();
@@ -266,6 +283,7 @@ impl MasterServiceImpl {
             if offload_enabled {
                 push_offloading_queue(&self.state, client_id, &req.key, size);
             }
+            // C++ 只在所有 replica 都 Complete 时才从 processing_keys 中移除，防止并发冲突
             // C++ only removes from processing_keys when ALL replicas are complete
             // AND the object is in the processing set.
             if all_complete && self.state.processing_keys.contains_key(&req.key) {
@@ -273,6 +291,7 @@ impl MasterServiceImpl {
             }
             self.oplog_manager.lock().record_put_end(&req.key, size);
         }
+        metrics::PUT_END_REQUESTS.inc();
         Ok(Response::new(proto::PutEndResponse {}))
     }
 
@@ -358,6 +377,7 @@ impl MasterServiceImpl {
                     replica.replica_type == ReplicaType::LocalDisk
                         && replica.status == ReplicaStatus::Complete
                 });
+                // C++ master_service.cpp:1097-1100 只返回 COMPLETED 状态的 replica
                 // C++ filters by fn_is_completed; return REPLICA_IS_NOT_READY if empty.
                 let completed_replicas: Vec<_> = entry
                     .replicas
@@ -380,6 +400,47 @@ impl MasterServiceImpl {
         }
     }
 
+    // ---- GetReplicaListByRegex ----
+    pub(super) async fn get_replica_list_by_regex_impl(
+        &self,
+        request: Request<proto::GetReplicaListByRegexRequest>,
+    ) -> Result<Response<proto::GetReplicaListByRegexResponse>, Status> {
+        let req = request.into_inner();
+        let pattern = regex::Regex::new(&req.key_regex)
+            .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
+
+        let mut entries = vec![];
+        // 遍历所有 key，按正则匹配后返回 COMPLETED 状态的 replica 列表
+        for entry in self.state.objects.iter() {
+            if pattern.is_match(entry.key()) {
+                // Only include COMPLETE replicas, matching C++ GetReplicaListByRegex semantics
+                let completed_replicas: Vec<_> = entry
+                    .replicas
+                    .iter()
+                    .filter(|r| r.status == ReplicaStatus::Complete)
+                    .map(replica_to_proto)
+                    .collect();
+
+                // Skip keys that match but have no complete replicas
+                if completed_replicas.is_empty() {
+                    tracing::warn!(
+                        "key={} matched by regex, but has no complete replicas.",
+                        entry.key()
+                    );
+                    continue;
+                }
+
+                entries.push(proto::get_replica_list_by_regex_response::ObjectEntry {
+                    key: entry.key().clone(),
+                    replicas: completed_replicas,
+                });
+            }
+        }
+
+        metrics::GET_REQUESTS.inc();
+        Ok(Response::new(proto::GetReplicaListByRegexResponse { entries }))
+    }
+
     // ---- Remove ----
     pub(super) async fn remove_impl(
         &self,
@@ -393,9 +454,11 @@ impl MasterServiceImpl {
         }
         if !req.force {
             if let Some(entry) = self.state.objects.get(&req.key) {
+                // C++ master_service.cpp:2314 只有 lease 过期或 force=true 才允许删除
                 if !is_lease_expired(&entry) {
                     return Err(Status::failed_precondition("object has lease"));
                 }
+                // C++ 只有所有 replica 都 Complete 才允许删除
                 if !entry
                     .replicas
                     .iter()
@@ -547,6 +610,7 @@ impl MasterServiceImpl {
         }
         let replica_count = config.replica_num.max(1) as usize;
 
+        // C++ 检查是否有进行中的 replication/offloading 任务，以及 replica 是否 busy
         // C++ checks if replication_tasks or offloading_tasks exist for the key.
         if self.state.replication_tasks.contains_key(&req.key) {
             return Err(Status::failed_precondition("object has replication task"));

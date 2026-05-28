@@ -102,6 +102,7 @@ fn test_replica_descriptor_full() {
     let sid = Uuid::new_v4();
     let rd = ReplicaDescriptor {
         refcnt: 0,
+                handle_valid: true,
         segment_id: sid,
         segment_name: "node1:12345".into(),
         offset: 0xDEAD,
@@ -122,6 +123,7 @@ fn test_replica_descriptor_full() {
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {
         refcnt: 0,
+                handle_valid: true,
         segment_id: Uuid::new_v4(),
         segment_name: "s1".into(),
         offset: 100,
@@ -163,8 +165,10 @@ fn test_object_entry_creation() {
     let sid = Uuid::new_v4();
     let entry = ObjectEntry {
         replicas: vec![
-            ReplicaDescriptor { refcnt: 0, segment_id: sid, segment_name: "s1".into(), offset: 0, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
-            ReplicaDescriptor { refcnt: 0, segment_id: sid, segment_name: "s2".into(), offset: 128, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
+            ReplicaDescriptor { refcnt: 0,
+                handle_valid: true, segment_id: sid, segment_name: "s1".into(), offset: 0, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
+            ReplicaDescriptor { refcnt: 0,
+                handle_valid: true, segment_id: sid, segment_name: "s2".into(), offset: 128, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
         ],
         size: 256, last_access: SystemTime::now(), soft_pinned: false, hard_pinned: false,
         data_type: ObjectDataType::Unknown, client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,

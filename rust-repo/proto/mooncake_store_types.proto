@@ -379,6 +379,18 @@ message GetReplicaListResponse {
   uint64 lease_ttl_ms = 2;
 }
 
+message GetReplicaListByRegexRequest {
+  string key_regex = 1;
+}
+
+message GetReplicaListByRegexResponse {
+  message ObjectEntry {
+    string key = 1;
+    repeated ReplicaDescriptor replicas = 2;
+  }
+  repeated ObjectEntry entries = 1;
+}
+
 // ---------------------------------------------------------------
 // Remove
 // ---------------------------------------------------------------

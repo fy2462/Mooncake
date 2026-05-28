@@ -87,9 +87,17 @@ pub struct ReplicaDescriptor {
     /// Eviction and release MUST check `is_busy()` before freeing.
     #[serde(skip, default = "default_refcnt")]
     pub refcnt: u32,
+    /// Tracks whether the RDMA memory / NoF handle is still valid.
+    /// C++ equivalent: Replica::has_invalid_mem_handle() / has_invalid_nof_handle().
+    /// master_service.cpp:1368-1372 — PutEnd skips replicas whose handle became invalid.
+    /// master_service.cpp:1985-1994 — CopyEnd/MoveEnd abort if source handle invalidated.
+    #[serde(default = "default_handle_valid")]
+    pub handle_valid: bool,
 }
 
 fn default_refcnt() -> u32 { 0 }
+
+fn default_handle_valid() -> bool { true }
 
 impl Clone for ReplicaDescriptor {
     fn clone(&self) -> Self {
@@ -102,6 +110,7 @@ impl Clone for ReplicaDescriptor {
             replica_type: self.replica_type,
             holder_client_id: self.holder_client_id,
             refcnt: 0,
+            handle_valid: self.handle_valid,
         }
     }
 }

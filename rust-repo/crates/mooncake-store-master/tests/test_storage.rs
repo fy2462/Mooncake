@@ -77,6 +77,7 @@ fn test_storage_backend_save_and_load() {
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
                 refcnt: 0,
+                handle_valid: true,
                 segment_id: sid,
                 segment_name: "node1:12345".into(),
                 offset: 0x1000,
@@ -152,6 +153,7 @@ fn test_storage_backend_multiple_objects() {
             ObjectEntry {
                 replicas: vec![ReplicaDescriptor {
                     refcnt: 0,
+                handle_valid: true,
                     segment_id: sid,
                     segment_name: "s1".into(),
                     offset: i * 100,
@@ -228,6 +230,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
                 refcnt: 0,
+                handle_valid: true,
                 segment_id: sid,
                 segment_name: "hf3fs-node".into(),
                 offset: 64,
@@ -259,6 +262,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
 fn test_serialize_replica_status_roundtrip() {
     let rd = ReplicaDescriptor {
         refcnt: 0,
+                handle_valid: true,
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
         offset: 0x2000,
