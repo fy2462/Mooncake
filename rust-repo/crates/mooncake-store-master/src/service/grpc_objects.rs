@@ -97,31 +97,64 @@ impl MasterServiceImpl {
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
 
-        if let Some(existing) = self.state.objects.get_mut(&key) {
-            let has_completed = existing
-                .replicas
-                .iter()
-                .any(|r| r.status == ReplicaStatus::Complete);
-            if !has_completed {
-                if let Some(start) = existing.put_start_time {
-                    let elapsed = SystemTime::now()
-                        .duration_since(start)
-                        .unwrap_or_default();
-                    if elapsed >= self.state.runtime_config.put_start_discard_timeout {
-                        let old_replicas = existing.replicas.clone();
-                        let expired = existing
-                            .replicas
-                            .iter()
-                            .filter(|r| r.status == ReplicaStatus::Allocating)
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        self.state.objects.remove(&key);
-                        self.state.processing_keys.remove(&key);
-                        drop(existing);
-                        if !expired.is_empty() {
-                            release_replicas_scheduled(&self.state, expired);
-                        } else if !old_replicas.is_empty() {
-                            release_replicas(&self.state, &old_replicas);
+        // C++ master_service.cpp:1467-1507 — prepare_existing:
+        // 1. CleanupStaleHandles 清理无效 handle 和死亡客户端的副本
+        // 2. 如果所有有效副本都被清理，删除对象并允许新 PutStart
+        // 3. 如果 PutStart 超时且无 Completed 副本，丢弃旧对象
+        // 4. 否则返回 OBJECT_ALREADY_EXISTS
+        if let Some(mut existing) = self.state.objects.get_mut(&key) {
+            let alive_clients = get_alive_clients_snapshot(&self.state);
+            let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
+
+            if should_remove {
+                // 所有有效副本已被清理，删除对象并允许新 PutStart
+                let old_replicas = existing.replicas.clone();
+                self.state.objects.remove(&key);
+                self.state.processing_keys.remove(&key);
+                self.state.replication_tasks.remove(&key);
+                drop(existing);
+                release_replicas(&self.state, &old_replicas);
+            } else {
+                // 对象仍有有效副本，检查是否可以超时丢弃
+                let has_completed = existing
+                    .replicas
+                    .iter()
+                    .any(|r| r.status == ReplicaStatus::Complete);
+                if !has_completed {
+                    if let Some(start) = existing.put_start_time {
+                        let elapsed = SystemTime::now()
+                            .duration_since(start)
+                            .unwrap_or_default();
+                        if elapsed
+                            >= self.state.runtime_config.put_start_discard_timeout
+                        {
+                            // PutStart 超时，删除对象
+                            let old_replicas = existing.replicas.clone();
+                            let expired = existing
+                                .replicas
+                                .iter()
+                                .filter(|r| r.status == ReplicaStatus::Allocating)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            self.state.objects.remove(&key);
+                            self.state.processing_keys.remove(&key);
+                            self.state.replication_tasks.remove(&key);
+                            drop(existing);
+                            if !expired.is_empty() {
+                                release_replicas_scheduled(
+                                    &self.state, expired,
+                                );
+                            } else if !old_replicas.is_empty() {
+                                release_replicas(
+                                    &self.state,
+                                    &old_replicas,
+                                );
+                            }
+                        } else {
+                            return Err(Status::already_exists(format!(
+                                "object already exists: {}",
+                                key
+                            )));
                         }
                     } else {
                         return Err(Status::already_exists(format!(
@@ -135,11 +168,6 @@ impl MasterServiceImpl {
                         key
                     )));
                 }
-            } else {
-                return Err(Status::already_exists(format!(
-                    "object already exists: {}",
-                    key
-                )));
             }
         }
 
@@ -619,9 +647,13 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("object has offloading task"));
         }
 
-        let (replicas, previous_soft_pinned, previous_hard_pinned) = if let Some(existing) =
-            self.state.objects.get(&req.key)
+        let (replicas, previous_soft_pinned, previous_hard_pinned) = if let Some(mut existing) =
+            self.state.objects.get_mut(&req.key)
         {
+            // C++ 先调用 CleanupStaleHandles 清理无效副本
+            let alive_clients = get_alive_clients_snapshot(&self.state);
+            let _ = cleanup_stale_handles(&mut existing, &alive_clients);
+
             // C++ checks HasReplica(&Replica::fn_is_busy)
             if existing.replicas.iter().any(|r| r.refcnt > 0) {
                 return Err(Status::failed_precondition("object replica busy"));

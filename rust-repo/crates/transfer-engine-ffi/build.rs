@@ -70,26 +70,30 @@ fn main() {
         .write_to_file(out_path)
         .expect("Failed to write Transfer Engine bindings");
 
-    // Link against the Transfer Engine shared library.
-    // In practice you need libtransfer_engine.so on the linker search path.
-    println!("cargo:rustc-link-lib=dylib=transfer_engine");
+    // Link against the Transfer Engine shared library only when the
+    // "link-native" feature is enabled.  Tests and type-level code
+    // compile without the native library.
+    let link_native = std::env::var("CARGO_FEATURE_LINK_NATIVE").is_ok();
+    if link_native {
+        println!("cargo:rustc-link-lib=dylib=transfer_engine");
 
-    // Add common search paths for the Mooncake build output.
-    let build_dir = project_root.join("build");
-    if build_dir.join("mooncake-transfer-engine").join("src").exists() {
+        // Add common search paths for the Mooncake build output.
+        let build_dir = project_root.join("build");
+        if build_dir.join("mooncake-transfer-engine").join("src").exists() {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                build_dir
+                    .join("mooncake-transfer-engine")
+                    .join("src")
+                    .display()
+            );
+        }
         println!(
             "cargo:rustc-link-search=native={}",
             build_dir
-                .join("mooncake-transfer-engine")
+                .join("mooncake-common")
                 .join("src")
                 .display()
         );
     }
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir
-            .join("mooncake-common")
-            .join("src")
-            .display()
-    );
 }

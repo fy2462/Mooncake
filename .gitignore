@@ -1,5 +1,8 @@
 .cache
 .vscode
+.claude-flow
+.claude
+.mcp.json
 build
 build_ofed4
 old

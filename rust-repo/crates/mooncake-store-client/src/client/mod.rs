@@ -9,7 +9,7 @@ pub(crate) mod transfer;
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::Arc;
 use tonic::transport::Channel;
@@ -40,6 +40,9 @@ pub struct MooncakeClient {
     pub(crate) local_buffer: Vec<u8>,
     pub(crate) registered_buffers: RwLock<HashMap<usize, (usize, String)>>,
     pub(crate) tear_down: Arc<RwLock<bool>>,
+    /// 本地已挂载 segment 的传输端点集合，用于 SelectBestReplica 本地性检查。
+    /// C++ 等价：Client::GetLocalEndpoints() → segment.te_endpoint。
+    pub(crate) local_endpoints: RwLock<HashSet<String>>,
 }
 
 impl MooncakeClient {
@@ -108,6 +111,12 @@ impl MooncakeClient {
             master.mount_segment(request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
         }
 
+        // 将当前节点的 hostname 注册为本地端点（传输地址），
+        // 用于 SelectBestReplica 的本地性优先判断。
+        // C++ 等价：Client::GetLocalEndpoints() 返回所有已挂载 segment 的 te_endpoint。
+        let mut endpoints = HashSet::new();
+        endpoints.insert(local_host.to_string());
+
         Ok(Self {
             master,
             engine,
@@ -116,6 +125,7 @@ impl MooncakeClient {
             local_buffer,
             registered_buffers: RwLock::new(HashMap::new()),
             tear_down: Arc::new(RwLock::new(false)),
+            local_endpoints: RwLock::new(endpoints),
         })
     }
 
@@ -137,6 +147,17 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         Ok(())
+    }
+
+    /// 注册一个本地传输端点（例如新挂载 segment 的 te_endpoint）。
+    /// C++ 等价：mounted_segments_ 中 segment.te_endpoint 被加入 GetLocalEndpoints()。
+    pub fn register_local_endpoint(&self, endpoint: &str) {
+        self.local_endpoints.write().insert(endpoint.to_string());
+    }
+
+    /// 取消注册一个本地传输端点（例如 segment 卸载时）。
+    pub fn unregister_local_endpoint(&self, endpoint: &str) {
+        self.local_endpoints.write().remove(endpoint);
     }
 
     pub fn is_closed(&self) -> bool {

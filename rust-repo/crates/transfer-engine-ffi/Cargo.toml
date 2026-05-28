@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+link-native = []
+
 [lib]
 name = "transfer_engine_ffi"
 

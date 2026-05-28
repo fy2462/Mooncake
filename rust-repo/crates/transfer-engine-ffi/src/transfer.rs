@@ -25,6 +25,19 @@ impl Opcode {
     }
 }
 
+/// A notification message exchanged between transfer engine peers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyMsg {
+    pub name: String,
+    pub msg: String,
+}
+
+/// An owned buffer of notification messages received from the engine.
+#[derive(Debug)]
+pub struct NotifyMsgBuf {
+    pub messages: Vec<NotifyMsg>,
+}
+
 /// A single transfer request within a batch.
 #[derive(Debug, Clone)]
 pub struct TransferRequest {
@@ -313,5 +326,66 @@ mod tests {
         let cloned = st.clone();
         assert_eq!(cloned.status, st.status);
         assert_eq!(cloned.transferred_bytes, st.transferred_bytes);
+    }
+
+    // =========================================================================
+    // NotifyMsg
+    // =========================================================================
+
+    #[test]
+    fn test_notify_msg_creation() {
+        let nm = NotifyMsg {
+            name: "sender".to_string(),
+            msg: "hello".to_string(),
+        };
+        assert_eq!(nm.name, "sender");
+        assert_eq!(nm.msg, "hello");
+    }
+
+    #[test]
+    fn test_notify_msg_clone_eq() {
+        let a = NotifyMsg {
+            name: "n1".into(),
+            msg: "m1".into(),
+        };
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_notify_msg_debug() {
+        let nm = NotifyMsg {
+            name: "peer".into(),
+            msg: "done".into(),
+        };
+        let s = format!("{:?}", nm);
+        assert!(s.contains("peer"));
+        assert!(s.contains("done"));
+    }
+
+    #[test]
+    fn test_notify_msg_buf_creation() {
+        let buf = NotifyMsgBuf {
+            messages: vec![
+                NotifyMsg {
+                    name: "a".into(),
+                    msg: "x".into(),
+                },
+            ],
+        };
+        assert_eq!(buf.messages.len(), 1);
+        assert_eq!(buf.messages[0].name, "a");
+    }
+
+    #[test]
+    fn test_notify_msg_buf_empty() {
+        let buf = NotifyMsgBuf { messages: vec![] };
+        assert!(buf.messages.is_empty());
+    }
+
+    #[test]
+    fn test_notify_msg_buf_debug() {
+        let buf = NotifyMsgBuf { messages: vec![] };
+        assert!(format!("{:?}", buf).contains("NotifyMsgBuf"));
     }
 }

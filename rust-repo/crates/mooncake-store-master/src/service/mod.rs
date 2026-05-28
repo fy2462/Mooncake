@@ -40,12 +40,14 @@ use self::background_ops::{
 };
 use self::helpers::{
     addresses_for_client, allocate_nof_replicas, bump_view_version,
-    client_id_by_nof_segment_name, is_lease_expired, release_object_replicas,
-    client_id_by_replica_segment_name, client_id_by_segment_name, host_from_segment_name,
-    object_owner_client_id, preferred_nof_segment_names, register_metadata_segments,
-    release_replicas, release_replicas_scheduled, sync_client_segments,
-    sync_nof_segment_usage, sync_segment_usage,
-    unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
+    cleanup_stale_handles, client_id_by_nof_segment_name,
+    get_alive_clients_snapshot, is_lease_expired,
+    release_object_replicas, client_id_by_replica_segment_name,
+    client_id_by_segment_name, host_from_segment_name, object_owner_client_id,
+    preferred_nof_segment_names, register_metadata_segments, release_replicas,
+    release_replicas_scheduled, sync_client_segments, sync_nof_segment_usage,
+    sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned,
+    upsert_client_addresses,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,

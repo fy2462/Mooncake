@@ -2,6 +2,7 @@ use crate::http_metadata::MetadataState;
 use crate::metrics;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
 use chrono::Utc;
+use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use tonic::Status;
@@ -333,3 +334,64 @@ pub(crate) fn is_lease_expired(entry: &ObjectEntry) -> bool {
         .lease_timeout
         .map_or(true, |timeout| timeout <= SystemTime::now())
 }
+
+/// 获取当前存活客户端的 UUID 快照。
+/// C++ 等价：`MasterService::getAliveClientsSnapshot()`（master_service.cpp:587）。
+/// 如果客户端的上次 ping 时间在 `client_live_ttl` 内，则认为存活。
+pub(crate) fn get_alive_clients_snapshot(state: &MasterState) -> HashSet<Uuid> {
+    let now = SystemTime::now();
+    let ttl = state.runtime_config.client_live_ttl;
+    state
+        .clients
+        .iter()
+        .filter_map(|entry| {
+            let elapsed = now.duration_since(entry.last_ping).unwrap_or_default();
+            if elapsed <= ttl {
+                Some(entry.info.id)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// 清理指定对象中失效的副本。
+///
+/// C++ 等价：`MasterService::CleanupStaleHandles()`（master_service.cpp:2832-2846）。
+/// 移除以下类型的副本：
+/// 1. `handle_valid == false` 的 MEMORY / NoF 副本（handle 已失效）
+/// 2. `holder_client_id` 不在 `alive_clients` 中的 LOCAL_DISK 副本（客户端已死亡）
+///
+/// 仅清理状态为 Complete 的副本。返回 `true` 表示对象应该被完全移除
+/// （所有有效副本已被清理，调用者应删除该对象）。
+pub(crate) fn cleanup_stale_handles(
+    entry: &mut ObjectEntry,
+    alive_clients: &HashSet<Uuid>,
+) -> bool {
+    let original_len = entry.replicas.len();
+
+    entry.replicas.retain(|r| {
+        if r.status != mooncake_store_core::ReplicaStatus::Complete {
+            return true; // 保留非 Complete 状态的副本
+        }
+        let is_stale = match r.replica_type {
+            ReplicaType::Memory | ReplicaType::NoFSsd => !r.handle_valid,
+            ReplicaType::LocalDisk => {
+                r.holder_client_id
+                    .map_or(false, |cid| !alive_clients.contains(&cid))
+            }
+            _ => false,
+        };
+        !is_stale
+    });
+
+    // 检查是否还有有效副本
+    let has_completed = entry
+        .replicas
+        .iter()
+        .any(|r| r.status == mooncake_store_core::ReplicaStatus::Complete);
+
+    // 如果清理掉了一些副本，且没有有效的 Complete 副本残留，对象应该被移除
+    entry.replicas.len() != original_len && !has_completed
+}
+

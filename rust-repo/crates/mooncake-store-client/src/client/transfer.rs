@@ -85,18 +85,76 @@ impl MooncakeClient {
         }).collect()
     }
 
-    pub(crate) fn select_best_replica<'a>(&self, replicas: &'a [ReplicaDescriptor]) -> Option<&'a ReplicaDescriptor> {
-        // C++ SelectBestReplica 优先级：local MEMORY > any MEMORY > N_OF_SSD > LOCAL_DISK > DISK
-        // Priority: local MEMORY > any MEMORY > N_OF_SSD > LOCAL_DISK > DISK
-        replicas.iter()
-            .filter(|r| r.status == mooncake_store_core::ReplicaStatus::Complete)
-            .max_by_key(|r| match r.replica_type {
-                mooncake_store_core::ReplicaType::Memory => 3,
-                mooncake_store_core::ReplicaType::NoFSsd => 2,
-                mooncake_store_core::ReplicaType::LocalDisk => 1,
-                mooncake_store_core::ReplicaType::Disk => 0,
-                _ => -1,
-            })
+    /// 从副本列表中选择最优副本，完全匹配 C++ `SelectBestReplica` 逻辑。
+    ///
+    /// 优先级（C++ `real_client.cpp:286-325`）：
+    /// 1. 本地 MEMORY（segment_name 匹配本地端点）→ 立即返回
+    /// 2. 任意远程 MEMORY
+    /// 3. 本地 NOF_SSD（segment_name 匹配本地端点）→ 立即返回
+    /// 4. 任意远程 NOF_SSD
+    /// 5. LOCAL_DISK（如果有多个，最后一个生效；覆盖 DISK）
+    /// 6. DISK（仅在没有任何 LOCAL_DISK 时）
+    pub(crate) fn select_best_replica<'a>(
+        &self,
+        replicas: &'a [ReplicaDescriptor],
+    ) -> Option<&'a ReplicaDescriptor> {
+        let endpoints = self.local_endpoints.read();
+        let mut first_memory: Option<&ReplicaDescriptor> = None;
+        let mut first_nof: Option<&ReplicaDescriptor> = None;
+
+        // 第一遍：优先本地 MEMORY/NOF，否则记录首次出现的远程副本
+        for r in replicas {
+            if r.status != mooncake_store_core::ReplicaStatus::Complete {
+                continue;
+            }
+            match r.replica_type {
+                mooncake_store_core::ReplicaType::Memory => {
+                    if endpoints.contains(&r.segment_name) {
+                        return Some(r); // 本地 MEMORY —— 最优
+                    }
+                    if first_memory.is_none() {
+                        first_memory = Some(r);
+                    }
+                }
+                mooncake_store_core::ReplicaType::NoFSsd => {
+                    if endpoints.contains(&r.segment_name) {
+                        return Some(r); // 本地 NOF_SSD —— 次优
+                    }
+                    if first_nof.is_none() {
+                        first_nof = Some(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        drop(endpoints);
+
+        if let Some(r) = first_memory {
+            return Some(r);
+        }
+        if let Some(r) = first_nof {
+            return Some(r);
+        }
+
+        // 第二遍：LOCAL_DISK 优先，DISK 作为最后备选
+        let mut best: Option<&ReplicaDescriptor> = None;
+        for r in replicas {
+            if r.status != mooncake_store_core::ReplicaStatus::Complete {
+                continue;
+            }
+            match r.replica_type {
+                mooncake_store_core::ReplicaType::LocalDisk => {
+                    best = Some(r); // LOCAL_DISK 始终覆盖 DISK
+                }
+                mooncake_store_core::ReplicaType::Disk => {
+                    if best.is_none() {
+                        best = Some(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+        best
     }
 
     pub(crate) async fn write_to_replica(
