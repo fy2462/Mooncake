@@ -6,22 +6,21 @@ use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use std::time::SystemTime;
 use uuid::Uuid;
 
+fn make_test_seg(id: Uuid, name: &str, size: u64) -> Segment {
+    Segment { id, name: name.into(), size, base: 0, te_endpoint: String::new(), protocol: "tcp".into() }
+}
+
+fn make_test_entry(id: Uuid, name: &str, size: u64, used: u64, client_id: Uuid) -> SegmentEntry {
+    SegmentEntry { segment: make_test_seg(id, name, size), used, client_id, status: ProtoSegmentStatus::Active }
+}
+
 #[test]
 fn test_segment_creation_all_fields() {
     let id = Uuid::new_v4();
-    let cid = Uuid::new_v4();
-    let segment = Segment {
-        id,
-        name: "node1:12345".into(),
-        size: 1024 * 1024 * 100,
-        used: 0,
-        client_id: cid,
-    };
-
+    let segment = make_test_seg(id, "node1:12345", 1024 * 1024 * 100);
     assert_eq!(segment.name, "node1:12345");
     assert_eq!(segment.size, 104857600);
-    assert_eq!(segment.used, 0);
-    assert_eq!(segment.client_id, cid);
+    assert_eq!(segment.base, 0);
     assert_eq!(segment.id, id);
 }
 
@@ -29,19 +28,10 @@ fn test_segment_creation_all_fields() {
 fn test_segment_entry_wrapper() {
     let id = Uuid::new_v4();
     let cid = Uuid::new_v4();
-    let entry = SegmentEntry {
-        segment: Segment {
-            id,
-            name: "n1:1".into(),
-            size: 5000,
-            used: 100,
-            client_id: cid,
-        },
-        status: ProtoSegmentStatus::Active,
-    };
-
+    let entry = make_test_entry(id, "n1:1", 5000, 100, cid);
     assert_eq!(entry.segment.name, "n1:1");
-    assert_eq!(entry.segment.used, 100);
+    assert_eq!(entry.used, 100);
+    assert_eq!(entry.client_id, cid);
 }
 
 #[test]
@@ -51,32 +41,8 @@ fn test_segment_dashmap_ops() {
     let id2 = Uuid::new_v4();
     let cid = Uuid::new_v4();
 
-    segments.insert(
-        id1,
-        SegmentEntry {
-            segment: Segment {
-                id: id1,
-                name: "s1".into(),
-                size: 1000,
-                used: 0,
-                client_id: cid,
-            },
-            status: ProtoSegmentStatus::Active,
-        },
-    );
-    segments.insert(
-        id2,
-        SegmentEntry {
-            segment: Segment {
-                id: id2,
-                name: "s2".into(),
-                size: 2000,
-                used: 100,
-                client_id: cid,
-            },
-            status: ProtoSegmentStatus::Active,
-        },
-    );
+    segments.insert(id1, make_test_entry(id1, "s1", 1000, 0, cid));
+    segments.insert(id2, make_test_entry(id2, "s2", 2000, 100, cid));
 
     assert_eq!(segments.len(), 2);
     assert!(segments.contains_key(&id1));
@@ -100,6 +66,9 @@ fn test_replica_status_enum_values() {
 fn test_replica_type_enum_values() {
     assert_eq!(ReplicaType::Memory as i32, 0);
     assert_eq!(ReplicaType::Disk as i32, 1);
+    assert_eq!(ReplicaType::LocalDisk as i32, 2);
+    assert_eq!(ReplicaType::NoFSsd as i32, 3);
+    assert_eq!(ReplicaType::All as i32, 4);
 }
 
 #[test]
@@ -121,7 +90,7 @@ fn test_replica_status_serde_roundtrip() {
 
 #[test]
 fn test_replica_type_serde_roundtrip() {
-    for ty in &[ReplicaType::Memory, ReplicaType::Disk] {
+    for ty in &[ReplicaType::Memory, ReplicaType::Disk, ReplicaType::LocalDisk, ReplicaType::NoFSsd, ReplicaType::All] {
         let json = serde_json::to_string(ty).unwrap();
         let restored: ReplicaType = serde_json::from_str(&json).unwrap();
         assert_eq!(*ty, restored);
@@ -180,20 +149,11 @@ fn test_allocator_add_and_remove_segment() {
     let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::Random);
     let cid = Uuid::new_v4();
     let sid = Uuid::new_v4();
-
-    allocator.add_segment(Segment {
-        id: sid,
-        name: "node1:1".into(),
-        size: 1024 * 1024,
-        used: 0,
-        client_id: cid,
-    });
+    allocator.add_segment(make_test_seg(sid, "node1:1", 1024 * 1024), 0, cid);
 
     let replicas = allocator.allocate("k", 100, 1, &Default::default());
     assert_eq!(replicas.len(), 1);
-
     allocator.remove_segment(&sid);
-
     let replicas = allocator.allocate("k", 100, 1, &Default::default());
     assert!(replicas.is_empty());
 }
@@ -203,34 +163,12 @@ fn test_object_entry_creation() {
     let sid = Uuid::new_v4();
     let entry = ObjectEntry {
         replicas: vec![
-            ReplicaDescriptor {
-                refcnt: 0,
-                segment_id: sid,
-                segment_name: "s1".into(),
-                offset: 0,
-                size: 128,
-                status: ReplicaStatus::Complete,
-                replica_type: ReplicaType::Memory,
-                holder_client_id: None,
-            },
-            ReplicaDescriptor {
-                refcnt: 0,
-                segment_id: sid,
-                segment_name: "s2".into(),
-                offset: 128,
-                size: 128,
-                status: ReplicaStatus::Complete,
-                replica_type: ReplicaType::Memory,
-                holder_client_id: None,
-            },
+            ReplicaDescriptor { refcnt: 0, segment_id: sid, segment_name: "s1".into(), offset: 0, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
+            ReplicaDescriptor { refcnt: 0, segment_id: sid, segment_name: "s2".into(), offset: 128, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
         ],
-        size: 256,
-        last_access: SystemTime::now(),
-        soft_pinned: false,
-        hard_pinned: false,
+        size: 256, last_access: SystemTime::now(), soft_pinned: false, hard_pinned: false,
         data_type: ObjectDataType::Unknown, put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
     };
-
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");
     assert_eq!(entry.replicas[1].segment_name, "s2");
@@ -242,36 +180,10 @@ fn test_allocator_prefers_same_node() {
     let cid_same = Uuid::new_v4();
     let cid_other = Uuid::new_v4();
     let cid_third = Uuid::new_v4();
-
-    allocator.add_segment(Segment {
-        id: Uuid::new_v4(),
-        name: "same:1".into(),
-        size: 10000,
-        used: 0,
-        client_id: cid_same,
-    });
-    allocator.add_segment(Segment {
-        id: Uuid::new_v4(),
-        name: "other:1".into(),
-        size: 10000,
-        used: 0,
-        client_id: cid_other,
-    });
-    allocator.add_segment(Segment {
-        id: Uuid::new_v4(),
-        name: "third:1".into(),
-        size: 10000,
-        used: 0,
-        client_id: cid_third,
-    });
-
-    let config = ReplicateConfig {
-        prefer_alloc_in_same_node: true,
-        replica_num: 1,
-        nof_replica_num: 0,
-        ..Default::default()
-    };
-
+    allocator.add_segment(make_test_seg(Uuid::new_v4(), "same:1", 10000), 0, cid_same);
+    allocator.add_segment(make_test_seg(Uuid::new_v4(), "other:1", 10000), 0, cid_other);
+    allocator.add_segment(make_test_seg(Uuid::new_v4(), "third:1", 10000), 0, cid_third);
+    let config = ReplicateConfig { prefer_alloc_in_same_node: true, replica_num: 1, nof_replica_num: 0, ..Default::default() };
     let replicas = allocator.allocate_for_client("k", Some(cid_same), 100, 1, &config);
     assert_eq!(replicas.len(), 1);
     assert_eq!(replicas[0].segment_name, "same:1");
@@ -289,15 +201,8 @@ fn test_multi_replica_different_segments() {
     let mut allocator = SegmentAllocator::new();
     let cid = Uuid::new_v4();
     for i in 0..4 {
-        allocator.add_segment(Segment {
-            id: Uuid::new_v4(),
-            name: format!("n{}:1", i),
-            size: 10000,
-            used: 0,
-            client_id: cid,
-        });
+        allocator.add_segment(make_test_seg(Uuid::new_v4(), &format!("n{}:1", i), 10000), 0, cid);
     }
-
     let replicas = allocator.allocate("k", 100, 3, &Default::default());
     if replicas.len() >= 2 {
         let mut names: Vec<&str> = replicas.iter().map(|r| r.segment_name.as_str()).collect();

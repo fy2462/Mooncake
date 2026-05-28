@@ -262,6 +262,7 @@ impl MasterServiceImpl {
                 push_offloading_queue(&self.state, client_id, &req.key, size);
             }
             self.state.processing_keys.remove(&req.key);
+            self.oplog_manager.lock().record_put_end(&req.key, size);
         }
         Ok(Response::new(proto::PutEndResponse {}))
     }
@@ -375,6 +376,7 @@ impl MasterServiceImpl {
             clear_offloading_task(&self.state, &req.key);
             clear_promotion_task(&self.state, &req.key);
             release_replicas(&self.state, &object.replicas);
+            self.oplog_manager.lock().record_remove(&req.key);
         }
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
@@ -449,7 +451,7 @@ impl MasterServiceImpl {
             if entry.segment.name == req.segment_name {
                 return Ok(Response::new(proto::QuerySegmentsResponse {
                     total_size: entry.segment.size,
-                    used_size: entry.segment.used,
+                    used_size: entry.used,
                 }));
             }
         }

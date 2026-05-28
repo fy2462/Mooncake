@@ -59,9 +59,12 @@ fn test_storage_backend_save_and_load() {
                 id: sid,
                 name: "node1:12345".into(),
                 size: 1024 * 1024,
-                used: 100,
-                client_id: cid,
+                base: 0,
+                te_endpoint: String::new(),
+                protocol: "tcp".into(),
             },
+            used: 0,
+            client_id: cid,
             status: ProtoSegmentStatus::Active,
         },
     );
@@ -93,7 +96,7 @@ fn test_storage_backend_save_and_load() {
     backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
 
     let (loaded_segs, loaded_nof_segs, loaded_objs, _loaded_tasks) = backend.load().unwrap().unwrap();
-    let loaded_segs: Vec<_> = loaded_segs.into_iter().map(|(s, _)| s).collect();
+    let loaded_segs: Vec<_> = loaded_segs.into_iter().map(|s| s.segment).collect();
     assert_eq!(loaded_segs.len(), 1);
     assert!(loaded_nof_segs.is_empty());
     assert_eq!(loaded_segs[0].name, "node1:12345");
@@ -129,9 +132,12 @@ fn test_storage_backend_multiple_objects() {
                 id: sid,
                 name: "s1".into(),
                 size: 1000,
-                used: 0,
-                client_id: cid,
+                base: 0,
+                te_endpoint: String::new(),
+                protocol: "tcp".into(),
             },
+            used: 0,
+            client_id: cid,
             status: ProtoSegmentStatus::Active,
         },
     );
@@ -204,9 +210,12 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
                 id: sid,
                 name: "hf3fs-node".into(),
                 size: 4096,
-                used: 128,
-                client_id: cid,
+                base: 0,
+                te_endpoint: String::new(),
+                protocol: "tcp".into(),
             },
+            used: 0,
+            client_id: cid,
             status: ProtoSegmentStatus::Active,
         },
     );

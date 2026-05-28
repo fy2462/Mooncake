@@ -25,6 +25,7 @@ impl Default for EngramStoreConfig {
 }
 
 pub trait EngramClient {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn register_buffer(
         &self,
         buffer: *mut c_void,
@@ -32,6 +33,7 @@ pub trait EngramClient {
         location: &str,
     ) -> StoreResult<()>;
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()>;
 
     fn batch_is_exist<'a>(&'a mut self, keys: &'a [String]) -> ClientFuture<'a, StoreResult<Vec<bool>>>;
@@ -57,6 +59,7 @@ pub trait EngramClient {
 }
 
 impl EngramClient for MooncakeClient {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn register_buffer(
         &self,
         buffer: *mut c_void,
@@ -66,6 +69,7 @@ impl EngramClient for MooncakeClient {
         unsafe { MooncakeClient::register_buffer(self, buffer, size, location) }
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()> {
         unsafe { MooncakeClient::unregister_buffer(self, buffer) }
     }

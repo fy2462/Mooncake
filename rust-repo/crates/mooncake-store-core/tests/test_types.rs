@@ -100,102 +100,109 @@ fn test_segment_creation() {
         id,
         name: "node1:12345".into(),
         size: 1024 * 1024 * 100,
-        used: 1024,
-        client_id: Uuid::new_v4(),
+        base: 0x7f0000000000,
+        te_endpoint: "192.168.1.1:12345".into(),
+        protocol: "tcp".into(),
     };
     assert_eq!(seg.name, "node1:12345");
     assert_eq!(seg.size, 104857600);
-    assert_eq!(seg.used, 1024);
+    assert_eq!(seg.base, 0x7f0000000000);
+    assert_eq!(seg.te_endpoint, "192.168.1.1:12345");
+    assert_eq!(seg.protocol, "tcp");
 }
 
 #[test]
 fn test_segment_empty() {
     let id = Uuid::new_v4();
-    let cid = Uuid::new_v4();
     let seg = Segment {
         id,
         name: String::new(),
         size: 0,
-        used: 0,
-        client_id: cid,
+        base: 0,
+        te_endpoint: String::new(),
+        protocol: String::new(),
     };
     assert!(seg.name.is_empty());
     assert_eq!(seg.size, 0);
-    assert_eq!(seg.used, 0);
-    assert_eq!(seg.client_id, cid);
+    assert_eq!(seg.base, 0);
+    assert!(seg.te_endpoint.is_empty());
 }
 
 #[test]
-fn test_segment_fully_used() {
+fn test_segment_rdma_protocol() {
     let id = Uuid::new_v4();
-    let cid = Uuid::new_v4();
     let seg = Segment {
         id,
-        name: "full-seg:1".into(),
+        name: "rdma-seg:1".into(),
         size: 4096,
-        used: 4096,
-        client_id: cid,
+        base: 0x1000000,
+        te_endpoint: "192.168.1.2:54321".into(),
+        protocol: "rdma".into(),
     };
-    assert_eq!(seg.size, seg.used);
+    assert_eq!(seg.protocol, "rdma");
+    assert_eq!(seg.te_endpoint, "192.168.1.2:54321");
 }
 
 #[test]
 fn test_segment_clone() {
     let id = Uuid::new_v4();
-    let cid = Uuid::new_v4();
     let seg = Segment {
         id,
         name: "clone-me:1".into(),
         size: 999,
-        used: 111,
-        client_id: cid,
+        base: 0xdead0000,
+        te_endpoint: "10.0.0.1:9000".into(),
+        protocol: "tcp".into(),
     };
     let cloned = seg.clone();
     assert_eq!(seg.id, cloned.id);
     assert_eq!(seg.name, cloned.name);
     assert_eq!(seg.size, cloned.size);
-    assert_eq!(seg.used, cloned.used);
-    assert_eq!(seg.client_id, cloned.client_id);
+    assert_eq!(seg.base, cloned.base);
+    assert_eq!(seg.te_endpoint, cloned.te_endpoint);
+    assert_eq!(seg.protocol, cloned.protocol);
 }
 
 #[test]
 fn test_segment_serde_roundtrip() {
     let id = Uuid::new_v4();
-    let cid = Uuid::new_v4();
     let seg = Segment {
         id,
         name: "serde-seg:1".into(),
         size: 123456,
-        used: 7890,
-        client_id: cid,
+        base: 0x7fff00000000,
+        te_endpoint: "10.0.0.2:8080".into(),
+        protocol: "rdma".into(),
     };
     let json = serde_json::to_string(&seg).unwrap();
     let restored: Segment = serde_json::from_str(&json).unwrap();
     assert_eq!(seg.id, restored.id);
     assert_eq!(seg.name, restored.name);
     assert_eq!(seg.size, restored.size);
-    assert_eq!(seg.used, restored.used);
-    assert_eq!(seg.client_id, restored.client_id);
+    assert_eq!(seg.base, restored.base);
+    assert_eq!(seg.te_endpoint, restored.te_endpoint);
+    assert_eq!(seg.protocol, restored.protocol);
 }
 
 #[test]
 fn test_segment_serde_json_keys() {
-    let cid = Uuid::new_v4();
     let seg = Segment {
-        id: cid,
+        id: Uuid::new_v4(),
         name: "k:1".into(),
         size: 2048,
-        used: 512,
-        client_id: cid,
+        base: 0x1000,
+        te_endpoint: "ep1".into(),
+        protocol: "tcp".into(),
     };
     let json = serde_json::to_value(&seg).unwrap();
     assert!(json.get("id").is_some());
     assert!(json.get("name").is_some());
     assert!(json.get("size").is_some());
-    assert!(json.get("used").is_some());
-    assert!(json.get("client_id").is_some());
+    assert!(json.get("base").is_some());
+    assert!(json.get("te_endpoint").is_some());
+    assert!(json.get("protocol").is_some());
     assert_eq!(json["size"], 2048);
-    assert_eq!(json["used"], 512);
+    assert_eq!(json["base"], 0x1000);
 }
 
 // =========================================================================
@@ -317,6 +324,9 @@ fn test_replica_status_values() {
 fn test_replica_type_values() {
     assert_eq!(ReplicaType::Memory as i32, 0);
     assert_eq!(ReplicaType::Disk as i32, 1);
+    assert_eq!(ReplicaType::LocalDisk as i32, 2);
+    assert_eq!(ReplicaType::NoFSsd as i32, 3);
+    assert_eq!(ReplicaType::All as i32, 4);
 }
 
 #[test]
@@ -336,7 +346,7 @@ fn test_replica_status_serde_all_variants() {
 
 #[test]
 fn test_replica_type_serde_all_variants() {
-    for ty in &[ReplicaType::Memory, ReplicaType::Disk] {
+    for ty in &[ReplicaType::Memory, ReplicaType::Disk, ReplicaType::LocalDisk, ReplicaType::NoFSsd, ReplicaType::All] {
         let json = serde_json::to_string(ty).unwrap();
         let restored: ReplicaType = serde_json::from_str(&json).unwrap();
         assert_eq!(*ty, restored);

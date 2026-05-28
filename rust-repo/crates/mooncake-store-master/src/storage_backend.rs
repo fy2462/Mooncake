@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub enum StorageBackendType {
     LocalDisk,
     Hf3fs,
+    FilePerKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +83,7 @@ impl BackendFile {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let file = fs::File::create(path)?;
         let registration = match backend_type {
-            StorageBackendType::LocalDisk => None,
+            StorageBackendType::LocalDisk | StorageBackendType::FilePerKey => None,
             StorageBackendType::Hf3fs => Some(hf3fs::register_fd(file.as_raw_fd())?),
         };
         Ok(Self {
@@ -97,7 +98,7 @@ impl BackendFile {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let file = fs::File::open(path)?;
         let registration = match backend_type {
-            StorageBackendType::LocalDisk => None,
+            StorageBackendType::LocalDisk | StorageBackendType::FilePerKey => None,
             StorageBackendType::Hf3fs => Some(hf3fs::register_fd(file.as_raw_fd())?),
         };
         Ok(Self {
@@ -150,8 +151,8 @@ impl StorageBackend {
                     id: entry.segment.id.to_string(),
                     name: entry.segment.name.clone(),
                     size: entry.segment.size,
-                    used: entry.segment.used,
-                    client_id: entry.segment.client_id.to_string(),
+                    used: entry.used,
+                    client_id: entry.client_id.to_string(),
                     status: entry.status as i32,
                 })
                 .collect(),
@@ -221,7 +222,7 @@ impl StorageBackend {
         &self,
     ) -> Result<
         Option<(
-            Vec<(mooncake_store_core::Segment, crate::proto::SegmentStatus)>,
+            Vec<crate::service::SegmentEntry>,
             Vec<crate::service::NoFSegmentEntry>,
             Vec<(String, crate::service::ObjectEntry)>,
             Vec<crate::service::TaskEntry>,
@@ -236,7 +237,7 @@ impl StorageBackend {
         let reader = BufReader::new(BackendFile::open(&path, self.backend_type)?);
         let snap: Snapshot = serde_json::from_reader(reader)?;
 
-        let segments: Vec<(mooncake_store_core::Segment, crate::proto::SegmentStatus)> = snap
+        let segments: Vec<crate::service::SegmentEntry> = snap
             .segments
             .into_iter()
             .map(|s| {
@@ -246,13 +247,19 @@ impl StorageBackend {
                     3 => crate::proto::SegmentStatus::Unavailable,
                     _ => crate::proto::SegmentStatus::Active,
                 };
-                (mooncake_store_core::Segment {
-                    id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
-                    name: s.name,
-                    size: s.size,
+                crate::service::SegmentEntry {
+                    segment: mooncake_store_core::Segment {
+                        id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
+                        name: s.name,
+                        base: 0,
+                        size: s.size,
+                        te_endpoint: String::new(),
+                        protocol: String::new(),
+                    },
                     used: s.used,
                     client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
-                }, status)
+                    status,
+                }
             })
             .collect();
 
@@ -332,5 +339,100 @@ impl StorageBackend {
             fs::remove_file(&path)?;
         }
         Ok(())
+    }
+
+    // ---- FilePerKey methods ----
+
+    fn key_dir(&self) -> PathBuf {
+        self.disk_dir.join("keys")
+    }
+
+    fn key_path(&self, key: &str) -> PathBuf {
+        // Encode key: replace '/' with '_' for filesystem safety
+        let safe_key = key.replace('/', "_");
+        self.key_dir().join(safe_key)
+    }
+
+    pub fn batch_offload(&self, entries: &[(String, Vec<u8>)]) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = self.key_dir();
+        std::fs::create_dir_all(&dir)?;
+        for (key, value) in entries {
+            let path = self.key_path(key);
+            let mut f = std::fs::File::create(&path)?;
+            f.write_all(value)?;
+        }
+        Ok(())
+    }
+
+    pub fn batch_load(&self, keys: &[String]) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+        let mut results = Vec::new();
+        for key in keys {
+            let path = self.key_path(key);
+            if path.exists() {
+                let mut f = std::fs::File::open(&path)?;
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf)?;
+                results.push((key.clone(), buf));
+            }
+        }
+        Ok(results)
+    }
+
+    pub fn remove_keys(&self, keys: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        for key in keys {
+            let path = self.key_path(key);
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_exist(&self, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(self.key_path(key).exists())
+    }
+
+    pub fn remove_by_regex(&self, pattern: &str) -> Result<usize, Box<dyn std::error::Error>> {
+        let dir = self.key_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if re.is_match(&name) {
+                std::fs::remove_file(entry.path())?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    pub fn remove_all(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let dir = self.key_dir();
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let count = std::fs::read_dir(&dir)?.count();
+        std::fs::remove_dir_all(&dir)?;
+        std::fs::create_dir_all(&dir)?;
+        Ok(count)
+    }
+
+    pub fn scan_meta(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
+        let dir = self.key_dir();
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut results = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let meta = entry.metadata()?;
+            results.push((name, meta.len()));
+        }
+        Ok(results)
     }
 }

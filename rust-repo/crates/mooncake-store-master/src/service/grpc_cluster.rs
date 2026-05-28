@@ -59,15 +59,18 @@ impl MasterServiceImpl {
         let segment = mooncake_store_core::Segment {
             id: segment_id,
             name: req.segment_name.clone(),
+            base: 0,
             size: req.size,
-            used: 0,
-            client_id,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         };
 
         self.state.segments.insert(
             segment_id,
             SegmentEntry {
                 segment: segment.clone(),
+                used: 0,
+                client_id,
                 status: proto::SegmentStatus::Active,
             },
         );
@@ -76,9 +79,10 @@ impl MasterServiceImpl {
         register_metadata_segments(&self.metadata_state, &[req.segment_name.clone()]).await;
 
         let mut allocator = self.state.allocator.write();
-        allocator.add_segment(segment);
+        allocator.add_segment(segment, 0, client_id);
 
         bump_view_version(&self.state);
+        self.oplog_manager.lock().record_mount_segment(&req.segment_name, segment_id, req.size);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
         Ok(Response::new(proto::MountSegmentResponse {}))
     }
@@ -112,11 +116,13 @@ impl MasterServiceImpl {
         self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
             id: segment.id,
             name: segment.name.clone(),
+            base: segment.base,
             size: segment.size,
-            used: 0,
-            client_id,
-        });
+            te_endpoint: segment.te_endpoint.clone(),
+            protocol: String::new(),
+        }, 0, client_id);
         bump_view_version(&self.state);
+        self.oplog_manager.lock().record_mount_nof_segment(&segment.name, segment.id, segment.size);
         Ok(Response::new(proto::MountNoFSegmentResponse {}))
     }
 
@@ -137,10 +143,18 @@ impl MasterServiceImpl {
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
 
+        let segment_name = self
+            .state
+            .segments
+            .get(&segment_id)
+            .map(|e| e.segment.name.clone())
+            .unwrap_or_default();
+
         if !unmount_segment_owned(&self.state, segment_id, client_id) {
             return Err(Status::not_found("segment not found for client"));
         }
         bump_view_version(&self.state);
+        self.oplog_manager.lock().record_unmount_segment(&segment_name, segment_id);
         Ok(Response::new(proto::UnmountSegmentResponse {}))
     }
 
@@ -160,10 +174,18 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        let nof_segment_name = self
+            .state
+            .nof_segments
+            .get(&segment_id)
+            .map(|e| e.segment.name.clone())
+            .unwrap_or_default();
+
         if !unmount_nof_segment_owned(&self.state, segment_id, client_id) {
             return Err(Status::not_found("NoF segment not found for client"));
         }
         bump_view_version(&self.state);
+        self.oplog_manager.lock().record_unmount_nof_segment(&nof_segment_name, segment_id);
         Ok(Response::new(proto::UnmountNoFSegmentResponse {}))
     }
 
@@ -187,7 +209,7 @@ impl MasterServiceImpl {
             .state
             .segments
             .get(&segment_id)
-            .map(|entry| entry.segment.client_id == client_id)
+            .map(|entry| entry.client_id == client_id)
             .unwrap_or(false);
         if !owned {
             return Err(Status::not_found("segment not found for client"));
@@ -224,7 +246,7 @@ impl MasterServiceImpl {
 
         for (segment_name, size) in req.segment_names.iter().zip(req.segment_sizes.iter()) {
             let exists = self.state.segments.iter().any(|entry| {
-                entry.segment.client_id == client_id && entry.segment.name == *segment_name
+                entry.client_id == client_id && entry.segment.name == *segment_name
             });
             if exists {
                 continue;
@@ -233,18 +255,21 @@ impl MasterServiceImpl {
             let segment = mooncake_store_core::Segment {
                 id: Uuid::new_v4(),
                 name: segment_name.clone(),
+                base: 0,
                 size: *size,
-                used: 0,
-                client_id,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             };
             self.state.segments.insert(
                 segment.id,
                 SegmentEntry {
                     segment: segment.clone(),
+                    used: 0,
+                    client_id,
                     status: proto::SegmentStatus::Active,
                 },
             );
-            self.state.allocator.write().add_segment(segment);
+            self.state.allocator.write().add_segment(segment, 0, client_id);
         }
         sync_client_segments(&self.state, client_id);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
@@ -284,10 +309,11 @@ impl MasterServiceImpl {
             self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
                 id: segment.id,
                 name: segment.name.clone(),
+                base: segment.base,
                 size: segment.size,
-                used: 0,
-                client_id,
-            });
+                te_endpoint: segment.te_endpoint.clone(),
+                protocol: String::new(),
+            }, 0, client_id);
         }
         Ok(Response::new(proto::ReMountNoFSegmentResponse {}))
     }

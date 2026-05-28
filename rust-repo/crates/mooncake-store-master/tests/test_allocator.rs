@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 mod common;
-use common::make_seg;
+use common::{make_seg, make_seg_with_usage};
 
 use mooncake_store_core::{ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{
@@ -14,7 +14,7 @@ use uuid::Uuid;
 #[test]
 fn test_single_segment_single_replica() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("n:1", 10000, 0));
+    a.add_segment(make_seg("n:1", 10000), 0, Uuid::new_v4());
     let repls = a.allocate("k", 100, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
     assert_eq!(repls[0].segment_name, "n:1");
@@ -23,9 +23,9 @@ fn test_single_segment_single_replica() {
 #[test]
 fn test_multiple_segments_partially_filled() {
     let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
-    a.add_segment(make_seg("n:1", 10000, 9000));
-    a.add_segment(make_seg("n:2", 10000, 1000));
-    a.add_segment(make_seg("n:3", 10000, 0));
+    a.add_segment(make_seg("n:1", 10000), 9000, Uuid::new_v4());
+    a.add_segment(make_seg("n:2", 10000), 1000, Uuid::new_v4());
+    a.add_segment(make_seg("n:3", 10000), 0, Uuid::new_v4());
 
     let repls = a.allocate("k", 500, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
@@ -42,8 +42,8 @@ fn test_no_segment_has_enough_space() {
 #[test]
 fn test_all_segments_too_full() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("n:1", 100, 90));
-    a.add_segment(make_seg("n:2", 100, 95));
+    a.add_segment(make_seg("n:1", 100), 90, Uuid::new_v4());
+    a.add_segment(make_seg("n:2", 100), 95, Uuid::new_v4());
     let repls = a.allocate("k", 20, 1, &ReplicateConfig::default());
     assert!(repls.is_empty());
 }
@@ -51,7 +51,7 @@ fn test_all_segments_too_full() {
 #[test]
 fn test_exact_fit() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("n:1", 100, 50));
+    a.add_segment(make_seg("n:1", 100), 50, Uuid::new_v4());
     let repls = a.allocate("k", 50, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
     assert_eq!(repls[0].offset, 50);
@@ -60,7 +60,7 @@ fn test_exact_fit() {
 #[test]
 fn test_replica_count_zero() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("n:1", 1000, 0));
+    a.add_segment(make_seg("n:1", 1000), 0, Uuid::new_v4());
     let repls = a.allocate("k", 100, 0, &ReplicateConfig::default());
     assert!(repls.is_empty());
 }
@@ -68,8 +68,8 @@ fn test_replica_count_zero() {
 #[test]
 fn test_not_enough_segments_for_replicas() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("n:1", 1000, 0));
-    a.add_segment(make_seg("n:2", 1000, 0));
+    a.add_segment(make_seg("n:1", 1000), 0, Uuid::new_v4());
+    a.add_segment(make_seg("n:2", 1000), 0, Uuid::new_v4());
     let repls = a.allocate("k", 100, 5, &ReplicateConfig::default());
     assert_eq!(repls.len(), 2);
 }
@@ -77,7 +77,7 @@ fn test_not_enough_segments_for_replicas() {
 #[test]
 fn test_preferred_segment_nonexistent() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("real:1", 1000, 0));
+    a.add_segment(make_seg("real:1", 1000), 0, Uuid::new_v4());
     let config = ReplicateConfig {
         preferred_segment: "ghost:1".into(),
         ..Default::default()
@@ -90,8 +90,8 @@ fn test_preferred_segment_nonexistent() {
 #[test]
 fn test_preferred_segment_no_space() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("pref:1", 100, 100));
-    a.add_segment(make_seg("fallback:1", 1000, 0));
+    a.add_segment(make_seg("pref:1", 100), 100, Uuid::new_v4());
+    a.add_segment(make_seg("fallback:1", 1000), 0, Uuid::new_v4());
     let config = ReplicateConfig {
         preferred_segment: "pref:1".into(),
         ..Default::default()
@@ -105,7 +105,7 @@ fn test_preferred_segment_no_space() {
 fn test_random_strategy_uses_available_segments() {
     let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::Random);
     for i in 1..=5 {
-        a.add_segment(make_seg(&format!("n:{}", i), 10000, 0));
+        a.add_segment(make_seg(&format!("n:{}", i), 10000), 0, Uuid::new_v4());
     }
     let repls = a.allocate("k", 100, 3, &ReplicateConfig::default());
     assert_eq!(repls.len(), 3);
@@ -119,14 +119,14 @@ fn test_random_strategy_uses_available_segments() {
 fn test_remove_segment_and_reallocate() {
     let mut a = SegmentAllocator::new();
     let sid = Uuid::new_v4();
-    let cid = Uuid::new_v4();
     a.add_segment(Segment {
         id: sid,
         name: "to-remove:1".into(),
         size: 1000,
-        used: 0,
-        client_id: cid,
-    });
+        base: 0,
+        te_endpoint: String::new(),
+        protocol: "tcp".into(),
+    }, 0, Uuid::new_v4());
     let repls = a.allocate("k", 100, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
 
@@ -146,7 +146,7 @@ fn test_allocator_new_is_empty() {
 fn test_many_small_segments() {
     let mut a = SegmentAllocator::new();
     for i in 0..20 {
-        a.add_segment(make_seg(&format!("s{}:1", i), 100, 0));
+        a.add_segment(make_seg(&format!("s{}:1", i), 100), 0, Uuid::new_v4());
     }
     let repls = a.allocate("k", 50, 10, &ReplicateConfig::default());
     assert_eq!(repls.len(), 10);
@@ -155,7 +155,7 @@ fn test_many_small_segments() {
 #[test]
 fn test_large_object_no_segment() {
     let mut a = SegmentAllocator::new();
-    a.add_segment(make_seg("big:1", 1_000_000, 0));
+    a.add_segment(make_seg("big:1", 1_000_000), 0, Uuid::new_v4());
     let repls = a.allocate("huge_key", 2_000_000, 1, &ReplicateConfig::default());
     assert!(repls.is_empty());
 }
@@ -163,9 +163,9 @@ fn test_large_object_no_segment() {
 #[test]
 fn test_free_ratio_sort_order() {
     let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
-    a.add_segment(make_seg("most_free:1", 10000, 0));
-    a.add_segment(make_seg("some_free:1", 10000, 5000));
-    a.add_segment(make_seg("little_free:1", 10000, 9000));
+    a.add_segment(make_seg("most_free:1", 10000), 0, Uuid::new_v4());
+    a.add_segment(make_seg("some_free:1", 10000), 5000, Uuid::new_v4());
+    a.add_segment(make_seg("little_free:1", 10000), 9000, Uuid::new_v4());
 
     let repls = a.allocate("k", 500, 2, &ReplicateConfig::default());
     assert_eq!(repls.len(), 2);
@@ -177,7 +177,7 @@ fn test_free_ratio_sort_order() {
 fn test_replicas_on_different_segments() {
     let mut a = SegmentAllocator::new();
     for i in 0..4 {
-        a.add_segment(make_seg(&format!("n{}:1", i), 10000, 0));
+        a.add_segment(make_seg(&format!("n{}:1", i), 10000), 0, Uuid::new_v4());
     }
     let repls = a.allocate("k", 100, 4, &ReplicateConfig::default());
     assert_eq!(repls.len(), 4);
@@ -194,9 +194,9 @@ fn test_replicas_on_different_segments() {
 #[test]
 fn test_cachelib_like_allocator_rounds_to_size_class_usage() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
 
     let repls = a.allocate("k", 64, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
@@ -207,7 +207,7 @@ fn test_cachelib_like_allocator_rounds_to_size_class_usage() {
 #[test]
 fn test_cachelib_like_allocator_reuses_freed_slot() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    a.add_segment(make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0));
+    a.add_segment(make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2), 0, Uuid::new_v4());
 
     let first = a.allocate("k1", 128, 1, &ReplicateConfig::default());
     let second = a.allocate("k2", 128, 1, &ReplicateConfig::default());
@@ -224,9 +224,9 @@ fn test_cachelib_like_allocator_reuses_freed_slot() {
 #[test]
 fn test_cachelib_like_allocator_pool_lifecycle() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 4, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 4, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
 
     let pool_ids = a.pool_ids(&seg_id).unwrap();
     assert_eq!(pool_ids.len(), 1);
@@ -259,9 +259,9 @@ fn test_cachelib_like_allocator_pool_lifecycle() {
 #[test]
 fn test_cachelib_like_slab_release_resize_requires_freeing_active_allocations() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     let replica = a.allocate("k1", 128, 1, &ReplicateConfig::default());
@@ -298,9 +298,9 @@ fn test_cachelib_like_slab_release_resize_requires_freeing_active_allocations() 
 #[test]
 fn test_cachelib_like_slab_release_abort_restores_free_slots() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     let replica = a.allocate("k1", 128, 1, &ReplicateConfig::default());
@@ -326,9 +326,9 @@ fn test_cachelib_like_slab_release_abort_restores_free_slots() {
 #[test]
 fn test_cachelib_like_pool_over_limit_and_helper_queries() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     let replica = a.allocate("k1", 128, 1, &ReplicateConfig::default());
@@ -345,9 +345,9 @@ fn test_cachelib_like_pool_over_limit_and_helper_queries() {
 #[test]
 fn test_cachelib_like_add_pool_with_ensure_provisionable() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 8, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 8, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     assert!(a
@@ -362,9 +362,9 @@ fn test_cachelib_like_add_pool_with_ensure_provisionable() {
 #[test]
 fn test_cachelib_like_release_helpers_and_rebalance() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
     let receiver_class_size = cachelib_allocation_class_size_for_request(256).unwrap();
 
@@ -409,9 +409,9 @@ fn test_cachelib_like_release_helpers_and_rebalance() {
 #[test]
 fn test_cachelib_like_query_interfaces_match_allocations() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 3, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 3, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     assert_eq!(a.pool_name(&seg_id, main_pool).as_deref(), Some("main"));
@@ -447,9 +447,9 @@ fn test_cachelib_like_query_interfaces_match_allocations() {
 #[test]
 fn test_cachelib_like_start_slab_release_with_hint_and_abort() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 3, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 3, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     let first = a.allocate("k1", 128, 1, &ReplicateConfig::default());
@@ -489,9 +489,9 @@ fn test_cachelib_like_start_slab_release_with_hint_and_abort() {
 #[test]
 fn test_cachelib_like_for_each_allocation_reports_slots_and_skips_releasing_slab() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    let seg = make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
+    let (seg, used_u, cid_u) = make_seg_with_usage("cachelib:1", CACHELIB_SLAB_SIZE * 2, 0);
     let seg_id = seg.id;
-    a.add_segment(seg);
+    a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
     let replica = a.allocate("k1", 128, 1, &ReplicateConfig::default());

@@ -16,13 +16,19 @@ pub fn temp_dir() -> PathBuf {
     dir
 }
 
-/// Create a `Segment` for test use.
-pub fn make_seg(name: &str, size: u64, used: u64) -> Segment {
+/// Create a `Segment` for test use, with default `base`=0, `te_endpoint`="", `protocol`="tcp".
+pub fn make_seg(name: &str, size: u64) -> Segment {
     Segment {
         id: Uuid::new_v4(),
         name: name.to_string(),
         size,
-        used,
-        client_id: Uuid::new_v4(),
+        base: 0,
+        te_endpoint: String::new(),
+        protocol: "tcp".to_string(),
     }
+}
+
+/// Convenience: create a segment and return (segment, used, client_id) for `add_segment`.
+pub fn make_seg_with_usage(name: &str, size: u64, used: u64) -> (Segment, u64, Uuid) {
+    (make_seg(name, size), used, Uuid::new_v4())
 }

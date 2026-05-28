@@ -1,3 +1,4 @@
+pub mod buffer_allocator;
 pub mod client;
 pub mod engram;
 pub mod hot_cache;

@@ -51,7 +51,8 @@ impl CountMinSketch {
         min_val
     }
 
-    /// Return the estimated count for `key` (read-only).
+    /// Return the estimated count for `key` (read-only). Used by admission control.
+    #[allow(dead_code)]
     pub fn count(&self, key: &str) -> u8 {
         let mut min_val = u8::MAX;
         for i in 0..self.depth {

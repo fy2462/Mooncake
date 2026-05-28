@@ -35,6 +35,7 @@ impl MockClient {
 }
 
 impl EngramClient for MockClient {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn register_buffer(
         &self,
         buffer: *mut c_void,
@@ -49,6 +50,7 @@ impl EngramClient for MockClient {
         Ok(())
     }
 
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn unregister_buffer(&self, buffer: *mut c_void) -> mooncake_store_core::error::StoreResult<()> {
         let mut state = self.state.lock().unwrap();
         state.unregistrations.push(buffer);

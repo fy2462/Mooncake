@@ -69,7 +69,7 @@ pub(crate) fn sync_client_segments(state: &MasterState, client_id: Uuid) {
     let segments = state
         .segments
         .iter()
-        .filter(|entry| entry.segment.client_id == client_id)
+        .filter(|entry| entry.client_id == client_id)
         .map(|entry| entry.segment.clone())
         .collect::<Vec<_>>();
     if let Some(mut client) = state.clients.get_mut(&client_id) {
@@ -98,7 +98,7 @@ pub(crate) fn client_id_by_segment_name(state: &MasterState, segment_name: &str)
         .segments
         .iter()
         .find(|entry| entry.segment.name == segment_name)
-        .map(|entry| entry.segment.client_id)
+        .map(|entry| entry.client_id)
 }
 
 pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) -> Option<Uuid> {
@@ -157,7 +157,7 @@ pub(crate) fn unmount_segment_owned(
     let owned = state
         .segments
         .get(&segment_id)
-        .map(|entry| entry.segment.client_id == client_id)
+        .map(|entry| entry.client_id == client_id)
         .unwrap_or(false);
     if !owned {
         return false;
@@ -194,7 +194,7 @@ pub(crate) fn addresses_for_client(state: &MasterState, client_id: Uuid) -> Vec<
 
     let mut addresses = Vec::new();
     for segment in state.segments.iter() {
-        if segment.segment.client_id == client_id {
+        if segment.client_id == client_id {
             let host = host_from_segment_name(&segment.segment.name);
             if !host.is_empty() && !addresses.iter().any(|v| v == &host) {
                 addresses.push(host);
@@ -211,7 +211,7 @@ pub(crate) fn sync_segment_usage(state: &MasterState, segment_ids: impl IntoIter
             continue;
         };
         if let Some(mut entry) = state.segments.get_mut(&segment_id) {
-            entry.segment.used = used;
+            entry.used = used;
         }
     }
 }

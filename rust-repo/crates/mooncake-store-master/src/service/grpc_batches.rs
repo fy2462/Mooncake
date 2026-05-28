@@ -204,6 +204,7 @@ impl MasterServiceImpl {
                     clear_offloading_task(&self.state, key);
                     clear_promotion_task(&self.state, key);
                     release_replicas(&self.state, &object.replicas);
+                    self.oplog_manager.lock().record_remove(key);
                 }
                 0
             })

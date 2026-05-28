@@ -10,9 +10,10 @@ use uuid::Uuid;
 pub struct Segment {
     pub id: Uuid,
     pub name: String,
+    pub base: u64,
     pub size: u64,
-    pub used: u64,
-    pub client_id: Uuid,
+    pub te_endpoint: String,
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +51,7 @@ pub enum ReplicaType {
     Disk = 1,
     LocalDisk = 2,
     NoFSsd = 3,
+    All = 4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

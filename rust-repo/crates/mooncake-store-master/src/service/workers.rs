@@ -321,7 +321,7 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
     let segment_ids = state
         .segments
         .iter()
-        .filter(|entry| entry.segment.client_id == client_id)
+        .filter(|entry| entry.client_id == client_id)
         .map(|entry| entry.segment.id)
         .collect::<Vec<_>>();
     for segment_id in segment_ids {

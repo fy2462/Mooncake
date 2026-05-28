@@ -1,8 +1,10 @@
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
+use serde_json::json;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::warn;
+use uuid::Uuid;
 
 /// Trait for persistent operation log stores.
 pub trait OpLogStore: Send + Sync {
@@ -333,6 +335,7 @@ pub struct EtcdOpLogStore {
     /// Entries accumulated for batch write.
     buffer: Vec<OpLogRecord>,
     /// Flush the buffer after this many entries.
+    #[allow(dead_code)]
     batch_size: usize,
 }
 
@@ -530,6 +533,169 @@ impl EtcdOpLogStore {
     /// Flush buffered entries to etcd (async). Call periodically or before shutdown.
     pub async fn flush_async(&mut self) -> Result<(), HaError> {
         self.flush().await
+    }
+}
+
+// =============================================================================
+// OpLogManager — high-level wrapper that records mutations into the oplog.
+// =============================================================================
+
+/// Manages recording of operations to an optional back-end OpLogStore.
+/// Each mutation method serializes the event as a JSON payload and appends
+/// it via `store.append()`.  Errors are logged (warn!) but never propagated,
+/// so that the oplog is best-effort and never blocks the main write path.
+pub struct OpLogManager {
+    store: Option<Box<dyn OpLogStore + Send>>,
+    view_version: u64,
+}
+
+impl OpLogManager {
+    pub fn new(store: Option<Box<dyn OpLogStore + Send>>, view_version: u64) -> Self {
+        Self { store, view_version }
+    }
+
+    pub fn latest_sequence(&self) -> u64 {
+        self.store
+            .as_ref()
+            .map(|s| s.latest_sequence())
+            .unwrap_or(0)
+    }
+
+    pub fn set_view_version(&mut self, version: u64) {
+        self.view_version = version;
+    }
+
+    pub fn store(&self) -> Option<&(dyn OpLogStore + Send)> {
+        self.store.as_deref()
+    }
+
+    pub fn into_store(self) -> Option<Box<dyn OpLogStore + Send>> {
+        self.store
+    }
+
+    /// Record a put-end mutation: { "op": "put_end", "key": "...", "size": ... }
+    pub fn record_put_end(&mut self, key: &str, size: u64) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({"op": "put_end", "key": key, "size": size}).to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record put_end for key={key}: {e}");
+            }
+        }
+    }
+
+    /// Record a remove mutation: { "op": "remove", "key": "..." }
+    pub fn record_remove(&mut self, key: &str) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({"op": "remove", "key": key}).to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record remove for key={key}: {e}");
+            }
+        }
+    }
+
+    /// Record a mount-segment mutation.
+    pub fn record_mount_segment(&mut self, segment_name: &str, segment_id: Uuid, size: u64) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({
+                "op": "mount_segment",
+                "segment_name": segment_name,
+                "segment_id": segment_id.to_string(),
+                "size": size
+            })
+            .to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record mount_segment for {segment_name}: {e}");
+            }
+        }
+    }
+
+    /// Record an unmount-segment mutation.
+    pub fn record_unmount_segment(&mut self, segment_name: &str, segment_id: Uuid) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({
+                "op": "unmount_segment",
+                "segment_name": segment_name,
+                "segment_id": segment_id.to_string()
+            })
+            .to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record unmount_segment for {segment_name}: {e}");
+            }
+        }
+    }
+
+    /// Record a mount-nof-segment mutation.
+    pub fn record_mount_nof_segment(&mut self, segment_name: &str, segment_id: Uuid, size: u64) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({
+                "op": "mount_nof_segment",
+                "segment_name": segment_name,
+                "segment_id": segment_id.to_string(),
+                "size": size
+            })
+            .to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record mount_nof_segment for {segment_name}: {e}");
+            }
+        }
+    }
+
+    /// Record an unmount-nof-segment mutation.
+    pub fn record_unmount_nof_segment(&mut self, segment_name: &str, segment_id: Uuid) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({
+                "op": "unmount_nof_segment",
+                "segment_name": segment_name,
+                "segment_id": segment_id.to_string()
+            })
+            .to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record unmount_nof_segment for {segment_name}: {e}");
+            }
+        }
+    }
+
+    /// Record a put-start mutation: { "op": "put_start", "key": "...", "client_id": "..." }
+    pub fn record_put_start(&mut self, key: &str, client_id: Uuid) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({
+                "op": "put_start",
+                "key": key,
+                "client_id": client_id.to_string()
+            })
+            .to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record put_start for key={key}: {e}");
+            }
+        }
     }
 }
 

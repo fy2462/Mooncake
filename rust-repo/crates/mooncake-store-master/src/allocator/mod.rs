@@ -35,6 +35,8 @@ enum SegmentLayout {
 #[derive(Debug, Clone)]
 struct SegmentState {
     segment: Segment,
+    used: u64,
+    client_id: Uuid,
     layout: SegmentLayout,
 }
 
@@ -67,20 +69,19 @@ impl SegmentAllocator {
         self.memory_allocator_kind
     }
 
-    pub fn add_segment(&mut self, mut segment: Segment) {
-        let layout = match self.memory_allocator_kind {
+    pub fn add_segment(&mut self, segment: Segment, used: u64, client_id: Uuid) {
+        let (layout, effective_used) = match self.memory_allocator_kind {
             MemoryAllocatorKind::Offset => {
-                let tail_free = segment.size.saturating_sub(segment.used);
+                let tail_free = segment.size.saturating_sub(used);
                 let free_ranges = if tail_free > 0 {
-                    vec![(segment.used, tail_free)]
+                    vec![(used, tail_free)]
                 } else {
                     Vec::new()
                 };
-                SegmentLayout::Offset(OffsetSegmentState { free_ranges })
+                (SegmentLayout::Offset(OffsetSegmentState { free_ranges }), used)
             }
             MemoryAllocatorKind::CachelibLike => {
-                let reserved_bytes = align_up(segment.used, CACHELIB_SLAB_SIZE).min(segment.size);
-                segment.used = reserved_bytes;
+                let reserved_bytes = align_up(used, CACHELIB_SLAB_SIZE).min(segment.size);
                 let total_slabs = (segment.size / CACHELIB_SLAB_SIZE) as u32;
                 let reserved_slabs = (reserved_bytes / CACHELIB_SLAB_SIZE) as u32;
                 let total_capacity_bytes =
@@ -106,11 +107,11 @@ impl SegmentAllocator {
                     .create_pool(DEFAULT_CACHELIB_POOL_NAME.to_string(), total_capacity_bytes)
                     .expect("default cachelib pool should be provisionable");
                 cachelib.default_pool_id = main_pool_id;
-                SegmentLayout::Cachelib(cachelib)
+                (SegmentLayout::Cachelib(cachelib), reserved_bytes)
             }
         };
         self.segments
-            .insert(segment.id, SegmentState { segment, layout });
+            .insert(segment.id, SegmentState { segment, used: effective_used, client_id, layout });
     }
 
     pub fn remove_segment(&mut self, segment_id: &Uuid) {
@@ -152,10 +153,10 @@ impl SegmentAllocator {
             }
             AllocationStrategy::FreeRatioFirst => {
                 candidates.sort_by(|a, b| {
-                    let seg_a = &self.segments[a].segment;
-                    let seg_b = &self.segments[b].segment;
-                    let ratio_a = free_ratio(seg_a);
-                    let ratio_b = free_ratio(seg_b);
+                    let state_a = &self.segments[a];
+                    let state_b = &self.segments[b];
+                    let ratio_a = free_ratio(state_a.segment.size, state_a.used);
+                    let ratio_b = free_ratio(state_b.segment.size, state_b.used);
                     ratio_b.partial_cmp(&ratio_a).unwrap_or(Ordering::Equal)
                 });
             }
@@ -175,7 +176,7 @@ impl SegmentAllocator {
             let preferred_host = client_id.and_then(|client_id| {
                 self.segments
                     .values()
-                    .find(|state| state.segment.client_id == client_id)
+                    .find(|state| state.client_id == client_id)
                     .map(|state| segment_host(&state.segment.name))
             });
             if let Some(preferred_host) = preferred_host {
@@ -195,7 +196,7 @@ impl SegmentAllocator {
             let Some((offset, accounted_size)) = state.allocate(slice_size) else {
                 continue;
             };
-            state.segment.used = state.segment.used.saturating_add(accounted_size);
+            state.used = state.used.saturating_add(accounted_size);
             replicas.push(ReplicaDescriptor {
                 refcnt: 0,
                 segment_id: state.segment.id,
@@ -218,21 +219,21 @@ impl SegmentAllocator {
             let Some(released_size) = state.release(replica) else {
                 continue;
             };
-            state.segment.used = state.segment.used.saturating_sub(released_size);
+            state.used = state.used.saturating_sub(released_size);
         }
     }
 
     pub fn used_bytes(&self, segment_id: &Uuid) -> Option<u64> {
         self.segments
             .get(segment_id)
-            .map(|state| state.segment.used)
+            .map(|state| state.used)
     }
 
     pub fn usage_totals(&self) -> (u64, u64) {
         self.segments.values().fold((0, 0), |(total, used), state| {
             (
                 total.saturating_add(state.segment.size),
-                used.saturating_add(state.segment.used),
+                used.saturating_add(state.used),
             )
         })
     }
@@ -713,11 +714,11 @@ impl SegmentState {
     }
 }
 
-fn free_ratio(segment: &Segment) -> f64 {
-    if segment.size == 0 {
+fn free_ratio(size: u64, used: u64) -> f64 {
+    if size == 0 {
         return 0.0;
     }
-    segment.size.saturating_sub(segment.used) as f64 / segment.size as f64
+    size.saturating_sub(used) as f64 / size as f64
 }
 
 fn reserve_range(free_ranges: &mut Vec<(u64, u64)>, size: u64) -> Option<u64> {

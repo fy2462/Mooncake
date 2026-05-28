@@ -204,7 +204,7 @@ impl SnapshotProvider for LocalSnapshotProvider {
         Ok(Some(LoadedSnapshot {
             snapshot_id,
             snapshot_sequence_id: 0,
-            segments: segments.into_iter().map(|(s, _)| s).collect(),
+            segments: segments.into_iter().map(|s| s.segment).collect(),
             nof_segments,
             objects,
             tasks,

@@ -7,7 +7,7 @@ mod grpc_tasks;
 mod grpc_trait;
 mod helpers;
 mod proto_conv;
-mod state;
+pub(crate) mod state;
 mod workers;
 
 use crate::allocator::SegmentAllocator;
@@ -68,6 +68,7 @@ pub struct MasterServiceImpl {
     processing_reaper: ProcessingReaper,
     eviction_worker: EvictionWorker,
     client_monitor_worker: ClientMonitorWorker,
+    oplog_manager: parking_lot::Mutex<crate::oplog::OpLogManager>,
 }
 
 const PUT_NO_SPACE_HELPER_STR: &str = " due to insufficient space. Consider lowering eviction_high_watermark_ratio or mounting more segments.";
@@ -99,6 +100,15 @@ impl MasterServiceImpl {
         backend_type: Option<StorageBackendType>,
         backup_dir: Option<PathBuf>,
         runtime_config: MasterRuntimeConfig,
+    ) -> Self {
+        Self::new_with_runtime_config_and_oplog(backend_type, backup_dir, runtime_config, None)
+    }
+
+    pub fn new_with_runtime_config_and_oplog(
+        backend_type: Option<StorageBackendType>,
+        backup_dir: Option<PathBuf>,
+        runtime_config: MasterRuntimeConfig,
+        mut oplog_manager: Option<crate::oplog::OpLogManager>,
     ) -> Self {
         let snapshot_backup_dir = backup_dir.clone();
         let storage_backend = match (backend_type, backup_dir) {
@@ -153,15 +163,17 @@ impl MasterServiceImpl {
                 }
             }
             if let Ok(Some((segments, nof_segments, objects, tasks))) = backend.load() {
-                for (seg, status) in segments {
+                for seg in segments {
                     state.segments.insert(
-                        seg.id,
+                        seg.segment.id,
                         SegmentEntry {
-                            segment: seg.clone(),
-                            status,
+                            segment: seg.segment.clone(),
+                            used: seg.used,
+                            client_id: seg.client_id,
+                            status: seg.status,
                         },
                     );
-                    state.allocator.write().add_segment(seg);
+                    state.allocator.write().add_segment(seg.segment, seg.used, seg.client_id);
                 }
                 for seg in nof_segments {
                     let status = seg.status;
@@ -176,10 +188,11 @@ impl MasterServiceImpl {
                     state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
                         id: seg.segment.id,
                         name: seg.segment.name.clone(),
+                        base: seg.segment.base,
                         size: seg.segment.size,
-                        used: seg.used,
-                        client_id: seg.segment.client_id,
-                    });
+                        te_endpoint: seg.segment.te_endpoint.clone(),
+                        protocol: String::new(),
+                    }, seg.used, seg.segment.client_id);
                 }
                 for (key, object) in objects {
                     state.objects.insert(key, object);
@@ -191,6 +204,10 @@ impl MasterServiceImpl {
             }
         }
 
+        let oplog_manager = oplog_manager
+            .take()
+            .unwrap_or_else(|| crate::oplog::OpLogManager::new(None, 0));
+
         Self {
             state,
             metadata_state,
@@ -198,6 +215,7 @@ impl MasterServiceImpl {
             processing_reaper,
             eviction_worker,
             client_monitor_worker,
+            oplog_manager: parking_lot::Mutex::new(oplog_manager),
         }
     }
 
@@ -237,6 +255,10 @@ impl MasterServiceImpl {
 
     pub fn run_automatic_eviction_once_for_test(&self) -> Vec<String> {
         run_automatic_eviction_once(&self.state)
+    }
+
+    pub fn oplog_manager(&self) -> &parking_lot::Mutex<crate::oplog::OpLogManager> {
+        &self.oplog_manager
     }
 }
 

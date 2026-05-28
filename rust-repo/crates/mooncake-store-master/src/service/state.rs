@@ -57,6 +57,8 @@ pub struct ObjectEntry {
 #[derive(Debug, Clone)]
 pub struct SegmentEntry {
     pub segment: mooncake_store_core::Segment,
+    pub used: u64,
+    pub client_id: Uuid,
     pub status: crate::proto::SegmentStatus,
 }
 
@@ -171,6 +173,7 @@ impl Default for MasterRuntimeConfig {
 
 /// Tracks an in-flight drain unit task for a single key during segment draining.
 #[derive(Debug, Clone)]
+#[allow(dead_code, reason = "partially implemented drain feature")]
 pub(crate) struct ActiveDrainTask {
     pub(crate) task_id: Uuid,
     pub(crate) key: String,
@@ -182,6 +185,7 @@ pub(crate) struct ActiveDrainTask {
 
 /// A drain job that moves objects from draining segments to target segments.
 #[derive(Debug, Clone)]
+#[allow(dead_code, reason = "partially implemented drain feature")]
 pub(crate) struct DrainJobEntry {
     pub(crate) id: Uuid,
     pub(crate) status: crate::proto::JobStatus,

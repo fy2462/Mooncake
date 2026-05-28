@@ -137,7 +137,7 @@ if [ "$CI" = "true" ] || [ "$FREE_BUILD_DIR" = "1" ]; then
     fi
 fi
 
-if [ "$NPU_BUILD" = "1" ]; then
+if [ "$NPU_BUILD" = "1" ]; then/
     echo "Stripping shared libraries to reduce wheel size..."
     find mooncake-wheel/mooncake -name "*.so" -exec strip --strip-unneeded {} \;
 fi
