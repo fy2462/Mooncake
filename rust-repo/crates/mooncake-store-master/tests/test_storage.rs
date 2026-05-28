@@ -89,7 +89,7 @@ fn test_storage_backend_save_and_load() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+            data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
         },
     );
 
@@ -164,7 +164,7 @@ fn test_storage_backend_multiple_objects() {
                 last_access: SystemTime::now(),
                 soft_pinned: false,
                 hard_pinned: false,
-                data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+                data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
             },
         );
     }
@@ -240,7 +240,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+            data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
         },
     );
 

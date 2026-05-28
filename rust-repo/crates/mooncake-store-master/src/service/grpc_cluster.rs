@@ -452,6 +452,7 @@ impl MasterServiceImpl {
                         soft_pinned: false,
                         hard_pinned: false,
                         data_type: ObjectDataType::Unknown,
+                        client_id: Uuid::nil(),
                         put_start_time: None,
                         lease_timeout: None,
                         soft_pin_timeout: None,

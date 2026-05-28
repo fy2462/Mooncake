@@ -214,10 +214,12 @@ impl PythonMooncakeClient {
         })
     }
 
+    #[pyo3(signature = (key, force = false))]
     fn remove<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
         key: String,
+        force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
@@ -228,7 +230,7 @@ impl PythonMooncakeClient {
                     .take()
                     .ok_or_else(|| StoreErrorPy::new_err("client already closed"))?
             };
-            let result = client.remove(&key).await;
+            let result = client.remove(&key, force).await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -316,10 +318,12 @@ impl PythonMooncakeClient {
     // batch_remove / batch_is_exist
     // -------------------------------------------------------------------
 
+    #[pyo3(signature = (keys, force = false))]
     fn batch_remove<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
         keys: Vec<String>,
+        force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
@@ -328,7 +332,7 @@ impl PythonMooncakeClient {
                 let mut guard = inner.lock();
                 guard.take().ok_or_else(|| StoreErrorPy::new_err("client already closed"))?
             };
-            let result = client.batch_remove(&keys).await;
+            let result = client.batch_remove(&keys, force).await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -356,10 +360,12 @@ impl PythonMooncakeClient {
     // remove_by_regex / remove_all
     // -------------------------------------------------------------------
 
+    #[pyo3(signature = (pattern, force = false))]
     fn remove_by_regex<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
         pattern: String,
+        force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
@@ -368,7 +374,7 @@ impl PythonMooncakeClient {
                 let mut guard = inner.lock();
                 guard.take().ok_or_else(|| StoreErrorPy::new_err("client already closed"))?
             };
-            let removed = client.remove_by_regex(&pattern).await;
+            let removed = client.remove_by_regex(&pattern, force).await;
             *inner.lock() = Some(client);
             removed.map_err(to_py_err)
         })

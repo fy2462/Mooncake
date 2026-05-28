@@ -167,7 +167,7 @@ fn test_object_entry_creation() {
             ReplicaDescriptor { refcnt: 0, segment_id: sid, segment_name: "s2".into(), offset: 128, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
         ],
         size: 256, last_access: SystemTime::now(), soft_pinned: false, hard_pinned: false,
-        data_type: ObjectDataType::Unknown, put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+        data_type: ObjectDataType::Unknown, client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");

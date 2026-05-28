@@ -198,6 +198,7 @@ impl MasterServiceImpl {
                 soft_pinned: config.with_soft_pin,
                 hard_pinned: config.with_hard_pin,
                 data_type: config.data_type,
+                client_id,
                 put_start_time: Some(now),
                 lease_timeout: None,
                 soft_pin_timeout: None,
@@ -217,7 +218,15 @@ impl MasterServiceImpl {
         request: Request<proto::PutEndRequest>,
     ) -> Result<Response<proto::PutEndResponse>, Status> {
         let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
         if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+            if entry.client_id != client_id {
+                return Err(Status::permission_denied("illegal client"));
+            }
             for r in &mut entry.replicas {
                 let matches_type = match req.replica_type {
                     x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
@@ -250,18 +259,18 @@ impl MasterServiceImpl {
                     _ => new_soft_pin,
                 });
             }
+            let all_complete = entry.replicas.iter().all(|r| r.status == ReplicaStatus::Complete);
             let size = entry.size;
             let offload_enabled = !self.state.runtime_config.offload_on_evict;
             drop(entry);
-            let client_id = uuid_from_proto(
-                req.client_id
-                    .as_ref()
-                    .ok_or(Status::invalid_argument("missing client_id"))?,
-            );
             if offload_enabled {
                 push_offloading_queue(&self.state, client_id, &req.key, size);
             }
-            self.state.processing_keys.remove(&req.key);
+            // C++ only removes from processing_keys when ALL replicas are complete
+            // AND the object is in the processing set.
+            if all_complete && self.state.processing_keys.contains_key(&req.key) {
+                self.state.processing_keys.remove(&req.key);
+            }
             self.oplog_manager.lock().record_put_end(&req.key, size);
         }
         Ok(Response::new(proto::PutEndResponse {}))
@@ -273,7 +282,7 @@ impl MasterServiceImpl {
         request: Request<proto::AddReplicaRequest>,
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
         let req = request.into_inner();
-        let _client_id = uuid_from_proto(
+        let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
@@ -306,6 +315,7 @@ impl MasterServiceImpl {
                     soft_pinned: false,
                     hard_pinned: false,
                     data_type: ObjectDataType::Unknown,
+                    client_id,
                     put_start_time: None,
                     lease_timeout: None,
                     soft_pin_timeout: None,
@@ -341,7 +351,6 @@ impl MasterServiceImpl {
                         _ => new_soft_pin,
                     });
                 }
-                let replicas = entry.replicas.iter().map(replica_to_proto).collect();
                 let promotion_eligible = !entry.replicas.iter().any(|replica| {
                     replica.replica_type == ReplicaType::Memory
                         && replica.status == ReplicaStatus::Complete
@@ -349,13 +358,23 @@ impl MasterServiceImpl {
                     replica.replica_type == ReplicaType::LocalDisk
                         && replica.status == ReplicaStatus::Complete
                 });
+                // C++ filters by fn_is_completed; return REPLICA_IS_NOT_READY if empty.
+                let completed_replicas: Vec<_> = entry
+                    .replicas
+                    .iter()
+                    .filter(|r| r.status == ReplicaStatus::Complete)
+                    .map(replica_to_proto)
+                    .collect();
+                if completed_replicas.is_empty() {
+                    return Err(Status::failed_precondition("replica is not ready"));
+                }
                 drop(entry);
                 if promotion_eligible {
                     try_push_promotion_queue(&self.state, &req.key);
                 }
                 metrics::GET_REQUESTS.inc();
                 let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
-                Ok(Response::new(proto::GetReplicaListResponse { replicas, lease_ttl_ms }))
+                Ok(Response::new(proto::GetReplicaListResponse { replicas: completed_replicas, lease_ttl_ms }))
             }
             None => Err(Status::not_found(format!("key not found: {}", req.key))),
         }
@@ -371,6 +390,20 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
             ));
+        }
+        if !req.force {
+            if let Some(entry) = self.state.objects.get(&req.key) {
+                if !is_lease_expired(&entry) {
+                    return Err(Status::failed_precondition("object has lease"));
+                }
+                if !entry
+                    .replicas
+                    .iter()
+                    .all(|r| r.status == ReplicaStatus::Complete)
+                {
+                    return Err(Status::failed_precondition("replica is not ready"));
+                }
+            }
         }
         if let Some((_, object)) = self.state.objects.remove(&req.key) {
             clear_offloading_task(&self.state, &req.key);
@@ -403,6 +436,20 @@ impl MasterServiceImpl {
         for key in keys_to_remove {
             if !req.force && self.state.replication_tasks.contains_key(&key) {
                 continue;
+            }
+            if !req.force {
+                if let Some(entry) = self.state.objects.get(&key) {
+                    if !is_lease_expired(&entry) {
+                        continue;
+                    }
+                    if !entry
+                        .replicas
+                        .iter()
+                        .all(|r| r.status == ReplicaStatus::Complete)
+                    {
+                        continue;
+                    }
+                }
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
                 clear_offloading_task(&self.state, &key);
@@ -483,7 +530,7 @@ impl MasterServiceImpl {
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
         let req = request.into_inner();
-        let _client_id = uuid_from_proto(
+        let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
@@ -500,9 +547,21 @@ impl MasterServiceImpl {
         }
         let replica_count = config.replica_num.max(1) as usize;
 
+        // C++ checks if replication_tasks or offloading_tasks exist for the key.
+        if self.state.replication_tasks.contains_key(&req.key) {
+            return Err(Status::failed_precondition("object has replication task"));
+        }
+        if self.state.offloading_tasks.contains_key(&req.key) {
+            return Err(Status::failed_precondition("object has offloading task"));
+        }
+
         let (replicas, previous_soft_pinned, previous_hard_pinned) = if let Some(existing) =
             self.state.objects.get(&req.key)
         {
+            // C++ checks HasReplica(&Replica::fn_is_busy)
+            if existing.replicas.iter().any(|r| r.refcnt > 0) {
+                return Err(Status::failed_precondition("object replica busy"));
+            }
             if existing.size == req.slice_length {
                 (
                     existing.replicas.clone(),
@@ -519,7 +578,7 @@ impl MasterServiceImpl {
                 (
                     allocator.allocate_for_client(
                         &req.key,
-                        Some(_client_id),
+                        Some(client_id),
                         req.slice_length,
                         replica_count,
                         &config,
@@ -533,7 +592,7 @@ impl MasterServiceImpl {
             (
                 allocator.allocate_for_client(
                     &req.key,
-                    Some(_client_id),
+                    Some(client_id),
                     req.slice_length,
                     replica_count,
                     &config,
@@ -578,6 +637,7 @@ impl MasterServiceImpl {
                 soft_pinned: config.with_soft_pin || previous_soft_pinned,
                 hard_pinned: config.with_hard_pin || previous_hard_pinned,
                 data_type: config.data_type,
+                client_id,
                 put_start_time: Some(SystemTime::now()),
                 lease_timeout: None,
                 soft_pin_timeout: None,

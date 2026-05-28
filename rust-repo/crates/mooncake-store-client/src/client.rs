@@ -123,6 +123,11 @@ impl MooncakeClient {
         value: &[u8],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<()> {
+        if key.is_empty() || value.is_empty() {
+            return Err(StoreError::InvalidParams(
+                "key is empty or value has zero length".to_string(),
+            ));
+        }
         let cfg = config.unwrap_or_default();
 
         let request = proto::PutStartRequest {
@@ -155,7 +160,15 @@ impl MooncakeClient {
         }
 
         for replica in &replicas {
-            self.write_to_replica(replica, value).await?;
+            if let Err(e) = self.write_to_replica(replica, value).await {
+                let revoke_req = proto::PutRevokeRequest {
+                    client_id: Some(self.client_id_proto()),
+                    key: key.to_string(),
+                    replica_type: 0,
+                };
+                let _ = self.master.put_revoke(revoke_req).await;
+                return Err(e);
+            }
         }
 
         let end_request = proto::PutEndRequest {
@@ -201,7 +214,15 @@ impl MooncakeClient {
         let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
-            self.zero_copy_write(replica, buffer, size).await?;
+            if let Err(e) = self.zero_copy_write(replica, buffer, size).await {
+                let revoke_req = proto::PutRevokeRequest {
+                    client_id: Some(self.client_id_proto()),
+                    key: key.to_string(),
+                    replica_type: 0,
+                };
+                let _ = self.master.put_revoke(revoke_req).await;
+                return Err(e);
+            }
         }
 
         let end_request = proto::PutEndRequest {
@@ -287,6 +308,12 @@ impl MooncakeClient {
                         break;
                     }
                     if status.status == TransferStatusEnum::Failed {
+                        let revoke_req = proto::PutRevokeRequest {
+                            client_id: Some(self.client_id_proto()),
+                            key: key.to_string(),
+                            replica_type: 0,
+                        };
+                        let _ = self.master.put_revoke(revoke_req).await;
                         return Err(StoreError::OperationFailed(-1));
                     }
                     tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
@@ -317,6 +344,11 @@ impl MooncakeClient {
         values: &[&[u8]],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<i32>> {
+        if keys.len() != values.len() {
+            return Err(StoreError::InvalidParams(
+                "keys and values length mismatch".to_string(),
+            ));
+        }
         let mut statuses = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
             match self.put(key, values[i], config.clone()).await {
@@ -324,17 +356,6 @@ impl MooncakeClient {
                 Err(_) => statuses.push(-1),
             }
         }
-
-        let end_entries: Vec<proto::PutEndEntry> = keys
-            .iter()
-            .map(|key| proto::PutEndEntry {
-                client_id: Some(self.client_id_proto()),
-                key: key.clone(),
-                replica_type: 0,
-            })
-            .collect();
-
-        let _ = self.master.batch_put_end(proto::BatchPutEndRequest { entries: end_entries }).await;
         Ok(statuses)
     }
 
@@ -361,10 +382,9 @@ impl MooncakeClient {
 
     pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
         let replicas = self.fetch_replicas(key).await?;
-        if replicas.is_empty() {
-            return Err(StoreError::KeyNotFound(key.to_string()));
-        }
-        self.read_from_replica(&replicas[0]).await
+        let replica = self.select_best_replica(&replicas)
+            .ok_or(StoreError::KeyNotFound(key.to_string()))?;
+        self.read_from_replica(replica).await
     }
 
     pub async unsafe fn get_into(
@@ -374,10 +394,9 @@ impl MooncakeClient {
         size: usize,
     ) -> StoreResult<usize> {
         let replicas = self.fetch_replicas(key).await?;
-        if replicas.is_empty() {
-            return Err(StoreError::KeyNotFound(key.to_string()));
-        }
-        self.zero_copy_read(&replicas[0], buffer, size).await
+        let replica = self.select_best_replica(&replicas)
+            .ok_or(StoreError::KeyNotFound(key.to_string()))?;
+        self.zero_copy_read(replica, buffer, size).await
     }
 
     // -----------------------------------------------------------------------
@@ -398,11 +417,14 @@ impl MooncakeClient {
             let mut buf_results = vec![];
             for (key_idx, key) in keys[buf_idx].iter().enumerate() {
                 let replicas = self.fetch_replicas(key).await?;
-                if replicas.is_empty() {
-                    buf_results.push(vec![-1]);
-                    continue;
-                }
-                let seg = self.engine.open_segment(&replicas[0].segment_name)?;
+                let replica = match self.select_best_replica(&replicas) {
+                    Some(r) => r,
+                    None => {
+                        buf_results.push(vec![-1]);
+                        continue;
+                    }
+                };
+                let seg = self.engine.open_segment(&replica.segment_name)?;
                 let batch_id = self.engine.allocate_batch_id(sizes[buf_idx][key_idx].len())?;
 
                 let reqs: Vec<TransferRequest> = sizes[buf_idx][key_idx]
@@ -412,7 +434,7 @@ impl MooncakeClient {
                         opcode: Opcode::Read,
                         source: buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri]),
                         target_id: seg,
-                        target_offset: replicas[0].offset + src_offsets[buf_idx][key_idx][ri] as u64,
+                        target_offset: replica.offset + src_offsets[buf_idx][key_idx][ri] as u64,
                         length: sz as u64,
                     })
                     .collect();
@@ -491,11 +513,14 @@ impl MooncakeClient {
         let mut results = vec![];
         for (key_idx, key) in keys.iter().enumerate() {
             let replicas = self.fetch_replicas(key).await?;
-            if replicas.is_empty() {
-                results.push(vec![-1; all_buffers[key_idx].len()]);
-                continue;
-            }
-            let seg = self.engine.open_segment(&replicas[0].segment_name)?;
+            let replica = match self.select_best_replica(&replicas) {
+                Some(r) => r,
+                None => {
+                    results.push(vec![-1; all_buffers[key_idx].len()]);
+                    continue;
+                }
+            };
+            let seg = self.engine.open_segment(&replica.segment_name)?;
             let count = all_buffers[key_idx].len();
             let batch_id = self.engine.allocate_batch_id(count)?;
 
@@ -504,7 +529,7 @@ impl MooncakeClient {
                     opcode: Opcode::Read,
                     source: all_buffers[key_idx][i],
                     target_id: seg,
-                    target_offset: replicas[0].offset,
+                    target_offset: replica.offset,
                     length: all_sizes[key_idx][i] as u64,
                 })
                 .collect();
@@ -568,8 +593,8 @@ impl MooncakeClient {
     // Remove / Exist
     // -----------------------------------------------------------------------
 
-    pub async fn remove(&mut self, key: &str) -> StoreResult<()> {
-        let request = proto::RemoveRequest { key: key.to_string(), force: false };
+    pub async fn remove(&mut self, key: &str, force: bool) -> StoreResult<()> {
+        let request = proto::RemoveRequest { key: key.to_string(), force };
         self.master
             .remove(request)
             .await
@@ -595,10 +620,11 @@ impl MooncakeClient {
     pub async fn batch_remove(
         &mut self,
         keys: &[String],
+        force: bool,
     ) -> StoreResult<Vec<i32>> {
         let request = proto::BatchRemoveRequest {
             keys: keys.to_vec(),
-            force: false,
+            force,
         };
         let response = self
             .master
@@ -632,10 +658,11 @@ impl MooncakeClient {
     pub async fn remove_by_regex(
         &mut self,
         pattern: &str,
+        force: bool,
     ) -> StoreResult<i64> {
         let request = proto::RemoveByRegexRequest {
             pattern: pattern.to_string(),
-            force: false,
+            force,
         };
         let response = self
             .master
@@ -647,7 +674,7 @@ impl MooncakeClient {
     }
 
     pub async fn remove_all(&mut self) -> StoreResult<i64> {
-        self.remove_by_regex(".*").await
+        self.remove_by_regex(".*", false).await
     }
 
     // -----------------------------------------------------------------------
@@ -729,15 +756,36 @@ impl MooncakeClient {
         let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
-            self.write_to_replica(replica, value).await?;
+            if let Err(e) = self.write_to_replica(replica, value).await {
+                let revoke_req = proto::PutRevokeRequest {
+                    client_id: Some(self.client_id_proto()),
+                    key: key.to_string(),
+                    replica_type: 0,
+                };
+                let _ = self.master.put_revoke(revoke_req).await;
+                return Err(e);
+            }
         }
 
-        let end_request = proto::PutEndRequest {
-            client_id: Some(self.client_id_proto()),
-            key: key.to_string(),
-            replica_type: 0,
+        let end_request = proto::BatchUpsertEndRequest {
+            entries: vec![proto::UpsertEntry {
+                client_id: Some(self.client_id_proto()),
+                key: key.to_string(),
+                slice_length: value.len() as u64,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: cfg.replica_num,
+                    nof_replica_num: cfg.nof_replica_num,
+                    with_soft_pin: cfg.with_soft_pin,
+                    with_hard_pin: cfg.with_hard_pin,
+                    preferred_segment: cfg.preferred_segment.clone(),
+                    prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                    preferred_segments: cfg.preferred_segments.clone(),
+                    preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                    data_type: cfg.data_type as i32,
+                }),
+            }],
         };
-        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.master.batch_upsert_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(replicas)
     }
@@ -771,15 +819,36 @@ impl MooncakeClient {
         let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
-            self.zero_copy_write(replica, buffer, size).await?;
+            if let Err(e) = self.zero_copy_write(replica, buffer, size).await {
+                let revoke_req = proto::PutRevokeRequest {
+                    client_id: Some(self.client_id_proto()),
+                    key: key.to_string(),
+                    replica_type: 0,
+                };
+                let _ = self.master.put_revoke(revoke_req).await;
+                return Err(e);
+            }
         }
 
-        let end_request = proto::PutEndRequest {
-            client_id: Some(self.client_id_proto()),
-            key: key.to_string(),
-            replica_type: 0,
+        let end_request = proto::BatchUpsertEndRequest {
+            entries: vec![proto::UpsertEntry {
+                client_id: Some(self.client_id_proto()),
+                key: key.to_string(),
+                slice_length: size as u64,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: cfg.replica_num,
+                    nof_replica_num: cfg.nof_replica_num,
+                    with_soft_pin: cfg.with_soft_pin,
+                    with_hard_pin: cfg.with_hard_pin,
+                    preferred_segment: cfg.preferred_segment.clone(),
+                    prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
+                    preferred_segments: cfg.preferred_segments.clone(),
+                    preferred_nof_segments: cfg.preferred_nof_segments.clone(),
+                    data_type: cfg.data_type as i32,
+                }),
+            }],
         };
-        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.master.batch_upsert_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(replicas)
     }
@@ -1082,6 +1151,7 @@ impl MooncakeClient {
                 replica_type: match r.replica_type {
                     1 => mooncake_store_core::ReplicaType::Disk,
                     2 => mooncake_store_core::ReplicaType::LocalDisk,
+                    3 => mooncake_store_core::ReplicaType::NoFSsd,
                     _ => mooncake_store_core::ReplicaType::Memory,
                 },
                 holder_client_id: r
@@ -1090,6 +1160,19 @@ impl MooncakeClient {
                     .map(|id| Uuid::from_u64_pair(id.high, id.low)),
             })
         }).collect()
+    }
+
+    fn select_best_replica<'a>(&self, replicas: &'a [ReplicaDescriptor]) -> Option<&'a ReplicaDescriptor> {
+        // Priority: local MEMORY > any MEMORY > N_OF_SSD > LOCAL_DISK > DISK
+        replicas.iter()
+            .filter(|r| r.status == mooncake_store_core::ReplicaStatus::Complete)
+            .max_by_key(|r| match r.replica_type {
+                mooncake_store_core::ReplicaType::Memory => 3,
+                mooncake_store_core::ReplicaType::NoFSsd => 2,
+                mooncake_store_core::ReplicaType::LocalDisk => 1,
+                mooncake_store_core::ReplicaType::Disk => 0,
+                _ => -1,
+            })
     }
 
     async fn write_to_replica(

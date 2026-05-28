@@ -102,7 +102,7 @@ impl EngramClient for MooncakeClient {
     }
 
     fn remove<'a>(&'a mut self, key: &'a str) -> ClientFuture<'a, StoreResult<()>> {
-        Box::pin(async move { MooncakeClient::remove(self, key).await })
+        Box::pin(async move { MooncakeClient::remove(self, key, false).await })
     }
 }
 

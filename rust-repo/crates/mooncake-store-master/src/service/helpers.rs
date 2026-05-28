@@ -326,3 +326,10 @@ pub(crate) fn release_object_replicas(
     clear_promotion_task(state, key);
     release_replicas(state, replicas);
 }
+
+/// Returns true if the lease on an object has expired (or never set).
+pub(crate) fn is_lease_expired(entry: &ObjectEntry) -> bool {
+    entry
+        .lease_timeout
+        .map_or(true, |timeout| timeout <= SystemTime::now())
+}

@@ -71,7 +71,11 @@ impl MasterServiceImpl {
                 return Err(Status::permission_denied("object owned by different client"));
             }
             let mut removed = Vec::new();
-            object.replicas.retain(|replica| {
+            let mut all_completed = true;
+            let mut has_matching = false;
+
+            // Check if all matching replicas are already complete
+            for replica in &object.replicas {
                 let matches = match req.replica_type {
                     x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
                     x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
@@ -80,9 +84,34 @@ impl MasterServiceImpl {
                     _ => replica.replica_type == ReplicaType::Memory,
                 };
                 if matches {
-                    removed.push(replica.clone());
+                    has_matching = true;
+                    if replica.status != ReplicaStatus::Complete {
+                        all_completed = false;
+                    }
                 }
-                !matches
+            }
+
+            if has_matching && all_completed {
+                return Err(Status::failed_precondition(
+                    "invalid write: replica already completed",
+                ));
+            }
+
+            // Remove only non-complete matching replicas
+            object.replicas.retain(|replica| {
+                let matches = match req.replica_type {
+                    x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
+                    x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
+                        replica.replica_type == ReplicaType::NoFSsd
+                    }
+                    _ => replica.replica_type == ReplicaType::Memory,
+                };
+                if matches && replica.status != ReplicaStatus::Complete {
+                    removed.push(replica.clone());
+                    false
+                } else {
+                    true
+                }
             });
             let remove_object = object.replicas.is_empty();
             drop(object);
@@ -103,7 +132,13 @@ impl MasterServiceImpl {
             .state
             .objects
             .iter()
-            .filter(|entry| req.force || !self.state.replication_tasks.contains_key(entry.key()))
+            .filter(|entry| {
+                if req.force {
+                    return true;
+                }
+                !self.state.replication_tasks.contains_key(entry.key())
+                    && is_lease_expired(entry.value())
+            })
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         let mut removed_count = 0i64;
@@ -426,6 +461,10 @@ impl MasterServiceImpl {
         } else {
             return Err(Status::not_found("key not found"));
         }
+        // TODO(Gap 12): C++ puts the source replica into discarded_replicas_ with a
+        // timeout delay to prevent premature RDMA reuse. The current Rust implementation
+        // releases the source replica immediately via release_object_replicas. In the
+        // future this should queue the source replica for delayed release instead.
         release_object_replicas(&self.state, &req.key, &removed_source);
         if remove_object {
             self.state.objects.remove(&req.key);

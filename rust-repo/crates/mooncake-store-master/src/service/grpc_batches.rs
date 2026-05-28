@@ -53,6 +53,10 @@ impl MasterServiceImpl {
                 if object_owner_client_id(&self.state, &object) != Some(client_id) {
                     continue;
                 }
+                // C++ checks for active lease; skip objects that still hold a valid lease.
+                if !is_lease_expired(&object) {
+                    continue;
+                }
                 if object
                     .replicas
                     .iter()
@@ -291,6 +295,7 @@ impl MasterServiceImpl {
                     soft_pinned: config.with_soft_pin,
                     hard_pinned: config.with_hard_pin,
                     data_type: config.data_type,
+                    client_id: Uuid::nil(),
                     put_start_time: Some(SystemTime::now()),
                     lease_timeout: None,
                     soft_pin_timeout: None,
@@ -346,6 +351,7 @@ impl MasterServiceImpl {
                         soft_pinned: config.with_soft_pin,
                         hard_pinned: config.with_hard_pin,
                         data_type: config.data_type,
+                        client_id: Uuid::nil(),
                         put_start_time: Some(now),
                         lease_timeout: None,
                         soft_pin_timeout: None,

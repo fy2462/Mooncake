@@ -143,7 +143,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+            data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
         },
     );
     backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();

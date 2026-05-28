@@ -46,6 +46,8 @@ pub struct ObjectEntry {
     pub hard_pinned: bool,
     #[serde(default)]
     pub data_type: ObjectDataType,
+    #[serde(default)]
+    pub client_id: Uuid,
     #[serde(skip)]
     pub put_start_time: Option<SystemTime>,
     #[serde(skip)]

@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn test_batch_replica_clear_respects_client_and_segment_name() {
-    let service = MasterServiceImpl::default();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::ZERO,
+        ..Default::default()
+    });
     let client_id = Uuid::new_v4();
     let other_client_id = Uuid::new_v4();
 
@@ -385,7 +388,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .await
     .unwrap();
 
-    for key in ["revoke-key", "remove-all-a", "remove-all-b"] {
+    for key in ["remove-all-a", "remove-all-b"] {
         MasterService::put_start(
             &service,
             Request::new(proto::PutStartRequest {
@@ -416,6 +419,26 @@ async fn test_put_revoke_remove_all_and_storage_config() {
         .unwrap();
     }
 
+    // PutStart revoke-key without PutEnd so it stays in Allocating state for PutRevoke
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "revoke-key".into(),
+            slice_length: 128,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: "revoke:1".into(),
+                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32,
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
     MasterService::put_revoke(
         &service,
         Request::new(proto::PutRevokeRequest {
@@ -435,7 +458,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .await
     .is_err());
 
-    let removed = MasterService::remove_all(&service, Request::new(proto::RemoveAllRequest { force: false }))
+    let removed = MasterService::remove_all(&service, Request::new(proto::RemoveAllRequest { force: true }))
         .await
         .unwrap()
         .into_inner();
