@@ -136,6 +136,7 @@ impl PythonMooncakeClient {
                     }
                     #[cfg(not(feature = "s3"))]
                     {
+                        let _ = s3_py; // used only with s3 feature
                         return Err(to_py_err(
                             "S3 remote source configured but 's3' feature is not enabled. \
                              Rebuild with --features s3"
