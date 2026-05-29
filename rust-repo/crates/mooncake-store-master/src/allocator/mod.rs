@@ -165,26 +165,26 @@ impl SegmentAllocator {
                 candidates.shuffle(&mut thread_rng());
             }
             AllocationStrategy::FreeRatioFirst => {
-                // Single composite sort: preferred-segment > same-node > free-ratio
+                // Single composite sort: same-node > preferred > free-ratio
                 candidates.sort_by(|a, b| {
                     let sa = &self.segments[a];
                     let sb = &self.segments[b];
 
-                    // Tier 1: preferred segment
-                    if has_preferred {
-                        let a_pref = sa.segment.name == config.preferred_segment;
-                        let b_pref = sb.segment.name == config.preferred_segment;
-                        let cmp = a_pref.cmp(&b_pref).reverse();
+                    // Tier 1: same node (matches original C++ priority ordering)
+                    if let Some(ref host) = preferred_host {
+                        let a_same = segment_host(&sa.segment.name) == host.as_str();
+                        let b_same = segment_host(&sb.segment.name) == host.as_str();
+                        let cmp = a_same.cmp(&b_same).reverse();
                         if cmp != Ordering::Equal {
                             return cmp;
                         }
                     }
 
-                    // Tier 2: same node
-                    if let Some(ref host) = preferred_host {
-                        let a_same = segment_host(&sa.segment.name) == host.as_str();
-                        let b_same = segment_host(&sb.segment.name) == host.as_str();
-                        let cmp = a_same.cmp(&b_same).reverse();
+                    // Tier 2: preferred segment
+                    if has_preferred {
+                        let a_pref = sa.segment.name == config.preferred_segment;
+                        let b_pref = sb.segment.name == config.preferred_segment;
+                        let cmp = a_pref.cmp(&b_pref).reverse();
                         if cmp != Ordering::Equal {
                             return cmp;
                         }
@@ -198,22 +198,22 @@ impl SegmentAllocator {
             }
         }
 
-        // For Random strategy: apply preferred_segment / same_node as
-        // stable sorts after shuffle, preserving the original multi-sort
-        // behaviour (preferred segments are first, others shuffled).
+        // For Random strategy: apply same_node / preferred_segment as
+        // stable sorts after shuffle (same_node first, then preferred —
+        // matching original C++ priority order).
         if matches!(self.strategy, AllocationStrategy::Random) {
-            if has_preferred {
+            if let Some(ref host) = preferred_host {
                 candidates.sort_by_key(|segment_id| {
-                    if self.segments[segment_id].segment.name == config.preferred_segment {
+                    if segment_host(&self.segments[segment_id].segment.name) == host.as_str() {
                         0
                     } else {
                         1
                     }
                 });
             }
-            if let Some(ref host) = preferred_host {
+            if has_preferred {
                 candidates.sort_by_key(|segment_id| {
-                    if segment_host(&self.segments[segment_id].segment.name) == host.as_str() {
+                    if self.segments[segment_id].segment.name == config.preferred_segment {
                         0
                     } else {
                         1

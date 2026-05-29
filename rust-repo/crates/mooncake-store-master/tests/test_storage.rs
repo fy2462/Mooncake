@@ -277,3 +277,66 @@ fn test_serialize_replica_status_roundtrip() {
     assert_eq!(rd.status, ReplicaStatus::Written);
     assert_eq!(rd.replica_type, ReplicaType::Disk);
 }
+
+/// Verify that `load()` falls back to legacy JSON when no msgpack file exists.
+#[test]
+fn test_storage_backend_load_falls_back_to_json() {
+    use std::fs;
+
+    let tmp = temp_dir();
+    let subdir = tmp.join("json_fallback");
+    fs::create_dir_all(&subdir).unwrap();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &subdir);
+
+    // Manually write a legacy JSON snapshot.
+    let json_path = subdir.join("master_snapshot.json");
+    let snap = serde_json::json!({
+        "segments": [{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "legacy-seg",
+            "size": 4096u64,
+            "used": 0u64,
+            "client_id": "00000000-0000-0000-0000-000000000002",
+            "status": 1i32
+        }],
+        "nof_segments": [],
+        "objects": [],
+        "tasks": []
+    });
+    fs::write(&json_path, serde_json::to_string_pretty(&snap).unwrap()).unwrap();
+
+    let (segments, nof_segs, objects, _tasks) = backend.load().unwrap().unwrap();
+    assert!(nof_segs.is_empty());
+    assert!(objects.is_empty());
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].segment.name, "legacy-seg");
+    assert_eq!(segments[0].segment.size, 4096);
+}
+
+/// Verify `clear()` removes both msgpack and legacy JSON files.
+#[test]
+fn test_storage_backend_clear_removes_both_formats() {
+    use std::fs;
+
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+
+    let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
+    let objects: DashMap<String, ObjectEntry> = DashMap::new();
+
+    // Save msgpack.
+    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    // Create a legacy JSON file manually.
+    let json_path = tmp.join("master_snapshot.json");
+    fs::write(&json_path, "{}").unwrap();
+
+    assert!(tmp.join("master_snapshot.msgpack").exists());
+    assert!(json_path.exists());
+
+    backend.clear().unwrap();
+
+    assert!(!tmp.join("master_snapshot.msgpack").exists());
+    assert!(!json_path.exists());
+}

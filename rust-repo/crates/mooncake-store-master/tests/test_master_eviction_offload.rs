@@ -351,3 +351,107 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
         1
     );
 }
+
+#[tokio::test]
+async fn test_processing_keys_excluded_from_eviction() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        offload_on_evict: false,
+        lease_ttl: Duration::from_millis(1),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            segment_name: "proc-key-seg".into(),
+            size: 4096,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // Complete PutEnd for an evictable key.
+    let put = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            key: "evictable".into(),
+            slice_length: 128,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1, nof_replica_num: 0,
+                with_soft_pin: false, with_hard_pin: false,
+                preferred_segment: "".into(),
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![], preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(put.replicas.len(), 1);
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            key: "evictable".into(),
+            replica_type: 0,
+        }),
+    )
+    .await
+    .unwrap();
+
+    // PutStart but never PutEnd — key stays in processing_keys.
+    let put2 = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            key: "still-processing".into(),
+            slice_length: 128,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1, nof_replica_num: 0,
+                with_soft_pin: false, with_hard_pin: false,
+                preferred_segment: "".into(),
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![], preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(put2.replicas.len(), 1);
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // Eviction should only evict "evictable"; "still-processing" is in processing_keys.
+    let evicted = service.run_eviction_cycle_for_test(10);
+    assert_eq!(evicted, vec!["evictable".to_string()]);
+
+    // "still-processing" still exists — replicas are Allocating, not Complete.
+    let err = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "still-processing".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message().contains("replica is not ready"));
+}

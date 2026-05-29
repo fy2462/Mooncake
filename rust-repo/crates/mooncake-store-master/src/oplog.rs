@@ -819,4 +819,48 @@ mod tests {
         assert_eq!(result.records[0].seq, 5);
         assert_eq!(result.next_seq, 8);
     }
+
+    #[test]
+    fn test_local_fs_async_flush_readable_without_explicit_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        // max_entries_per_segment=3 triggers async flush on every 3rd append.
+        let mut store = LocalFsOpLogStore::new(dir.path(), 3).unwrap();
+
+        // Append 7 entries: triggers async flush at append #3 and #6.
+        for _ in 0..7 {
+            store.append(&make_entry(0)).unwrap();
+        }
+        assert_eq!(store.latest_sequence(), 7);
+
+        // Give the background thread time to flush segments to disk.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // read_since reads from both on-disk segments and in-memory buffer.
+        let entries = store.read_since(1, 10).unwrap();
+        assert_eq!(entries.len(), 7, "all 7 entries should be readable after async flush");
+        assert_eq!(entries[0].seq, 1);
+        assert_eq!(entries[6].seq, 7);
+    }
+
+    #[test]
+    fn test_local_fs_async_flush_fallback_on_channel_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = LocalFsOpLogStore::new(dir.path(), 2).unwrap();
+
+        // Drop the store's flush channel receiver by replacing the sender
+        // with one whose receiver is immediately dropped.
+        let (dead_tx, dead_rx) = std::sync::mpsc::channel::<Vec<OpLogRecord>>();
+        drop(dead_rx);
+        let _old_tx = std::mem::replace(&mut store.flush_tx, dead_tx);
+
+        // Append should trigger the fallback: mpsc::send fails → inline sync flush.
+        store.append(&make_entry(0)).unwrap();
+        store.append(&make_entry(0)).unwrap();
+        store.append(&make_entry(0)).unwrap();
+
+        // Verify data was flushed synchronously via the fallback.
+        assert_eq!(store.latest_sequence(), 3);
+        let entries = store.read_since(1, 10).unwrap();
+        assert_eq!(entries.len(), 3);
+    }
 }
