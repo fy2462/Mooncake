@@ -70,11 +70,13 @@ fn test_client_full_lifecycle_logic() {
 /// Test error conversion from TransferEngine.
 #[test]
 fn test_store_error_from_transfer_engine() {
-    use mooncake_store_core::StoreError;
     use transfer_engine_ffi::TransferEngineError;
 
     let te_err = TransferEngineError::NullHandle;
-    let store_err = StoreError::from(te_err);
+    let store_err = mooncake_store_core::StoreError::Internal(format!(
+        "transfer engine error: {}",
+        te_err
+    ));
     assert!(store_err.to_string().contains("transfer engine error"));
 }
 

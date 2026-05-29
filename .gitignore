@@ -3,6 +3,8 @@
 .claude-flow
 .claude
 .mcp.json
+.swarm
+ruvector.db
 build
 build_ofed4
 old
