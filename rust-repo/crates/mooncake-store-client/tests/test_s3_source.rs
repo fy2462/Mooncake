@@ -247,4 +247,69 @@ mod s3_tests {
         let data = source.get("hello").await.unwrap();
         assert_eq!(data, b"prefixed data");
     }
+
+    // -------------------------------------------------------------------
+    // Integration: MissHandler + S3RemoteSource chain
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_miss_handler_with_s3() {
+        use mooncake_store_client::{MissHandler, RemoteSourceConfig};
+
+        let store: Store = Arc::new(Mutex::new(HashMap::new()));
+        store.lock().insert("key_001".into(), b"hello".to_vec());
+        store.lock().insert("key_002".into(), b"world".to_vec());
+        let (endpoint, _server) = start_mock(store).await;
+        let source = S3RemoteSource::new(&s3_config(&endpoint)).await.unwrap();
+        let handler = MissHandler::new(source, RemoteSourceConfig { enabled: true, ..Default::default() });
+
+        assert_eq!(handler.handle_miss("key_001").await.unwrap(), b"hello");
+        assert!(matches!(
+            handler.handle_miss("no_such").await.unwrap_err(),
+            mooncake_store_client::RemoteSourceError::NotFound(_)
+        ));
+        let snap = handler.snapshot();
+        assert_eq!(snap.total_misses, 2);
+        assert_eq!(snap.successful_fetches, 1);
+    }
+
+    #[tokio::test]
+    async fn test_miss_handler_batch_fetch_with_s3_hot_cache() {
+        use mooncake_store_client::{LocalHotCache, MissHandler, RemoteSourceConfig};
+
+        let store: Store = Arc::new(Mutex::new(HashMap::new()));
+        store.lock().insert("k1".into(), b"alpha".to_vec());
+        store.lock().insert("k2".into(), b"beta".to_vec());
+        let (endpoint, _server) = start_mock(store).await;
+        let source = S3RemoteSource::new(&s3_config(&endpoint)).await.unwrap();
+        let cache = Arc::new(LocalHotCache::default());
+        let handler = MissHandler::new(source, RemoteSourceConfig { enabled: true, ..Default::default() })
+            .with_hot_cache(cache);
+
+        let keys: Vec<String> = ["k1", "k2", "missing"].iter().map(|s| s.to_string()).collect();
+        handler.batch_fetch(&keys).await;
+
+        // handle_miss should hit hot cache for k1
+        assert_eq!(handler.handle_miss("k1").await.unwrap(), b"alpha");
+        let snap = handler.snapshot();
+        assert_eq!(snap.prefetch_keys_requested, 3);
+        assert_eq!(snap.prefetch_keys_succeeded, 2);
+        assert!(snap.cache_hits >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_miss_handler_disabled_skips_s3() {
+        use mooncake_store_client::{MissHandler, RemoteSourceConfig};
+
+        let store: Store = Arc::new(Mutex::new(HashMap::new()));
+        store.lock().insert("key_001".into(), b"data".to_vec());
+        let (endpoint, _server) = start_mock(store).await;
+        let source = S3RemoteSource::new(&s3_config(&endpoint)).await.unwrap();
+        let handler = MissHandler::new(source, RemoteSourceConfig { enabled: false, ..Default::default() });
+
+        assert!(matches!(
+            handler.handle_miss("key_001").await.unwrap_err(),
+            mooncake_store_client::RemoteSourceError::NotFound(_)
+        ));
+    }
 }

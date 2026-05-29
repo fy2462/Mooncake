@@ -1,7 +1,7 @@
 mod client;
 mod engram;
 mod p2p_store;
-mod remote_config;
+pub mod remote_config;
 mod replicate_config;
 
 use pyo3::prelude::*;

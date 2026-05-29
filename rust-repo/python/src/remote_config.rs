@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 
 #[pyclass(name = "S3Config", from_py_object)]
 #[derive(Clone, Debug)]
-pub(crate) struct PyS3Config {
+pub struct PyS3Config {
     #[pyo3(get, set)]
     pub bucket: String,
     #[pyo3(get, set)]
@@ -53,7 +53,7 @@ impl PyS3Config {
 }
 
 impl PyS3Config {
-    pub(crate) fn to_core(&self) -> S3Config {
+    pub fn to_core(&self) -> S3Config {
         S3Config {
             bucket: self.bucket.clone(),
             region: self.region.clone(),
@@ -71,7 +71,7 @@ impl PyS3Config {
 
 #[pyclass(name = "RemoteSourceConfig", from_py_object)]
 #[derive(Clone)]
-pub(crate) struct PyRemoteSourceConfig {
+pub struct PyRemoteSourceConfig {
     #[pyo3(get, set)]
     pub enabled: bool,
     /// Maximum concurrent remote fetches.
@@ -112,11 +112,59 @@ impl PyRemoteSourceConfig {
 }
 
 impl PyRemoteSourceConfig {
-    pub(crate) fn to_core(&self) -> RemoteSourceConfig {
+    pub fn to_core(&self) -> RemoteSourceConfig {
         RemoteSourceConfig {
             enabled: self.enabled,
             max_concurrent_fetches: self.max_concurrent_fetches,
             s3: self.s3_config.as_ref().map(|s| s.to_core()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mooncake_store_client::S3Config as RustS3Config;
+
+    #[test]
+    fn s3_config_roundtrip() {
+        let py = PyS3Config {
+            bucket: "bkt".into(), region: "eu-west-1".into(),
+            endpoint: Some("http://minio:9000".into()), prefix: "p/".into(),
+            access_key_id: Some("ak".into()), secret_access_key: Some("sk".into()),
+        };
+        let rust: RustS3Config = py.to_core();
+        assert_eq!(rust.bucket, "bkt");
+        assert_eq!(rust.region, "eu-west-1");
+        assert_eq!(rust.endpoint.as_deref(), Some("http://minio:9000"));
+        assert_eq!(rust.prefix, "p/");
+    }
+
+    #[test]
+    fn remote_config_enabled_s3() {
+        let s3 = PyS3Config {
+            bucket: "b".into(), region: "us-east-1".into(),
+            endpoint: None, prefix: String::new(),
+            access_key_id: None, secret_access_key: None,
+        };
+        let py = PyRemoteSourceConfig { enabled: true, max_concurrent_fetches: 8, s3_config: Some(s3), local_fs_root: None };
+        let rust = py.to_core();
+        assert!(rust.enabled);
+        assert_eq!(rust.max_concurrent_fetches, 8);
+        assert_eq!(rust.s3.unwrap().bucket, "b");
+    }
+
+    #[test]
+    fn remote_config_disabled() {
+        let py = PyRemoteSourceConfig { enabled: false, max_concurrent_fetches: 16, s3_config: None, local_fs_root: None };
+        assert!(!py.to_core().enabled);
+    }
+
+    #[test]
+    fn remote_config_local_fs() {
+        let py = PyRemoteSourceConfig { enabled: true, max_concurrent_fetches: 4, s3_config: None, local_fs_root: Some("/tmp".into()) };
+        let rust = py.to_core();
+        assert!(rust.enabled);
+        assert!(rust.s3.is_none());
     }
 }
