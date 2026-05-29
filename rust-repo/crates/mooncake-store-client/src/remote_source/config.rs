@@ -73,6 +73,6 @@ impl RemoteSourceConfig {
 
     /// Returns true if the remote source is properly configured and enabled.
     pub fn is_ready(&self) -> bool {
-        self.enabled && self.s3.as_ref().map_or(false, |s3| !s3.bucket.is_empty())
+        self.enabled && self.s3.as_ref().is_some_and(|s3| !s3.bucket.is_empty())
     }
 }

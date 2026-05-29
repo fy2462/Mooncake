@@ -271,9 +271,8 @@ impl<C: EngramClient> EngramStore<C> {
 
         self.store
             .register_buffer(&output_buffer[..expected_size], &self.buffer_location)
-            .map_err(|err| {
+            .inspect_err(|_| {
                 output_buffer[..expected_size].fill(0);
-                err
             })?;
 
         let result = self

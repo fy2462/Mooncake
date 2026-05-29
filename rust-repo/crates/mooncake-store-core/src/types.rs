@@ -55,7 +55,9 @@ pub enum ReplicaType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ObjectDataType {
+    #[default]
     Unknown = 0,
     Kvcache = 1,
     Tensor = 2,
@@ -68,11 +70,6 @@ pub enum ObjectDataType {
     General = 9,
 }
 
-impl Default for ObjectDataType {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReplicaDescriptor {
