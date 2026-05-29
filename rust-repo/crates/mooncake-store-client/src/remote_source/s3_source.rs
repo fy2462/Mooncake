@@ -194,9 +194,6 @@ impl RemoteSource for S3RemoteSource {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::time::Duration;
-
     #[test]
     fn test_object_key_no_prefix() {
         // Verify key mapping logic via a dummy s3_config

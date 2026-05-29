@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 // S3Config — Python-visible S3 bucket+connection settings
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "S3Config")]
+#[pyclass(name = "S3Config", from_py_object)]
 #[derive(Clone, Debug)]
 pub(crate) struct PyS3Config {
     #[pyo3(get, set)]
@@ -69,7 +69,7 @@ impl PyS3Config {
 // RemoteSourceConfig — master switch + S3 or LocalFS config
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "RemoteSourceConfig")]
+#[pyclass(name = "RemoteSourceConfig", from_py_object)]
 #[derive(Clone)]
 pub(crate) struct PyRemoteSourceConfig {
     #[pyo3(get, set)]

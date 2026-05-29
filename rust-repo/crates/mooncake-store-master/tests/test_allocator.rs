@@ -537,7 +537,6 @@ fn test_cachelib_like_for_each_allocation_reports_slots_and_skips_releasing_slab
 #[test]
 fn test_composite_sort_same_node_before_preferred_then_free_ratio() {
     let client = Uuid::new_v4();
-    let other = Uuid::new_v4();
     let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
 
     // Layout (priority: same_node > free_ratio):
