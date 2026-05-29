@@ -5,6 +5,7 @@ use tokio::sync::watch;
 use tracing::info;
 use uuid::Uuid;
 
+// HotStandbyConfig: 热备配置，控制是否启用快照引导和 oplog 跟随两种恢复模式。
 pub struct HotStandbyConfig {
     pub enable_snapshot_bootstrap: bool,
     pub enable_oplog_following: bool,
@@ -66,7 +67,8 @@ impl HotStandbyService {
         )
     }
 
-    /// Start standby: optionally load snapshot, then begin oplog following
+    /// 启动热备：(1) 可选加载快照引导（恢复 segments/objects/tasks）
+    /// (2) 进入 Watching 状态等待 oplog 追平。快照加载时恢复 Memory 和 NoF segment 到 allocator。
     pub async fn start(&mut self) -> Result<(), HaError> {
         let mut status = self.sync_status.write();
         status.state = StandbyState::Connecting;
@@ -157,6 +159,7 @@ impl HotStandbyService {
         Ok(())
     }
 
+    // 停止热备：发送 shutdown 信号，重置状态为 Stopped。
     pub fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -166,7 +169,7 @@ impl HotStandbyService {
         status.is_syncing = false;
     }
 
-    /// Promote: finalize standby state and return the last applied sequence id
+    /// 提升为 Leader：状态转为 Promoting → Promoted，返回已应用的 oplog 序列号。
     pub async fn promote(&mut self) -> Result<u64, HaError> {
         let mut status = self.sync_status.write();
         status.state = StandbyState::Promoting;

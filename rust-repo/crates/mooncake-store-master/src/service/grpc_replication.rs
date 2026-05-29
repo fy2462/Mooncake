@@ -51,6 +51,8 @@ fn same_replica(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
 }
 
 impl MasterServiceImpl {
+    // PutRevoke: 撤销 PutStart 分配的副本。仅允许撤销非 Complete 状态的副本
+    // （已完成写入的副本不能撤销防止数据丢失）。若所有副本被移除则删除对象。
     pub(super) async fn put_revoke_impl(
         &self,
         request: Request<proto::PutRevokeRequest>,
@@ -126,6 +128,7 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::PutRevokeResponse {}))
     }
 
+    // RemoveAll: 批量删除所有 lease 已过期的对象（force 模式跳过此检查）。
     pub(super) async fn remove_all_impl(
         &self,
         request: Request<proto::RemoveAllRequest>,
@@ -156,6 +159,7 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::RemoveAllResponse { removed_count }))
     }
 
+    // GetStorageConfig: 返回当前的存储配置（fs_dir、eviction 开关、配额）。
     pub(super) async fn get_storage_config_impl(
         &self,
         _request: Request<proto::GetStorageConfigRequest>,
@@ -168,6 +172,9 @@ impl MasterServiceImpl {
         }))
     }
 
+    // CopyStart: 对已有对象发起副本拷贝到新 segment。
+    // 校验 source replica 存在且 Complete，target segment 处于 Active 可分配状态。
+    // 在目标 segment 上分配新副本，通过 refcnt 固定源副本防止 concurrent evict。
     pub(super) async fn copy_start_impl(
         &self,
         request: Request<proto::CopyStartRequest>,
@@ -265,6 +272,8 @@ impl MasterServiceImpl {
         }))
     }
 
+    // CopyEnd: 拷贝完成确认。校验 handle_valid 后将目标副本标记为 Complete。
+    // 若 source handle 在拷贝期间失效则撤销所有 target（防止数据不一致），释放 refcnt。
     pub(super) async fn copy_end_impl(
         &self,
         request: Request<proto::CopyEndRequest>,
@@ -354,6 +363,7 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::CopyEndResponse {}))
     }
 
+    // CopyRevoke: 撤销 Copy 任务，移除已分配但未完成的 target 副本，释放 source refcnt。
     pub(super) async fn copy_revoke_impl(
         &self,
         request: Request<proto::CopyRevokeRequest>,
@@ -403,6 +413,9 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::CopyRevokeResponse {}))
     }
 
+    // MoveStart: 发起对象副本迁移（不同于 Copy，Move 完成后会删除源副本）。
+    // 若目标 segment 上已有副本则复用（避免重复分配），否则分配新副本。
+    // 源和目标必须不同（同 segment 内 move 无意义）。
     pub(super) async fn move_start_impl(
         &self,
         request: Request<proto::MoveStartRequest>,
@@ -484,6 +497,9 @@ impl MasterServiceImpl {
         }))
     }
 
+    // MoveEnd: Move 完成确认。标记目标副本 Complete 并移除源副本。
+    // 源副本通过延迟释放（discarded_replicas_ 机制）在 release_timeout 后异步回收，
+    // 防止 RDMA in-flight 操作仍在使用源缓冲区时被重用。
     pub(super) async fn move_end_impl(
         &self,
         request: Request<proto::MoveEndRequest>,
@@ -605,6 +621,7 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::MoveEndResponse {}))
     }
 
+    // MoveRevoke: 撤销 Move 任务，移除已分配的 target 副本，释放 source refcnt。
     pub(super) async fn move_revoke_impl(
         &self,
         request: Request<proto::MoveRevokeRequest>,

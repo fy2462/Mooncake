@@ -2,6 +2,8 @@ use super::*;
 
 impl MasterServiceImpl {
     // ---- Ping ----
+    // 客户端心跳：更新客户端地址、last_ping 时间戳，注册 metadata segments。
+    // 新客户端返回 NeedRemount 状态码触发客户端重新挂载；已有客户端仅更新 view_version。
     pub(super) async fn ping_impl(
         &self,
         request: Request<proto::PingRequest>,
@@ -43,6 +45,8 @@ impl MasterServiceImpl {
     }
 
     // ---- MountSegment ----
+    // 客户端挂载 Memory segment：注册到 segments 表和 allocator，同步 client-segments 索引。
+    // 触发 view_version 递增通知其他客户端拓扑变更，记录 oplog 用于热备同步。
     pub(super) async fn mount_segment_impl(
         &self,
         request: Request<proto::MountSegmentRequest>,
@@ -88,6 +92,7 @@ impl MasterServiceImpl {
     }
 
     // ---- MountNoFSegment ----
+    // 客户端挂载 NoF (NVMe-oF) segment：注册到 nof_segments 表和 nof_allocator。
     pub(super) async fn mount_nof_segment_impl(
         &self,
         request: Request<proto::MountNoFSegmentRequest>,
@@ -127,6 +132,7 @@ impl MasterServiceImpl {
     }
 
     // ---- UnmountSegment ----
+    // 客户端卸载 Memory segment，校验所有权后从 segments 表和 allocator 移除。
     pub(super) async fn unmount_segment_impl(
         &self,
         request: Request<proto::UnmountSegmentRequest>,
@@ -159,6 +165,7 @@ impl MasterServiceImpl {
     }
 
     // ---- UnmountNoFSegment ----
+    // 客户端卸载 NoF segment，同时从 nof_segments 表和 nof_allocator 移除。
     pub(super) async fn unmount_nof_segment_impl(
         &self,
         request: Request<proto::UnmountNoFSegmentRequest>,
@@ -190,6 +197,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GracefulUnmountSegment ----
+    // 优雅卸载：将 segment 加入调度器，在 grace_period_ms 内等待数据迁移后再真正移除。
     pub(super) async fn graceful_unmount_segment_impl(
         &self,
         request: Request<proto::GracefulUnmountSegmentRequest>,
@@ -220,6 +228,7 @@ impl MasterServiceImpl {
     }
 
     // ---- ReMountSegment ----
+    // 重新挂载：客户端重启后批量注册已有 segment，已存在的跳过不重复创建。
     pub(super) async fn re_mount_segment_impl(
         &self,
         request: Request<proto::ReMountSegmentRequest>,
@@ -277,6 +286,7 @@ impl MasterServiceImpl {
     }
 
     // ---- ReMountNoFSegment ----
+    // 重新挂载 NoF segment，按 id/name 去重避免重复注册。
     pub(super) async fn re_mount_nof_segment_impl(
         &self,
         request: Request<proto::ReMountNoFSegmentRequest>,
@@ -319,6 +329,7 @@ impl MasterServiceImpl {
     }
 
     // ---- MountLocalDiskSegment ----
+    // 注册客户端本地磁盘 segment，用于 offload/promotion 功能。按 client_id 去重。
     pub(super) async fn mount_local_disk_segment_impl(
         &self,
         request: Request<proto::MountLocalDiskSegmentRequest>,
@@ -346,6 +357,8 @@ impl MasterServiceImpl {
     }
 
     // ---- OffloadObjectHeartbeat ----
+    // 客户端周期性拉取需要 offload 的对象列表并上报心跳。
+    // 若客户端禁用 offload，清空其 offload 队列并取消所有待 offload 任务。
     pub(super) async fn offload_object_heartbeat_impl(
         &self,
         request: Request<proto::OffloadObjectHeartbeatRequest>,
@@ -380,6 +393,7 @@ impl MasterServiceImpl {
     }
 
     // ---- ReportSsdCapacity ----
+    // 客户端上报本地 SSD 总容量，供 master 做 offload 容量规划。
     pub(super) async fn report_ssd_capacity_impl(
         &self,
         request: Request<proto::ReportSsdCapacityRequest>,
@@ -405,6 +419,8 @@ impl MasterServiceImpl {
     }
 
     // ---- NotifyOffloadSuccess ----
+    // 客户端通知 offload 完成：为每个 key 创建/更新 LocalDisk 类型副本（状态 Complete），
+    // 同时清理 offload 任务。若对象不存在则自动创建并关联到该客户端。
     pub(super) async fn notify_offload_success_impl(
         &self,
         request: Request<proto::NotifyOffloadSuccessRequest>,
@@ -465,6 +481,7 @@ impl MasterServiceImpl {
     }
 
     // ---- PromotionObjectHeartbeat ----
+    // 客户端心跳拉取待 promotion 的对象（从本地磁盘提升到内存）。每次返回一个对象并移出队列。
     pub(super) async fn promotion_object_heartbeat_impl(
         &self,
         request: Request<proto::PromotionObjectHeartbeatRequest>,
@@ -496,6 +513,8 @@ impl MasterServiceImpl {
     }
 
     // ---- PromotionAllocStart ----
+    // Promotion 第一阶段：为 promotion 任务分配一个 Memory 副本（staged），返回描述符供客户端
+    // RDMA 写入数据。校验 holder_id 和 key 存在性，分配后写入 staged_* 字段供后续追踪。
     pub(super) async fn promotion_alloc_start_impl(
         &self,
         request: Request<proto::PromotionAllocStartRequest>,
@@ -551,6 +570,8 @@ impl MasterServiceImpl {
     }
 
     // ---- NotifyPromotionSuccess ----
+    // Promotion 完成通知：将 staged Memory 副本标记为 Complete，清理 promotion 任务和队列。
+    // 通过 segment_id+offset+status 精确匹配 promoted replica 以防止误操作。
     pub(super) async fn notify_promotion_success_impl(
         &self,
         request: Request<proto::NotifyPromotionSuccessRequest>,
@@ -609,6 +630,8 @@ impl MasterServiceImpl {
     }
 
     // ---- NotifyPromotionFailure ----
+    // Promotion 失败回滚：释放已分配的 staged Memory 副本，清理任务和队列。
+    // 即使 task 不存在也返回成功（幂等），避免客户端重试时出错。
     pub(super) async fn notify_promotion_failure_impl(
         &self,
         request: Request<proto::NotifyPromotionFailureRequest>,
@@ -643,6 +666,7 @@ impl MasterServiceImpl {
     }
 
     // ---- QuerySegmentStatus ----
+    // 按名称查询 segment 状态（Active/Draining 等），同时查询 Memory 和 NoF segment。
     pub(super) async fn query_segment_status_impl(
         &self,
         request: Request<proto::QuerySegmentStatusRequest>,
@@ -662,6 +686,7 @@ impl MasterServiceImpl {
     }
 
     // ---- QuerySegmentStatusById ----
+    // 按 UUID 查询 segment 状态，先查 Memory 后查 NoF segment。
     pub(super) async fn query_segment_status_by_id_impl(
         &self,
         request: Request<proto::QuerySegmentStatusByIdRequest>,
@@ -686,6 +711,9 @@ impl MasterServiceImpl {
     }
 
     // ---- CreateDrainJob ----
+    // 创建 Drain 任务：将指定 source segments 上的数据迁移到 target segments。
+    // 校验源/目标 segment 均处于 Active 状态后，将源 segment 标记为 Draining 并创建 job。
+    // 调度后台任务逐 key 执行副本拷贝（ReplicaCopy），支持并发控制和重试。
     pub(super) async fn create_drain_job_impl(
         &self,
         request: Request<proto::CreateDrainJobRequest>,
@@ -774,6 +802,7 @@ impl MasterServiceImpl {
     }
 
     // ---- QueryDrainJob ----
+    // 查询 Drain 任务进度：返回状态、成功/失败/阻塞任务数、活跃任务数和已迁移字节数。
     pub(super) async fn query_drain_job_impl(
         &self,
         request: Request<proto::QueryDrainJobRequest>,
@@ -814,6 +843,8 @@ impl MasterServiceImpl {
     }
 
     // ---- CancelDrainJob ----
+    // 取消 Drain 任务：将 draining segment 恢复为 Active 状态，job 标记为 Canceled。
+    // 已处于终态（Success/Failed/Canceled）的 job 不允许重复取消。
     pub(super) async fn cancel_drain_job_impl(
         &self,
         request: Request<proto::CancelDrainJobRequest>,
@@ -857,7 +888,8 @@ impl MasterServiceImpl {
         Ok(Response::new(proto::CancelDrainJobResponse {}))
     }
 
-    /// Helper: find objects on draining segments and create drain tasks.
+    /// Helper: 查找 draining segment 上的所有对象并为每个 key 创建 ReplicaCopy 任务。
+    /// 目标 segment 按 round-robin 分配，避免单目标热点。每个 key 只创建一个 drain unit。
     fn schedule_drain_job_tasks(&self, job_id: Uuid) {
         let mut job = match self.state.drain_jobs.get_mut(&job_id) {
             Some(j) => j,
@@ -951,6 +983,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GetFsdir ----
+    // 返回 master 配置的存储文件系统目录路径，供客户端本地文件存储使用。
     pub(super) async fn get_fsdir_impl(
         &self,
         _request: Request<proto::GetFsdirRequest>,

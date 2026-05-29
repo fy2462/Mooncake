@@ -11,10 +11,12 @@ use uuid::Uuid;
 use super::background_ops::{clear_offloading_task, clear_promotion_task};
 use super::state::{ClientEntry, MasterState, ObjectEntry};
 
+// 递增全局 view_version，触发所有客户端感知拓扑变更并重新拉取最新视图。
 pub(crate) fn bump_view_version(state: &MasterState) -> i64 {
     state.view_version.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+// 从 segment 名称（格式 host:port）中提取 host 部分。
 pub(crate) fn host_from_segment_name(name: &str) -> String {
     name.split(':').next().unwrap_or(name).to_string()
 }
@@ -26,6 +28,7 @@ pub(crate) fn port_from_segment_name(name: &str) -> u16 {
         .unwrap_or(0)
 }
 
+// 合并地址列表，去重保留已有地址，追加新地址。
 fn merge_addresses(
     existing: &[String],
     new_addresses: impl IntoIterator<Item = String>,
@@ -39,6 +42,7 @@ fn merge_addresses(
     merged
 }
 
+// 更新或插入客户端信息：已有客户端合并地址并更新 last_ping，新客户端创建 entry。
 pub(crate) fn upsert_client_addresses(
     state: &MasterState,
     client_id: Uuid,
@@ -66,6 +70,7 @@ pub(crate) fn upsert_client_addresses(
     );
 }
 
+// 同步客户端的 segment 列表：将属于该 client 的所有 segment 写回 client.info.segments。
 pub(crate) fn sync_client_segments(state: &MasterState, client_id: Uuid) {
     let segments = state
         .segments
@@ -94,6 +99,7 @@ pub(crate) async fn register_metadata_segments(
     }
 }
 
+// 按 segment 名称查找所属客户端 UUID（仅 Memory segment）。
 pub(crate) fn client_id_by_segment_name(state: &MasterState, segment_name: &str) -> Option<Uuid> {
     state
         .segments
@@ -102,6 +108,7 @@ pub(crate) fn client_id_by_segment_name(state: &MasterState, segment_name: &str)
         .map(|entry| entry.client_id)
 }
 
+// 获取对象的 owner client_id：优先使用 replica 的 holder_client_id，fallback 到 segment 所属客户端。
 pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) -> Option<Uuid> {
     object.replicas.iter().find_map(|replica| {
         replica
@@ -110,6 +117,8 @@ pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) 
     })
 }
 
+// 根据已分配的 Memory 副本所在 host，查找同 host 上的 NoF segment 名作为优选目标。
+// 用于 prefer_alloc_in_same_node 策略，降低 Memory↔NoF 跨节点数据传输延迟。
 pub(crate) fn preferred_nof_segment_names(
     state: &MasterState,
     replicas: &[ReplicaDescriptor],
@@ -131,6 +140,7 @@ pub(crate) fn preferred_nof_segment_names(
     names
 }
 
+// 按 NoF segment 名称查找所属客户端 UUID。
 pub(crate) fn client_id_by_nof_segment_name(
     state: &MasterState,
     segment_name: &str,
@@ -150,6 +160,8 @@ pub(crate) fn client_id_by_replica_segment_name(
         .or_else(|| client_id_by_nof_segment_name(state, segment_name))
 }
 
+// 卸载客户端拥有的 Memory segment，校验所有权后从 segments 表和 allocator 移除。
+// 返回 true 表示成功移除。
 pub(crate) fn unmount_segment_owned(
     state: &MasterState,
     segment_id: Uuid,
@@ -171,6 +183,7 @@ pub(crate) fn unmount_segment_owned(
     true
 }
 
+// 卸载客户端拥有的 NoF segment，同时从 nof_segments 表和 nof_allocator 移除。
 pub(crate) fn unmount_nof_segment_owned(state: &MasterState, segment_id: Uuid, client_id: Uuid) -> bool {
     let owned = state
         .nof_segments
@@ -186,6 +199,7 @@ pub(crate) fn unmount_nof_segment_owned(state: &MasterState, segment_id: Uuid, c
     true
 }
 
+// 获取客户端的地址列表：优先使用 clients 表的 addresses，fallback 到 segment host 名。
 pub(crate) fn addresses_for_client(state: &MasterState, client_id: Uuid) -> Vec<String> {
     if let Some(entry) = state.clients.get(&client_id) {
         if !entry.info.addresses.is_empty() {
@@ -205,6 +219,7 @@ pub(crate) fn addresses_for_client(state: &MasterState, client_id: Uuid) -> Vec<
     addresses
 }
 
+// 从 allocator 同步指定 Memory segment 的 used 字节数到 segments 表。
 pub(crate) fn sync_segment_usage(state: &MasterState, segment_ids: impl IntoIterator<Item = Uuid>) {
     let allocator = state.allocator.read();
     for segment_id in segment_ids {
@@ -232,6 +247,7 @@ pub(crate) fn sync_nof_segment_usage(
     }
 }
 
+// 释放副本 back 到 allocator：按类型分拣 Memory 和 NoF 副本各自释放，并同步 usage。
 pub(crate) fn release_replicas(state: &MasterState, replicas: &[ReplicaDescriptor]) {
     let memory = replicas
         .iter()
@@ -256,6 +272,8 @@ pub(crate) fn release_replicas(state: &MasterState, replicas: &[ReplicaDescripto
     }
 }
 
+// 分配 NoF 副本：逐个分配（每次 1 个），避免一次分配多个错过同 host 优化。
+// 分配数量不超过已挂载 NoF segment 总数，防止无意义的重复分配。
 pub(crate) fn allocate_nof_replicas(
     state: &MasterState,
     key: &str,
@@ -314,7 +332,7 @@ pub(crate) fn release_replicas_scheduled(state: &MasterState, replicas: Vec<Repl
     release_replicas(state, &replicas);
 }
 
-/// Helper: release replicas and clear associated offloading/promotion tasks.
+/// Helper: 释放对象副本并同时清理关联的 offload/promotion 任务。
 pub(crate) fn release_object_replicas(
     state: &MasterState,
     key: &str,
@@ -328,7 +346,7 @@ pub(crate) fn release_object_replicas(
     release_replicas(state, replicas);
 }
 
-/// Returns true if the lease on an object has expired (or never set).
+/// 检查对象的 lease 是否已过期（或从未设置），用于决定是否允许删除/驱逐等操作。
 pub(crate) fn is_lease_expired(entry: &ObjectEntry) -> bool {
     entry
         .lease_timeout

@@ -1,11 +1,11 @@
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 
-/// A simple Count-Min Sketch for tracking key access frequency.
-/// Used by the frequency admission policy to decide whether a key
-/// should be promoted into the local hot cache.
+/// 简单的 Count-Min Sketch，用于跟踪 key 的访问频率。
+/// 被 frequency admission policy 使用，决定一个 key 是否应该被 promotion 到本地热点缓存。
 ///
-/// Default 4096 × 4 = 16 KB fixed memory, independent of number of keys.
+/// 默认 4096 × 4 = 16 KB 固定内存，与 key 总数无关。
+/// 使用多哈希 + 取小值的经典 Count-Min 设计，存在一定的过估计但不会低估计。
 pub(crate) struct CountMinSketch {
     width: usize,
     depth: usize,
@@ -32,9 +32,8 @@ impl CountMinSketch {
         }
     }
 
-    /// Increment the count for `key` and return the estimated min-count.
-    /// Automatically triggers decay when total_increments exceeds
-    /// width * depth to prevent counters from saturating.
+    /// 递增 key 的计数值，返回递增后的估计值（所有行中的最小值）。
+    /// 当 total_increments 超过 width * depth 时自动触发衰减，防止计数器饱和。
     pub fn increment(&mut self, key: &str) -> u8 {
         let mut min_val = u8::MAX;
         for i in 0..self.depth {
@@ -51,7 +50,7 @@ impl CountMinSketch {
         min_val
     }
 
-    /// Return the estimated count for `key` (read-only). Used by admission control.
+    /// 只读查询 key 的估计计数值（不触发递增和衰减），供 admission control 使用。
     #[allow(dead_code)]
     pub fn count(&self, key: &str) -> u8 {
         let mut min_val = u8::MAX;
@@ -62,7 +61,8 @@ impl CountMinSketch {
         min_val
     }
 
-    /// Halve all counters (right-shift by 1).
+    /// 衰减所有计数器（右移 1 位 = 减半），并将 total_increments 归零。
+    /// 使用右移而非除法以提高性能。
     pub fn decay(&mut self) {
         for row in &mut self.table {
             for cell in row.iter_mut() {
@@ -72,11 +72,13 @@ impl CountMinSketch {
         self.total_increments = 0;
     }
 
+    // 多行独立哈希：先用 DefaultHasher 对 key 做一次哈希，再与 per-row seed 混合。
+    // 使用与 C++ 相同的 murmur-style 常数确保跨语言一致性。
     fn hash(&self, key: &str, seed: u64) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let h = hasher.finish();
-        // Combine with per-row seed for independent hashes (same constants as C++)
+        // 与 C++ 保持一致的哈希混合常数
         let h = h ^ (seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(0x517cc1b727220a95));
         let h = h ^ (h >> 33);
         let h = h.wrapping_mul(0xff51afd7ed558ccd);

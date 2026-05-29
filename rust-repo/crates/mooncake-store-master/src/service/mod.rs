@@ -63,6 +63,9 @@ use self::workers::{
     ClientMonitorWorker, EvictionWorker, GracefulUnmountScheduler, ProcessingReaper,
 };
 
+/// Master 服务的核心实现，持有所有共享状态和后台 worker。
+/// state 通过 Arc 在线程间共享，后台 worker 各自持有 Arc 克隆以访问状态。
+/// 析构时（Drop）自动停止所有后台线程。
 pub struct MasterServiceImpl {
     state: Arc<MasterState>,
     metadata_state: MetadataState,
@@ -106,6 +109,8 @@ impl MasterServiceImpl {
         Self::new_with_runtime_config_and_oplog(backend_type, backup_dir, runtime_config, None)
     }
 
+    /// 完整构造函数：初始化所有 DashMap 存储、分配器、快照恢复、后台 worker 和 oplog。
+    /// 如果提供了 StorageBackend 且快照文件存在，则从快照恢复 segment / 对象 / 任务状态。
     pub fn new_with_runtime_config_and_oplog(
         backend_type: Option<StorageBackendType>,
         backup_dir: Option<PathBuf>,
@@ -164,6 +169,7 @@ impl MasterServiceImpl {
                 } else {
                     std::path::PathBuf::new()
                 };
+                // 加载快照前先备份原文件，防止恢复过程中数据损坏
                 if !existing.as_os_str().is_empty() && existing.exists() {
                     let backup_path = backup_dir.join("mooncake_snapshot_restore_backup");
                     if let Err(e) = std::fs::create_dir_all(&backup_path) {
@@ -173,6 +179,7 @@ impl MasterServiceImpl {
                     }
                 }
             }
+            // 从快照恢复状态：先恢复 segment（含分配器），再恢复对象和任务
             if let Ok(Some((segments, nof_segments, objects, tasks))) = backend.load() {
                 for seg in segments {
                     state.segments.insert(
@@ -230,6 +237,9 @@ impl MasterServiceImpl {
         }
     }
 
+    /// 保存当前 Master 状态快照到 storage_backend。
+    /// 通过 spawn_blocking 在 blocking 线程池中执行，避免阻塞 async runtime。
+    /// 同时记录成功/失败计数和耗时指标，供监控系统采集。
     pub fn save_snapshot(&self) {
         let state = self.state.clone();
         tokio::task::spawn_blocking(move || {

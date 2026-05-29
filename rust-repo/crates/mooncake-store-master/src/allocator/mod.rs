@@ -21,11 +21,13 @@ pub use self::types::{
     PoolId, SlabReleaseContext, SlabReleaseMode, CACHELIB_MIN_ALLOC_SIZE, CACHELIB_SLAB_SIZE,
 };
 
+/// 基于 Offset 的简单分配器状态：维护释放后合并的空闲区间列表。
 #[derive(Debug, Clone)]
 struct OffsetSegmentState {
-    free_ranges: Vec<(u64, u64)>,
+    free_ranges: Vec<(u64, u64)>, // (offset, size)
 }
 
+/// 分配布局的两种模式：简单 Offset（适合大块分配）和 Cachelib（适合小块、多 slab 管理）。
 #[derive(Debug, Clone)]
 enum SegmentLayout {
     Offset(OffsetSegmentState),
@@ -40,6 +42,8 @@ struct SegmentState {
     layout: SegmentLayout,
 }
 
+/// 段分配器：管理多个 memory segment 的空间分配和回收。
+/// 支持两种分配策略（Random / FreeRatioFirst）和两种内存分配器（Offset / CachelibLike）。
 pub struct SegmentAllocator {
     segments: HashMap<Uuid, SegmentState>,
     strategy: AllocationStrategy,
@@ -69,6 +73,10 @@ impl SegmentAllocator {
         self.memory_allocator_kind
     }
 
+    /// 注册一个新的 memory segment 到分配器。
+    /// 根据 memory_allocator_kind 初始化不同的布局：
+    /// - Offset：简单的空闲区间管理，空闲区 = (used, size - used)
+    /// - CachelibLike：按 slab 粒度分片，预留已用空间对应的 slab，剩余归入默认池
     pub fn add_segment(&mut self, segment: Segment, used: u64, client_id: Uuid) {
         let (layout, effective_used) = match self.memory_allocator_kind {
             MemoryAllocatorKind::Offset => {
@@ -128,6 +136,11 @@ impl SegmentAllocator {
         self.allocate_for_client(key, None, slice_size, replica_count, config)
     }
 
+    /// 为指定 client 分配 replica_count 个内存副本。
+    /// 分配策略：
+    /// - Random：随机打乱候选 segment 后稳定排序（优先同节点、优先首选 segment）
+    /// - FreeRatioFirst：复合排序（同节点 > 首选 segment > 空闲率从高到低）
+    /// 每个副本从候选 segment 中按顺序取空闲空间，创建 Allocating 状态的 ReplicaDescriptor。
     pub fn allocate_for_client(
         &mut self,
         _key: &str,
@@ -165,7 +178,7 @@ impl SegmentAllocator {
                 candidates.shuffle(&mut thread_rng());
             }
             AllocationStrategy::FreeRatioFirst => {
-                // Single composite sort: same-node > preferred > free-ratio
+                // 三级复合排序：同节点 > 首选 segment > 空闲率从高到低
                 candidates.sort_by(|a, b| {
                     let sa = &self.segments[a];
                     let sb = &self.segments[b];
@@ -198,9 +211,8 @@ impl SegmentAllocator {
             }
         }
 
-        // For Random strategy: apply same_node / preferred_segment as
-        // stable sorts after shuffle (same_node first, then preferred —
-        // matching original C++ priority order).
+        // Random 策略下：先 shuffle 随机化，再用稳定排序提升同节点和首选 segment 的优先级
+        // 注意：stable sort 保持相同 key 的原有顺序，从而保留 shuffle 的随机性
         if matches!(self.strategy, AllocationStrategy::Random) {
             if let Some(ref host) = preferred_host {
                 candidates.sort_by_key(|segment_id| {
@@ -247,6 +259,9 @@ impl SegmentAllocator {
         replicas
     }
 
+    /// 释放一组副本，将占用的空间归还给各自的 segment。
+    /// 对于 Offset 模式，归还会触发空闲区间合并（insert_free_range）。
+    /// 对于 Cachelib 模式，通过 release_cachelib 标记分配为已释放。
     pub fn release(&mut self, replicas: &[ReplicaDescriptor]) {
         for replica in replicas {
             let Some(state) = self.segments.get_mut(&replica.segment_id) else {
@@ -707,6 +722,7 @@ impl SegmentAllocator {
     }
 }
 
+/// 从 segment name（格式 "host:port"）中提取主机名部分。
 fn segment_host(name: &str) -> &str {
     name.split(':').next().unwrap_or(name)
 }
@@ -750,6 +766,7 @@ impl SegmentState {
     }
 }
 
+/// 计算 segment 的空闲率：free / total。
 fn free_ratio(size: u64, used: u64) -> f64 {
     if size == 0 {
         return 0.0;
@@ -757,6 +774,8 @@ fn free_ratio(size: u64, used: u64) -> f64 {
     size.saturating_sub(used) as f64 / size as f64
 }
 
+/// 从空闲区间列表中预留 size 字节，返回起始偏移量。
+/// 优先使用首个足够大的区间；若区间刚好吃完则移除，否则收缩。
 fn reserve_range(free_ranges: &mut Vec<(u64, u64)>, size: u64) -> Option<u64> {
     let idx = free_ranges.iter().position(|(_, len)| *len >= size)?;
     let (offset, len) = free_ranges[idx];
@@ -768,6 +787,8 @@ fn reserve_range(free_ranges: &mut Vec<(u64, u64)>, size: u64) -> Option<u64> {
     Some(offset)
 }
 
+/// 向空闲区间列表插入一个新区间，并自动合并相邻区间。
+/// 先排序后遍历合并：若新区间与前一区间重叠或相邻，则扩展前一区间。
 fn insert_free_range(free_ranges: &mut Vec<(u64, u64)>, offset: u64, len: u64) {
     free_ranges.push((offset, len));
     free_ranges.sort_by_key(|(start, _)| *start);

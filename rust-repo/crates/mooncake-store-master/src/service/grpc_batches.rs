@@ -2,6 +2,7 @@ use super::*;
 
 impl MasterServiceImpl {
     // ---- BatchExistKey ----
+    // 批量检查 key 是否存在，返回布尔数组与输入 keys 一一对应。
     pub(super) async fn batch_exist_key_impl(
         &self,
         request: Request<proto::BatchExistKeyRequest>,
@@ -16,6 +17,7 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchQueryIp ----
+    // 批量查询客户端 IP 地址，返回 client_id -> addresses 的映射。
     pub(super) async fn batch_query_ip_impl(
         &self,
         request: Request<proto::BatchQueryIpRequest>,
@@ -33,6 +35,8 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchReplicaClear ----
+    // 批量清除指定客户端对象在指定 segment（或所有 segment）上的副本。
+    // 校验 owner、lease 过期和所有副本 Complete 后才执行清理。
     pub(super) async fn batch_replica_clear_impl(
         &self,
         request: Request<proto::BatchReplicaClearRequest>,
@@ -97,6 +101,8 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchPutEnd ----
+    // 批量 PutEnd：将各 key 的 Allocating 副本标记为 Complete，触发 offload 队列攒批。
+    // 每个 entry 返回 0（成功）或 -1（key 不存在）。
     pub(super) async fn batch_put_end_impl(
         &self,
         request: Request<proto::BatchPutEndRequest>,
@@ -137,6 +143,8 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchPutRevoke ----
+    // 批量撤销 PutStart：移除指定 keys 在指定 segment 上的所有副本（含 Complete 状态）。
+    // 返回码：0=成功, -1=key 不存在, -2=有进行中的复制任务, -3=权限拒绝。
     pub(super) async fn batch_put_revoke_impl(
         &self,
         request: Request<proto::BatchPutRevokeRequest>,
@@ -192,6 +200,7 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchRemove ----
+    // 批量删除对象，每个 key 执行相同的 force/lease 检查（与 Remove 一致），记录 oplog。
     pub(super) async fn batch_remove_impl(
         &self,
         request: Request<proto::BatchRemoveRequest>,
@@ -218,6 +227,8 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchUpsertEnd ----
+    // 批量 Upsert：对每个 entry 若 key 已存在且 size 匹配则复用副本，否则重新分配。
+    // 支持 NoF 副本分配（含同节点优先策略），返回所有分配的副本描述符合集。
     pub(super) async fn batch_upsert_end_impl(
         &self,
         request: Request<proto::BatchUpsertEndRequest>,
@@ -310,6 +321,8 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchPutStart ----
+    // 批量 PutStart：为多个 key 同时分配副本并注册对象。跳过已存在的 key。
+    // 所有 key 共享同一份 ReplicateConfig，适用于批量初始化场景。
     pub(super) async fn batch_put_start_impl(
         &self,
         request: Request<proto::BatchPutStartRequest>,
@@ -366,6 +379,7 @@ impl MasterServiceImpl {
     }
 
     // ---- EvictDiskReplica ----
+    // 驱逐一个对象的指定类型磁盘副本（Disk/LocalDisk/All），若所有副本被移除则删除对象。
     pub(super) async fn evict_disk_replica_impl(
         &self,
         request: Request<proto::EvictDiskReplicaRequest>,
@@ -396,6 +410,7 @@ impl MasterServiceImpl {
     }
 
     // ---- BatchEvictDiskReplica ----
+    // 批量驱逐多个对象的磁盘副本，按 replica_type 过滤要驱逐的副本类型。
     pub(super) async fn batch_evict_disk_replica_impl(
         &self,
         request: Request<proto::BatchEvictDiskReplicaRequest>,

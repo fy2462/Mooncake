@@ -2,6 +2,7 @@ use super::*;
 
 impl MasterServiceImpl {
     // ---- ExistKey ----
+    // 检查指定 key 是否存在于 master 的对象表中，O(1) 哈希查找。
     pub(super) async fn exist_key_impl(
         &self,
         request: Request<proto::ExistKeyRequest>,
@@ -13,6 +14,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GetAllKeys ----
+    // 返回当前所有已存储对象的 key 列表，用于客户端全量扫描。
     pub(super) async fn get_all_keys_impl(
         &self,
         _request: Request<proto::GetAllKeysRequest>,
@@ -27,6 +29,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GetAllSegments ----
+    // 返回所有已挂载的 Memory segment 名称列表，供管理端查询拓扑。
     pub(super) async fn get_all_segments_impl(
         &self,
         _request: Request<proto::GetAllSegmentsRequest>,
@@ -41,6 +44,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GetAllNoFSegments ----
+    // 返回所有已挂载的 NoF (NVMe-oF) segment 列表，含传输端点等完整信息。
     pub(super) async fn get_all_nof_segments_impl(
         &self,
         _request: Request<proto::GetAllNoFSegmentsRequest>,
@@ -55,6 +59,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GetNoFSegmentsByName ----
+    // 按 segment 名称查询所属的 NoF owner 列表，用于定位特定 NoF 设备的所有者。
     pub(super) async fn get_nof_segments_by_name_impl(
         &self,
         request: Request<proto::GetNoFSegmentsByNameRequest>,
@@ -76,6 +81,10 @@ impl MasterServiceImpl {
     }
 
     // ---- PutStart ----
+    // 对象写入的第一阶段：分配副本、注册对象元数据。
+    // 流程：(1) 校验 key/size → (2) 若对象已存在则清理过期 handle 或超时丢弃
+    // (3) 分配 Memory 副本并可选分配 NoF 副本 → (4) 写入对象表并标记 processing_keys。
+    // 返回分配的副本列表供客户端 RDMA 写入。
     pub(super) async fn put_start_impl(
         &self,
         request: Request<proto::PutStartRequest>,
@@ -107,7 +116,7 @@ impl MasterServiceImpl {
             let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
 
             if should_remove {
-                // 所有有效副本已被清理，删除对象并允许新 PutStart
+                // 所有有效副本已被清理（handle 失效或客户端死亡），删除对象并允许新 PutStart
                 let old_replicas = existing.replicas.clone();
                 self.state.objects.remove(&key);
                 self.state.processing_keys.remove(&key);
@@ -115,7 +124,8 @@ impl MasterServiceImpl {
                 drop(existing);
                 release_replicas(&self.state, &old_replicas);
             } else {
-                // 对象仍有有效副本，检查是否可以超时丢弃
+                // 对象仍有有效副本，但需检查是否可超时丢弃：
+                // 仅当无 Completed 副本且 PutStart 已超时时才允许覆盖，否则返回已存在错误
                 let has_completed = existing
                     .replicas
                     .iter()
@@ -199,6 +209,7 @@ impl MasterServiceImpl {
                 PUT_NO_SPACE_HELPER_STR,
             )));
         }
+        // NoF 副本分配：优先分配在与 Memory 副本相同节点上的 NoF segment，降低跨节点访问延迟
         if config.nof_replica_num > 0 {
             let preferred_nof = if config.prefer_alloc_in_same_node {
                 preferred_nof_segment_names(&self.state, &replicas)
@@ -250,6 +261,9 @@ impl MasterServiceImpl {
     }
 
     // ---- PutEnd ----
+    // 对象写入的第二阶段：将 Allocating 状态的副本标记为 Complete，更新 lease 和软 pin 超时。
+    // 校验 client_id 防止越权写入。仅当所有副本都 Complete 时才从 processing_keys 移除，
+    // 以避免并发 PutStart 冲突。同时触发 offload 队列攒批和 oplog 记录。
     pub(super) async fn put_end_impl(
         &self,
         request: Request<proto::PutEndRequest>,
@@ -332,6 +346,8 @@ impl MasterServiceImpl {
     }
 
     // ---- AddReplica ----
+    // 向已有对象追加副本。LocalDisk 类型副本按 holder_client_id 去重（同一客户端只保留最新），
+    // 其他类型直接追加。若对象不存在，仅对 LocalDisk 类型自动创建对象条目。
     pub(super) async fn add_replica_impl(
         &self,
         request: Request<proto::AddReplicaRequest>,
@@ -381,6 +397,9 @@ impl MasterServiceImpl {
     }
 
     // ---- GetReplicaList ----
+    // 返回对象的所有 Complete 副本列表，用于客户端选择传输端点。
+    // 三阶段设计：(1) 读锁获取副本列表 → (2) 写锁更新 lease/软 pin 超时（微秒级）
+    // → (3) 锁外检查是否符合 promotion 条件并入队。三阶段设计避免了读操作长时间持写锁。
     pub(super) async fn get_replica_list_impl(
         &self,
         request: Request<proto::GetReplicaListRequest>,
@@ -443,6 +462,7 @@ impl MasterServiceImpl {
     }
 
     // ---- GetReplicaListByRegex ----
+    // 按正则表达式批量获取对象的 Complete 副本列表。过滤掉无 Complete 副本的匹配 key。
     pub(super) async fn get_replica_list_by_regex_impl(
         &self,
         request: Request<proto::GetReplicaListByRegexRequest>,
@@ -484,6 +504,8 @@ impl MasterServiceImpl {
     }
 
     // ---- Remove ----
+    // 删除指定对象及其所有副本。非 force 模式会校验：(1) 无进行中的复制任务
+    // (2) lease 已过期 (3) 所有副本均 Complete。同时清理 offload/promotion 任务和客户端索引。
     pub(super) async fn remove_impl(
         &self,
         request: Request<proto::RemoveRequest>,
@@ -524,6 +546,7 @@ impl MasterServiceImpl {
     }
 
     // ---- RemoveByRegex ----
+    // 按正则批量删除对象，每个 key 执行与 Remove 相同的安全检查（force/lease/Complete）。
     pub(super) async fn remove_by_regex_impl(
         &self,
         request: Request<proto::RemoveByRegexRequest>,
@@ -578,6 +601,7 @@ impl MasterServiceImpl {
     }
 
     // ---- QueryByRegex ----
+    // 按正则查询对象及其所有副本（含非 Complete 状态），用于诊断和管理。
     pub(super) async fn query_by_regex_impl(
         &self,
         request: Request<proto::QueryByRegexRequest>,
@@ -600,6 +624,7 @@ impl MasterServiceImpl {
     }
 
     // ---- QuerySegments ----
+    // 按名称查询 segment 的总容量和已使用量，用于容量监控。
     pub(super) async fn query_segments_impl(
         &self,
         request: Request<proto::QuerySegmentsRequest>,
@@ -617,6 +642,7 @@ impl MasterServiceImpl {
     }
 
     // ---- QueryIp ----
+    // 查询指定客户端的 IP 地址列表，先查 clients 表，fallback 到 segment 名解析。
     pub(super) async fn query_ip_impl(
         &self,
         request: Request<proto::QueryIpRequest>,
@@ -636,6 +662,9 @@ impl MasterServiceImpl {
     }
 
     // ---- Upsert ----
+    // 原子 Upsert：若 key 已存在则检查 refcnt（busy 检查）并复用/替换副本，否则新建。
+    // 与 PutStart 相比不写入 processing_keys，适合管理端直接注入对象。
+    // 已有的 soft_pin/hard_pin 状态会保留（OR 语义），防止意外丢失 pin 保护。
     pub(super) async fn upsert_impl(
         &self,
         request: Request<proto::UpsertRequest>,

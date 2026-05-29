@@ -15,6 +15,8 @@ use super::helpers::{
 };
 use super::state::MasterState;
 
+/// 优雅卸载记录：segment 被标记为待卸载后不会立即移除，
+/// 而是等待一个宽限期（grace_period）让进行中的请求有机会完成。
 #[derive(Debug, Clone)]
 struct GracefulUnmountRecord {
     segment_id: Uuid,
@@ -38,6 +40,8 @@ impl PartialOrd for GracefulUnmountRecord {
     }
 }
 
+// 使用 BinaryHeap（最大堆），按过期时间升序（即最早过期的在最顶端），
+// 方便 worker 快速获取下一批到期的卸载任务。
 impl Ord for GracefulUnmountRecord {
     fn cmp(&self, other: &Self) -> Ordering {
         other.expire_at.cmp(&self.expire_at)
@@ -90,6 +94,8 @@ pub(crate) struct ClientMonitorWorker {
 }
 
 impl GracefulUnmountScheduler {
+    /// 启动优雅卸载调度线程。使用 Condvar + BinaryHeap 实现定时触发：
+    /// 等待下一个最早到期的卸载记录，到期后批量执行实际卸载。
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let inner = Arc::new(GracefulUnmountSchedulerInner {
             state: Mutex::new(GracefulUnmountSchedulerState {
@@ -101,6 +107,7 @@ impl GracefulUnmountScheduler {
         let worker_inner = inner.clone();
         let worker = thread::spawn(move || loop {
             let mut guard = worker_inner.state.lock().expect("scheduler mutex poisoned");
+            // 队列空时无限等待，有新记录加入时被 notify 唤醒
             while !guard.stopping && guard.queue.is_empty() {
                 guard = worker_inner
                     .condvar
@@ -111,6 +118,7 @@ impl GracefulUnmountScheduler {
                 break;
             }
 
+            // 计算到下一个到期时间的间隔，带超时等待避免空转
             let Some(next) = guard.queue.peek().cloned() else {
                 continue;
             };
@@ -126,10 +134,11 @@ impl GracefulUnmountScheduler {
                     break;
                 }
                 if !timeout_res.timed_out() {
-                    continue;
+                    continue; // 被新记录提前唤醒，重新检查队列
                 }
             }
 
+            // 批量收集所有已到期的记录，一次性释放锁后再执行卸载
             let mut expired = Vec::new();
             let now = Instant::now();
             while let Some(record) = guard.queue.peek().cloned() {
@@ -139,7 +148,7 @@ impl GracefulUnmountScheduler {
                 expired.push(record);
                 guard.queue.pop();
             }
-            drop(guard);
+            drop(guard); // 尽早释放锁，卸载操作可能耗时
 
             for record in expired {
                 unmount_segment_owned(&state, record.segment_id, record.client_id);
@@ -151,6 +160,7 @@ impl GracefulUnmountScheduler {
         }
     }
 
+    /// 安排 segment 在 grace_period_ms 毫秒后执行卸载。
     pub(crate) fn schedule(&self, segment_id: Uuid, client_id: Uuid, grace_period_ms: u64) {
         let mut guard = self.inner.state.lock().expect("scheduler mutex poisoned");
         if guard.stopping {
@@ -162,9 +172,10 @@ impl GracefulUnmountScheduler {
             expire_at: Instant::now() + Duration::from_millis(grace_period_ms),
         });
         drop(guard);
-        self.inner.condvar.notify_all();
+        self.inner.condvar.notify_all(); // 唤醒 worker 线程重新计算等待时间
     }
 
+    /// 停止调度线程：设置停止标志、唤醒、join 线程。
     pub(crate) fn stop(&mut self) {
         {
             let mut guard = self.inner.state.lock().expect("scheduler mutex poisoned");
@@ -181,6 +192,7 @@ impl GracefulUnmountScheduler {
 }
 
 impl ProcessingReaper {
+    /// 启动后台任务回收线程，周期性地清理超时的 offload/promotion 任务。
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let inner = Arc::new(ProcessingReaperInner {
             state: Mutex::new(false),
@@ -222,6 +234,7 @@ impl ProcessingReaper {
 }
 
 impl EvictionWorker {
+    /// 启动后台驱逐线程，按 eviction_interval 间隔检查内存水位并触发自动驱逐。
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let inner = Arc::new(EvictionWorkerInner {
             state: Mutex::new(false),
@@ -262,11 +275,15 @@ impl EvictionWorker {
     }
 }
 
+/// 彻底清理一个过期的客户端：释放其所有副本、移除 segment 挂载、
+/// 删除任务、清理 offload/promotion 队列，最后从 client 列表中移除。
+/// 优先使用 O(client_keys) 的索引查找（client_objects），
+/// 仅在索引缺失时回退到全表扫描（兼容旧客户端）。
 fn purge_expired_client(state: &MasterState, client_id: Uuid) {
     let mut released_replicas = Vec::new();
     let mut emptied_keys = Vec::new();
 
-    // Use per-client index for O(client_keys) lookup.
+    // 优先使用 per-client 索引进行 O(N_keys) 的高效查找
     let client_keys: Vec<String> = state
         .client_objects
         .remove(&client_id)
@@ -320,6 +337,7 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         release_replicas(state, &released_replicas);
     }
 
+    // 清理已变空的对象及其关联的后台任务
     for key in emptied_keys {
         state.objects.remove(&key);
         clear_offloading_task(state, &key);
@@ -327,6 +345,7 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         state.replication_tasks.remove(&key);
     }
 
+    // 移除该 client 的所有待处理任务
     let task_ids = state
         .tasks
         .iter()
@@ -339,6 +358,7 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
 
     state.local_disk_segments.remove(&client_id);
 
+    // 卸载该 client 拥有的所有 NOF segment（非易失性内存）
     let nof_segment_ids = state
         .nof_segments
         .iter()
@@ -349,6 +369,7 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         unmount_nof_segment_owned(state, segment_id, client_id);
     }
 
+    // 卸载该 client 拥有的所有常规 Memory segment
     let segment_ids = state
         .segments
         .iter()
@@ -359,10 +380,12 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         unmount_segment_owned(state, segment_id, client_id);
     }
     sync_client_segments(state, client_id);
-    state.clients.remove(&client_id);
+    state.clients.remove(&client_id); // 最终从在线客户端列表中移除
 }
 
 impl ClientMonitorWorker {
+    /// 启动客户端存活监控线程，按 client_monitor_interval 间隔扫描所有 client，
+    /// 将超过 client_live_ttl 未心跳的客户端标记为过期并执行 purge_expired_client 清理。
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let inner = Arc::new(ClientMonitorInner {
             state: Mutex::new(false),

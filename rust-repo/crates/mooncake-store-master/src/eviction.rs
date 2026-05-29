@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime};
 
+/// 驱逐管理器：基于 LRU（最近最少使用）策略选择驱逐候选对象。
+/// 提供两层保护：soft_pin（软固定，TTL 内不会被驱逐）和 lease（租约，过期后允许驱逐）。
 pub struct EvictionManager {
     soft_pin_ttl: Duration,
     lease_ttl: Duration,
@@ -13,8 +15,8 @@ impl EvictionManager {
         }
     }
 
-    /// Public API kept for backward compatibility with existing tests.
-    /// Internally converts to owned data and delegates to `select_for_eviction_with_hard_pin`.
+    /// 向后兼容的公开 API，内部转换为自有数据后委托给 select_for_eviction_with_hard_pin。
+    /// 仅用于已有测试；生产路径应使用下面的 select_for_eviction_with_hard_pin。
     pub fn select_for_eviction(
         &self,
         candidates: &[(&str, &[mooncake_store_core::ReplicaDescriptor], bool, SystemTime)],
@@ -43,6 +45,7 @@ impl EvictionManager {
             return vec![];
         }
 
+        // 过滤：跳过软/硬固定的对象，以及租约未过期的对象
         let now = SystemTime::now();
         let mut valid: Vec<usize> = candidates
             .iter()
@@ -80,6 +83,7 @@ impl EvictionManager {
             .collect()
     }
 
+    /// 检查软固定是否已过期：创建时间超过 soft_pin_ttl 后允许驱逐。
     pub fn soft_pin_expired(&self, created_at: SystemTime) -> bool {
         SystemTime::now()
             .duration_since(created_at)
@@ -87,6 +91,8 @@ impl EvictionManager {
             .unwrap_or(true)
     }
 
+    /// 检查租约是否过期：最近访问时间距今超过 lease_ttl 后允许驱逐。
+    /// 租约机制保证最近被访问的对象不会被误驱逐。
     pub fn is_lease_expired(&self, last_access: SystemTime, now: SystemTime) -> bool {
         now.duration_since(last_access)
             .map(|d| d > self.lease_ttl)

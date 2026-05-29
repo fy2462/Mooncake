@@ -23,12 +23,14 @@ pub enum HaError {
     UnavailableInCurrentStatus,
 }
 
+// LeaderRole: Leader 选举的两态模型，Leader 负责服务请求，Standby 等待接管。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaderRole {
     Leader,
     Standby,
 }
 
+// HABackendType: 支持的三种 HA 后端 —— etcd（分布式选举）、Redis（SET NX）、K8s（Lease）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HABackendType {
     Unknown,
@@ -70,6 +72,9 @@ pub struct MasterView {
     pub view_version: u64,
 }
 
+// MasterRuntimeState: master 服务的生命周期状态机。
+// Standby → Candidate → Recovering → CatchingUp → LeaderWarmup → Serving
+// 每个状态对应不同的行为限制（如仅有 Serving/LeaderWarmup 才处理客户端请求）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MasterRuntimeState {
     Starting,
@@ -106,6 +111,7 @@ impl MasterRuntimeState {
     }
 }
 
+// StandbyState: 热备节点的同步状态机（Stopped → Connecting → Recovering → Watching → Promoted）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandbyState {
     Stopped,
@@ -275,6 +281,8 @@ pub fn map_standby_runtime_state(
     }
 }
 
+// StandbyController trait: 热备控制器的统一接口，支持 Noop（无 HA）、CapabilityDriven 两种实现。
+// promote_standby 会校验 lag_entries 是否归零（oplog 已追平）才允许提升。
 pub trait StandbyController: Send {
     fn start_standby(&mut self, observed_leader: Option<MasterView>) -> Result<(), HaError>;
     fn stop_standby(&mut self);
@@ -509,6 +517,8 @@ impl StandbyController for CapabilityDrivenStandbyController {
     }
 }
 
+// MasterServiceSupervisor: 协调 Leader 选举和热备切换的顶层管理器。
+// 通过 StandbyController 管理 standby 生命周期，维护 runtime_state 供 gRPC 服务层查询当前角色。
 pub struct MasterServiceSupervisor {
     runtime_state: Arc<Mutex<MasterRuntimeState>>,
     observed_leader: Arc<Mutex<Option<MasterView>>>,
@@ -603,7 +613,7 @@ pub struct AcquireLeadershipResult {
     pub lease_id: Option<i64>,
 }
 
-/// Handle for actively held leadership — cancels keepalive on drop.
+/// 领导者 keepalive 句柄：Drop 时自动取消后台续约任务，防止资源泄漏。
 pub struct LeadershipHandle {
     cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -695,7 +705,7 @@ impl LeaderCoordinator {
         )
     }
 
-    /// Read the current master view from etcd election.
+    /// 读取当前 Leader 视图。etcd 后端通过 election leader API 查询，Redis 通过 GET 命令读取。
     pub async fn read_current_view(&self) -> Result<Option<MasterView>, HaError> {
         match &self.backend {
             CoordinatorBackend::Etcd {
@@ -741,7 +751,8 @@ impl LeaderCoordinator {
         }
     }
 
-    /// Try to acquire leadership using etcd election API (campaign).
+    /// 尝试获取 Leader 权。etcd 使用 campaign（grant lease + campaign），Redis 使用 SET NX PX。
+    /// K8s 后端当前未实现（返回错误），Manual 模式始终成功。
     pub async fn try_acquire_leadership(
         &self,
         leader_address: &str,
@@ -855,7 +866,8 @@ impl LeaderCoordinator {
         }
     }
 
-    /// Start keepalive task for the given lease. Handle stops on drop.
+    /// 启动 Leader 续约后台任务。etcd 通过 lease_keep_alive stream 续约，Redis 通过 PEXPIRE 续期。
+    /// 续约失败时自动降级为 Standby，通过 role_tx channel 通知。
     pub async fn start_leadership_keepalive(
         &self,
         lease_id: i64,
@@ -939,7 +951,7 @@ impl LeaderCoordinator {
         })
     }
 
-    /// Release leadership via etcd resign.
+    /// 释放 Leader 权。etcd 调用 resign，Redis 删除选举 key，Manual 直接降级。
     pub async fn release_leadership(&self, _lease_id: i64) -> Result<(), HaError> {
         match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
@@ -975,7 +987,7 @@ impl LeaderCoordinator {
         }
     }
 
-    /// Poll for a view change from known_version, up to timeout.
+    /// 等待 Leader 视图变更（直到超时），每 200ms 轮询一次，检测到 view_version 变化即返回。
     pub async fn wait_for_view_change(
         &self,
         known_version: u64,
@@ -1019,6 +1031,7 @@ impl LeaderCoordinator {
         }
     }
 
+    // 阻塞等待 Leader 角色变更（通过 watch channel），仅在成为 Leader 时返回。
     pub async fn watch_leadership_change(&self) {
         if *self.role_rx.borrow() == LeaderRole::Leader {
             return;

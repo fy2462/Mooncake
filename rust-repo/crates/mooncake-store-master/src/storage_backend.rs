@@ -9,6 +9,10 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// 快照存储后端类型：
+/// - LocalDisk：普通本地磁盘，无需额外注册
+/// - Hf3fs：3FS 分布式文件系统，需要通过 hf3fs::register_fd 注册文件描述符
+/// - FilePerKey：每个 key 独立文件存储（用于 offload 场景）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageBackendType {
     LocalDisk,
@@ -71,9 +75,10 @@ pub struct StorageBackend {
     disk_dir: PathBuf,
 }
 
+/// 封装 fs::File，针对 Hf3fs 后端额外持有 fd 注册句柄，防止文件被 3FS 提前回收。
 struct BackendFile {
     file: fs::File,
-    _hf3fs_registration: Option<hf3fs::Hf3fsRegistration>,
+    _hf3fs_registration: Option<hf3fs::Hf3fsRegistration>, // RAII: 持有期间保证 3FS fd 有效
 }
 
 impl BackendFile {
@@ -137,6 +142,8 @@ impl StorageBackend {
         }
     }
 
+    /// 保存快照：将 segments、nof_segments、objects、tasks 序列化为 msgpack 格式。
+    /// 使用原子写模式：先写 .tmp 文件，sync + rename 到最终文件名，防止写过程中崩溃导致数据损坏。
     pub fn save(
         &self,
         segments: &DashMap<Uuid, crate::service::SegmentEntry>,
@@ -201,13 +208,14 @@ impl StorageBackend {
 
         let path = self.disk_dir.join("master_snapshot.msgpack");
         let tmp = self.disk_dir.join("master_snapshot.msgpack.tmp");
+        // 先写入临时文件，完成后再原子 rename（避免中途崩溃产生损坏的快照）
         let writer = BackendFile::create(&tmp, self.backend_type)?;
         let mut writer = BufWriter::new(writer);
         rmp_serde::encode::write_named(&mut writer, &snap)?;
         writer.flush()?;
-        writer.get_ref().sync_all()?;
-        drop(writer);
-        fs::rename(&tmp, &path)?;
+        writer.get_ref().sync_all()?; // fsync 保证数据落盘
+        drop(writer); // 关闭文件句柄
+        fs::rename(&tmp, &path)?; // 原子替换
         tracing::info!(
             "Snapshot saved to {} via {:?} ({} segments, {} objects)",
             path.display(),
@@ -218,7 +226,8 @@ impl StorageBackend {
         Ok(())
     }
 
-    /// Extract domain types from a deserialized Snapshot.
+    /// 将反序列化的 Snapshot 转换为领域类型（SegmentEntry / NoFSegmentEntry / ObjectEntry / TaskEntry）。
+    /// 处理序列化/反序列化之间的类型差异（如 UUID 字符串 ↔ Uuid、i32 ↔ enum）。
     fn build_loaded_state(
         snap: Snapshot,
         backend_type: StorageBackendType,
@@ -325,6 +334,8 @@ impl StorageBackend {
         (segments, nof_segments, objects, tasks)
     }
 
+    /// 加载快照：优先尝试 msgpack 格式（新），不存在时回退到 JSON 格式（旧版兼容）。
+    /// 返回恢复的 segments、nof_segments、objects 和 tasks。
     pub fn load(
         &self,
     ) -> Result<
@@ -336,7 +347,7 @@ impl StorageBackend {
         )>,
         Box<dyn std::error::Error>,
     > {
-        // Try msgpack first (new format)
+        // 优先尝试 msgpack（新格式），不存在则回退到 JSON（旧版兼容）
         let msgpack_path = self.disk_dir.join("master_snapshot.msgpack");
         if msgpack_path.exists() {
             let reader = BufReader::new(BackendFile::open(&msgpack_path, self.backend_type)?);
@@ -376,11 +387,13 @@ impl StorageBackend {
     }
 
     fn key_path(&self, key: &str) -> PathBuf {
-        // Encode key: replace '/' with '_' for filesystem safety
+        // 编码 key：将 '/' 替换为 '_'，防止路径穿越攻击
         let safe_key = key.replace('/', "_");
         self.key_dir().join(safe_key)
     }
 
+    /// 批量下沉：将多个 key 的二进制数据写入独立文件。
+    /// 用于将热数据从内存 offload 到本地磁盘。
     pub fn batch_offload(&self, entries: &[(String, Vec<u8>)]) -> Result<(), Box<dyn std::error::Error>> {
         let dir = self.key_dir();
         std::fs::create_dir_all(&dir)?;
@@ -392,6 +405,8 @@ impl StorageBackend {
         Ok(())
     }
 
+    /// 批量加载：从磁盘读取多个 key 的二进制数据。
+    /// 不存在的 key 直接跳过，不报错。
     pub fn batch_load(&self, keys: &[String]) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
         let mut results = Vec::new();
         for key in keys {

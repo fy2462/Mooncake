@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
+// MasterState: master 服务的全局状态容器，所有数据结构均为并发安全类型。
+// DashMap 用于高并发读写（分段锁），RwLock 用于需要事务性一致性的操作。
+// processing_keys 跟踪正在 PutStart 但未 Complete 的 key，防止并发冲突。
+// client_objects 维护每个客户端的对象索引，加速客户端下线时批量清理。
 pub(crate) struct MasterState {
     pub(crate) clients: DashMap<Uuid, ClientEntry>,
     pub(crate) objects: DashMap<String, ObjectEntry>,
@@ -37,6 +41,8 @@ pub(crate) struct ClientEntry {
     pub(crate) last_ping: SystemTime,
 }
 
+// ObjectEntry: 对象的完整元数据。put_start_time/lease_timeout/soft_pin_timeout
+// 标记为 serde(skip) 因为这些是运行时状态，不应持久化到快照中。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectEntry {
     pub replicas: Vec<ReplicaDescriptor>,
@@ -87,12 +93,14 @@ pub struct TaskEntry {
     pub max_retry_attempts: u32,
 }
 
+// ReplicationTaskKind: 区分 Copy（保留源副本）和 Move（完成后删除源副本）两种复制语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReplicationTaskKind {
     Copy,
     Move,
 }
 
+// ReplicationTaskEntry: 记录进行中的复制任务，包含源和目标副本描述符，用于 CopyEnd/MoveEnd 验证。
 #[derive(Debug, Clone)]
 pub(crate) struct ReplicationTaskEntry {
     pub(crate) client_id: Uuid,
@@ -116,6 +124,8 @@ pub(crate) struct PromotionTaskEntry {
     pub(crate) start_time: Instant,
 }
 
+// MasterRuntimeConfig: 运行时配置参数，控制 lease TTL、eviction 水位线、promotion 策略等。
+// 所有 Duration 字段使用 std::time::Duration 表示。
 #[derive(Debug, Clone)]
 pub struct MasterRuntimeConfig {
     pub put_start_discard_timeout: Duration,
@@ -138,7 +148,7 @@ pub struct MasterRuntimeConfig {
     pub storage_fs_dir: String,
     pub enable_disk_eviction: bool,
     pub quota_bytes: u64,
-    /// CXL memory path (e.g., "/dev/dax0.0"). Empty means CXL is disabled.
+    /// CXL 内存路径（如 "/dev/dax0.0"），空字符串表示 CXL 未启用。
     pub cxl_path: String,
     pub cxl_size: u64,
     pub enable_cxl: bool,

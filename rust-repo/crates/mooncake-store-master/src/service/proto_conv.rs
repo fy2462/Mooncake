@@ -5,15 +5,18 @@ use mooncake_store_core::{
 };
 use uuid::Uuid;
 
+// UUID 转换为 proto 格式（拆分为高64位和低64位）。
 pub(crate) fn uuid_to_proto(id: Uuid) -> proto::Uuid {
     let (high, low) = id.as_u64_pair();
     proto::Uuid { high, low }
 }
 
+// proto UUID 转回 Rust Uuid 类型。
 pub(crate) fn uuid_from_proto(p: &proto::Uuid) -> Uuid {
     Uuid::from_u64_pair(p.high, p.low)
 }
 
+// 将内部 ReplicaDescriptor 序列化为 proto 格式，供 gRPC 响应使用。
 pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescriptor {
     proto::ReplicaDescriptor {
         segment_id: Some(uuid_to_proto(r.segment_id)),
@@ -31,6 +34,7 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
     }
 }
 
+// 从 proto 反序列化回 ReplicaDescriptor，status/replica_type 枚举值按 C++ 约定映射。
 pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescriptor {
     ReplicaDescriptor {
         refcnt: 0,
@@ -56,6 +60,7 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
     }
 }
 
+// 将 proto ReplicateConfig 转换为内部类型，preferred_segment 向后兼容并合并到 preferred_segments。
 pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
     let preferred_segment = c.preferred_segment.clone();
     let preferred_segments = if !c.preferred_segments.is_empty() {
@@ -100,6 +105,7 @@ pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
     }
 }
 
+// 将内部 NoFSegment 转换为 proto 格式，包含传输端点和客户端信息。
 pub(crate) fn nof_segment_to_proto(segment: &NoFSegment) -> proto::NoFSegment {
     proto::NoFSegment {
         id: Some(uuid_to_proto(segment.id)),
@@ -111,6 +117,7 @@ pub(crate) fn nof_segment_to_proto(segment: &NoFSegment) -> proto::NoFSegment {
     }
 }
 
+// 从 proto 反序列化 NoFSegment，UUID 缺省时生成新 UUID（新挂载场景）。
 pub(crate) fn nof_segment_from_proto(segment: &proto::NoFSegment) -> NoFSegment {
     NoFSegment {
         id: segment.id.as_ref().map_or(Uuid::new_v4(), uuid_from_proto),
@@ -129,6 +136,7 @@ pub(crate) fn nof_segment_owner_to_proto(owner: &NoFSegmentOwnerInfo) -> proto::
     }
 }
 
+// TaskType/Status 枚举的 proto 转换，用于任务查询接口。
 pub(crate) fn task_type_to_proto(task_type: TaskType) -> i32 {
     match task_type {
         TaskType::ReplicaCopy => proto::TaskType::ReplicaCopy as i32,
