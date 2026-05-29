@@ -1,7 +1,7 @@
 use crate::eviction::EvictionManager;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use uuid::Uuid;
 
 use super::helpers::{
@@ -155,33 +155,24 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         state.runtime_config.soft_pin_ttl,
         state.runtime_config.lease_ttl,
     );
-    let candidate_data = state
+    let mut candidates: Vec<(String, bool, bool, SystemTime)> = state
         .objects
         .iter()
-        .filter(|entry| !state.replication_tasks.contains_key(entry.key()))
+        .filter(|entry| {
+            let key = entry.key();
+            !state.replication_tasks.contains_key(key)
+                && !state.processing_keys.contains_key(key)
+        })
         .map(|entry| {
             (
                 entry.key().clone(),
-                entry.replicas.clone(),
                 entry.soft_pinned,
                 entry.hard_pinned,
                 entry.last_access,
             )
         })
-        .collect::<Vec<_>>();
-    let candidate_refs = candidate_data
-        .iter()
-        .map(|(key, replicas, soft_pinned, hard_pinned, last_access)| {
-            (
-                key.as_str(),
-                replicas.as_slice(),
-                *soft_pinned,
-                *hard_pinned,
-                *last_access,
-            )
-        })
-        .collect::<Vec<_>>();
-    let selected = manager.select_for_eviction_with_hard_pin(&candidate_refs, target_count);
+        .collect();
+    let selected = manager.select_for_eviction_with_hard_pin(&mut candidates, target_count);
 
     let mut evicted = Vec::new();
     for key in selected {
@@ -221,6 +212,10 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
             }
             if became_empty {
                 state.objects.remove(&key);
+                // Clean up per-client object index.
+                for mut entry in state.client_objects.iter_mut() {
+                    entry.value_mut().remove(&key);
+                }
                 clear_offloading_task(state, &key);
                 clear_promotion_task(state, &key);
             }

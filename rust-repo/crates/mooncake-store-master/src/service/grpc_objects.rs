@@ -317,6 +317,14 @@ impl MasterServiceImpl {
             if all_complete && self.state.processing_keys.contains_key(&req.key) {
                 self.state.processing_keys.remove(&req.key);
             }
+            // Maintain per-client object index for fast client cleanup.
+            if all_complete {
+                self.state
+                    .client_objects
+                    .entry(client_id)
+                    .or_default()
+                    .insert(req.key.clone());
+            }
             self.oplog_manager.lock().record_put_end(&req.key, size);
         }
         metrics::PUT_END_REQUESTS.inc();
@@ -497,6 +505,9 @@ impl MasterServiceImpl {
             }
         }
         if let Some((_, object)) = self.state.objects.remove(&req.key) {
+            for mut entry in self.state.client_objects.iter_mut() {
+                entry.value_mut().remove(&req.key);
+            }
             clear_offloading_task(&self.state, &req.key);
             clear_promotion_task(&self.state, &req.key);
             release_replicas(&self.state, &object.replicas);
@@ -543,6 +554,9 @@ impl MasterServiceImpl {
                 }
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
+                for mut entry in self.state.client_objects.iter_mut() {
+                    entry.value_mut().remove(&key);
+                }
                 clear_offloading_task(&self.state, &key);
                 clear_promotion_task(&self.state, &key);
                 release_replicas(&self.state, &object.replicas);

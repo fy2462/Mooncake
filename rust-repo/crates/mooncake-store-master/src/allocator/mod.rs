@@ -147,42 +147,77 @@ impl SegmentAllocator {
             .map(|(id, _)| *id)
             .collect();
 
+        // Pre-compute preferred hostname outside the sort comparator.
+        let has_preferred = !config.preferred_segment.is_empty();
+        let preferred_host = if config.prefer_alloc_in_same_node {
+            client_id.and_then(|cid| {
+                self.segments
+                    .values()
+                    .find(|state| state.client_id == cid)
+                    .map(|state| segment_host(&state.segment.name).to_string())
+            })
+        } else {
+            None
+        };
+
         match self.strategy {
             AllocationStrategy::Random => {
                 candidates.shuffle(&mut thread_rng());
             }
             AllocationStrategy::FreeRatioFirst => {
+                // Single composite sort: preferred-segment > same-node > free-ratio
                 candidates.sort_by(|a, b| {
-                    let state_a = &self.segments[a];
-                    let state_b = &self.segments[b];
-                    let ratio_a = free_ratio(state_a.segment.size, state_a.used);
-                    let ratio_b = free_ratio(state_b.segment.size, state_b.used);
+                    let sa = &self.segments[a];
+                    let sb = &self.segments[b];
+
+                    // Tier 1: preferred segment
+                    if has_preferred {
+                        let a_pref = sa.segment.name == config.preferred_segment;
+                        let b_pref = sb.segment.name == config.preferred_segment;
+                        let cmp = a_pref.cmp(&b_pref).reverse();
+                        if cmp != Ordering::Equal {
+                            return cmp;
+                        }
+                    }
+
+                    // Tier 2: same node
+                    if let Some(ref host) = preferred_host {
+                        let a_same = segment_host(&sa.segment.name) == host.as_str();
+                        let b_same = segment_host(&sb.segment.name) == host.as_str();
+                        let cmp = a_same.cmp(&b_same).reverse();
+                        if cmp != Ordering::Equal {
+                            return cmp;
+                        }
+                    }
+
+                    // Tier 3: free ratio (descending)
+                    let ratio_a = free_ratio(sa.segment.size, sa.used);
+                    let ratio_b = free_ratio(sb.segment.size, sb.used);
                     ratio_b.partial_cmp(&ratio_a).unwrap_or(Ordering::Equal)
                 });
             }
         }
 
-        if !config.preferred_segment.is_empty() {
-            candidates.sort_by_key(|segment_id| {
-                if self.segments[segment_id].segment.name == config.preferred_segment {
-                    0
-                } else {
-                    1
-                }
-            });
-        }
-
-        if config.prefer_alloc_in_same_node {
-            let preferred_host = client_id.and_then(|client_id| {
-                self.segments
-                    .values()
-                    .find(|state| state.client_id == client_id)
-                    .map(|state| segment_host(&state.segment.name))
-            });
-            if let Some(preferred_host) = preferred_host {
+        // For Random strategy: apply preferred_segment / same_node as
+        // stable sorts after shuffle, preserving the original multi-sort
+        // behaviour (preferred segments are first, others shuffled).
+        if matches!(self.strategy, AllocationStrategy::Random) {
+            if has_preferred {
                 candidates.sort_by_key(|segment_id| {
-                    let host = segment_host(&self.segments[segment_id].segment.name);
-                    if host == preferred_host { 0 } else { 1 }
+                    if self.segments[segment_id].segment.name == config.preferred_segment {
+                        0
+                    } else {
+                        1
+                    }
+                });
+            }
+            if let Some(ref host) = preferred_host {
+                candidates.sort_by_key(|segment_id| {
+                    if segment_host(&self.segments[segment_id].segment.name) == host.as_str() {
+                        0
+                    } else {
+                        1
+                    }
                 });
             }
         }

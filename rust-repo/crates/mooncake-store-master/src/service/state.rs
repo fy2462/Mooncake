@@ -14,6 +14,7 @@ pub(crate) struct MasterState {
     pub(crate) clients: DashMap<Uuid, ClientEntry>,
     pub(crate) objects: DashMap<String, ObjectEntry>,
     pub(crate) processing_keys: DashMap<String, ()>,
+    pub(crate) client_objects: DashMap<Uuid, HashSet<String>>,
     pub(crate) segments: DashMap<Uuid, SegmentEntry>,
     pub(crate) nof_segments: DashMap<Uuid, NoFSegmentEntry>,
     pub(crate) local_disk_segments: DashMap<Uuid, LocalDiskSegmentEntry>,

@@ -24,6 +24,7 @@ uuid.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
+rmp-serde.workspace = true
 clap.workspace = true
 axum.workspace = true
 etcd-client.workspace = true

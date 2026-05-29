@@ -199,11 +199,11 @@ impl StorageBackend {
                 .collect(),
         };
 
-        let path = self.disk_dir.join("master_snapshot.json");
-        let tmp = self.disk_dir.join("master_snapshot.json.tmp");
+        let path = self.disk_dir.join("master_snapshot.msgpack");
+        let tmp = self.disk_dir.join("master_snapshot.msgpack.tmp");
         let writer = BackendFile::create(&tmp, self.backend_type)?;
         let mut writer = BufWriter::new(writer);
-        serde_json::to_writer_pretty(&mut writer, &snap)?;
+        rmp_serde::encode::write_named(&mut writer, &snap)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
         drop(writer);
@@ -218,25 +218,17 @@ impl StorageBackend {
         Ok(())
     }
 
-    pub fn load(
-        &self,
-    ) -> Result<
-        Option<(
-            Vec<crate::service::SegmentEntry>,
-            Vec<crate::service::NoFSegmentEntry>,
-            Vec<(String, crate::service::ObjectEntry)>,
-            Vec<crate::service::TaskEntry>,
-        )>,
-        Box<dyn std::error::Error>,
-    > {
-        let path = self.disk_dir.join("master_snapshot.json");
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let reader = BufReader::new(BackendFile::open(&path, self.backend_type)?);
-        let snap: Snapshot = serde_json::from_reader(reader)?;
-
+    /// Extract domain types from a deserialized Snapshot.
+    fn build_loaded_state(
+        snap: Snapshot,
+        backend_type: StorageBackendType,
+        path: &Path,
+    ) -> (
+        Vec<crate::service::SegmentEntry>,
+        Vec<crate::service::NoFSegmentEntry>,
+        Vec<(String, crate::service::ObjectEntry)>,
+        Vec<crate::service::TaskEntry>,
+    ) {
         let segments: Vec<crate::service::SegmentEntry> = snap
             .segments
             .into_iter()
@@ -324,19 +316,55 @@ impl StorageBackend {
         tracing::info!(
             "Snapshot loaded from {} via {:?} ({} segments, {} objects, {} tasks)",
             path.display(),
-            self.backend_type,
+            backend_type,
             segments.len() + nof_segments.len(),
             objects.len(),
             tasks.len()
         );
 
+        (segments, nof_segments, objects, tasks)
+    }
+
+    pub fn load(
+        &self,
+    ) -> Result<
+        Option<(
+            Vec<crate::service::SegmentEntry>,
+            Vec<crate::service::NoFSegmentEntry>,
+            Vec<(String, crate::service::ObjectEntry)>,
+            Vec<crate::service::TaskEntry>,
+        )>,
+        Box<dyn std::error::Error>,
+    > {
+        // Try msgpack first (new format)
+        let msgpack_path = self.disk_dir.join("master_snapshot.msgpack");
+        if msgpack_path.exists() {
+            let reader = BufReader::new(BackendFile::open(&msgpack_path, self.backend_type)?);
+            let snap: Snapshot = rmp_serde::decode::from_read(reader)?;
+            let (segments, nof_segments, objects, tasks) =
+                Self::build_loaded_state(snap, self.backend_type, &msgpack_path);
+            return Ok(Some((segments, nof_segments, objects, tasks)));
+        }
+
+        // Fall back to legacy JSON format
+        let json_path = self.disk_dir.join("master_snapshot.json");
+        if !json_path.exists() {
+            return Ok(None);
+        }
+
+        let reader = BufReader::new(BackendFile::open(&json_path, self.backend_type)?);
+        let snap: Snapshot = serde_json::from_reader(reader)?;
+        let (segments, nof_segments, objects, tasks) =
+            Self::build_loaded_state(snap, self.backend_type, &json_path);
         Ok(Some((segments, nof_segments, objects, tasks)))
     }
 
     pub fn clear(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let path = self.disk_dir.join("master_snapshot.json");
-        if path.exists() {
-            fs::remove_file(&path)?;
+        for filename in &["master_snapshot.msgpack", "master_snapshot.json"] {
+            let path = self.disk_dir.join(filename);
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
         }
         Ok(())
     }

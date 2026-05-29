@@ -3,6 +3,7 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -120,6 +121,10 @@ pub struct LocalFsOpLogStore {
     buffer: Vec<OpLogRecord>,
     last_seq: u64,
     current_segment_seq: u64,
+    /// Channel to send full buffers to the background flush thread.
+    flush_tx: mpsc::Sender<Vec<OpLogRecord>>,
+    /// Background flush thread handle — joined on drop.
+    _flush_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl LocalFsOpLogStore {
@@ -127,12 +132,28 @@ impl LocalFsOpLogStore {
         fs::create_dir_all(dir).map_err(|e| {
             HaError::InvalidBackend(format!("oplog dir create: {e}"))
         })?;
+
+        let dir_buf = dir.to_path_buf();
+        let (flush_tx, flush_rx) = mpsc::channel::<Vec<OpLogRecord>>();
+
+        // Background thread: writes full buffers to disk without blocking callers.
+        let flush_dir = dir_buf.clone();
+        let flush_handle = std::thread::spawn(move || {
+            for entries in flush_rx {
+                if let Err(e) = Self::flush_inner(&flush_dir, &entries) {
+                    warn!("oplog background flush failed: {e}");
+                }
+            }
+        });
+
         let mut store = Self {
-            dir: dir.to_path_buf(),
+            dir: dir_buf,
             max_entries_per_segment: max_entries_per_segment.max(1000),
             buffer: Vec::new(),
             last_seq: 0,
             current_segment_seq: 0,
+            flush_tx,
+            _flush_handle: Some(flush_handle),
         };
         // Recover latest sequence from existing segment files
         store.recover()?;
@@ -183,17 +204,18 @@ impl LocalFsOpLogStore {
         self.dir.join(format!("oplog_{:020}.bin", start_seq))
     }
 
-    /// Write buffer to a segment file atomically.
-    fn flush(&mut self) -> Result<(), HaError> {
-        if self.buffer.is_empty() {
+    /// Write buffer to a segment file atomically (synchronous, used by background
+    /// thread and explicit flush() calls).
+    fn flush_inner(dir: &Path, entries: &[OpLogRecord]) -> Result<(), HaError> {
+        if entries.is_empty() {
             return Ok(());
         }
-        let start_seq = self.buffer.first().unwrap().seq;
-        let tmp_path = self.dir.join(format!("oplog_{:020}.tmp", start_seq));
-        let final_path = self.segment_path(start_seq);
+        let start_seq = entries.first().unwrap().seq;
+        let tmp_path = dir.join(format!("oplog_{:020}.tmp", start_seq));
+        let final_path = dir.join(format!("oplog_{:020}.bin", start_seq));
 
-        let mut data = Vec::with_capacity(self.buffer.len() * 128);
-        for entry in &self.buffer {
+        let mut data = Vec::with_capacity(entries.len() * 128);
+        for entry in entries {
             let payload = entry.payload.as_bytes();
             data.extend_from_slice(&(entry.seq as u32).to_le_bytes());
             data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -207,11 +229,19 @@ impl LocalFsOpLogStore {
             HaError::InvalidBackend(format!("oplog rename segment: {e}"))
         })?;
         // fsync parent directory for durability
-        if let Ok(f) = fs::File::open(&self.dir) {
+        if let Ok(f) = fs::File::open(dir) {
             let _ = f.sync_all();
         }
+        Ok(())
+    }
 
-        self.current_segment_seq = start_seq;
+    /// Write buffer to a segment file atomically.
+    fn flush(&mut self) -> Result<(), HaError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        Self::flush_inner(&self.dir, &self.buffer)?;
+        self.current_segment_seq = self.buffer.first().map(|e| e.seq).unwrap_or(0);
         self.buffer.clear();
         Ok(())
     }
@@ -257,7 +287,16 @@ impl OpLogStore for LocalFsOpLogStore {
             ..entry.clone()
         });
         if self.buffer.len() >= self.max_entries_per_segment {
-            self.flush()?;
+            let to_flush = std::mem::replace(&mut self.buffer, Vec::new());
+            match self.flush_tx.send(to_flush) {
+                Ok(()) => {}
+                Err(mpsc::SendError(entries)) => {
+                    // Channel closed — flush inline for safety.
+                    warn!("oplog flush channel closed, falling back to sync flush");
+                    self.buffer = entries;
+                    self.flush()?;
+                }
+            }
         }
         Ok(self.last_seq)
     }

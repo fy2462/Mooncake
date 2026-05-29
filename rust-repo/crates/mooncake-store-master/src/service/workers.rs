@@ -266,22 +266,53 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
     let mut released_replicas = Vec::new();
     let mut emptied_keys = Vec::new();
 
-    for mut object in state.objects.iter_mut() {
-        let key = object.key().clone();
-        let mut removed_any = false;
-        object.replicas.retain(|replica| {
-            let owner = replica
-                .holder_client_id
-                .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name));
-            let keep = owner != Some(client_id);
-            if !keep {
-                removed_any = true;
-                released_replicas.push(replica.clone());
+    // Use per-client index for O(client_keys) lookup.
+    let client_keys: Vec<String> = state
+        .client_objects
+        .remove(&client_id)
+        .map(|(_, keys)| keys.into_iter().collect())
+        .unwrap_or_default();
+
+    if !client_keys.is_empty() {
+        for key in &client_keys {
+            if let Some(mut object) = state.objects.get_mut(key) {
+                let mut removed_any = false;
+                object.replicas.retain(|replica| {
+                    let owner = replica
+                        .holder_client_id
+                        .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name));
+                    let keep = owner != Some(client_id);
+                    if !keep {
+                        removed_any = true;
+                        released_replicas.push(replica.clone());
+                    }
+                    keep
+                });
+                if removed_any && object.replicas.is_empty() {
+                    emptied_keys.push(key.clone());
+                }
             }
-            keep
-        });
-        if removed_any && object.replicas.is_empty() {
-            emptied_keys.push(key);
+        }
+    } else {
+        // Fallback: full scan for clients without an index entry (legacy or
+        // clients that never completed a PutEnd).
+        for mut object in state.objects.iter_mut() {
+            let key = object.key().clone();
+            let mut removed_any = false;
+            object.replicas.retain(|replica| {
+                let owner = replica
+                    .holder_client_id
+                    .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name));
+                let keep = owner != Some(client_id);
+                if !keep {
+                    removed_any = true;
+                    released_replicas.push(replica.clone());
+                }
+                keep
+            });
+            if removed_any && object.replicas.is_empty() {
+                emptied_keys.push(key);
+            }
         }
     }
 

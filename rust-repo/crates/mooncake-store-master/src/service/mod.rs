@@ -122,6 +122,7 @@ impl MasterServiceImpl {
             clients: DashMap::new(),
             objects: DashMap::new(),
             processing_keys: DashMap::new(),
+            client_objects: DashMap::new(),
             segments: DashMap::new(),
             nof_segments: DashMap::new(),
             local_disk_segments: DashMap::new(),
@@ -154,12 +155,20 @@ impl MasterServiceImpl {
 
         if let Some(ref backend) = *state.storage_backend.read() {
             if let Some(ref backup_dir) = snapshot_backup_dir {
-                let snapshot_path = backup_dir.join("master_snapshot.json");
-                if snapshot_path.exists() {
+                let snapshot_path = backup_dir.join("master_snapshot.msgpack");
+                let legacy_path = backup_dir.join("master_snapshot.json");
+                let existing = if snapshot_path.exists() {
+                    snapshot_path
+                } else if legacy_path.exists() {
+                    legacy_path
+                } else {
+                    std::path::PathBuf::new()
+                };
+                if !existing.as_os_str().is_empty() && existing.exists() {
                     let backup_path = backup_dir.join("mooncake_snapshot_restore_backup");
                     if let Err(e) = std::fs::create_dir_all(&backup_path) {
                         tracing::warn!("Failed to create snapshot backup dir: {}", e);
-                    } else if let Err(e) = std::fs::copy(&snapshot_path, backup_path.join("master_snapshot.json")) {
+                    } else if let Err(e) = std::fs::copy(&existing, backup_path.join(existing.file_name().unwrap_or_default())) {
                         tracing::warn!("Failed to backup snapshot: {}", e);
                     }
                 }
@@ -222,21 +231,25 @@ impl MasterServiceImpl {
     }
 
     pub fn save_snapshot(&self) {
-        let start = std::time::Instant::now();
-        if let Some(ref backend) = *self.state.storage_backend.read() {
-            if let Err(e) = backend.save(
-                &self.state.segments,
-                &self.state.nof_segments,
-                &self.state.objects,
-                &self.state.tasks,
-            ) {
-                metrics::SNAPSHOT_FAIL_COUNT.inc();
-                tracing::error!("Failed to save snapshot: {}", e);
-            } else {
-                metrics::SNAPSHOT_DURATION_MS.set(start.elapsed().as_millis() as i64);
-                metrics::SNAPSHOT_SUCCESS_COUNT.inc();
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+            let guard = state.storage_backend.read();
+            if let Some(ref backend) = *guard {
+                if let Err(e) = backend.save(
+                    &state.segments,
+                    &state.nof_segments,
+                    &state.objects,
+                    &state.tasks,
+                ) {
+                    metrics::SNAPSHOT_FAIL_COUNT.inc();
+                    tracing::error!("Failed to save snapshot: {}", e);
+                } else {
+                    metrics::SNAPSHOT_DURATION_MS.set(start.elapsed().as_millis() as i64);
+                    metrics::SNAPSHOT_SUCCESS_COUNT.inc();
+                }
             }
-        }
+        });
     }
 
     pub fn metadata_state(&self) -> MetadataState {
