@@ -755,3 +755,39 @@ message GetFsdirRequest {}
 message GetFsdirResponse {
   string fs_dir = 1;
 }
+
+// ---------------------------------------------------------------
+// Remote pull coordination
+// ---------------------------------------------------------------
+
+enum RemotePullAction {
+  PULL = 0;     // This client should fetch from the remote source
+  WAIT = 1;     // Another client is already fetching; retry the store get
+  ABANDON = 2;  // Remote source not enabled or max retries exceeded
+}
+
+message AcquireRemotePullRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message AcquireRemotePullResponse {
+  RemotePullAction action = 1;
+  uint64 retry_after_ms = 2;  // Suggested backoff for WAIT (0 = default)
+}
+
+message CompleteRemotePullRequest {
+  Uuid client_id = 1;
+  string key = 2;
+  bool success = 3;
+  uint64 data_size = 4;
+}
+
+message CompleteRemotePullResponse {}
+
+message ReleaseRemotePullRequest {
+  Uuid client_id = 1;
+  string key = 2;
+}
+
+message ReleaseRemotePullResponse {}

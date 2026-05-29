@@ -151,6 +151,7 @@ impl MasterServiceImpl {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: AtomicI64::new(0),
             runtime_config: runtime_config.clone(),
+            pending_remote_pulls: DashMap::new(),
         });
         let metadata_state = MetadataState::new("");
         let graceful_unmount_scheduler = GracefulUnmountScheduler::new(state.clone());

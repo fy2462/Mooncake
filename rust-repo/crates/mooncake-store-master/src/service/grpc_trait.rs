@@ -435,4 +435,25 @@ impl MasterService for MasterServiceImpl {
     ) -> Result<Response<proto::GetFsdirResponse>, Status> {
         MasterServiceImpl::get_fsdir_impl(self, request).await
     }
+
+    async fn acquire_remote_pull(
+        &self,
+        request: Request<proto::AcquireRemotePullRequest>,
+    ) -> Result<Response<proto::AcquireRemotePullResponse>, Status> {
+        MasterServiceImpl::acquire_remote_pull_impl(self, request).await
+    }
+
+    async fn complete_remote_pull(
+        &self,
+        request: Request<proto::CompleteRemotePullRequest>,
+    ) -> Result<Response<proto::CompleteRemotePullResponse>, Status> {
+        MasterServiceImpl::complete_remote_pull_impl(self, request).await
+    }
+
+    async fn release_remote_pull(
+        &self,
+        request: Request<proto::ReleaseRemotePullRequest>,
+    ) -> Result<Response<proto::ReleaseRemotePullResponse>, Status> {
+        MasterServiceImpl::release_remote_pull_impl(self, request).await
+    }
 }

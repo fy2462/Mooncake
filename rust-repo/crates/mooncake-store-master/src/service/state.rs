@@ -34,6 +34,16 @@ pub(crate) struct MasterState {
     pub(crate) promotion_in_flight: AtomicUsize,
     pub(crate) view_version: AtomicI64,
     pub(crate) runtime_config: MasterRuntimeConfig,
+    /// Tracks in-flight remote source pulls so only one node fetches a given key.
+    pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
+}
+
+/// Tracks which node is currently fetching a key from the remote source.
+#[derive(Debug, Clone)]
+pub(crate) struct RemotePullEntry {
+    #[allow(dead_code)]
+    pub(crate) puller_client_id: Uuid,
+    pub(crate) started_at: Instant,
 }
 
 pub(crate) struct ClientEntry {
@@ -168,6 +178,10 @@ pub struct MasterRuntimeConfig {
     pub enable_disk_eviction: bool,
     /// 透传给客户端的存储配额（字节），master 端暂未实现配额限流。
     pub quota_bytes: u64,
+    /// Enable remote source (S3) fallback for cache misses.
+    pub remote_source_enabled: bool,
+    /// TTL for a pending remote pull entry before it is considered stale.
+    pub remote_pull_ttl: Duration,
 }
 
 impl Default for MasterRuntimeConfig {
@@ -193,6 +207,8 @@ impl Default for MasterRuntimeConfig {
             storage_fs_dir: String::new(),
             enable_disk_eviction: false,
             quota_bytes: 0,
+            remote_source_enabled: false,
+            remote_pull_ttl: Duration::from_secs(60),
         }
     }
 }

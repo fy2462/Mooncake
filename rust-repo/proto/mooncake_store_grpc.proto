@@ -97,6 +97,11 @@ service MasterService {
   // HA fsdir
   rpc GetFsdir(GetFsdirRequest) returns (GetFsdirResponse);
 
+  // Remote pull coordination — prevents duplicate S3 fetches across nodes
+  rpc AcquireRemotePull(AcquireRemotePullRequest) returns (AcquireRemotePullResponse);
+  rpc CompleteRemotePull(CompleteRemotePullRequest) returns (CompleteRemotePullResponse);
+  rpc ReleaseRemotePull(ReleaseRemotePullRequest) returns (ReleaseRemotePullResponse);
+
   // Batch operations (high-throughput paths)
   rpc BatchPutEnd(BatchPutEndRequest) returns (BatchPutEndResponse);
   rpc BatchPutRevoke(BatchPutRevokeRequest) returns (BatchPutRevokeResponse);

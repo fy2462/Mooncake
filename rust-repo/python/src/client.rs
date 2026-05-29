@@ -1,3 +1,4 @@
+use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
 use mooncake_store_client::MooncakeClient;
 use mooncake_store_client::proto::StorageObjectMetadata;
@@ -63,6 +64,16 @@ impl PythonMooncakeClient {
     // ===================================================================
 
     #[staticmethod]
+    #[pyo3(signature = (
+        local_hostname,
+        metadata_server,
+        master_server_addr,
+        protocol = String::new(),
+        device = String::new(),
+        global_segment_size = -1,
+        local_buffer_size = -1,
+        remote_config = None::<PyRemoteSourceConfig>,
+    ))]
     fn create<'py>(
         py: Python<'py>,
         local_hostname: String,
@@ -72,7 +83,10 @@ impl PythonMooncakeClient {
         device: String,
         global_segment_size: i64,
         local_buffer_size: i64,
+        remote_config: Option<PyRemoteSourceConfig>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        use mooncake_store_client::LocalFsSource;
+
         let local_hostname = if local_hostname.is_empty() {
             "localhost".to_string()
         } else {
@@ -95,7 +109,7 @@ impl PythonMooncakeClient {
         };
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = MooncakeClient::create(
+            let mut client = MooncakeClient::create(
                 &master_server_addr,
                 &metadata_server,
                 &local_hostname,
@@ -106,6 +120,36 @@ impl PythonMooncakeClient {
             )
             .await
             .map_err(to_py_err)?;
+
+            // Wire up remote source if configured
+            if let Some(ref py_cfg) = remote_config {
+                let config = py_cfg.to_core();
+
+                if let Some(ref s3_py) = py_cfg.s3_config {
+                    #[cfg(feature = "s3")]
+                    {
+                        use mooncake_store_client::S3RemoteSource;
+                        let source = S3RemoteSource::new(&s3_py.to_core())
+                            .await
+                            .map_err(|e| to_py_err(format!("S3 init failed: {e}")))?;
+                        client = client.with_remote_source(source, config);
+                    }
+                    #[cfg(not(feature = "s3"))]
+                    {
+                        return Err(to_py_err(
+                            "S3 remote source configured but 's3' feature is not enabled. \
+                             Rebuild with --features s3"
+                        ));
+                    }
+                } else if let Some(ref root) = py_cfg.local_fs_root {
+                    let source = LocalFsSource::new(root.clone());
+                    client = client.with_remote_source(source, config);
+                } else if config.enabled {
+                    return Err(to_py_err(
+                        "RemoteSourceConfig.enabled=true requires s3_config or local_fs_root"
+                    ));
+                }
+            }
 
             Ok(PythonMooncakeClient {
                 inner: Arc::new(Mutex::new(Some(client))),
@@ -285,6 +329,30 @@ impl PythonMooncakeClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
             let result = client.batch_is_exist(&keys).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    // ===================================================================
+    // prefetch
+    // ===================================================================
+
+    /// Prefetch a list of keys from the configured remote source (S3 / local FS).
+    /// Fetched data is stored in the local hot cache.
+    ///
+    /// Use this BEFORE a training batch to warm the cache with keys you know
+    /// will be accessed soon.
+    fn prefetch<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.prefetch(&keys).await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })

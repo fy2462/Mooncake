@@ -11,10 +11,53 @@ impl MooncakeClient {
     // -----------------------------------------------------------------------
 
     pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
+        // Level 0: check local hot cache (fastest — no network)
+        if let Some(ref cache) = self.hot_cache {
+            if let Some(data) = cache.get(key) {
+                return Ok(data);
+            }
+        }
+
+        // Level 1: fetch from memory store (gRPC → RDMA)
         let replicas = self.fetch_replicas(key).await?;
-        let replica = self.select_best_replica(&replicas)
-            .ok_or(StoreError::KeyNotFound(key.to_string()))?;
-        self.read_from_replica(replica).await
+        let replica = self.select_best_replica(&replicas);
+        match replica {
+            Some(r) => {
+                let data = self.read_from_replica(r).await?;
+                // Store in hot cache for future hits
+                if let Some(ref cache) = self.hot_cache {
+                    cache.put(key, &data);
+                }
+                Ok(data)
+            }
+            None => {
+                // Level 2: remote source fallback (S3 / local FS)
+                if let Some(ref handler) = self.miss_handler {
+                    if handler.is_enabled() {
+                        match handler.handle_miss(key).await {
+                            Ok(data) => {
+                                if let Some(ref cache) = self.hot_cache {
+                                    cache.put(key, &data);
+                                }
+                                Ok(data)
+                            }
+                            Err(remote_err) => {
+                                tracing::warn!(
+                                    key = %key,
+                                    error = %remote_err,
+                                    "remote source miss handler failed"
+                                );
+                                Err(StoreError::KeyNotFound(key.to_string()))
+                            }
+                        }
+                    } else {
+                        Err(StoreError::KeyNotFound(key.to_string()))
+                    }
+                } else {
+                    Err(StoreError::KeyNotFound(key.to_string()))
+                }
+            }
+        }
     }
 
     pub async unsafe fn get_into(
@@ -222,6 +265,27 @@ impl MooncakeClient {
     // -----------------------------------------------------------------------
     // get_size
     // -----------------------------------------------------------------------
+
+    /// Prefetch a list of keys from the remote source.
+    ///
+    /// Keys are fetched in parallel and stored in the hot cache (if attached).
+    /// Use this to warm the cache before a training batch. Combine with
+    /// [`put`](Self::put) to also store data in the Mooncake distributed store.
+    pub async fn prefetch(&mut self, keys: &[String]) -> StoreResult<()> {
+        let Some(ref handler) = self.miss_handler else {
+            return Err(StoreError::Internal(
+                "no remote source configured for prefetch".to_string(),
+            ));
+        };
+        if !handler.is_enabled() {
+            return Err(StoreError::Internal(
+                "remote source is not enabled".to_string(),
+            ));
+        }
+        tracing::info!(count = keys.len(), "starting prefetch");
+        handler.batch_fetch(keys).await;
+        Ok(())
+    }
 
     pub async fn get_size(&mut self, key: &str) -> StoreResult<i64> {
         let replicas = self.fetch_replicas(key).await?;

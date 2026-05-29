@@ -986,4 +986,89 @@ impl MasterServiceImpl {
         let fs_dir = self.state.runtime_config.storage_fs_dir.clone();
         Ok(Response::new(proto::GetFsdirResponse { fs_dir }))
     }
+
+    // ---- Remote pull coordination ----
+    // 分布式协调：确保同一 key 只有一个节点从远端（S3）拉取数据，其余等待。
+    //
+    // 流程：
+    //   Node A miss → AcquireRemotePull(key) → PULL → S3.fetch → PutEnd → CompleteRemotePull
+    //   Node B miss → AcquireRemotePull(key) → WAIT → 重试 GetReplicaList（数据已由 A 写入 store）
+
+    pub(super) async fn acquire_remote_pull_impl(
+        &self,
+        request: Request<proto::AcquireRemotePullRequest>,
+    ) -> Result<Response<proto::AcquireRemotePullResponse>, Status> {
+        let req = request.into_inner();
+        let proto_id = req.client_id.as_ref().ok_or_else(|| {
+            Status::invalid_argument("client_id is required")
+        })?;
+        let client_id = uuid_from_proto(proto_id);
+        let key = req.key;
+
+        if !self.state.runtime_config.remote_source_enabled {
+            return Ok(Response::new(proto::AcquireRemotePullResponse {
+                action: proto::RemotePullAction::Abandon as i32,
+                retry_after_ms: 0,
+            }));
+        }
+
+        // Check if another node is already pulling this key
+        if let Some(entry) = self.state.pending_remote_pulls.get(&key) {
+            let elapsed = entry.started_at.elapsed();
+            let ttl = self.state.runtime_config.remote_pull_ttl;
+            if elapsed < ttl {
+                return Ok(Response::new(proto::AcquireRemotePullResponse {
+                    action: proto::RemotePullAction::Wait as i32,
+                    retry_after_ms: (ttl.saturating_sub(elapsed)).as_millis().min(5000) as u64,
+                }));
+            }
+            // Stale entry — remove and let this node pull
+            drop(entry);
+            self.state.pending_remote_pulls.remove(&key);
+        }
+
+        tracing::debug!(key = %key, client = %client_id, "remote pull acquired");
+        self.state.pending_remote_pulls.insert(
+            key,
+            super::state::RemotePullEntry {
+                puller_client_id: client_id,
+                started_at: std::time::Instant::now(),
+            },
+        );
+        Ok(Response::new(proto::AcquireRemotePullResponse {
+            action: proto::RemotePullAction::Pull as i32,
+            retry_after_ms: 0,
+        }))
+    }
+
+    pub(super) async fn complete_remote_pull_impl(
+        &self,
+        request: Request<proto::CompleteRemotePullRequest>,
+    ) -> Result<Response<proto::CompleteRemotePullResponse>, Status> {
+        let req = request.into_inner();
+        let key = req.key;
+
+        let removed = self.state.pending_remote_pulls.remove(&key);
+        tracing::debug!(
+            key = %key,
+            success = req.success,
+            data_size = req.data_size,
+            was_present = removed.is_some(),
+            "remote pull completed"
+        );
+
+        Ok(Response::new(proto::CompleteRemotePullResponse {}))
+    }
+
+    pub(super) async fn release_remote_pull_impl(
+        &self,
+        request: Request<proto::ReleaseRemotePullRequest>,
+    ) -> Result<Response<proto::ReleaseRemotePullResponse>, Status> {
+        let req = request.into_inner();
+        let key = req.key;
+
+        self.state.pending_remote_pulls.remove(&key);
+        tracing::debug!(key = %key, "remote pull released");
+        Ok(Response::new(proto::ReleaseRemotePullResponse {}))
+    }
 }

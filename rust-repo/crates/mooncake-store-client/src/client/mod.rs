@@ -17,6 +17,7 @@ use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
 
 use crate::proto;
+use crate::{LocalHotCache, MissHandler, RemoteSource, RemoteSourceConfig};
 
 // ---------------------------------------------------------------------------
 // BufferHandle
@@ -43,6 +44,10 @@ pub struct MooncakeClient {
     /// 本地已挂载 segment 的传输端点集合，用于 SelectBestReplica 本地性检查。
     /// C++ 等价：Client::GetLocalEndpoints() → segment.te_endpoint。
     pub(crate) local_endpoints: RwLock<HashSet<String>>,
+    /// Optional remote source miss handler for cache-miss fallback.
+    pub(crate) miss_handler: Option<MissHandler<Arc<dyn RemoteSource>>>,
+    /// Local hot cache for fast-path lookups (avoids gRPC + RDMA round-trip).
+    pub(crate) hot_cache: Option<Arc<LocalHotCache>>,
 }
 
 impl MooncakeClient {
@@ -126,6 +131,8 @@ impl MooncakeClient {
             registered_buffers: RwLock::new(HashMap::new()),
             tear_down: Arc::new(RwLock::new(false)),
             local_endpoints: RwLock::new(endpoints),
+            miss_handler: None,
+            hot_cache: None,
         })
     }
 
@@ -158,6 +165,30 @@ impl MooncakeClient {
     /// 取消注册一个本地传输端点（例如 segment 卸载时）。
     pub fn unregister_local_endpoint(&self, endpoint: &str) {
         self.local_endpoints.write().remove(endpoint);
+    }
+
+    /// Attach a remote source for cache-miss fallback.
+    ///
+    /// The remote source is only consulted when `config.enabled` is `true`.
+    /// When disabled, [`get`](Self::get) returns `KeyNotFound` as usual.
+    pub fn with_remote_source(
+        mut self,
+        source: impl RemoteSource + 'static,
+        config: RemoteSourceConfig,
+    ) -> Self {
+        self.miss_handler = Some(MissHandler::new(
+            Arc::new(source) as Arc<dyn RemoteSource>,
+            config,
+        ));
+        self
+    }
+
+    /// Attach a local hot cache for two-level caching:
+    /// 1. get() checks this before gRPC fetch (fastest path)
+    /// 2. Remote-source fetches + prefetches are stored here
+    pub fn with_hot_cache(mut self, cache: Arc<LocalHotCache>) -> Self {
+        self.hot_cache = Some(cache);
+        self
     }
 
     pub fn is_closed(&self) -> bool {

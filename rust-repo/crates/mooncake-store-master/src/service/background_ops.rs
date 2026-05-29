@@ -68,6 +68,19 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
             }
         }
     }
+
+    // Reap stale remote pull entries (pulling node crashed or timed out)
+    let pull_ttl = state.runtime_config.remote_pull_ttl;
+    let stale_pulls: Vec<String> = state
+        .pending_remote_pulls
+        .iter()
+        .filter(|entry| entry.started_at.elapsed() > pull_ttl)
+        .map(|entry| entry.key().clone())
+        .collect();
+    for key in stale_pulls {
+        state.pending_remote_pulls.remove(&key);
+        tracing::info!(key = %key, "reaped stale remote pull entry");
+    }
 }
 
 /// 将对象推入下沉队列，触发从内存到本地磁盘的数据下沉。
