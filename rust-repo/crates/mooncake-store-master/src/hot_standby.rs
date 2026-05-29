@@ -29,29 +29,10 @@ pub struct HotStandbyService {
     config: HotStandbyConfig,
     sync_status: parking_lot::RwLock<StandbySyncStatus>,
     shutdown_tx: Option<watch::Sender<()>>,
-    #[allow(dead_code)]
-    shutdown_rx: Option<watch::Receiver<()>>,
-    #[allow(dead_code)]
     snapshot_provider: Option<Box<dyn SnapshotProvider>>,
 }
 
 impl HotStandbyService {
-    #[allow(dead_code, reason = "used by HA supervisor")]
-    pub(crate) fn new(state: Arc<MasterState>, config: HotStandbyConfig) -> Self {
-        let (shutdown_tx, shutdown_rx) = watch::channel(());
-        Self {
-            state,
-            config,
-            sync_status: parking_lot::RwLock::new(StandbySyncStatus {
-                state: StandbyState::Stopped,
-                ..Default::default()
-            }),
-            shutdown_tx: Some(shutdown_tx),
-            shutdown_rx: Some(shutdown_rx),
-            snapshot_provider: None,
-        }
-    }
-
     pub fn set_snapshot_provider(&mut self, provider: Box<dyn SnapshotProvider>) {
         self.snapshot_provider = Some(provider);
     }

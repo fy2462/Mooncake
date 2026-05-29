@@ -385,9 +385,6 @@ pub struct EtcdOpLogStore {
     last_seq: u64,
     /// Entries accumulated for batch write.
     buffer: Vec<OpLogRecord>,
-    /// Flush the buffer after this many entries.
-    #[allow(dead_code)]
-    batch_size: usize,
 }
 
 impl EtcdOpLogStore {
@@ -395,7 +392,6 @@ impl EtcdOpLogStore {
     pub async fn new(
         client: etcd_client::Client,
         key_prefix: &str,
-        batch_size: usize,
     ) -> Result<Self, HaError> {
         let prefix = key_prefix.trim_end_matches('/').to_string();
         let mut store = Self {
@@ -403,7 +399,6 @@ impl EtcdOpLogStore {
             key_prefix: prefix,
             last_seq: 0,
             buffer: Vec::new(),
-            batch_size: batch_size.max(1),
         };
         store.recover().await?;
         Ok(store)

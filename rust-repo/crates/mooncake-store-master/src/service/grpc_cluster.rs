@@ -781,7 +781,6 @@ impl MasterServiceImpl {
                 migrated_bytes: 0,
                 active_tasks: HashMap::new(),
                 completed_unit_keys: HashSet::new(),
-                retry_counts: HashMap::new(),
                 terminal_failed_unit_keys: HashSet::new(),
             },
         );
@@ -915,7 +914,7 @@ impl MasterServiceImpl {
 
         // Pick a target for each unit (round-robin)
         let num_targets = targets.len().max(1);
-        for (i, (key, source_seg, bytes)) in units.into_iter().enumerate() {
+        for (i, (key, source_seg, _bytes)) in units.into_iter().enumerate() {
             if job.active_tasks.len() >= max_concurrency {
                 break;
             }
@@ -930,12 +929,8 @@ impl MasterServiceImpl {
             job.active_tasks.insert(
                 task_id,
                 ActiveDrainTask {
-                    task_id,
-                    key: key.clone(),
                     source_segment: source_seg,
                     target_segment: target_seg,
-                    bytes,
-                    unit_key: unit_key.clone(),
                 },
             );
 

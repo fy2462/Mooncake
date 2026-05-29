@@ -128,30 +128,46 @@ pub(crate) struct PromotionTaskEntry {
 // 所有 Duration 字段使用 std::time::Duration 表示。
 #[derive(Debug, Clone)]
 pub struct MasterRuntimeConfig {
+    /// 未完成的 PutStart 超过此时间后被新的同 key PutStart 丢弃。
     pub put_start_discard_timeout: Duration,
+    /// 丢弃或 release 的副本延迟释放时间，防止仍在传输中的 RDMA 访问已回收内存。
     pub put_start_release_timeout: Duration,
+    /// 段选择策略：Random（随机）或 FreeRatioFirst（空闲率优先）。
     pub allocation_strategy: AllocationStrategy,
+    /// 段内内存分配器：Offset（简单连续分配）或 CachelibLike（slab + class 分配）。
     pub memory_allocator_kind: MemoryAllocatorKind,
+    /// 是否开启 promotion-on-hit：读磁盘副本时自动将热点对象提升到内存。
     pub promotion_on_hit: bool,
+    /// 提升准入阈值：对象被访问达到此次数后才放入提升队列。
     pub promotion_admission_threshold: u8,
+    /// 提升队列最大长度，超过后新的提升请求被丢弃。
     pub promotion_queue_limit: usize,
+    /// 后台 reaper 轮询间隔，用于清理过期的 offload / promotion / PutStart 任务。
     pub reaper_interval: Duration,
+    /// 自动淘汰检查的轮询间隔。
     pub eviction_interval: Duration,
+    /// 触发淘汰的内存使用率水位（0.0 ~ 1.0），超过后启动淘汰。
     pub eviction_high_watermark_ratio: f64,
+    /// 每次淘汰尝试释放的内存比例（0.0 ~ 1.0）。
     pub eviction_ratio: f64,
+    /// 软锁定（soft pin）对象的租约时长，过期后软锁定失效但仍优先保留。
     pub soft_pin_ttl: Duration,
+    /// KV 对象默认租约时长：PutEnd / GetReplicaList 授时，淘汰时超过此 TTL 的对象允许驱逐。
     pub lease_ttl: Duration,
+    /// 淘汰时是否触发 offload（将内存副本写入本地磁盘）。
     pub offload_on_evict: bool,
+    /// 淘汰时是否强制驱逐（即使有 soft_pin 也驱逐）。
     pub offload_force_evict: bool,
+    /// 客户端心跳 TTL，超过此时间未 ping 的客户端视为下线。
     pub client_live_ttl: Duration,
+    /// 客户端监控（client monitor）轮询间隔，检查下线客户端并释放其资源。
     pub client_monitor_interval: Duration,
+    /// HA 快照存储目录路径。
     pub storage_fs_dir: String,
+    /// 透传给客户端的磁盘淘汰开关，master 端淘汰逻辑暂未消费此字段。
     pub enable_disk_eviction: bool,
+    /// 透传给客户端的存储配额（字节），master 端暂未实现配额限流。
     pub quota_bytes: u64,
-    /// CXL 内存路径（如 "/dev/dax0.0"），空字符串表示 CXL 未启用。
-    pub cxl_path: String,
-    pub cxl_size: u64,
-    pub enable_cxl: bool,
 }
 
 impl Default for MasterRuntimeConfig {
@@ -177,28 +193,19 @@ impl Default for MasterRuntimeConfig {
             storage_fs_dir: String::new(),
             enable_disk_eviction: false,
             quota_bytes: 0,
-            cxl_path: String::new(),
-            cxl_size: 8 * 1024 * 1024 * 1024,
-            enable_cxl: false,
         }
     }
 }
 
 /// Tracks an in-flight drain unit task for a single key during segment draining.
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "partially implemented drain feature")]
 pub(crate) struct ActiveDrainTask {
-    pub(crate) task_id: Uuid,
-    pub(crate) key: String,
     pub(crate) source_segment: String,
     pub(crate) target_segment: String,
-    pub(crate) bytes: u64,
-    pub(crate) unit_key: String,
 }
 
 /// A drain job that moves objects from draining segments to target segments.
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "partially implemented drain feature")]
 pub(crate) struct DrainJobEntry {
     pub(crate) id: Uuid,
     pub(crate) status: crate::proto::JobStatus,
@@ -214,6 +221,5 @@ pub(crate) struct DrainJobEntry {
     pub(crate) migrated_bytes: u64,
     pub(crate) active_tasks: HashMap<Uuid, ActiveDrainTask>,
     pub(crate) completed_unit_keys: HashSet<String>,
-    pub(crate) retry_counts: HashMap<String, u32>,
     pub(crate) terminal_failed_unit_keys: HashSet<String>,
 }
