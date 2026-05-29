@@ -386,54 +386,60 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListRequest>,
     ) -> Result<Response<proto::GetReplicaListResponse>, Status> {
         let req = request.into_inner();
-        match self.state.objects.get_mut(&req.key) {
-            Some(mut entry) => {
-                entry.last_access = SystemTime::now();
-                let now = SystemTime::now();
-                let new_lease = now
-                    .checked_add(self.state.runtime_config.lease_ttl)
-                    .unwrap_or(now);
-                entry.lease_timeout = Some(match entry.lease_timeout {
-                    Some(current) if current > new_lease => current,
-                    _ => new_lease,
-                });
-                if entry.soft_pinned {
-                    let new_soft_pin = now
-                        .checked_add(self.state.runtime_config.soft_pin_ttl)
-                        .unwrap_or(now);
-                    entry.soft_pin_timeout = Some(match entry.soft_pin_timeout {
-                        Some(current) if current > new_soft_pin => current,
-                        _ => new_soft_pin,
-                    });
-                }
-                let promotion_eligible = !entry.replicas.iter().any(|replica| {
+
+        // Phase 1: read-only (uses get() — shared lock, allows concurrent reads).
+        let (completed_replicas, promotion_eligible) = match self.state.objects.get(&req.key) {
+            Some(entry) => {
+                let eligible = !entry.replicas.iter().any(|replica| {
                     replica.replica_type == ReplicaType::Memory
                         && replica.status == ReplicaStatus::Complete
                 }) && entry.replicas.iter().any(|replica| {
                     replica.replica_type == ReplicaType::LocalDisk
                         && replica.status == ReplicaStatus::Complete
                 });
-                // C++ master_service.cpp:1097-1100 只返回 COMPLETED 状态的 replica
-                // C++ filters by fn_is_completed; return REPLICA_IS_NOT_READY if empty.
-                let completed_replicas: Vec<_> = entry
+                let replicas: Vec<_> = entry
                     .replicas
                     .iter()
                     .filter(|r| r.status == ReplicaStatus::Complete)
                     .map(replica_to_proto)
                     .collect();
-                if completed_replicas.is_empty() {
+                if replicas.is_empty() {
                     return Err(Status::failed_precondition("replica is not ready"));
                 }
-                drop(entry);
-                if promotion_eligible {
-                    try_push_promotion_queue(&self.state, &req.key);
-                }
-                metrics::GET_REQUESTS.inc();
-                let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
-                Ok(Response::new(proto::GetReplicaListResponse { replicas: completed_replicas, lease_ttl_ms }))
+                (replicas, eligible)
             }
-            None => Err(Status::not_found(format!("key not found: {}", req.key))),
+            None => return Err(Status::not_found(format!("key not found: {}", req.key))),
+        };
+
+        // Phase 2: brief write lock for timestamp updates only (microseconds).
+        if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+            let now = SystemTime::now();
+            entry.last_access = now;
+            let new_lease = now
+                .checked_add(self.state.runtime_config.lease_ttl)
+                .unwrap_or(now);
+            entry.lease_timeout = Some(match entry.lease_timeout {
+                Some(current) if current > new_lease => current,
+                _ => new_lease,
+            });
+            if entry.soft_pinned {
+                let new_soft_pin = now
+                    .checked_add(self.state.runtime_config.soft_pin_ttl)
+                    .unwrap_or(now);
+                entry.soft_pin_timeout = Some(match entry.soft_pin_timeout {
+                    Some(current) if current > new_soft_pin => current,
+                    _ => new_soft_pin,
+                });
+            }
         }
+
+        // Phase 3: promotion after all locks released.
+        if promotion_eligible {
+            try_push_promotion_queue(&self.state, &req.key);
+        }
+        metrics::GET_REQUESTS.inc();
+        let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
+        Ok(Response::new(proto::GetReplicaListResponse { replicas: completed_replicas, lease_ttl_ms }))
     }
 
     // ---- GetReplicaListByRegex ----
