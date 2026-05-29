@@ -8,6 +8,6 @@ pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
 
 // Generated protobuf code
-pub(crate) mod proto {
+pub mod proto {
     tonic::include_proto!("mooncake.store");
 }

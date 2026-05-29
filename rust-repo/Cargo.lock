@@ -1554,6 +1554,7 @@ dependencies = [
 name = "mooncake-store-py"
 version = "0.1.0"
 dependencies = [
+ "mooncake-p2p-store",
  "mooncake-store-client",
  "mooncake-store-core",
  "parking_lot",

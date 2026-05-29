@@ -12,6 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 mooncake-store-client = { path = "../crates/mooncake-store-client" }
 mooncake-store-core = { path = "../crates/mooncake-store-core" }
+mooncake-p2p-store = { path = "../crates/mooncake-p2p-store" }
 pyo3.workspace = true
 pyo3-async-runtimes.workspace = true
 parking_lot.workspace = true
