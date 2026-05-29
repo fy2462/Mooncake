@@ -10,6 +10,11 @@ mod ffi {
     #![allow(dead_code)]
     #![allow(clippy::useless_transmute)]
     include!(concat!(env!("OUT_DIR"), "/transfer_engine_bindings.rs"));
+
+    // INVALID_BATCH is defined as UINT64_MAX in transfer_engine_c.h;
+    // bindgen cannot resolve it because it requires system headers.
+    // Supply the constant ourselves so the ffi module stays self-contained.
+    pub const INVALID_BATCH: u64 = u64::MAX;
 }
 
 mod error;
