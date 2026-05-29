@@ -2,11 +2,10 @@ use mooncake_store_client::{EngramStore, EngramStoreConfig, MooncakeClient};
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use std::sync::Arc;
-
 use crate::client::PythonMooncakeClient;
 use super::to_py_err;
 
-#[pyclass(name = "EngramStoreConfig", from_py_object)]
+#[pyclass(name = "EngramStoreConfig", skip_from_py_object)]
 #[derive(Clone)]
 pub(crate) struct EngramStoreConfigPy {
     #[pyo3(get, set)]
