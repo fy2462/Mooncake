@@ -1,3 +1,42 @@
+// =============================================================================
+// Operation Log (OpLog) — 操作日志存储
+// =============================================================================
+// Provides operation log persistence for HA consistency and standby recovery.
+// 为 HA 一致性和备用恢复提供操作日志持久化。
+//
+// This module implements a replay log for master mutations. The leader appends
+// each state-changing operation (put, remove, mount, unmount) as a JSON record
+// with a monotonically increasing sequence number. Standby nodes poll and replay
+// these records to stay synchronized with the leader.
+// 本模块实现 master 变更的重放日志。Leader 将每个状态变更操作（put、remove、
+// mount、unmount）以 JSON 记录形式追加，每条记录带有单调递增的序列号。
+// Standby 节点轮询并重放这些记录以保持与 leader 同步。
+//
+// Architecture / 架构:
+// ┌──────────────────────────────────────────────────────────┐
+// │  OpLogManager (high-level)                                │
+// │  record_put_end / record_remove / record_mount / ...     │
+// │  ┌──────────────────────┐                                │
+// │  │ OpLogStore (trait)    │ ← abstract backend            │
+// │  │ append / read_since / │                                │
+// │  │ latest_sequence /     │                                │
+// │  │ poll_from             │                                │
+// │  └──────┬───────────────┘                                │
+// │         │                                                 │
+// │  ┌──────┼───────────────┬───────────────┐                │
+// │  │ InMemoryOpLog │ LocalFsOpLogStore│ EtcdOpLogStore     │
+// │  │ (VecDeque)    │ (segment files)  │ (etcd key-value)   │
+// │  └──────────────┴───────────────────┴───────────────────┘ │
+// └──────────────────────────────────────────────────────────┘
+//
+// Backend implementations / 后端实现:
+// - InMemoryOpLog: VecDeque-based FIFO buffer (lightweight, no persistence).
+//   InMemoryOpLog: 基于 VecDeque 的 FIFO 缓冲区（轻量，无持久化）。
+// - LocalFsOpLogStore: segment files on local disk with atomic write.
+//   LocalFsOpLogStore: 本地磁盘的分段文件，带原子写入保证。
+// - EtcdOpLogStore: etcd key-value store, suitable for distributed deployment.
+//   EtcdOpLogStore: etcd 键值存储，适合分布式部署。
+
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -7,28 +46,54 @@ use std::sync::mpsc;
 use tracing::warn;
 use uuid::Uuid;
 
+// =============================================================================
+// OpLogStore Trait — unified abstraction for oplog backends
+// =============================================================================
+
+/// Operation log storage abstraction. Different backends (memory, local files,
+/// etcd) provide append, read, and poll capabilities through this trait.
 /// 操作日志存储的统一抽象接口。
 /// 不同后端（内存、本地文件、etcd）均通过此 trait 提供追加、读取、轮询能力。
 /// 用于 HA 场景中 standby 节点从 leader 的 oplog 中同步状态。
 pub trait OpLogStore: Send + Sync {
+    /// Append a record and return its assigned sequence number.
     /// 追加一条记录，返回分配的序列号。
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError>;
 
+    /// Read up to max_count records starting from since_seq (inclusive).
     /// 从 since_seq（含）开始读取最多 max_count 条记录。
     fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError>;
 
+    /// Get the latest committed sequence number.
     /// 获取最新已提交的序列号。
     fn latest_sequence(&self) -> u64;
 
+    /// Poll for records from since_seq, returning records, next_seq, and timeout flag.
     /// 从 since_seq 开始轮询记录，返回记录列表、next_seq 和是否超时。
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult;
 }
 
+// =============================================================================
+// InMemoryOpLog — FIFO in-memory oplog (no persistence)
+// =============================================================================
+
+/// In-memory oplog backed by a bounded VecDeque.
 /// 基于 VecDeque 的内存 oplog，容量有上限（FIFO 淘汰旧条目）。
 /// 用于没有配置持久化后端时的轻量级替代方案。
+///
+/// When the buffer exceeds max_entries, the oldest entries are evicted (FIFO).
+/// Suitable for testing and single-node deployments without persistence.
+/// 当 buffer 超过 max_entries 时，最旧的条目被淘汰（FIFO）。
+/// 适合测试和无持久化需求的单节点部署。
 pub struct InMemoryOpLog {
+    /// Ring buffer of records (FIFO eviction when full).
+    /// 记录的环形缓冲区（满时 FIFO 淘汰）。
     buffer: VecDeque<OpLogRecord>,
+    /// Monotonically increasing sequence counter.
+    /// 单调递增的序列计数器。
     last_seq: u64,
+    /// Maximum number of entries to retain.
+    /// 最大保留条目数。
     max_entries: usize,
 }
 
@@ -62,6 +127,7 @@ impl InMemoryOpLog {
 }
 
 impl OpLogStore for InMemoryOpLog {
+    /// Append entry: increments sequence counter, evicts oldest if at capacity.
     /// 追加条目：自增序列号，FIFO 淘汰超出容量的旧数据。
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
         self.last_seq += 1;
@@ -100,19 +166,37 @@ impl OpLogStore for InMemoryOpLog {
     }
 }
 
+// =============================================================================
+// LocalFsOpLogStore — segment-file-based persistent oplog
+// =============================================================================
+
+/// Segment-based persistent oplog on the local filesystem.
 /// 基于本地文件系统的分段持久化 oplog。
 ///
-/// 每个分段文件命名为 `oplog_<start_seq>.bin`。条目采用长度前缀帧格式：
-/// [4字节 seq 小端][4字节 payload_len 小端][payload 字节]。
+/// Each segment file is named `oplog_<start_seq:020>.bin`. Entries use a
+/// length-prefixed binary frame format:
+/// 每个分段文件命名为 `oplog_<start_seq:020>.bin`。条目采用长度前缀帧格式：
+/// ```
+/// [4 bytes seq LE][4 bytes payload_len LE][payload bytes]
+/// ```
+///
+/// Writes are made atomic via "write .tmp → rename → fsync directory".
 /// 通过「写入 .tmp 文件 → rename → fsync 目录」实现原子写和持久性保证。
+///
+/// A background flush thread asynchronously persists full segment buffers,
+/// preventing the append hot-path from being blocked by disk I/O.
 /// 后台线程异步刷盘，避免 append 时阻塞业务路径。
 pub struct LocalFsOpLogStore {
+    /// Root directory for segment files.
+    /// 分段文件的根目录。
     dir: PathBuf,
     /// Maximum entries per segment file.
     max_entries_per_segment: usize,
     /// Entries accumulated in the current (not yet flushed) segment.
     buffer: Vec<OpLogRecord>,
+    /// Monotonically increasing sequence counter.
     last_seq: u64,
+    /// Starting sequence of the current segment.
     current_segment_seq: u64,
     /// Channel to send full buffers to the background flush thread.
     flush_tx: mpsc::Sender<Vec<OpLogRecord>>,
@@ -121,10 +205,11 @@ pub struct LocalFsOpLogStore {
 }
 
 impl LocalFsOpLogStore {
+    /// Create a local filesystem oplog store.
     /// 创建本地文件 oplog store。
-    /// - 创建目录（如不存在）
-    /// - 启动后台 flush 线程（通过 mpsc channel 接收待刷盘的 buffer）
-    /// - 从已有分段文件恢复 last_seq
+    /// - Creates the directory if it doesn't exist. / 创建目录（如不存在）
+    /// - Spawns a background flush thread via mpsc channel. / 启动后台 flush 线程（通过 mpsc channel 接收待刷盘的 buffer）
+    /// - Recovers last_seq from existing segment files. / 从已有分段文件恢复 last_seq
     pub fn new(dir: &Path, max_entries_per_segment: usize) -> Result<Self, HaError> {
         fs::create_dir_all(dir)
             .map_err(|e| HaError::InvalidBackend(format!("oplog dir create: {e}")))?;
@@ -132,6 +217,7 @@ impl LocalFsOpLogStore {
         let dir_buf = dir.to_path_buf();
         let (flush_tx, flush_rx) = mpsc::channel::<Vec<OpLogRecord>>();
 
+        // Background thread: asynchronously writes full buffers to disk.
         // 后台线程：异步将满 buffer 写入磁盘，不阻塞 append 调用方。
         let flush_dir = dir_buf.clone();
         let flush_handle = std::thread::spawn(move || {
@@ -156,6 +242,8 @@ impl LocalFsOpLogStore {
         Ok(store)
     }
 
+    /// Recover last_seq from existing segment files: scan for the highest-
+    /// numbered segment file and parse its last record's seq.
     /// 从磁盘恢复 last_seq：扫描编号最大的分段文件，解析其中最后一条记录的 seq。
     fn recover(&mut self) -> Result<(), HaError> {
         let mut segments: Vec<u64> = self.list_segment_files()?;
@@ -173,6 +261,8 @@ impl LocalFsOpLogStore {
         Ok(())
     }
 
+    /// List segment files in the oplog directory, returning their start_seq.
+    /// 列出 oplog 目录中的分段文件，返回其 start_seq。
     fn list_segment_files(&self) -> Result<Vec<u64>, HaError> {
         let mut segments = Vec::new();
         let dir_entries = fs::read_dir(&self.dir)
@@ -194,11 +284,17 @@ impl LocalFsOpLogStore {
         Ok(segments)
     }
 
+    /// Build the path for a segment file given its start sequence number.
+    /// 根据起始序列号构建分段文件的路径。
     fn segment_path(&self, start_seq: u64) -> PathBuf {
         self.dir.join(format!("oplog_{:020}.bin", start_seq))
     }
 
+    /// Flush entries to a segment file atomically (synchronous — used by both
+    /// the background thread and explicit flush() calls).
     /// 将 buffer 原子写入分段文件（同步操作，由后台线程和显式 flush() 调用）。
+    ///
+    /// Writes to .tmp, renames to final, then fsyncs the parent directory for durability.
     /// 写入 .tmp 文件后 rename 到最终文件名，并 fsync 父目录保证持久性。
     fn flush_inner(dir: &Path, entries: &[OpLogRecord]) -> Result<(), HaError> {
         if entries.is_empty() {
@@ -208,6 +304,8 @@ impl LocalFsOpLogStore {
         let tmp_path = dir.join(format!("oplog_{:020}.tmp", start_seq));
         let final_path = dir.join(format!("oplog_{:020}.bin", start_seq));
 
+        // Serialize entries in binary frame format
+        // 以二进制帧格式序列化条目
         let mut data = Vec::with_capacity(entries.len() * 128);
         for entry in entries {
             let payload = entry.payload.as_bytes();
@@ -227,7 +325,7 @@ impl LocalFsOpLogStore {
         Ok(())
     }
 
-    /// Write buffer to a segment file atomically.
+    /// Write the current buffer to a segment file atomically.
     fn flush(&mut self) -> Result<(), HaError> {
         if self.buffer.is_empty() {
             return Ok(());
@@ -238,8 +336,11 @@ impl LocalFsOpLogStore {
         Ok(())
     }
 
+    /// Parse entries from binary frame format: [4B seq LE][4B payload_len LE][payload].
     /// 解析二进制帧格式的数据：每帧 [4B seq LE][4B payload_len LE][payload]。
     /// 遇到不完整帧时停止解析，保证容错性。
+    ///
+    /// Stops parsing on incomplete frames for fault tolerance.
     fn parse_entries(data: &[u8]) -> Vec<OpLogRecord> {
         let mut entries = Vec::new();
         let mut offset = 0;
@@ -273,7 +374,11 @@ impl LocalFsOpLogStore {
 }
 
 impl OpLogStore for LocalFsOpLogStore {
+    /// Append entry: buffer in memory, flush via background thread when buffer is full.
     /// 追加条目：先写入内存 buffer，buffer 满时通过 channel 发送给后台线程异步刷盘。
+    ///
+    /// If the flush channel is closed (background thread exited abnormally),
+    /// falls back to a synchronous flush to prevent data loss.
     /// 若 channel 已关闭（后台线程异常退出），回退到同步 flush 保证数据不丢失。
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
         self.last_seq += 1;
@@ -281,12 +386,14 @@ impl OpLogStore for LocalFsOpLogStore {
             seq: self.last_seq,
             ..entry.clone()
         });
+        // When buffer is full: send to background thread for async flush
         // buffer 满时触发异步刷盘：swap 空 buffer 后将旧数据发给后台线程
         if self.buffer.len() >= self.max_entries_per_segment {
             let to_flush = std::mem::take(&mut self.buffer);
             match self.flush_tx.send(to_flush) {
-                Ok(()) => {} // 后台线程接管刷盘
+                Ok(()) => {} // Background thread handles the flush / 后台线程接管刷盘
                 Err(mpsc::SendError(entries)) => {
+                    // Channel closed — fallback to synchronous flush to prevent data loss
                     // Channel 关闭，回退到同步 flush 兜底（防止数据丢失）
                     warn!("oplog flush channel closed, falling back to sync flush");
                     self.buffer = entries;
@@ -297,11 +404,13 @@ impl OpLogStore for LocalFsOpLogStore {
         Ok(self.last_seq)
     }
 
+    /// Read entries starting from since_seq.
+    /// Reads both on-disk segment files and in-memory (unflushed) buffer.
     fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
         let segments = self.list_segment_files()?;
         let mut all_entries = Vec::new();
 
-        // Read from segment files
+        // Read from on-disk segment files
         let mut sorted_segs = segments;
         sorted_segs.sort();
         for start_seq in sorted_segs {
@@ -350,12 +459,18 @@ impl OpLogStore for LocalFsOpLogStore {
 }
 
 // =============================================================================
-// Etcd-backed OpLog Store
+// Etcd-backed OpLog Store / 基于 etcd 的 OpLog 存储
 // =============================================================================
 
+/// Persistent oplog backed by etcd.
 /// 基于 etcd 的持久化 oplog。
 ///
+/// Each record is stored as `/oplog/<prefix>/seq_<seq:020>` with zero-padded
+/// sequence numbers to ensure lexicographic ordering.
 /// 每条记录存储为 `/oplog/<prefix>/seq_<seq:020>`，零填充序列号保证字典序。
+///
+/// A separate `/oplog/<prefix>/latest` key holds the latest sequence number
+/// for fast recovery without scanning all keys.
 /// 独立的 `/oplog/<prefix>/latest` key 记录最新序列号，加速恢复。
 pub struct EtcdOpLogStore {
     client: etcd_client::Client,
@@ -366,6 +481,7 @@ pub struct EtcdOpLogStore {
 }
 
 impl EtcdOpLogStore {
+    /// Create an etcd-backed oplog store, recovering last_seq from the /latest key.
     /// 创建 etcd oplog store，通过读取 `/latest` key 恢复 last_seq。
     pub async fn new(client: etcd_client::Client, key_prefix: &str) -> Result<Self, HaError> {
         let prefix = key_prefix.trim_end_matches('/').to_string();
@@ -398,14 +514,17 @@ impl EtcdOpLogStore {
         Ok(())
     }
 
+    /// Build the etcd key for a given sequence number.
     fn entry_key(&self, seq: u64) -> String {
         format!("{}/seq_{:020}", self.key_prefix, seq)
     }
 
+    /// Build the etcd key for the latest sequence pointer.
     fn latest_key(&self) -> String {
         format!("{}/latest", self.key_prefix)
     }
 
+    /// Flush buffered entries to etcd: put each record, then update /latest.
     /// 将 buffer 批量写入 etcd：逐个 put 每条记录，最后更新 `/latest` 指针。
     async fn flush(&mut self) -> Result<(), HaError> {
         if self.buffer.is_empty() {
@@ -481,9 +600,14 @@ impl OpLogStore for EtcdOpLogStore {
     }
 }
 
+// =============================================================================
+// EtcdOpLogStore — async extension methods
+// =============================================================================
+
 /// Async extension for etcd-backed stores that need full range queries.
 impl EtcdOpLogStore {
     /// Read entries from etcd starting from `since_seq` (async).
+    /// 从 etcd 异步读取条目（起始序列号 since_seq）。
     pub async fn read_since_async(
         &self,
         since_seq: u64,
@@ -492,7 +616,7 @@ impl EtcdOpLogStore {
         let mut entries = Vec::new();
         let c = self.client.clone();
 
-        // Try reading from etcd
+        // Range query: from seq_N to seq_MAX across the key prefix
         let range_end = self.entry_key(u64::MAX);
         let range_start = self.entry_key(since_seq);
 
@@ -521,7 +645,7 @@ impl EtcdOpLogStore {
             }
         }
 
-        // Supplement with buffered entries
+        // Supplement with buffered (not yet flushed) entries
         for entry in &self.buffer {
             if entry.seq >= since_seq && entries.len() < max_count
                 && !entries.iter().any(|e| e.seq == entry.seq) {
@@ -541,10 +665,15 @@ impl EtcdOpLogStore {
 }
 
 // =============================================================================
-// OpLogManager — high-level wrapper that records mutations into the oplog.
+// OpLogManager — high-level wrapper that records mutations into the oplog
 // =============================================================================
 
+/// High-level manager that serializes business operations (put, remove, mount,
+/// etc.) as JSON and appends them to the underlying OpLogStore.
 /// OpLog 管理器：将业务操作（put/remove/mount 等）序列化为 JSON 并追加到底层 OpLogStore。
+///
+/// All errors are logged via warn! but never propagated — oplog uses best-effort
+/// semantics to ensure the main write path is never blocked by oplog failures.
 /// 所有错误仅 warn 日志记录，不向上传播——oplog 采用 best-effort 语义，
 /// 确保主写路径永不因 oplog 故障而被阻塞。
 pub struct OpLogManager {
@@ -579,6 +708,7 @@ impl OpLogManager {
         self.store
     }
 
+    /// Record a put_end mutation: object data write completed.
     /// 记录 put_end 操作：对象数据写入完成。
     /// payload 格式：{ "op": "put_end", "key": "...", "size": ... }
     pub fn record_put_end(&mut self, key: &str, size: u64) {
