@@ -1,3 +1,23 @@
+// ============================================================================
+// TransferEngine integration: replica selection, data transfer, buffer
+// registration. This module implements the data-plane logic shared by
+// read and write paths.
+//
+// TransferEngine 集成：副本选择、数据传输、缓冲区注册。
+// 此模块实现了读写路径共享的数据面逻辑。
+//
+// Key patterns (关键模式):
+//   - local_memcpy: fast path for same-node transfers (bypasses TE)
+//   - write_to_replica / read_from_replica: TE transfer with per-replica
+//     resource lifecycle (open_segment → allocate_batch_id → submit →
+//     poll 10s → free_batch_id → close_segment)
+//   - zero_copy_read / zero_copy_write: same TE pattern but with
+//     caller-provided (pre-registered) buffers instead of local_buffer
+//
+// C++ equivalent: real_client.cpp (SelectBestReplica, WriteToReplica,
+// ReadFromReplica, local memcpy paths)
+// ============================================================================
+
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
@@ -10,12 +30,30 @@ use crate::proto;
 impl MooncakeClient {
     // -----------------------------------------------------------------------
     // LOCAL_MEMCPY — bypass TE for same-node transfers (matches C++ strategy)
+    // 本地内存拷贝 —— 同节点传输绕过 TE（与 C++ 策略一致）
+    //
+    // When the target replica is hosted on a locally-mounted segment, we can
+    // directly memcpy into/from the segment_buffer without involving the
+    // TransferEngine at all. This avoids RDMA/TCP stack overhead entirely.
+    //
+    // 当目标副本位于本地挂载的 segment 上时，可以直接从 segment_buffer
+    // 进行 memcpy，完全不需要 TransferEngine。这避免了 RDMA/TCP 栈的全部开销。
+    // C++ equivalent: real_client.cpp local memcpy paths inside
+    // ReadFromReplica / WriteToReplica.
     // -----------------------------------------------------------------------
 
+    /// Check whether a replica's segment is locally mounted on this node.
+    /// 检查副本的 segment 是否在本地节点上挂载。
     fn is_local_replica(&self, replica: &ReplicaDescriptor) -> bool {
         self.local_endpoints.read().contains(&replica.segment_name)
     }
 
+    /// Direct memory copy into the local segment buffer (same-node write).
+    /// Only call this when `is_local_replica(replica)` returns `true` and
+    /// `segment_buffer` is `Some`.
+    ///
+    /// 直接内存拷贝到本地 segment 缓冲区（同节点写）。
+    /// 仅在 is_local_replica(replica) 为 true 且 segment_buffer 为 Some 时调用。
     fn local_memcpy_write(&self, replica: &ReplicaDescriptor, data: &[u8]) -> StoreResult<()> {
         let seg = self
             .segment_buffer
@@ -23,6 +61,7 @@ impl MooncakeClient {
             .ok_or_else(|| StoreError::Internal("no local segment buffer".into()))?;
         let offset = replica.offset as usize;
         let len = data.len();
+        // Bounds check / 越界检查
         if offset + len > seg.len() {
             return Err(StoreError::InvalidParams(format!(
                 "local write out of bounds: offset={} len={} segment_size={}",
@@ -37,6 +76,12 @@ impl MooncakeClient {
         Ok(())
     }
 
+    /// Direct memory copy from the local segment buffer (same-node read).
+    /// Only call this when `is_local_replica(replica)` returns `true` and
+    /// `segment_buffer` is `Some`.
+    ///
+    /// 直接从本地 segment 缓冲区内存拷贝（同节点读）。
+    /// 仅在 is_local_replica(replica) 为 true 且 segment_buffer 为 Some 时调用。
     fn local_memcpy_read(&self, replica: &ReplicaDescriptor) -> StoreResult<Vec<u8>> {
         let seg = self
             .segment_buffer
@@ -44,6 +89,7 @@ impl MooncakeClient {
             .ok_or_else(|| StoreError::Internal("no local segment buffer".into()))?;
         let offset = replica.offset as usize;
         let len = replica.size as usize;
+        // Bounds check / 越界检查
         if offset + len > seg.len() {
             return Err(StoreError::InvalidParams(format!(
                 "local read out of bounds: offset={} len={} segment_size={}",
@@ -61,8 +107,28 @@ impl MooncakeClient {
 
     // -----------------------------------------------------------------------
     // Buffer registration (zero-copy path)
+    // 缓冲区注册（零拷贝路径）
+    //
+    // Externally-managed buffers must be registered with the TransferEngine
+    // before they can be used as source/destination in zero-copy transfers.
+    //
+    // 外部管理的缓冲区必须先向 TransferEngine 注册，然后才能用作零拷贝传输的源/目标。
     // -----------------------------------------------------------------------
 
+    /// Register an externally-managed buffer with the TransferEngine.
+    ///
+    /// After registration, the TE can DMA directly into/from this buffer,
+    /// enabling true zero-copy I/O.
+    ///
+    /// 向 TransferEngine 注册外部管理的缓冲区。
+    /// 注册后，TE 可以直接对此缓冲区进行 DMA 操作，实现真正的零拷贝 I/O。
+    ///
+    /// # Safety
+    /// `buffer` must point to valid memory of at least `size` bytes and must
+    /// remain alive until [`unregister_buffer`](Self::unregister_buffer) is called.
+    ///
+    /// buffer 必须指向至少 size 字节的有效内存，并且在调用 unregister_buffer
+    /// 之前必须保持存活。
     pub unsafe fn register_buffer(
         &self,
         buffer: *mut c_void,
@@ -79,6 +145,12 @@ impl MooncakeClient {
         Ok(())
     }
 
+    /// Unregister a previously-registered buffer from the TransferEngine.
+    /// 从 TransferEngine 取消注册之前注册的缓冲区。
+    ///
+    /// # Safety
+    /// `buffer` must have been previously registered via `register_buffer`.
+    /// buffer 必须之前已通过 register_buffer 注册。
     pub unsafe fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()> {
         unsafe {
             self.engine.unregister_local_memory(buffer)?;
@@ -88,14 +160,22 @@ impl MooncakeClient {
     }
 
     // -----------------------------------------------------------------------
-    // Internal helpers
+    // Internal helpers / 内部辅助函数
     // -----------------------------------------------------------------------
 
+    /// Convert Rust UUID to protobuf UUID (high/low u64 pair).
+    /// 将 Rust UUID 转换为 protobuf UUID（high/low u64 对）。
     pub(crate) fn client_id_proto(&self) -> proto::Uuid {
         let (h, l) = self.client_id.as_u64_pair();
         proto::Uuid { high: h, low: l }
     }
 
+    /// Query the master for the list of replicas hosting a given key.
+    /// Returns an empty vector if the key is not found.
+    ///
+    /// 向 master 查询持有给定 key 的副本列表。
+    /// 如果 key 未找到则返回空向量。
+    /// C++ equivalent: Client::GetReplicaList()
     pub(crate) async fn fetch_replicas(
         &mut self,
         key: &str,
@@ -113,6 +193,15 @@ impl MooncakeClient {
         Ok(replicas)
     }
 
+    /// Convert protobuf replica descriptors into domain [`ReplicaDescriptor`]s.
+    ///
+    /// Maps proto enums:
+    /// - `status`: 1=Allocating, 2=Written, 3=Complete, 4=Failed
+    /// - `replica_type`: 1=Disk, 2=LocalDisk, 3=NoFSsd, default=Memory
+    ///
+    /// 将 protobuf 副本描述符转换为领域 ReplicaDescriptor。
+    /// 映射 proto 枚举：status (1=Allocating, 2=Written, 3=Complete, 4=Failed)
+    /// 和 replica_type (1=Disk, 2=LocalDisk, 3=NoFSsd, 默认=Memory)。
     pub(crate) fn replicas_from_proto(
         &self,
         replicas: &[proto::ReplicaDescriptor],
@@ -151,15 +240,43 @@ impl MooncakeClient {
             .collect()
     }
 
-    /// 从副本列表中选择最优副本，完全匹配 C++ `SelectBestReplica` 逻辑。
+    /// Select the best replica from a list, matching C++ `SelectBestReplica`.
     ///
-    /// 优先级（C++ `real_client.cpp:286-325`）：
-    /// 1. 本地 MEMORY（segment_name 匹配本地端点）→ 立即返回
-    /// 2. 任意远程 MEMORY
-    /// 3. 本地 NOF_SSD（segment_name 匹配本地端点）→ 立即返回
-    /// 4. 任意远程 NOF_SSD
-    /// 5. LOCAL_DISK（如果有多个，最后一个生效；覆盖 DISK）
-    /// 6. DISK（仅在没有任何 LOCAL_DISK 时）
+    /// # Priority order (优先级顺序 — C++ `real_client.cpp:286-325`)
+    ///
+    /// | Priority | Replica Type | Locality  | Behavior                        |
+    /// |----------|-------------|-----------|----------------------------------|
+    /// | 1        | MEMORY      | Local     | Return immediately (最优)       |
+    /// | 2        | MEMORY      | Remote    | First seen (任意远程 MEMORY)     |
+    /// | 3        | NOF_SSD     | Local     | Return immediately (次优)       |
+    /// | 4        | NOF_SSD     | Remote    | First seen (任意远程 NOF_SSD)    |
+    /// | 5        | LOCAL_DISK  | —         | Last one wins (覆盖 DISK)       |
+    /// | 6        | DISK        | —         | Only if no LOCAL_DISK found      |
+    ///
+    /// # Algorithm (算法)
+    ///
+    /// **Pass 1** — scan for MEMORY and NOF_SSD:
+    /// - If a local MEMORY replica is found, return it immediately (short-circuit).
+    /// - If a local NOF_SSD replica is found, return it immediately.
+    /// - Otherwise, remember the first remote MEMORY and first remote NOF_SSD.
+    ///
+    /// **第一遍** —— 扫描 MEMORY 和 NOF_SSD：
+    /// - 找到本地 MEMORY 副本则立即返回（短路）。
+    /// - 找到本地 NOF_SSD 副本则立即返回。
+    /// - 否则记住第一个远程 MEMORY 和第一个远程 NOF_SSD。
+    ///
+    /// **Pass 2** — if no MEMORY/NOF_SSD found, scan for disk-based replicas:
+    /// - LOCAL_DISK always overwrites any previous disk pick.
+    /// - DISK is only chosen if no LOCAL_DISK was found.
+    ///
+    /// **第二遍** —— 如果没有找到 MEMORY/NOF_SSD，扫描基于磁盘的副本：
+    /// - LOCAL_DISK 总是覆盖之前的磁盘选择。
+    /// - DISK 仅在未找到任何 LOCAL_DISK 时被选择。
+    ///
+    /// Only replicas with `status == Complete` are considered.
+    /// 仅考虑 status == Complete 的副本。
+    ///
+    /// 从副本列表中选择最优副本，完全匹配 C++ `SelectBestReplica` 逻辑。
     pub(crate) fn select_best_replica<'a>(
         &self,
         replicas: &'a [ReplicaDescriptor],
@@ -168,32 +285,35 @@ impl MooncakeClient {
         let mut first_memory: Option<&ReplicaDescriptor> = None;
         let mut first_nof: Option<&ReplicaDescriptor> = None;
 
-        // 第一遍：优先本地 MEMORY/NOF，否则记录首次出现的远程副本
+        // Pass 1: prioritize local MEMORY/NOF_SSD, otherwise record first remote.
+        // 第一遍：优先本地 MEMORY/NOF_SSD，否则记录第一个远程副本。
         for r in replicas {
             if r.status != mooncake_store_core::ReplicaStatus::Complete {
-                continue;
+                continue; // skip non-ready replicas / 跳过未就绪的副本
             }
             match r.replica_type {
                 mooncake_store_core::ReplicaType::Memory => {
                     if endpoints.contains(&r.segment_name) {
-                        return Some(r); // 本地 MEMORY —— 最优
+                        return Some(r); // 本地 MEMORY —— 最优 / local MEMORY — best
                     }
                     if first_memory.is_none() {
-                        first_memory = Some(r);
+                        first_memory = Some(r); // 记录第一个远程 MEMORY / record first remote MEMORY
                     }
                 }
                 mooncake_store_core::ReplicaType::NoFSsd => {
                     if endpoints.contains(&r.segment_name) {
-                        return Some(r); // 本地 NOF_SSD —— 次优
+                        return Some(r); // 本地 NOF_SSD —— 次优 / local NOF_SSD — second best
                     }
                     if first_nof.is_none() {
-                        first_nof = Some(r);
+                        first_nof = Some(r); // 记录第一个远程 NOF_SSD / record first remote NOF_SSD
                     }
                 }
-                _ => {}
+                _ => {} // disk types handled in pass 2 / 磁盘类型在第二遍处理
             }
         }
 
+        // Return best memory/NOF found (local was already short-circuited above).
+        // 返回找到的最佳 MEMORY/NOF（本地已在上面短路返回）。
         if let Some(r) = first_memory {
             return Some(r);
         }
@@ -201,7 +321,8 @@ impl MooncakeClient {
             return Some(r);
         }
 
-        // 第二遍：LOCAL_DISK 优先，DISK 作为最后备选
+        // Pass 2: LOCAL_DISK preferred over DISK.
+        // 第二遍：LOCAL_DISK 优先于 DISK。
         let mut best: Option<&ReplicaDescriptor> = None;
         for r in replicas {
             if r.status != mooncake_store_core::ReplicaStatus::Complete {
@@ -209,11 +330,11 @@ impl MooncakeClient {
             }
             match r.replica_type {
                 mooncake_store_core::ReplicaType::LocalDisk => {
-                    best = Some(r); // LOCAL_DISK 始终覆盖 DISK
+                    best = Some(r); // LOCAL_DISK always overrides DISK / LOCAL_DISK 始终覆盖 DISK
                 }
                 mooncake_store_core::ReplicaType::Disk
                     if best.is_none() => {
-                        best = Some(r);
+                        best = Some(r); // DISK only if no LOCAL_DISK / DISK 仅在没有任何 LOCAL_DISK 时
                     }
                 _ => {}
             }
@@ -221,6 +342,37 @@ impl MooncakeClient {
         best
     }
 
+    // -----------------------------------------------------------------------
+    // write_to_replica — generic write with local_memcpy fast path
+    // 向副本写入 —— 带 local_memcpy 快速路径的通用写入
+    //
+    // Flow (流程):
+    //   1. Check is_local_replica && segment_buffer → local_memcpy (fast path)
+    //      → done, no TE resources needed.
+    //      检查本地副本 + segment_buffer → local_memcpy（快速路径），无需 TE 资源。
+    //
+    //   2. (Remote path) Copy data into local_buffer → open_segment →
+    //      allocate_batch_id → submit transfer → poll status (10s timeout) →
+    //      free_batch_id → close_segment.
+    //      (远程路径) 拷贝数据到 local_buffer → open_segment →
+    //      allocate_batch_id → 提交传输 → 轮询状态 (10s 超时) →
+    //      free_batch_id → close_segment。
+    //
+    // Resource cleanup: on failure or timeout, batch_id is freed and segment
+    // is closed before returning the error. This prevents resource leaks in
+    // the TransferEngine.
+    //
+    // 资源清理：在失败或超时时，先释放 batch_id 并关闭 segment 再返回错误。
+    // 这防止了 TransferEngine 中的资源泄漏。
+    //
+    // C++ equivalent: Client::WriteToReplica() in real_client.cpp
+    // -----------------------------------------------------------------------
+
+    /// Write data to a specific replica. Automatically chooses local_memcpy
+    /// fast path when the replica is local and segment_buffer is available.
+    ///
+    /// 向指定副本写入数据。当副本为本地且 segment_buffer 可用时自动选择
+    /// local_memcpy 快速路径。
     pub(crate) async fn write_to_replica(
         &self,
         replica: &ReplicaDescriptor,
@@ -237,7 +389,8 @@ impl MooncakeClient {
             "write_to_replica: ENTER"
         );
 
-        // Fast path: local segment — direct memcpy, no TE overhead
+        // Fast path: local segment — direct memcpy, no TE overhead.
+        // 快速路径：本地 segment —— 直接 memcpy，无 TE 开销。
         if self.is_local_replica(replica) && self.segment_buffer.is_some() {
             tracing::info!(target: "te_debug", "write_to_replica: taking LOCAL_MEMCPY fast path");
             let result = self.local_memcpy_write(replica, data);
@@ -245,6 +398,8 @@ impl MooncakeClient {
             return result;
         }
 
+        // Remote path: validate data fits in local_buffer, then transfer via TE.
+        // 远程路径：验证数据适合 local_buffer，然后通过 TE 传输。
         if data.len() > self.local_buffer.len() {
             tracing::error!(
                 target: "te_debug",
@@ -266,12 +421,17 @@ impl MooncakeClient {
             local_buf_len = self.local_buffer.len(),
             "write_to_replica: opening segment"
         );
+        // Step 1: open the segment on the TE. / 第 1 步：在 TE 上打开 segment。
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: segment opened");
 
+        // Step 2: allocate a batch_id for grouping transfer requests.
+        // 第 2 步：分配 batch_id 用于分组传输请求。
         let batch_id = self.engine.allocate_batch_id(1)?;
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: batch_id allocated");
 
+        // Step 3: copy data into the registered local_buffer (TE source).
+        // 第 3 步：将数据拷贝到已注册的 local_buffer（TE 源）。
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr(),
@@ -281,6 +441,8 @@ impl MooncakeClient {
         }
         tracing::info!(target: "te_debug", data_len = data.len(), "write_to_replica: data copied to local_buffer");
 
+        // Step 4: build and submit the transfer request.
+        // 第 4 步：构建并提交传输请求。
         let target_offset = replica.base_addr + replica.offset;
         let request = TransferRequest {
             opcode: Opcode::Write,
@@ -301,6 +463,11 @@ impl MooncakeClient {
         self.engine.submit_transfer(batch_id, &[request])?;
         tracing::info!(target: "te_debug", "write_to_replica: transfer submitted, polling...");
 
+        // Step 5: poll transfer status with 10s timeout.
+        // 第 5 步：以 10s 超时轮询传输状态。
+        // 10s is generous for RDMA (us-scale) but covers TCP retransmissions
+        // and slow NVMe-oF targets. 10s 对 RDMA（微秒级）很充裕，但覆盖了 TCP
+        // 重传和慢速 NVMe-oF 目标。
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);
         let mut poll_count: u64 = 0;
@@ -326,6 +493,8 @@ impl MooncakeClient {
                     seg_id = segment_id.0,
                     "write_to_replica: transfer FAILED (leaking batch_id and segment!)"
                 );
+                // Cleanup on failure: free batch_id, close segment.
+                // 失败时清理：释放 batch_id，关闭 segment。
                 let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(segment_id);
                 return Err(StoreError::OperationFailed(-1));
@@ -338,13 +507,18 @@ impl MooncakeClient {
                     batch_id = batch_id.0,
                     "write_to_replica: transfer TIMEOUT"
                 );
+                // Cleanup on timeout: free batch_id, close segment.
+                // 超时时清理：释放 batch_id，关闭 segment。
                 let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(segment_id);
                 return Err(StoreError::OperationFailed(-2));
             }
+            // 50us poll interval — balances latency and CPU usage.
+            // 50us 轮询间隔 —— 平衡延迟和 CPU 使用。
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
+        // Step 6: cleanup resources. / 第 6 步：清理资源。
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: freeing batch_id");
         self.engine.free_batch_id(batch_id)?;
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: closing segment");
@@ -353,6 +527,37 @@ impl MooncakeClient {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // zero_copy_write — write directly from a caller-provided buffer
+    // 零拷贝写入 —— 直接从调用者提供的缓冲区写入
+    //
+    // Unlike write_to_replica, this does NOT copy data into local_buffer first.
+    // Instead, the caller's buffer (which must be pre-registered with the TE)
+    // is used directly as the source of the RDMA transfer. This eliminates one
+    // memcpy.
+    //
+    // 与 write_to_replica 不同，此方法不先将数据拷贝到 local_buffer。
+    // 而是直接使用调用者的缓冲区（必须已向 TE 预先注册）作为 RDMA 传输的源。
+    // 这消除了额外的 memcpy。
+    //
+    // Resource lifecycle (资源生命周期):
+    //   open_segment → allocate_batch_id → submit → poll(10s) →
+    //   free_batch_id → close_segment
+    //
+    // C++ equivalent: zero-copy path inside Client::WriteToReplica() when
+    // the caller passes an externally-registered buffer.
+    // -----------------------------------------------------------------------
+
+    /// Zero-copy write to a replica using a caller-provided buffer.
+    /// The buffer must be pre-registered with the TE via [`register_buffer`].
+    ///
+    /// 使用调用者提供的缓冲区进行零拷贝写入。
+    /// 缓冲区必须通过 register_buffer 预先向 TE 注册。
+    ///
+    /// # Safety
+    /// `buffer` must point to at least `size` bytes of valid memory that has
+    /// been registered with the TE. / buffer 必须指向至少 size 字节的已向 TE
+    /// 注册的有效内存。
     pub(crate) async unsafe fn zero_copy_write(
         &self,
         replica: &ReplicaDescriptor,
@@ -373,6 +578,8 @@ impl MooncakeClient {
         let batch_id = self.engine.allocate_batch_id(1)?;
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_write: batch_id allocated");
 
+        // Build transfer: source = caller's buffer directly (no intermediate copy).
+        // 构建传输：源 = 直接使用调用者缓冲区（无中间拷贝）。
         let request = TransferRequest {
             opcode: Opcode::Write,
             source: buffer,
@@ -384,6 +591,7 @@ impl MooncakeClient {
         self.engine.submit_transfer(batch_id, &[request])?;
         tracing::info!(target: "te_debug", "zero_copy_write: transfer submitted, polling...");
 
+        // Poll with 10s timeout. / 以 10s 超时轮询。
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);
         let mut poll_count: u64 = 0;
@@ -434,6 +642,21 @@ impl MooncakeClient {
         Ok(())
     }
 
+    // -----------------------------------------------------------------------
+    // read_from_replica — generic read with local_memcpy fast path
+    // 从副本读取 —— 带 local_memcpy 快速路径的通用读取
+    //
+    // Mirror of write_to_replica (with Opcode::Read instead of Write).
+    // write_to_replica 的镜像（Opcode::Read 代替 Write）。
+    //
+    // C++ equivalent: Client::ReadFromReplica() in real_client.cpp
+    // -----------------------------------------------------------------------
+
+    /// Read data from a specific replica. Automatically chooses local_memcpy
+    /// fast path when the replica is local and segment_buffer is available.
+    ///
+    /// 从指定副本读取数据。当副本为本地且 segment_buffer 可用时自动选择
+    /// local_memcpy 快速路径。
     pub(crate) async fn read_from_replica(
         &self,
         replica: &ReplicaDescriptor,
@@ -449,7 +672,8 @@ impl MooncakeClient {
             "read_from_replica: ENTER"
         );
 
-        // Fast path: local segment — direct memcpy, no TE overhead
+        // Fast path: local segment — direct memcpy, no TE overhead.
+        // 快速路径：本地 segment —— 直接 memcpy，无 TE 开销。
         if self.is_local_replica(replica) && self.segment_buffer.is_some() {
             tracing::info!(target: "te_debug", "read_from_replica: taking LOCAL_MEMCPY fast path");
             let result = self.local_memcpy_read(replica);
@@ -462,6 +686,8 @@ impl MooncakeClient {
             return result;
         }
 
+        // Remote path: validate object size fits in local_buffer.
+        // 远程路径：验证对象大小适合 local_buffer。
         if replica.size > self.local_buffer.len() as u64 {
             tracing::error!(
                 target: "te_debug",
@@ -490,12 +716,14 @@ impl MooncakeClient {
         let batch_id = self.engine.allocate_batch_id(1)?;
         tracing::info!(target: "te_debug", batch_id = batch_id.0, read_len, "read_from_replica: batch_id allocated");
 
+        // Build transfer: Read from remote segment into local_buffer.
+        // 构建传输：从远端 segment 读入 local_buffer。
         let target_offset = replica.base_addr + replica.offset;
         let request = TransferRequest {
             opcode: Opcode::Read,
-            source: self.local_buffer.as_ptr() as *mut c_void,
+            source: self.local_buffer.as_ptr() as *mut c_void, // destination / 目标
             target_id: segment_id,
-            target_offset,
+            target_offset, // source offset in remote segment / 远端 segment 中的源偏移
             length: read_len as u64,
         };
         tracing::info!(
@@ -510,6 +738,7 @@ impl MooncakeClient {
         self.engine.submit_transfer(batch_id, &[request])?;
         tracing::info!(target: "te_debug", "read_from_replica: transfer submitted, polling...");
 
+        // Poll with 10s timeout. / 以 10s 超时轮询。
         let mut transferred: u64;
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);
@@ -562,6 +791,7 @@ impl MooncakeClient {
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "read_from_replica: closing segment");
         self.engine.close_segment(segment_id)?;
 
+        // Extract the read data from local_buffer. / 从 local_buffer 提取读取的数据。
         let result: Vec<u8> = self.local_buffer[..(transferred as usize)].to_vec();
         tracing::info!(
             target: "te_debug",
@@ -571,6 +801,32 @@ impl MooncakeClient {
         Ok(result)
     }
 
+    // -----------------------------------------------------------------------
+    // zero_copy_read — read directly into a caller-provided buffer
+    // 零拷贝读取 —— 直接读入调用者提供的缓冲区
+    //
+    // Mirror of zero_copy_write (with Opcode::Read instead of Write).
+    // zero_copy_write 的镜像（Opcode::Read 代替 Write）。
+    //
+    // The caller's buffer is the DESTINATION of the RDMA read, so no
+    // intermediate copy from local_buffer is needed.
+    //
+    // 调用者的缓冲区是 RDMA 读的目标，因此不需要从 local_buffer 进行中间拷贝。
+    // -----------------------------------------------------------------------
+
+    /// Zero-copy read from a replica into a caller-provided buffer.
+    /// The buffer must be pre-registered with the TE via [`register_buffer`].
+    ///
+    /// 从副本零拷贝读取到调用者提供的缓冲区。
+    /// 缓冲区必须通过 register_buffer 预先向 TE 注册。
+    ///
+    /// # Returns
+    /// The number of bytes actually transferred. / 实际传输的字节数。
+    ///
+    /// # Safety
+    /// `buffer` must point to at least `size` bytes of valid memory that has
+    /// been registered with the TE. / buffer 必须指向至少 size 字节的已向 TE
+    /// 注册的有效内存。
     pub(crate) async unsafe fn zero_copy_read(
         &self,
         replica: &ReplicaDescriptor,
@@ -592,6 +848,8 @@ impl MooncakeClient {
         let batch_id: transfer_engine_ffi::BatchId = self.engine.allocate_batch_id(1)?;
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_read: batch_id allocated");
 
+        // Build transfer: source = caller's buffer (RDMA destination).
+        // 构建传输：源 = 调用者缓冲区（RDMA 目标）。
         let request: TransferRequest = TransferRequest {
             opcode: Opcode::Read,
             source: buffer,
@@ -603,6 +861,7 @@ impl MooncakeClient {
         self.engine.submit_transfer(batch_id, &[request])?;
         tracing::info!(target: "te_debug", "zero_copy_read: transfer submitted, polling...");
 
+        // Poll with 10s timeout. / 以 10s 超时轮询。
         let mut transferred: u64;
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);

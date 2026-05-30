@@ -1,33 +1,98 @@
+//! Error types for the Transfer Engine FFI layer.
+//! Transfer Engine FFI 层的错误类型。
+//!
+//! # Error Mapping Strategy / 错误映射策略
+//!
+//! The C++ Transfer Engine communicates errors through multiple channels:
+//! - **Null pointer returns**: e.g., `createTransferEngine` returns NULL on failure.
+//! - **Integer return codes**: most functions return 0 on success, non-zero on error.
+//! - **Negative segment IDs**: `openSegment` returns a negative value on failure.
+//!
+//! These are unified into `TransferEngineError` variants for idiomatic Rust
+//! error handling via `thiserror`.
+//!
+//! C++ Transfer Engine 通过多种渠道传递错误：
+//! - **空指针返回**：如 `createTransferEngine` 失败时返回 NULL。
+//! - **整数返回码**：大多数函数成功返回 0，失败返回非零值。
+//! - **负数段 ID**：`openSegment` 失败时返回负数。
+//!
+//! 这些被统一为 `TransferEngineError` 变体，通过 `thiserror` 提供符合
+//! Rust 习惯的错误处理。
+
 #[derive(Debug, thiserror::Error)]
 pub enum TransferEngineError {
+    /// The C++ `createTransferEngine` returned a null pointer.
+    /// This typically indicates a memory allocation failure or invalid
+    /// connection parameters in the C++ layer.
+    /// C++ `createTransferEngine` 返回了空指针。
+    /// 通常表示 C++ 层内存分配失败或连接参数无效。
     #[error("Transfer Engine returned null handle")]
     NullHandle,
 
+    /// A generic C++ operation failed with the given integer error code.
+    /// The meaning of the code depends on the specific C++ function called.
+    /// Most C API functions return 0 on success and a non-zero error code
+    /// on failure. This variant captures that code for debugging.
+    /// 通用 C++ 操作失败，携带整数错误码。
+    /// 错误码的含义取决于调用的具体 C++ 函数。
+    /// 大多数 C API 函数成功返回 0，失败返回非零错误码。
+    /// 此变体捕获该错误码以供调试。
     #[error("Transfer Engine operation failed with code {0}")]
     OperationFailed(i32),
 
+    /// `installTransport` returned a null transport handle.
+    /// This occurs when the requested transport protocol (e.g., RDMA) is
+    /// not available or when the topology matrix is malformed.
+    /// `installTransport` 返回了空传输句柄。
+    /// 当请求的传输协议（如 RDMA）不可用或拓扑矩阵格式错误时发生。
     #[error("Failed to install transport protocol")]
     InstallTransportFailed,
 
+    /// An unknown or invalid transfer status code was received from the C++ layer.
+    /// The raw integer value is preserved for debugging.
+    /// 从 C++ 层收到了未知或无效的传输状态码。
+    /// 保留原始整数值以供调试。
     #[error("Invalid status code: {0}")]
     InvalidStatus(i32),
 
+    /// An unknown or invalid opcode value was encountered when converting
+    /// from the C++ integer representation to the Rust `Opcode` enum.
+    /// 从 C++ 整数表示转换为 Rust `Opcode` 枚举时遇到了未知或无效的操作码值。
     #[error("Invalid opcode: {0}")]
     InvalidOpcode(i32),
 
+    /// A required pointer argument was null.
+    /// 必需的指针参数为空。
     #[error("Null pointer")]
     NullPointer,
 
+    /// A string received from the C++ layer contained invalid UTF-8.
+    /// This can happen if the C++ code passes raw bytes that are not
+    /// valid UTF-8 sequences.
+    /// 从 C++ 层接收的字符串包含无效的 UTF-8。
+    /// 当 C++ 代码传递了非有效 UTF-8 序列的原始字节时可能发生。
     #[error("UTF-8 error: {0}")]
     InvalidUtf8(#[from] std::str::Utf8Error),
 
+    /// A CString could not be created because the input contained a NUL byte.
+    /// C strings are NUL-terminated; interior NUL bytes are not allowed.
+    /// 无法创建 CString，因为输入包含 NUL 字节。
+    /// C 字符串以 NUL 结尾；不允许字符串内部出现 NUL 字节。
     #[error("NUL byte in C string: {0}")]
     NulError(#[from] std::ffi::NulError),
 
+    /// An integer conversion failed (e.g., usize to u32 on a 64-bit platform
+    /// where the value exceeds u32::MAX).
+    /// 整数转换失败（如在 64 位平台上将超过 u32::MAX 的值转为 u32）。
     #[error("Integer conversion error: {0}")]
     IntConversion(#[from] std::num::TryFromIntError),
 }
 
+/// Result type alias for Transfer Engine operations.
+/// Transfer Engine 操作的 Result 类型别名。
+///
+/// All fallible Transfer Engine methods return this type.
+/// 所有可能失败的 Transfer Engine 方法都返回此类型。
 pub type TransferEngineResult<T> = Result<T, TransferEngineError>;
 
 #[cfg(test)]

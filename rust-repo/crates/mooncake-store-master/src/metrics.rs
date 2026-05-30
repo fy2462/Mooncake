@@ -1,11 +1,43 @@
+// =============================================================================
+// Prometheus Metrics — Prometheus 监控指标
+// =============================================================================
+// Defines all Prometheus metrics for the mooncake-store-master service and
+// provides an HTTP endpoint for scraping.
+// 定义 mooncake-store-master 服务的所有 Prometheus 指标，
+// 并提供 HTTP 端点供抓取。
+//
+// Metrics organized by category / 按类别组织:
+// 1. Base operation counters (put/get/remove/mount/etc.)
+//    基础操作计数器（put/get/remove/mount 等）
+// 2. Batch operation counters
+//    批量操作计数器
+// 3. Gauges (global state like segment count, memory usage)
+//    仪表值（全局状态：segment 数量、内存使用等）
+// 4. Cache hit counters
+//    缓存命中计数器
+// 5. Transfer latency histograms
+//    传输延迟直方图
+// 6. Snapshot metrics
+//    快照指标
+// 7. HA/OpLog replication metrics
+//    HA/OpLog 复制指标
+//
+// All metrics are registered lazily via lazy_static and re-registered
+// explicitly in register_metrics() to handle Prometheus' duplicate
+// registration policy.
+// 所有指标通过 lazy_static 延迟初始化，并在 register_metrics() 中
+// 显式重新注册，以处理 Prometheus 的重复注册策略。
+
 use axum::{routing::get, Router};
 use lazy_static::lazy_static;
 use prometheus::{register_histogram, Encoder, Histogram, IntCounter, IntGauge, TextEncoder};
 use std::net::SocketAddr;
 
-// =========================================================================
-// Base operation counters
-// =========================================================================
+// =============================================================================
+// Base operation counters — 基础操作计数器
+// =============================================================================
+// Count total requests and failures for each RPC method.
+// 统计每个 RPC 方法的总请求数和失败数。
 
 lazy_static! {
     pub static ref PUT_START_REQUESTS: IntCounter =
@@ -117,13 +149,17 @@ lazy_static! {
         "total failed upsert requests"
     )
     .unwrap();
+    /// Generic error counter for all internal errors.
+    /// 通用错误计数器，统计所有内部错误。
     pub static ref ERROR_COUNTER: IntCounter =
         IntCounter::new("mooncake_store_errors_total", "total error count").unwrap();
 }
 
-// =========================================================================
-// Batch operation counters
-// =========================================================================
+// =============================================================================
+// Batch operation counters — 批量操作计数器
+// =============================================================================
+// Count batch requests and failures (counted per item).
+// 统计批量请求和失败数（按条目计数）。
 
 lazy_static! {
     pub static ref BATCH_EXIST_KEY_REQUESTS: IntCounter = IntCounter::new(
@@ -198,9 +234,11 @@ lazy_static! {
     .unwrap();
 }
 
-// =========================================================================
-// Gauges (global state)
-// =========================================================================
+// =============================================================================
+// Gauges (global state) — 仪表值（全局状态）
+// =============================================================================
+// Snapshot of current system state — updated periodically by the master.
+// 当前系统状态快照 —— 由 master 定期更新。
 
 lazy_static! {
     pub static ref SEGMENT_COUNT: IntGauge =
@@ -238,9 +276,9 @@ lazy_static! {
     .unwrap();
 }
 
-// =========================================================================
-// Cache hit counters
-// =========================================================================
+// =============================================================================
+// Cache hit counters — 缓存命中计数器
+// =============================================================================
 
 lazy_static! {
     pub static ref MEM_CACHE_HITS: IntCounter = IntCounter::new(
@@ -270,9 +308,12 @@ lazy_static! {
     .unwrap();
 }
 
-// =========================================================================
-// Transfer latency histograms (microseconds)
-// =========================================================================
+// =============================================================================
+// Transfer latency histograms (microseconds) — 传输延迟直方图（微秒）
+// =============================================================================
+// Histogram buckets chosen to cover typical transfer latencies from microseconds
+// to seconds (125 us to 1 second).
+// 直方图桶设计覆盖从微秒到秒的典型传输延迟（125 us 到 1 second）。
 
 const LATENCY_BUCKETS: &[f64] = &[
     125.0, 150.0, 200.0, 250.0, 300.0, 400.0, 500.0, 750.0, 1000.0, 1500.0, 2000.0, 3000.0, 5000.0,
@@ -304,22 +345,30 @@ lazy_static! {
         LATENCY_BUCKETS.to_vec()
     )
     .unwrap();
+    /// Master RPC latency (all RPC methods combined).
+    /// Master RPC 延迟（所有 RPC 方法综合）。
     pub static ref MASTER_RPC_LATENCY_US: Histogram = register_histogram!(
         "mooncake_store_master_rpc_latency_us",
         "Master RPC latency in microseconds",
         LATENCY_BUCKETS.to_vec()
     )
     .unwrap();
+    /// Total bytes read via transfer engine (cumulative counter).
+    /// 通过 transfer engine 读取的总字节数（累积计数器）。
     pub static ref TRANSFER_READ_BYTES: IntCounter = IntCounter::new(
         "mooncake_store_transfer_read_bytes_total",
         "total bytes read via transfer engine"
     )
     .unwrap();
+    /// Total bytes written via transfer engine (cumulative counter).
+    /// 通过 transfer engine 写入的总字节数（累积计数器）。
     pub static ref TRANSFER_WRITE_BYTES: IntCounter = IntCounter::new(
         "mooncake_store_transfer_write_bytes_total",
         "total bytes written via transfer engine"
     )
     .unwrap();
+    /// Distribution of stored value sizes.
+    /// 存储值大小的分布直方图。
     pub static ref VALUE_SIZE_HISTOGRAM: Histogram = register_histogram!(
         "mooncake_store_value_size_bytes",
         "Distribution of stored value sizes",
@@ -331,9 +380,9 @@ lazy_static! {
     .unwrap();
 }
 
-// =========================================================================
-// Snapshot metrics
-// =========================================================================
+// =============================================================================
+// Snapshot metrics — 快照指标
+// =============================================================================
 
 lazy_static! {
     pub static ref SNAPSHOT_DURATION_MS: IntGauge = IntGauge::new(
@@ -353,41 +402,55 @@ lazy_static! {
     .unwrap();
 }
 
-// =========================================================================
-// HA metrics (OpLog replication)
-// =========================================================================
+// =============================================================================
+// HA / OpLog replication metrics — HA / OpLog 复制指标
+// =============================================================================
 
 lazy_static! {
+    /// Latest OpLog sequence ID on the primary (leader).
+    /// 主节点（leader）上的最新 OpLog 序列号。
     pub static ref OPLOG_LAST_SEQ_ID: IntGauge = IntGauge::new(
         "mooncake_store_oplog_last_seq_id",
         "latest OpLog sequence ID on primary"
     )
     .unwrap();
+    /// Latest OpLog sequence ID applied on the standby.
+    /// 备节点上的最新已应用 OpLog 序列号。
     pub static ref OPLOG_APPLIED_SEQ_ID: IntGauge = IntGauge::new(
         "mooncake_store_oplog_applied_seq_id",
         "standby applied OpLog sequence ID"
     )
     .unwrap();
+    /// Replication lag: primary_seq - standby_applied_seq.
+    /// 复制延迟：主序列号 - 备已应用序列号。
     pub static ref OPLOG_STANDBY_LAG: IntGauge = IntGauge::new(
         "mooncake_store_oplog_standby_lag",
         "standby replication lag in entries"
     )
     .unwrap();
+    /// Pending out-of-order OpLog entries awaiting sequencing.
+    /// 等待排序的乱序 OpLog 条目数。
     pub static ref OPLOG_PENDING_ENTRIES: IntGauge = IntGauge::new(
         "mooncake_store_oplog_pending_entries",
         "pending out-of-order OpLog entries"
     )
     .unwrap();
+    /// Size of the pending mutation retry queue.
+    /// 待处理变更重试队列的大小。
     pub static ref PENDING_MUTATION_QUEUE_SIZE: IntGauge = IntGauge::new(
         "mooncake_store_pending_mutation_queue_size",
         "pending mutation retry queue size"
     )
     .unwrap();
+    /// Total OpLog entries skipped (e.g., duplicates or no-ops).
+    /// 已跳过的 OpLog 条目总数（如重复或无操作）。
     pub static ref OPLOG_SKIPPED_ENTRIES: IntCounter = IntCounter::new(
         "mooncake_store_oplog_skipped_entries_total",
         "total skipped OpLog entries"
     )
     .unwrap();
+    /// Total OpLog checksum validation failures.
+    /// OpLog 校验和验证失败总数。
     pub static ref OPLOG_CHECKSUM_FAILURES: IntCounter = IntCounter::new(
         "mooncake_store_oplog_checksum_failures_total",
         "total OpLog checksum failures"
@@ -395,19 +458,32 @@ lazy_static! {
     .unwrap();
 }
 
-// =========================================================================
-// Registration & HTTP server
-// =========================================================================
+// =============================================================================
+// Registration & HTTP server — 注册与 HTTP 服务器
+// =============================================================================
 
+/// Re-register a counter with Prometheus (lazy_static auto-registers on first use,
+/// this is for explicit re-registration to handle duplicates).
+/// 重新向 Prometheus 注册计数器（lazy_static 在首次使用时自动注册，
+/// 此为显式重新注册以处理重复）。
 fn register_counter(c: &IntCounter) {
     let _ = prometheus::register(Box::new(c.clone()));
 }
 
+/// Re-register a gauge with Prometheus.
+/// 重新向 Prometheus 注册仪表值。
 fn register_gauge(g: &IntGauge) {
     let _ = prometheus::register(Box::new(g.clone()));
 }
 
+/// Register all metrics with Prometheus.
+/// 向 Prometheus 注册所有指标。
+///
+/// Called on service startup to ensure all metrics are available before
+/// any requests are served.
+/// 在服务启动时调用，确保所有指标在处理任何请求前可用。
 pub fn register_metrics() {
+    // Base counters
     register_counter(&PUT_START_REQUESTS);
     register_counter(&PUT_START_FAILURES);
     register_counter(&PUT_END_REQUESTS);
@@ -436,6 +512,7 @@ pub fn register_metrics() {
     register_counter(&UPSERT_FAILURES);
     register_counter(&ERROR_COUNTER);
 
+    // Batch counters
     register_counter(&BATCH_EXIST_KEY_REQUESTS);
     register_counter(&BATCH_EXIST_KEY_FAILURES);
     register_counter(&BATCH_QUERY_IP_REQUESTS);
@@ -451,6 +528,7 @@ pub fn register_metrics() {
     register_counter(&BATCH_UPSERT_END_REQUESTS);
     register_counter(&BATCH_UPSERT_END_FAILURES);
 
+    // Gauges
     register_gauge(&SEGMENT_COUNT);
     register_gauge(&OBJECT_COUNT);
     register_gauge(&KEY_COUNT);
@@ -461,19 +539,23 @@ pub fn register_metrics() {
     register_gauge(&ALLOCATED_FILE_SIZE);
     register_gauge(&TOTAL_FILE_CAPACITY);
 
+    // Cache counters
     register_counter(&MEM_CACHE_HITS);
     register_counter(&FILE_CACHE_HITS);
     register_counter(&MEM_CACHE_TOTAL);
     register_counter(&FILE_CACHE_TOTAL);
     register_counter(&VALID_GETS);
 
+    // Transfer bytes
     register_counter(&TRANSFER_READ_BYTES);
     register_counter(&TRANSFER_WRITE_BYTES);
 
+    // Snapshot metrics
     register_gauge(&SNAPSHOT_DURATION_MS);
     register_counter(&SNAPSHOT_SUCCESS_COUNT);
     register_counter(&SNAPSHOT_FAIL_COUNT);
 
+    // HA / OpLog metrics
     register_gauge(&OPLOG_LAST_SEQ_ID);
     register_gauge(&OPLOG_APPLIED_SEQ_ID);
     register_gauge(&OPLOG_STANDBY_LAG);
@@ -483,6 +565,13 @@ pub fn register_metrics() {
     register_counter(&OPLOG_CHECKSUM_FAILURES);
 }
 
+/// Start the Prometheus metrics HTTP server.
+/// 启动 Prometheus 指标 HTTP 服务器。
+///
+/// Registers all metrics and serves them at GET /metrics in Prometheus text format.
+/// This function blocks indefinitely — call in a spawned task.
+/// 注册所有指标并在 GET /metrics 提供 Prometheus 文本格式。
+/// 此函数无限期阻塞 —— 在 spawned task 中调用。
 pub async fn serve_metrics_http(addr: SocketAddr) {
     register_metrics();
 
@@ -492,6 +581,11 @@ pub async fn serve_metrics_http(addr: SocketAddr) {
     axum::serve(listener, app).await.unwrap();
 }
 
+/// HTTP handler for GET /metrics.
+/// GET /metrics 的 HTTP 处理器。
+///
+/// Gathers all registered Prometheus metrics and encodes them in text format.
+/// 收集所有已注册的 Prometheus 指标并编码为文本格式。
 async fn metrics_handler() -> String {
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();

@@ -1,61 +1,118 @@
+//! # Remote Source Configuration — 远程源配置
+//!
+//! 控制远程数据源回退行为的配置结构体，支持 TOML 反序列化。
+//! (Configuration structures controlling remote source fallback behavior, with TOML deserialization.)
+
 use serde::{Deserialize, Serialize};
 
-/// Controls whether and how the remote source fallback operates.
+/// 控制远程源回退的开启/关闭及并发限制。
+/// (Controls whether and how the remote source fallback operates.)
 ///
-/// When `enabled` is `false`, [`MissHandler::handle_miss`] returns
-/// `NotFound` immediately — no remote fetch is attempted.
+/// ## 字段语义 (Field Semantics)
+///
+/// | 字段 | 类型 | 默认值 | 含义 |
+/// |---|---|---|---|
+/// | `enabled` | `bool` | `false` | 总开关：`false` 时 [`MissHandler::handle_miss`] 直接返回 `NotFound` |
+/// | `max_concurrent_fetches` | `usize` | `16` | 最大并发远程获取数（准入控制信号量大小） |
+/// | `s3` | `Option<S3Config>` | `None` | S3 配置；非空 + `enabled=true` 时启用 S3 远程源 |
+///
+/// ## 使用 (Usage)
+///
+/// ```ignore
+/// use mooncake_store_client::RemoteSourceConfig;
+/// let config = RemoteSourceConfig {
+///     enabled: true,
+///     s3: None,  // 只启用 MissHandler 但不使用 S3（需配合其他 RemoteSource 实现）
+///     ..Default::default()
+/// };
+/// ```
+///
+/// ## TOML 反序列化 (TOML Deserialization)
+///
+/// ```ignore
+/// let toml_str = r#"
+/// enabled = true
+/// max_concurrent_fetches = 32
+/// [s3]
+/// bucket = "my-bucket"
+/// region = "us-west-2"
+/// "#;
+/// let config = RemoteSourceConfig::from_toml(toml_str)?;
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteSourceConfig {
-    /// Master switch: when false, remote source is never consulted.
+    /// 总开关：`false` 时从不查询远程源。
+    /// (Master switch: when false, remote source is never consulted.)
     #[serde(default)]
     pub enabled: bool,
 
-    /// Maximum concurrent remote fetches (admission control).
+    /// 最大并发远程获取数（准入控制）。
+    /// (Maximum concurrent remote fetches — admission control via semaphore.)
     #[serde(default = "default_max_concurrent_fetches")]
     pub max_concurrent_fetches: usize,
 
-    /// S3-specific configuration. When present and `enabled` is true,
-    /// the S3 remote source is used.
+    /// S3 专用配置。当此字段非空且 `enabled` 为 `true` 时，使用 S3 远程源。
+    /// (S3-specific configuration. When present and `enabled` is true,
+    /// the S3 remote source is used.)
     #[serde(default)]
     pub s3: Option<S3Config>,
 }
 
-/// S3 bucket and connection configuration.
+/// S3 存储桶及连接配置。
+/// (S3 bucket and connection configuration.)
+///
+/// ## 字段 (Fields)
+/// - `bucket`: 存储桶名称
+/// - `region`: AWS 区域（默认 `"us-east-1"`）
+/// - `endpoint`: 自定义端点（用于 MinIO / 兼容存储）
+/// - `prefix`: 桶内 key 前缀（如 `"cache/"`），不会自动追加 `/`
+/// - `access_key_id` / `secret_access_key`: 显式凭证（优先级高于环境变量和 IAM 角色）
+///
+/// ## 凭证优先级 (Credential Resolution, highest to lowest)
+/// 1. `access_key_id` + `secret_access_key` 字段
+/// 2. 环境变量: `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+/// 3. IAM 实例角色 / `~/.aws/credentials`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
-    /// S3 bucket name.
+    /// S3 存储桶名称 (S3 bucket name)
     pub bucket: String,
 
-    /// AWS region (e.g. "us-east-1").
+    /// AWS 区域，如 `"us-east-1"` (AWS region, e.g. "us-east-1")
     #[serde(default = "default_region")]
     pub region: String,
 
-    /// Optional custom endpoint (for MinIO / compatible stores).
+    /// 自定义端点 URL，用于 MinIO 等 S3 兼容存储 (optional custom endpoint for MinIO / compatible stores)
     #[serde(default)]
     pub endpoint: Option<String>,
 
-    /// Optional key prefix within the bucket.
+    /// 桶内 key 前缀，如 `"cache/"` (optional key prefix within the bucket)
     #[serde(default)]
     pub prefix: String,
 
-    /// Optional AWS access key ID (falls back to env / IAM).
+    /// AWS 访问密钥 ID，缺省时使用默认凭证链 (optional AWS access key ID; falls back to default credential chain)
     #[serde(default)]
     pub access_key_id: Option<String>,
 
-    /// Optional AWS secret access key (falls back to env / IAM).
+    /// AWS 密钥，缺省时使用默认凭证链 (optional AWS secret access key; falls back to default credential chain)
     #[serde(default)]
     pub secret_access_key: Option<String>,
 }
 
+/// `max_concurrent_fetches` 的默认值。
+/// (Default value for max_concurrent_fetches.)
 fn default_max_concurrent_fetches() -> usize {
     16
 }
 
+/// S3 区域的默认值：`"us-east-1"`。
+/// (Default AWS region: "us-east-1".)
 fn default_region() -> String {
     "us-east-1".to_string()
 }
 
 impl Default for RemoteSourceConfig {
+    /// 默认配置：远程源禁用，最大 16 并发，无 S3。
+    /// (Default: remote source disabled, max 16 concurrent fetches, no S3.)
     fn default() -> Self {
         Self {
             enabled: false,
@@ -66,12 +123,22 @@ impl Default for RemoteSourceConfig {
 }
 
 impl RemoteSourceConfig {
-    /// Load from a TOML string.
+    /// 从 TOML 字符串加载配置。
+    /// (Load configuration from a TOML string.)
+    ///
+    /// ## 示例 (Example)
+    /// ```ignore
+    /// let config = RemoteSourceConfig::from_toml(r#"enabled = true"#)?;
+    /// ```
     pub fn from_toml(toml: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(toml)
     }
 
-    /// Returns true if the remote source is properly configured and enabled.
+    /// 返回远程源是否已正确配置并启用。
+    /// (Returns true if remote source is properly configured and enabled.)
+    ///
+    /// 当前判定标准：`enabled == true` 且 S3 配置的 `bucket` 非空。
+    /// 若未来添加更多远程源类型，此方法会相应扩展。
     pub fn is_ready(&self) -> bool {
         self.enabled && self.s3.as_ref().is_some_and(|s3| !s3.bucket.is_empty())
     }
