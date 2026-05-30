@@ -211,11 +211,8 @@ impl PythonMooncakeClient {
             let mut client = take_client(&inner)?;
             let result = client.get(&key).await;
             *inner.lock() = Some(client);
-            let data = result.map_err(to_py_err)?;
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                PyBytes::new(py, &data).unbind()
-            })
+            // Return Rust type — future_into_py handles IntoPy conversion with GIL
+            result.map_err(to_py_err)
         })
     }
 
@@ -287,12 +284,8 @@ impl PythonMooncakeClient {
             let mut client = take_client(&inner)?;
             let result = client.batch_get(&keys).await;
             *inner.lock() = Some(client);
-            let results = result.map_err(to_py_err)?;
-            let py = unsafe { Python::assume_attached() };
-            let list = PyList::new(py, results.iter().map(|opt| {
-                opt.as_ref().map_or(py.None(), |d| PyBytes::new(py, d).into())
-            }));
-            Ok(list.unbind())
+            // Return Rust type — future_into_py handles IntoPy conversion with GIL
+            result.map_err(to_py_err)
         })
     }
 
@@ -468,12 +461,17 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
 
+        // Return Rust tuple list — future_into_py handles IntoPy conversion
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
             let result = client.upsert(&key, &data, cfg).await;
             *inner.lock() = Some(client);
             let replicas = result.map_err(to_py_err)?;
-            Ok(replicas_to_py(replicas))
+            let out: Vec<(String, u64, String)> = replicas
+                .iter()
+                .map(|r| (r.segment_name.clone(), r.offset, r.segment_id.to_string()))
+                .collect();
+            Ok(out)
         })
     }
 
@@ -489,13 +487,18 @@ impl PythonMooncakeClient {
         let data: Vec<Vec<u8>> = values.iter().map(|v| v.as_bytes().to_vec()).collect();
         let inner = slf.borrow().inner.clone();
 
+        // Return Rust tuple list — future_into_py handles IntoPy conversion
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.upsert_parts(&key, &slices, cfg).await;
             *inner.lock() = Some(client);
             let replicas = result.map_err(to_py_err)?;
-            Ok(replicas_to_py(replicas))
+            let out: Vec<(String, u64, String)> = replicas
+                .iter()
+                .map(|r| (r.segment_name.clone(), r.offset, r.segment_id.to_string()))
+                .collect();
+            Ok(out)
         })
     }
 
@@ -547,22 +550,14 @@ impl PythonMooncakeClient {
             Uuid::parse_str(&task_id_str).map_err(|e| to_py_err(format!("invalid UUID: {e}")))?;
         let inner = slf.borrow().inner.clone();
 
+        // Return Rust tuple — future_into_py handles IntoPy conversion
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
             let result = client.query_task(task_id).await;
             *inner.lock() = Some(client);
             let resp = result.map_err(to_py_err)?;
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                let d = PyDict::new(py);
-                if let Some(id) = &resp.id {
-                    d.set_item("task_id", Uuid::from_u64_pair(id.high, id.low).to_string())
-                        .ok();
-                }
-                d.set_item("status", resp.status).ok();
-                d.set_item("message", &resp.message).ok();
-                d.unbind()
-            })
+            let task_id_str = resp.id.map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
+            Ok((task_id_str, resp.status, resp.message))
         })
     }
 
@@ -573,28 +568,19 @@ impl PythonMooncakeClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
+        // Return Rust data — future_into_py handles IntoPy conversion
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
             let tasks = client.fetch_tasks(batch_size).await.map_err(to_py_err)?;
             *inner.lock() = Some(client);
-            let py = unsafe { Python::assume_attached() };
-            let out: Vec<Py<PyAny>> = tasks
+            let out: Vec<(Option<String>, i32, String, i64, u32)> = tasks
                 .iter()
-                    .map(|t| {
-                        let d = PyDict::new(py);
-                        if let Some(id) = &t.id {
-                            d.set_item("id", Uuid::from_u64_pair(id.high, id.low).to_string())
-                                .ok();
-                        }
-                        d.set_item("task_type", t.r#type).ok();
-                        d.set_item("payload", &t.payload).ok();
-                        d.set_item("created_at_ms_epoch", t.created_at_ms_epoch)
-                            .ok();
-                        d.set_item("max_retry_attempts", t.max_retry_attempts).ok();
-                        d.into()
-                    })
-                    .collect();
-            Ok(out.into_pyobject(py)?.unbind())
+                .map(|t| {
+                    let id_str = t.id.map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
+                    (id_str, t.r#type, t.payload.clone(), t.created_at_ms_epoch, t.max_retry_attempts)
+                })
+                .collect();
+            Ok(out)
         })
     }
 
@@ -773,10 +759,8 @@ impl PythonMooncakeClient {
             let result = client.get_buffer(&key).await;
             *inner.lock() = Some(client);
             let bh = result.map_err(to_py_err)?;
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                PyBytes::new(py, &bh.data).unbind()
-            })
+            // Return owned data — future_into_py handles IntoPy conversion with GIL
+            Ok(bh.data)
         })
     }
 
@@ -792,12 +776,12 @@ impl PythonMooncakeClient {
             let result = client.batch_get_buffer(&keys).await;
             *inner.lock() = Some(client);
             let results = result.map_err(to_py_err)?;
-            let py = unsafe { Python::assume_attached() };
-            let out: Vec<Option<Py<PyBytes>>> = results
+            // Return owned data — future_into_py handles IntoPy conversion
+            let out: Vec<Option<Vec<u8>>> = results
                 .into_iter()
-                .map(|opt| opt.map(|bh| PyBytes::new(py, &bh.data).unbind()))
+                .map(|opt| opt.map(|bh| bh.data))
                 .collect();
-            Ok(out.into_pyobject(py).expect("batch_get_buffer into_pyobject").unbind())
+            Ok(out)
         })
     }
 
@@ -1023,6 +1007,7 @@ impl PythonMooncakeClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
+        // Return Rust tuple — future_into_py handles IntoPy conversion
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
             let result = client
@@ -1030,16 +1015,12 @@ impl PythonMooncakeClient {
                 .await;
             *inner.lock() = Some(client);
             let replica = result.map_err(to_py_err)?;
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                let d = PyDict::new(py);
-                d.set_item("segment_name", &replica.segment_name).ok();
-                d.set_item("offset", replica.offset).ok();
-                d.set_item("size", replica.size).ok();
-                d.set_item("segment_id", replica.segment_id.to_string())
-                    .ok();
-                d.unbind()
-            })
+            Ok((
+                replica.segment_name,
+                replica.offset,
+                replica.size,
+                replica.segment_id.to_string(),
+            ))
         })
     }
 

@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "mooncake-store-rust"
 version = "0.1.0"
 description = "Python bindings for Mooncake distributed KV-cache store (Rust implementation)"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 authors = [{ name = "Mooncake Authors" }]
 license = { text = "Apache-2.0" }
 keywords = ["mooncake", "kv-cache", "distributed", "llm-inference"]

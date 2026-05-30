@@ -2445,6 +2445,8 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -4020,6 +4022,7 @@ dependencies = [
  "bindgen",
  "libc",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

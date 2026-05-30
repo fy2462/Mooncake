@@ -26,3 +26,5 @@ pyo3-async-runtimes.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

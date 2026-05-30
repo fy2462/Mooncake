@@ -17,7 +17,10 @@ impl MooncakeClient {
         value: &[u8],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<()> {
+        tracing::info!(target: "te_debug", %key, value_len = value.len(), "put: ENTER");
+
         if key.is_empty() || value.is_empty() {
+            tracing::error!(target: "te_debug", %key, "put: empty key or value");
             return Err(StoreError::InvalidParams(
                 "key is empty or value has zero length".to_string(),
             ));
@@ -41,20 +44,32 @@ impl MooncakeClient {
             }),
         };
 
+        tracing::info!(target: "te_debug", %key, "put: calling put_start");
         let response = self
             .master
             .put_start(request)
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(|e| {
+                tracing::error!(target: "te_debug", %key, error = %e, "put: put_start FAILED");
+                StoreError::Internal(e.to_string())
+            })?
             .into_inner();
 
         let replicas = self.replicas_from_proto(&response.replicas);
+        tracing::info!(target: "te_debug", %key, replica_count = replicas.len(), "put: replicas allocated");
         if replicas.is_empty() {
+            tracing::error!(target: "te_debug", %key, "put: no replicas allocated");
             return Err(StoreError::NoAvailableHandle);
         }
 
-        for replica in &replicas {
+        for (i, replica) in replicas.iter().enumerate() {
+            tracing::info!(
+                target: "te_debug", %key, replica_idx = i, total = replicas.len(),
+                seg_name = %replica.segment_name,
+                "put: writing to replica"
+            );
             if let Err(e) = self.write_to_replica(replica, value).await {
+                tracing::error!(target: "te_debug", %key, replica_idx = i, error = %e, "put: write_to_replica FAILED, revoking");
                 // C++ 写失败时调用 PutRevoke 撤销已分配的资源
                 let revoke_req = proto::PutRevokeRequest {
                     client_id: Some(self.client_id_proto()),
@@ -66,6 +81,7 @@ impl MooncakeClient {
             }
         }
 
+        tracing::info!(target: "te_debug", %key, "put: calling put_end");
         let end_request = proto::PutEndRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
@@ -74,8 +90,12 @@ impl MooncakeClient {
         self.master
             .put_end(end_request)
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(target: "te_debug", %key, error = %e, "put: put_end FAILED");
+                StoreError::Internal(e.to_string())
+            })?;
 
+        tracing::info!(target: "te_debug", %key, "put: EXIT (success)");
         Ok(())
     }
 
@@ -213,6 +233,8 @@ impl MooncakeClient {
             self.engine.submit_transfer(batch_id, &requests)?;
 
             for i in 0..values.len() {
+                let start = tokio::time::Instant::now();
+                let timeout = tokio::time::Duration::from_secs(10);
                 loop {
                     let status = self.engine.get_transfer_status(batch_id, i)?;
                     if status.status == TransferStatusEnum::Completed {
@@ -226,7 +248,20 @@ impl MooncakeClient {
                             replica_type: 0,
                         };
                         let _ = self.master.put_revoke(revoke_req).await;
+                        let _ = self.engine.free_batch_id(batch_id);
+                        let _ = self.engine.close_segment(segment_id);
                         return Err(StoreError::OperationFailed(-1));
+                    }
+                    if start.elapsed() > timeout {
+                        let revoke_req = proto::PutRevokeRequest {
+                            client_id: Some(self.client_id_proto()),
+                            key: key.to_string(),
+                            replica_type: 0,
+                        };
+                        let _ = self.master.put_revoke(revoke_req).await;
+                        let _ = self.engine.free_batch_id(batch_id);
+                        let _ = self.engine.close_segment(segment_id);
+                        return Err(StoreError::OperationFailed(-2));
                     }
                     tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
                 }

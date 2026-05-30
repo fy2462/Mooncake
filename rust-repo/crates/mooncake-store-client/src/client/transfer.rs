@@ -226,12 +226,32 @@ impl MooncakeClient {
         replica: &ReplicaDescriptor,
         data: &[u8],
     ) -> StoreResult<()> {
+        tracing::info!(
+            target: "te_debug",
+            seg_name = %replica.segment_name,
+            offset = replica.offset,
+            base_addr = replica.base_addr,
+            data_len = data.len(),
+            is_local = self.is_local_replica(replica),
+            has_seg_buf = self.segment_buffer.is_some(),
+            "write_to_replica: ENTER"
+        );
+
         // Fast path: local segment — direct memcpy, no TE overhead
         if self.is_local_replica(replica) && self.segment_buffer.is_some() {
-            return self.local_memcpy_write(replica, data);
+            tracing::info!(target: "te_debug", "write_to_replica: taking LOCAL_MEMCPY fast path");
+            let result = self.local_memcpy_write(replica, data);
+            tracing::info!(target: "te_debug", ok = result.is_ok(), "write_to_replica: EXIT (local_memcpy)");
+            return result;
         }
 
         if data.len() > self.local_buffer.len() {
+            tracing::error!(
+                target: "te_debug",
+                data_len = data.len(),
+                buf_len = self.local_buffer.len(),
+                "write_to_replica: data size exceeds local buffer"
+            );
             return Err(StoreError::InvalidParams(format!(
                 "data size {} exceeds local buffer size {}",
                 data.len(),
@@ -239,8 +259,18 @@ impl MooncakeClient {
             )));
         }
 
+        tracing::info!(
+            target: "te_debug",
+            seg_name = %replica.segment_name,
+            local_buf_ptr = ?self.local_buffer.as_ptr(),
+            local_buf_len = self.local_buffer.len(),
+            "write_to_replica: opening segment"
+        );
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: segment opened");
+
         let batch_id = self.engine.allocate_batch_id(1)?;
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: batch_id allocated");
 
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -249,6 +279,7 @@ impl MooncakeClient {
                 data.len(),
             );
         }
+        tracing::info!(target: "te_debug", data_len = data.len(), "write_to_replica: data copied to local_buffer");
 
         let target_offset = replica.base_addr + replica.offset;
         let request = TransferRequest {
@@ -258,28 +289,67 @@ impl MooncakeClient {
             target_offset,
             length: data.len() as u64,
         };
+        tracing::info!(
+            target: "te_debug",
+            src = ?request.source,
+            tgt_id = request.target_id.0,
+            tgt_off = request.target_offset,
+            len = request.length,
+            "write_to_replica: submitting transfer"
+        );
 
         self.engine.submit_transfer(batch_id, &[request])?;
+        tracing::info!(target: "te_debug", "write_to_replica: transfer submitted, polling...");
 
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);
+        let mut poll_count: u64 = 0;
         loop {
             let status = self.engine.get_transfer_status(batch_id, 0)?;
+            poll_count += 1;
             if status.status == TransferStatusEnum::Completed {
+                tracing::info!(
+                    target: "te_debug",
+                    poll_count,
+                    transferred = status.transferred_bytes,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "write_to_replica: transfer COMPLETED"
+                );
                 break;
             }
             if status.status == TransferStatusEnum::Failed {
+                tracing::error!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    batch_id = batch_id.0,
+                    seg_id = segment_id.0,
+                    "write_to_replica: transfer FAILED (leaking batch_id and segment!)"
+                );
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
                 return Err(StoreError::OperationFailed(-1));
             }
             if start.elapsed() > timeout {
-                self.engine.free_batch_id(batch_id)?;
+                tracing::error!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    batch_id = batch_id.0,
+                    "write_to_replica: transfer TIMEOUT"
+                );
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
                 return Err(StoreError::OperationFailed(-2));
             }
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: freeing batch_id");
         self.engine.free_batch_id(batch_id)?;
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: closing segment");
         self.engine.close_segment(segment_id)?;
+        tracing::info!(target: "te_debug", "write_to_replica: EXIT (success)");
         Ok(())
     }
 
@@ -289,8 +359,19 @@ impl MooncakeClient {
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<()> {
+        tracing::info!(
+            target: "te_debug",
+            seg_name = %replica.segment_name,
+            buf = ?buffer,
+            size,
+            "zero_copy_write: ENTER"
+        );
+
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "zero_copy_write: segment opened");
+
         let batch_id = self.engine.allocate_batch_id(1)?;
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_write: batch_id allocated");
 
         let request = TransferRequest {
             opcode: Opcode::Write,
@@ -301,20 +382,55 @@ impl MooncakeClient {
         };
 
         self.engine.submit_transfer(batch_id, &[request])?;
+        tracing::info!(target: "te_debug", "zero_copy_write: transfer submitted, polling...");
 
+        let start = tokio::time::Instant::now();
+        let timeout = tokio::time::Duration::from_secs(10);
+        let mut poll_count: u64 = 0;
         loop {
             let status = self.engine.get_transfer_status(batch_id, 0)?;
+            poll_count += 1;
             if status.status.is_terminal() {
                 if status.status != TransferStatusEnum::Completed {
+                    tracing::error!(
+                        target: "te_debug",
+                        poll_count,
+                        elapsed_ms = start.elapsed().as_millis(),
+                        batch_id = batch_id.0,
+                        seg_id = segment_id.0,
+                        "zero_copy_write: transfer FAILED (cleaning up)"
+                    );
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(segment_id);
                     return Err(StoreError::OperationFailed(-1));
                 }
+                tracing::info!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "zero_copy_write: transfer COMPLETED"
+                );
                 break;
+            }
+            if start.elapsed() > timeout {
+                tracing::error!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    batch_id = batch_id.0,
+                    seg_id = segment_id.0,
+                    "zero_copy_write: transfer TIMEOUT (cleaning up)"
+                );
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
+                return Err(StoreError::OperationFailed(-2));
             }
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
         self.engine.free_batch_id(batch_id)?;
         self.engine.close_segment(segment_id)?;
+        tracing::info!(target: "te_debug", "zero_copy_write: EXIT (success)");
         Ok(())
     }
 
@@ -322,22 +438,57 @@ impl MooncakeClient {
         &self,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
+        tracing::info!(
+            target: "te_debug",
+            seg_name = %replica.segment_name,
+            offset = replica.offset,
+            base_addr = replica.base_addr,
+            replica_size = replica.size,
+            is_local = self.is_local_replica(replica),
+            has_seg_buf = self.segment_buffer.is_some(),
+            "read_from_replica: ENTER"
+        );
+
         // Fast path: local segment — direct memcpy, no TE overhead
         if self.is_local_replica(replica) && self.segment_buffer.is_some() {
-            return self.local_memcpy_read(replica);
+            tracing::info!(target: "te_debug", "read_from_replica: taking LOCAL_MEMCPY fast path");
+            let result = self.local_memcpy_read(replica);
+            tracing::info!(
+                target: "te_debug",
+                ok = result.is_ok(),
+                data_len = result.as_ref().map(|v| v.len()).unwrap_or(0),
+                "read_from_replica: EXIT (local_memcpy)"
+            );
+            return result;
         }
 
         if replica.size > self.local_buffer.len() as u64 {
+            tracing::error!(
+                target: "te_debug",
+                replica_size = replica.size,
+                buf_len = self.local_buffer.len(),
+                "read_from_replica: object size exceeds local buffer"
+            );
             return Err(StoreError::InvalidParams(format!(
                 "object size {} exceeds local buffer size {}",
                 replica.size,
                 self.local_buffer.len()
             )));
         }
+
+        tracing::info!(
+            target: "te_debug",
+            seg_name = %replica.segment_name,
+            local_buf_ptr = ?self.local_buffer.as_ptr(),
+            local_buf_len = self.local_buffer.len(),
+            "read_from_replica: opening segment"
+        );
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "read_from_replica: segment opened");
 
         let read_len = replica.size as usize;
         let batch_id = self.engine.allocate_batch_id(1)?;
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, read_len, "read_from_replica: batch_id allocated");
 
         let target_offset = replica.base_addr + replica.offset;
         let request = TransferRequest {
@@ -347,33 +498,76 @@ impl MooncakeClient {
             target_offset,
             length: read_len as u64,
         };
+        tracing::info!(
+            target: "te_debug",
+            src = ?request.source,
+            tgt_id = request.target_id.0,
+            tgt_off = request.target_offset,
+            len = request.length,
+            "read_from_replica: submitting transfer"
+        );
 
         self.engine.submit_transfer(batch_id, &[request])?;
+        tracing::info!(target: "te_debug", "read_from_replica: transfer submitted, polling...");
 
         let mut transferred: u64;
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);
+        let mut poll_count: u64 = 0;
         loop {
             let status: transfer_engine_ffi::TransferStatus =
                 self.engine.get_transfer_status(batch_id, 0)?;
+            poll_count += 1;
             transferred = status.transferred_bytes;
             if status.status == TransferStatusEnum::Completed {
+                tracing::info!(
+                    target: "te_debug",
+                    poll_count,
+                    transferred,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "read_from_replica: transfer COMPLETED"
+                );
                 break;
             }
             if status.status == TransferStatusEnum::Failed {
+                tracing::error!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    batch_id = batch_id.0,
+                    seg_id = segment_id.0,
+                    "read_from_replica: transfer FAILED (leaking batch_id and segment!)"
+                );
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
                 return Err(StoreError::OperationFailed(-1));
             }
             if start.elapsed() > timeout {
-                self.engine.free_batch_id(batch_id)?;
+                tracing::error!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    batch_id = batch_id.0,
+                    "read_from_replica: transfer TIMEOUT"
+                );
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
                 return Err(StoreError::OperationFailed(-2));
             }
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, "read_from_replica: freeing batch_id");
         self.engine.free_batch_id(batch_id)?;
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "read_from_replica: closing segment");
         self.engine.close_segment(segment_id)?;
 
         let result: Vec<u8> = self.local_buffer[..(transferred as usize)].to_vec();
+        tracing::info!(
+            target: "te_debug",
+            result_len = result.len(),
+            "read_from_replica: EXIT (success)"
+        );
         Ok(result)
     }
 
@@ -383,9 +577,20 @@ impl MooncakeClient {
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<usize> {
+        tracing::info!(
+            target: "te_debug",
+            seg_name = %replica.segment_name,
+            buf = ?buffer,
+            size,
+            "zero_copy_read: ENTER"
+        );
+
         let segment_id: transfer_engine_ffi::SegmentId =
             self.engine.open_segment(&replica.segment_name)?;
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "zero_copy_read: segment opened");
+
         let batch_id: transfer_engine_ffi::BatchId = self.engine.allocate_batch_id(1)?;
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_read: batch_id allocated");
 
         let request: TransferRequest = TransferRequest {
             opcode: Opcode::Read,
@@ -396,20 +601,59 @@ impl MooncakeClient {
         };
 
         self.engine.submit_transfer(batch_id, &[request])?;
+        tracing::info!(target: "te_debug", "zero_copy_read: transfer submitted, polling...");
 
         let mut transferred: u64;
+        let start = tokio::time::Instant::now();
+        let timeout = tokio::time::Duration::from_secs(10);
+        let mut poll_count: u64 = 0;
         loop {
             let status: transfer_engine_ffi::TransferStatus =
                 self.engine.get_transfer_status(batch_id, 0)?;
+            poll_count += 1;
             transferred = status.transferred_bytes;
             if status.status.is_terminal() {
+                if status.status != TransferStatusEnum::Completed {
+                    tracing::error!(
+                        target: "te_debug",
+                        poll_count,
+                        elapsed_ms = start.elapsed().as_millis(),
+                        batch_id = batch_id.0,
+                        seg_id = segment_id.0,
+                        "zero_copy_read: transfer FAILED (cleaning up)"
+                    );
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(segment_id);
+                    return Err(StoreError::OperationFailed(-1));
+                }
+                tracing::info!(
+                    target: "te_debug",
+                    poll_count,
+                    transferred,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    "zero_copy_read: transfer COMPLETED"
+                );
                 break;
+            }
+            if start.elapsed() > timeout {
+                tracing::error!(
+                    target: "te_debug",
+                    poll_count,
+                    elapsed_ms = start.elapsed().as_millis(),
+                    batch_id = batch_id.0,
+                    seg_id = segment_id.0,
+                    "zero_copy_read: transfer TIMEOUT (cleaning up)"
+                );
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
+                return Err(StoreError::OperationFailed(-2));
             }
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
         self.engine.free_batch_id(batch_id)?;
         self.engine.close_segment(segment_id)?;
+        tracing::info!(target: "te_debug", transferred, "zero_copy_read: EXIT (success)");
         Ok(transferred as usize)
     }
 }

@@ -11,19 +11,32 @@ impl MooncakeClient {
     // -----------------------------------------------------------------------
 
     pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
+        tracing::info!(target: "te_debug", %key, "get: ENTER");
+
         // Level 0: check local hot cache (fastest — no network)
         if let Some(ref cache) = self.hot_cache {
             if let Some(data) = cache.get(key) {
+                tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: HIT hot cache");
                 return Ok(data);
             }
         }
 
         // Level 1: fetch from memory store (gRPC → RDMA)
+        tracing::info!(target: "te_debug", %key, "get: fetching replicas from master");
         let replicas = self.fetch_replicas(key).await?;
+        tracing::info!(target: "te_debug", %key, replica_count = replicas.len(), "get: replicas received");
+
         let replica = self.select_best_replica(&replicas);
         match replica {
             Some(r) => {
+                tracing::info!(
+                    target: "te_debug", %key,
+                    seg_name = %r.segment_name,
+                    replica_type = ?r.replica_type,
+                    "get: selected replica, calling read_from_replica"
+                );
                 let data = self.read_from_replica(r).await?;
+                tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: read_from_replica success");
                 // Store in hot cache for future hits
                 if let Some(ref cache) = self.hot_cache {
                     cache.put(key, &data);
@@ -31,11 +44,13 @@ impl MooncakeClient {
                 Ok(data)
             }
             None => {
+                tracing::info!(target: "te_debug", %key, "get: no replica found, trying remote source");
                 // Level 2: remote source fallback (S3 / local FS)
                 if let Some(ref handler) = self.miss_handler {
                     if handler.is_enabled() {
                         match handler.handle_miss(key).await {
                             Ok(data) => {
+                                tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: remote source success");
                                 if let Some(ref cache) = self.hot_cache {
                                     cache.put(key, &data);
                                 }
@@ -51,9 +66,11 @@ impl MooncakeClient {
                             }
                         }
                     } else {
+                        tracing::info!(target: "te_debug", %key, "get: miss handler disabled, key not found");
                         Err(StoreError::KeyNotFound(key.to_string()))
                     }
                 } else {
+                    tracing::info!(target: "te_debug", %key, "get: no miss handler, key not found");
                     Err(StoreError::KeyNotFound(key.to_string()))
                 }
             }
@@ -104,9 +121,16 @@ impl MooncakeClient {
                     }
                 };
                 let seg = self.engine.open_segment(&replica.segment_name)?;
-                let batch_id = self
+                let batch_id = match self
                     .engine
-                    .allocate_batch_id(sizes[buf_idx][key_idx].len())?;
+                    .allocate_batch_id(sizes[buf_idx][key_idx].len())
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = self.engine.close_segment(seg);
+                        return Err(e.into());
+                    }
+                };
 
                 let reqs: Vec<TransferRequest> = sizes[buf_idx][key_idx]
                     .iter()
@@ -125,6 +149,8 @@ impl MooncakeClient {
                 self.engine.submit_transfer(batch_id, &reqs)?;
 
                 let mut range_results: Vec<i64> = vec![0; sizes[buf_idx][key_idx].len()];
+                let start = tokio::time::Instant::now();
+                let timeout = tokio::time::Duration::from_secs(10);
                 for ri in 0..sizes[buf_idx][key_idx].len() {
                     loop {
                         let status = self.engine.get_transfer_status(batch_id, ri)?;
@@ -133,6 +159,10 @@ impl MooncakeClient {
                             break;
                         }
                         if status.status == TransferStatusEnum::Failed {
+                            range_results[ri] = -1;
+                            break;
+                        }
+                        if start.elapsed() > timeout {
                             range_results[ri] = -1;
                             break;
                         }
@@ -153,13 +183,23 @@ impl MooncakeClient {
     // -----------------------------------------------------------------------
 
     pub async fn batch_get(&mut self, keys: &[String]) -> StoreResult<Vec<Option<Vec<u8>>>> {
+        tracing::info!(target: "te_debug", key_count = keys.len(), "batch_get: ENTER");
         let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
+        for (i, key) in keys.iter().enumerate() {
+            tracing::info!(target: "te_debug", index = i, total = keys.len(), %key, "batch_get: processing key");
             match self.get(key).await {
-                Ok(data) => results.push(Some(data)),
-                Err(_) => results.push(None),
+                Ok(data) => {
+                    tracing::info!(target: "te_debug", index = i, %key, data_len = data.len(), "batch_get: key OK");
+                    results.push(Some(data));
+                }
+                Err(e) => {
+                    tracing::warn!(target: "te_debug", index = i, %key, error = %e, "batch_get: key FAILED");
+                    results.push(None);
+                }
             }
         }
+        let ok_count = results.iter().filter(|r| r.is_some()).count();
+        tracing::info!(target: "te_debug", total = keys.len(), ok = ok_count, "batch_get: EXIT");
         Ok(results)
     }
 
@@ -202,7 +242,13 @@ impl MooncakeClient {
             };
             let seg = self.engine.open_segment(&replica.segment_name)?;
             let count = all_buffers[key_idx].len();
-            let batch_id = self.engine.allocate_batch_id(count)?;
+            let batch_id = match self.engine.allocate_batch_id(count) {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = self.engine.close_segment(seg);
+                    return Err(e.into());
+                }
+            };
 
             let reqs: Vec<TransferRequest> = (0..count)
                 .map(|i| TransferRequest {
@@ -217,6 +263,8 @@ impl MooncakeClient {
             self.engine.submit_transfer(batch_id, &reqs)?;
 
             let mut key_results: Vec<i64> = vec![0; count];
+            let start = tokio::time::Instant::now();
+            let timeout = tokio::time::Duration::from_secs(10);
             for i in 0..count {
                 loop {
                     let status = self.engine.get_transfer_status(batch_id, i)?;
@@ -225,6 +273,10 @@ impl MooncakeClient {
                         break;
                     }
                     if status.status == TransferStatusEnum::Failed {
+                        key_results[i] = -1;
+                        break;
+                    }
+                    if start.elapsed() > timeout {
                         key_results[i] = -1;
                         break;
                     }

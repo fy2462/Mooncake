@@ -239,9 +239,12 @@ impl TransferEngine {
 
     /// Open a remote segment identified by `segment_name` (IP:port).
     pub fn open_segment(&self, segment_name: &str) -> TransferEngineResult<SegmentId> {
+        tracing::info!(target: "te_debug", %segment_name, "open_segment: calling C API");
         let name_c = CString::new(segment_name)?;
         let id = unsafe { ffi::openSegment(self.handle.as_ptr(), name_c.as_ptr()) };
+        tracing::info!(target: "te_debug", %segment_name, seg_id = id, "open_segment: C API returned");
         if id < 0 {
+            tracing::error!(target: "te_debug", %segment_name, seg_id = id, "open_segment: FAILED");
             return Err(TransferEngineError::OperationFailed(id));
         }
         Ok(SegmentId(id))
@@ -249,8 +252,11 @@ impl TransferEngine {
 
     /// Close a previously opened segment.
     pub fn close_segment(&self, segment_id: SegmentId) -> TransferEngineResult<()> {
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, "close_segment: calling C API");
         let rc = unsafe { ffi::closeSegment(self.handle.as_ptr(), segment_id.0) };
+        tracing::info!(target: "te_debug", seg_id = segment_id.0, rc, "close_segment: C API returned");
         if rc != 0 {
+            tracing::error!(target: "te_debug", seg_id = segment_id.0, rc, "close_segment: FAILED");
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(())
@@ -302,8 +308,11 @@ impl TransferEngine {
 
     /// Allocate a batch ID for submitting a group of transfer requests.
     pub fn allocate_batch_id(&self, batch_size: usize) -> TransferEngineResult<BatchId> {
+        tracing::info!(target: "te_debug", batch_size, "allocate_batch_id: calling C API");
         let id = unsafe { ffi::allocateBatchID(self.handle.as_ptr(), batch_size) };
+        tracing::info!(target: "te_debug", batch_size, batch_id = id, "allocate_batch_id: C API returned");
         if id == ffi::INVALID_BATCH {
+            tracing::error!(target: "te_debug", batch_size, "allocate_batch_id: INVALID_BATCH");
             return Err(TransferEngineError::OperationFailed(-1));
         }
         Ok(BatchId(id))
@@ -315,14 +324,34 @@ impl TransferEngine {
         batch_id: BatchId,
         requests: &[TransferRequest],
     ) -> TransferEngineResult<()> {
+        tracing::info!(
+            target: "te_debug",
+            batch_id = batch_id.0,
+            req_count = requests.len(),
+            "submit_transfer: calling C API"
+        );
         let mut ffi_requests: Vec<ffi::transfer_request_t> = requests
             .iter()
-            .map(|r| ffi::transfer_request_t {
-                opcode: r.opcode as i32,
-                source: r.source,
-                target_id: r.target_id.0,
-                target_offset: r.target_offset,
-                length: r.length,
+            .enumerate()
+            .map(|(i, r)| {
+                tracing::info!(
+                    target: "te_debug",
+                    batch_id = batch_id.0,
+                    idx = i,
+                    opcode = r.opcode as i32,
+                    src = ?r.source,
+                    tgt_id = r.target_id.0,
+                    tgt_off = r.target_offset,
+                    len = r.length,
+                    "submit_transfer: request detail"
+                );
+                ffi::transfer_request_t {
+                    opcode: r.opcode as i32,
+                    source: r.source,
+                    target_id: r.target_id.0,
+                    target_offset: r.target_offset,
+                    length: r.length,
+                }
             })
             .collect();
 
@@ -334,7 +363,9 @@ impl TransferEngine {
                 ffi_requests.len(),
             )
         };
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, rc, "submit_transfer: C API returned");
         if rc != 0 {
+            tracing::error!(target: "te_debug", batch_id = batch_id.0, rc, "submit_transfer: FAILED");
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(())
@@ -354,6 +385,13 @@ impl TransferEngine {
             ffi::getTransferStatus(self.handle.as_ptr(), batch_id.0, task_id, &mut status)
         };
         if rc != 0 {
+            tracing::error!(
+                target: "te_debug",
+                batch_id = batch_id.0,
+                task_id,
+                rc,
+                "get_transfer_status: FAILED"
+            );
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(TransferStatus {
@@ -364,8 +402,11 @@ impl TransferEngine {
 
     /// Release a batch ID after all transfers complete.
     pub fn free_batch_id(&self, batch_id: BatchId) -> TransferEngineResult<()> {
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, "free_batch_id: calling C API");
         let rc = unsafe { ffi::freeBatchID(self.handle.as_ptr(), batch_id.0) };
+        tracing::info!(target: "te_debug", batch_id = batch_id.0, rc, "free_batch_id: C API returned");
         if rc != 0 {
+            tracing::error!(target: "te_debug", batch_id = batch_id.0, rc, "free_batch_id: FAILED");
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(())
