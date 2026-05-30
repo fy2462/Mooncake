@@ -97,12 +97,10 @@ pub(crate) struct MasterState {
     pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
 }
 
-/// Tracks which node is currently fetching a key from the remote source.
-/// 记录当前正在从远端拉取某个 key 的节点信息。
+/// Tracks the start time of a remote fetch for a key.
+/// 记录某个 key 的回源拉取开始时间。
 #[derive(Debug, Clone)]
 pub(crate) struct RemotePullEntry {
-    #[allow(dead_code)]
-    pub(crate) puller_client_id: Uuid,
     /// 拉取开始时间，用于 TTL 过期判断 / Pull start time for TTL expiry.
     pub(crate) started_at: Instant,
 }

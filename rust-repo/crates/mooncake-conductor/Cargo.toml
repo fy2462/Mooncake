@@ -1,0 +1,24 @@
+[package]
+name = "mooncake-conductor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dashmap.workspace = true
+axum.workspace = true
+rmp-serde.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+rand.workspace = true
+parking_lot.workspace = true
+
+rmpv = "1"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+zmq = "0.10"

@@ -72,7 +72,6 @@ use self::helpers::{
     release_replicas, release_replicas_scheduled, validate_user_key,
     split_scoped_key, sync_client_segments, sync_nof_segment_usage,
     sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
-    DEFAULT_TENANT,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,

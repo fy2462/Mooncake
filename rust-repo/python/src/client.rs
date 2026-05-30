@@ -94,7 +94,7 @@ use mooncake_store_client::MooncakeClient;
 use parking_lot::Mutex;
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict};
 use std::ffi::c_void;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -123,12 +123,6 @@ pub(crate) struct PythonMooncakeClient {
 // =========================================================================
 // Internal helpers — 内部辅助函数
 // =========================================================================
-
-/// Convert a byte slice into an unbound Python bytes object.
-/// 将字节切片转换为不绑定到特定生命周期的 Python bytes 对象。
-fn bytes_to_py(py: Python<'_>, data: &[u8]) -> Py<PyBytes> {
-    PyBytes::new(py, data).unbind()
-}
 
 /// Extract the raw pointer and size from a Python buffer-like object.
 ///

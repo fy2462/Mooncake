@@ -229,7 +229,7 @@ async fn test_multiple_masters_remove_all_independent() {
 async fn test_many_masters_concurrent_isolated_creates() {
     // 4 independent masters, each creates objects in different tenants
     let mut masters = Vec::new();
-    for i in 0..4 {
+    for _ in 0..4 {
         let m = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
             lease_ttl: Duration::ZERO,
             ..Default::default()
@@ -273,7 +273,7 @@ async fn test_many_masters_concurrent_isolated_creates() {
                 continue;
             }
             let other_tenant = format!("conc-tenant-{}", j);
-            let keys = MasterService::get_all_keys(
+            let _keys = MasterService::get_all_keys(
                 m2,
                 Request::new(proto::GetAllKeysRequest {
                     tenant_id: other_tenant.clone(),
@@ -282,10 +282,7 @@ async fn test_many_masters_concurrent_isolated_creates() {
             .await
             .unwrap()
             .into_inner();
-            assert!(
-                keys.keys.len() >= 0,
-                "just verifying no crash on cross-master read"
-            );
+            // just verifying no crash on cross-master read
         }
     }
 }

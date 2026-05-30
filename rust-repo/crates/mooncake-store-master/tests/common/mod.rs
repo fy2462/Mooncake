@@ -1,3 +1,6 @@
+// Each integration test binary compiles this module independently but uses a
+// different subset of helpers. `allow(dead_code)` is the Rust convention for
+// shared test helpers — the compiler cannot see cross-test-file usage.
 #![allow(dead_code)]
 use mooncake_store_core::Segment;
 use std::path::PathBuf;

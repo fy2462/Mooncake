@@ -6,6 +6,7 @@ members = [
     "crates/mooncake-store-master",
     "crates/mooncake-store-client",
     "crates/mooncake-p2p-store",
+    "crates/mooncake-conductor",
     "python",
 ]
 

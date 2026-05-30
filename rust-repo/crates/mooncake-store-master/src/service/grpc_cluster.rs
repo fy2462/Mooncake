@@ -1201,7 +1201,6 @@ impl MasterServiceImpl {
         self.state.pending_remote_pulls.insert(
             key,
             super::state::RemotePullEntry {
-                puller_client_id: client_id,
                 started_at: std::time::Instant::now(),
             },
         );

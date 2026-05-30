@@ -123,13 +123,12 @@ impl CountMinSketch {
     }
 
     /// Query the estimated count for a key without modifying the sketch.
-    /// 只读查询 key 的估计计数值，不修改 sketch。
+    /// 只读查询 key 的估计计数值，不触发递增和衰减。
     ///
     /// Returns the minimum counter value across all rows.
     /// 返回所有行中最小的计数器值。
-    /// 只读查询 key 的估计计数值（不触发递增和衰减），供 admission control 使用。
-    #[allow(dead_code)]
-    pub fn count(&self, key: &str) -> u8 {
+    #[cfg(test)]
+    pub(crate) fn count(&self, key: &str) -> u8 {
         let mut min_val = u8::MAX;
         for i in 0..self.depth {
             let idx = self.hash(key, i as u64) % self.width;

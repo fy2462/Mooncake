@@ -1,14 +1,9 @@
-use mooncake_store_master::make_tenant_scoped_key;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
-
-fn sk(key: &str) -> String {
-    make_tenant_scoped_key("", key)
-}
 
 #[tokio::test]
 async fn test_promotion_flow_success_and_failure() {
