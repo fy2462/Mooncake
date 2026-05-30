@@ -476,8 +476,17 @@ impl MasterServiceImpl {
             }));
         }
         let objects = std::mem::take(&mut entry.offloading_objects);
+        // Convert scoped keys back to user_keys for external API.
+        // 将作用域 key 转换回 user_key，供外部 API 使用。
+        let unscoped: HashMap<String, i64> = objects
+            .into_iter()
+            .map(|(k, v)| {
+                let (_t, uk) = split_scoped_key(&k);
+                (uk, v)
+            })
+            .collect();
         Ok(Response::new(proto::OffloadObjectHeartbeatResponse {
-            objects,
+            objects: unscoped,
         }))
     }
 
@@ -529,8 +538,9 @@ impl MasterServiceImpl {
                 "keys and metadatas must have same length",
             ));
         }
-        for (key, metadata) in req.keys.iter().zip(req.metadatas.iter()) {
-            clear_offloading_task(&self.state, key);
+        for (raw_key, metadata) in req.keys.iter().zip(req.metadatas.iter()) {
+            let key = make_tenant_scoped_key("", raw_key);
+            clear_offloading_task(&self.state, &key);
             let replica = ReplicaDescriptor {
                 refcnt: 0,
                 handle_valid: true,
@@ -543,7 +553,7 @@ impl MasterServiceImpl {
                 holder_client_id: Some(client_id),
                 base_addr: 0,
             };
-            if let Some(mut object) = self.state.objects.get_mut(key) {
+            if let Some(mut object) = self.state.objects.get_mut(&key) {
                 if let Some(existing) = object.replicas.iter_mut().find(|existing| {
                     existing.replica_type == ReplicaType::LocalDisk
                         && existing.holder_client_id == Some(client_id)
@@ -554,6 +564,7 @@ impl MasterServiceImpl {
                 }
                 object.size = metadata.data_size.max(0) as u64;
             } else {
+                let (t_id, u_key) = split_scoped_key(&key);
                 self.state.objects.insert(
                     key.clone(),
                     ObjectEntry {
@@ -567,6 +578,8 @@ impl MasterServiceImpl {
                         put_start_time: None,
                         lease_timeout: None,
                         soft_pin_timeout: None,
+                        tenant_id: t_id,
+                        user_key: u_key,
                     },
                 );
             }
@@ -593,14 +606,15 @@ impl MasterServiceImpl {
             .get_mut(&client_id)
             .ok_or(Status::not_found("local disk segment not found"))?;
         let mut objects = HashMap::new();
-        if let Some((key, size)) = entry
+        if let Some((scoped_key, size)) = entry
             .promotion_objects
             .iter()
             .next()
             .map(|(key, size)| (key.clone(), *size))
         {
-            entry.promotion_objects.remove(&key);
-            objects.insert(key, size);
+            let (_t, uk) = split_scoped_key(&scoped_key);
+            entry.promotion_objects.remove(&scoped_key);
+            objects.insert(uk, size);
         }
         Ok(Response::new(proto::PromotionObjectHeartbeatResponse {
             objects,
@@ -619,6 +633,7 @@ impl MasterServiceImpl {
         request: Request<proto::PromotionAllocStartRequest>,
     ) -> Result<Response<proto::PromotionAllocStartResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -627,7 +642,7 @@ impl MasterServiceImpl {
         let mut task = self
             .state
             .promotion_tasks
-            .get_mut(&req.key)
+            .get_mut(&scoped_key)
             .ok_or(Status::failed_precondition("promotion task not found"))?;
         if task.holder_id != client_id {
             return Err(Status::permission_denied(
@@ -637,7 +652,7 @@ impl MasterServiceImpl {
         if task.object_size != req.size {
             return Err(Status::invalid_argument("size mismatch"));
         }
-        let object_exists = self.state.objects.contains_key(&req.key);
+        let object_exists = self.state.objects.contains_key(&scoped_key);
         if !object_exists {
             return Err(Status::not_found("key not found"));
         }
@@ -648,7 +663,7 @@ impl MasterServiceImpl {
         }
         let replicas = {
             let mut allocator = self.state.allocator.write();
-            allocator.allocate_for_client(&req.key, Some(client_id), req.size, 1, &config)
+            allocator.allocate_for_client(&scoped_key, Some(client_id), req.size, 1, &config)
         };
         let Some(mut staged) = replicas.into_iter().next() else {
             return Err(Status::resource_exhausted("no available memory segment"));
@@ -657,7 +672,7 @@ impl MasterServiceImpl {
         let staged_segment_id = staged.segment_id;
         let staged_offset = staged.offset;
         staged.status = ReplicaStatus::Allocating;
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&scoped_key) {
             object.replicas.push(staged.clone());
         }
         task.staged_segment_id = Some(staged_segment_id);
@@ -679,6 +694,7 @@ impl MasterServiceImpl {
         request: Request<proto::NotifyPromotionSuccessRequest>,
     ) -> Result<Response<proto::NotifyPromotionSuccessResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -687,7 +703,7 @@ impl MasterServiceImpl {
         let task = self
             .state
             .promotion_tasks
-            .get(&req.key)
+            .get(&scoped_key)
             .ok_or(Status::failed_precondition("promotion task not found"))?
             .clone();
         if task.holder_id != client_id {
@@ -709,7 +725,7 @@ impl MasterServiceImpl {
         let mut object = self
             .state
             .objects
-            .get_mut(&req.key)
+            .get_mut(&scoped_key)
             .ok_or(Status::not_found("key not found"))?;
         if let Some(replica) = object.replicas.iter_mut().find(|replica| {
             replica.replica_type == ReplicaType::Memory
@@ -721,9 +737,9 @@ impl MasterServiceImpl {
             committed = true;
         }
         drop(object);
-        clear_promotion_task(&self.state, &req.key);
+        clear_promotion_task(&self.state, &scoped_key);
         if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&client_id) {
-            local_disk.promotion_objects.remove(&req.key);
+            local_disk.promotion_objects.remove(&scoped_key);
         }
         if !committed {
             return Err(Status::failed_precondition("promotion replica not ready"));
@@ -742,6 +758,7 @@ impl MasterServiceImpl {
         request: Request<proto::NotifyPromotionFailureRequest>,
     ) -> Result<Response<proto::NotifyPromotionFailureResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -750,7 +767,7 @@ impl MasterServiceImpl {
         let Some(task) = self
             .state
             .promotion_tasks
-            .get(&req.key)
+            .get(&scoped_key)
             .map(|task| task.clone())
         else {
             return Ok(Response::new(proto::NotifyPromotionFailureResponse {}));
@@ -761,11 +778,11 @@ impl MasterServiceImpl {
             ));
         }
         if let (Some(segment_id), Some(offset)) = (task.staged_segment_id, task.staged_offset) {
-            release_staged_promotion_replica(&self.state, &req.key, segment_id, offset);
+            release_staged_promotion_replica(&self.state, &scoped_key, segment_id, offset);
         }
-        clear_promotion_task(&self.state, &req.key);
+        clear_promotion_task(&self.state, &scoped_key);
         if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&client_id) {
-            local_disk.promotion_objects.remove(&req.key);
+            local_disk.promotion_objects.remove(&scoped_key);
         }
         Ok(Response::new(proto::NotifyPromotionFailureResponse {}))
     }

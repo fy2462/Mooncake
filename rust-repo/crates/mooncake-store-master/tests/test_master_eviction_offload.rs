@@ -1,9 +1,22 @@
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
+use mooncake_store_master::make_tenant_scoped_key;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
+
+/// Scope a test key to the default tenant.
+fn sk(key: &str) -> String {
+    make_tenant_scoped_key("", key)
+}
+
+fn uuid_proto(id: Uuid) -> proto::Uuid {
+    proto::Uuid {
+        high: id.as_u64_pair().0,
+        low: id.as_u64_pair().1,
+    }
+}
 
 #[tokio::test]
 async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_work() {
@@ -18,10 +31,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
         MasterService::mount_segment(
             &service,
             Request::new(proto::MountSegmentRequest {
-                client_id: Some(proto::Uuid {
-                    high: client_id.as_u64_pair().0,
-                    low: client_id.as_u64_pair().1,
-                }),
+                client_id: Some(uuid_proto(client_id)),
                 segment_name: segment_name.into(),
                 size: 4096,
                 base_addr: 0,
@@ -33,10 +43,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     MasterService::mount_local_disk_segment(
         &service,
         Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             enable_offloading: true,
         }),
     )
@@ -46,10 +53,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     let put = MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "evict-offload".into(),
             slice_length: 256,
             config: Some(proto::ReplicateConfig {
@@ -63,6 +67,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -72,12 +77,10 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     MasterService::put_end(
         &service,
         Request::new(proto::PutEndRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "evict-offload".into(),
             replica_type: 0,
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -90,10 +93,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     let offload = MasterService::offload_object_heartbeat(
         &service,
         Request::new(proto::OffloadObjectHeartbeatRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             enable_offloading: true,
         }),
     )
@@ -106,6 +106,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "evict-offload".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -134,10 +135,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     MasterService::mount_segment(
         &service,
         Request::new(proto::MountSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             segment_name: "evict-localdisk".into(),
             size: 4096,
             base_addr: 0,
@@ -148,10 +146,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     MasterService::mount_local_disk_segment(
         &service,
         Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             enable_offloading: true,
         }),
     )
@@ -161,10 +156,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "already-offloaded".into(),
             slice_length: 128,
             config: Some(proto::ReplicateConfig {
@@ -178,6 +170,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -185,12 +178,10 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     MasterService::put_end(
         &service,
         Request::new(proto::PutEndRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "already-offloaded".into(),
             replica_type: 0,
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -198,10 +189,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     MasterService::notify_offload_success(
         &service,
         Request::new(proto::NotifyOffloadSuccessRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             keys: vec!["already-offloaded".into()],
             metadatas: vec![proto::StorageObjectMetadata {
                 bucket_id: 0,
@@ -223,6 +211,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "already-offloaded".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -264,10 +253,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
         MasterService::mount_segment(
             &service,
             Request::new(proto::MountSegmentRequest {
-                client_id: Some(proto::Uuid {
-                    high: client_id.as_u64_pair().0,
-                    low: client_id.as_u64_pair().1,
-                }),
+                client_id: Some(uuid_proto(client_id)),
                 segment_name: segment_name.into(),
                 size: 4096,
                 base_addr: 0,
@@ -279,10 +265,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     MasterService::mount_local_disk_segment(
         &service,
         Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             enable_offloading: true,
         }),
     )
@@ -292,10 +275,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "bg-evict-offload".into(),
             slice_length: 512,
             config: Some(proto::ReplicateConfig {
@@ -309,6 +289,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -316,12 +297,10 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     MasterService::put_end(
         &service,
         Request::new(proto::PutEndRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "bg-evict-offload".into(),
             replica_type: 0,
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -332,10 +311,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     let offload = MasterService::offload_object_heartbeat(
         &service,
         Request::new(proto::OffloadObjectHeartbeatRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             enable_offloading: true,
         }),
     )
@@ -348,6 +324,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "bg-evict-offload".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -376,10 +353,7 @@ async fn test_processing_keys_excluded_from_eviction() {
     MasterService::mount_segment(
         &service,
         Request::new(proto::MountSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             segment_name: "proc-key-seg".into(),
             size: 4096,
             base_addr: 0,
@@ -392,10 +366,7 @@ async fn test_processing_keys_excluded_from_eviction() {
     let put = MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "evictable".into(),
             slice_length: 128,
             config: Some(proto::ReplicateConfig {
@@ -409,6 +380,7 @@ async fn test_processing_keys_excluded_from_eviction() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -418,12 +390,10 @@ async fn test_processing_keys_excluded_from_eviction() {
     MasterService::put_end(
         &service,
         Request::new(proto::PutEndRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "evictable".into(),
             replica_type: 0,
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -433,10 +403,7 @@ async fn test_processing_keys_excluded_from_eviction() {
     let put2 = MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
-            client_id: Some(proto::Uuid {
-                high: client_id.as_u64_pair().0,
-                low: client_id.as_u64_pair().1,
-            }),
+            client_id: Some(uuid_proto(client_id)),
             key: "still-processing".into(),
             slice_length: 128,
             config: Some(proto::ReplicateConfig {
@@ -450,6 +417,7 @@ async fn test_processing_keys_excluded_from_eviction() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -468,6 +436,7 @@ async fn test_processing_keys_excluded_from_eviction() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "still-processing".into(),
+            tenant_id: String::new(),
         }),
     )
     .await

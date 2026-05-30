@@ -128,6 +128,8 @@ fn test_local_snapshot_provider_loads_snapshot() {
     objects.insert(
         "ha-key".into(),
         ObjectEntry {
+        tenant_id: "default".to_string(),
+        user_key: String::new(),
             replicas: vec![ReplicaDescriptor {
                 base_addr: 0,
                 refcnt: 0,

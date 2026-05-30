@@ -46,6 +46,7 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
             }),
             key: "offload-key".into(),
             slice_length: 256,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -70,6 +71,7 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
             }),
             key: "offload-key".into(),
             replica_type: 0,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -114,6 +116,7 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "disk-only-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await

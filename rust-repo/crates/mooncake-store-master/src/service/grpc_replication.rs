@@ -104,17 +104,18 @@ impl MasterServiceImpl {
         request: Request<proto::PutRevokeRequest>,
     ) -> Result<Response<proto::PutRevokeResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        if self.state.replication_tasks.contains_key(&req.key) {
+        if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
             ));
         }
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&scoped_key) {
             if object_owner_client_id(&self.state, &object) != Some(client_id) {
                 return Err(Status::permission_denied(
                     "object owned by different client",
@@ -167,9 +168,9 @@ impl MasterServiceImpl {
             });
             let remove_object = object.replicas.is_empty();
             drop(object);
-            release_object_replicas(&self.state, &req.key, &removed);
+            release_object_replicas(&self.state, &scoped_key, &removed);
             if remove_object {
-                self.state.objects.remove(&req.key);
+                self.state.objects.remove(&scoped_key);
             }
         }
         metrics::PUT_REVOKE_REQUESTS.inc();
@@ -182,11 +183,15 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
         let req = request.into_inner();
+        let tenant_filter = normalize_tenant_id(&req.tenant_id);
         let keys = self
             .state
             .objects
             .iter()
             .filter(|entry| {
+                if entry.tenant_id != tenant_filter {
+                    return false;
+                }
                 if req.force {
                     return true;
                 }
@@ -228,6 +233,7 @@ impl MasterServiceImpl {
         request: Request<proto::CopyStartRequest>,
     ) -> Result<Response<proto::CopyStartResponse>, Status> {
         let req = request.into_inner();
+        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -236,9 +242,9 @@ impl MasterServiceImpl {
         let object = self
             .state
             .objects
-            .get(&req.key)
+            .get(&key)
             .ok_or(Status::not_found("key not found"))?;
-        if self.state.replication_tasks.contains_key(&req.key) {
+        if self.state.replication_tasks.contains_key(&key) {
             return Err(Status::failed_precondition(
                 "object already has an ongoing replication task",
             ));
@@ -264,7 +270,7 @@ impl MasterServiceImpl {
                 continue;
             }
             if client_id_by_replica_segment_name(&self.state, target).is_none() {
-                release_object_replicas(&self.state, &req.key, &allocated);
+                release_object_replicas(&self.state, &key, &allocated);
                 return Err(Status::invalid_argument(format!(
                     "target segment not mounted: {target}"
                 )));
@@ -280,24 +286,24 @@ impl MasterServiceImpl {
                         e.segment.name == *target && e.status == proto::SegmentStatus::Active
                     });
             if !is_active {
-                release_object_replicas(&self.state, &req.key, &allocated);
+                release_object_replicas(&self.state, &key, &allocated);
                 return Err(Status::failed_precondition(format!(
                     "target segment not active or not allocatable: {target}"
                 )));
             }
             allocated.push(allocate_replica_on_segment(
                 &self.state,
-                &req.key,
+                &key,
                 size,
                 target,
             )?);
         }
 
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             object.replicas.extend(allocated.clone());
         }
         // Pin source replica via refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             if let Some(src) = object
                 .replicas
                 .iter_mut()
@@ -307,7 +313,7 @@ impl MasterServiceImpl {
             }
         }
         self.state.replication_tasks.insert(
-            req.key.clone(),
+            key.clone(),
             ReplicationTaskEntry {
                 client_id,
                 kind: ReplicationTaskKind::Copy,
@@ -329,6 +335,7 @@ impl MasterServiceImpl {
         request: Request<proto::CopyEndRequest>,
     ) -> Result<Response<proto::CopyEndResponse>, Status> {
         let req = request.into_inner();
+        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -337,7 +344,7 @@ impl MasterServiceImpl {
         let task = self
             .state
             .replication_tasks
-            .get(&req.key)
+            .get(&key)
             .ok_or(Status::failed_precondition("no replication task"))?
             .clone();
         if task.client_id != client_id || task.kind != ReplicationTaskKind::Copy {
@@ -347,7 +354,7 @@ impl MasterServiceImpl {
         let mut source_invalid = false;
         // C++ master_service.cpp:1985-1994 CopyEnd 时检查 source replica 的 handle 有效性
         // 如果 source handle 已失效，中止操作并撤销 targets
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             // C++ master_service.cpp:1985-1988 检查 source replica 是否 still present 且 handle_valid
             match object
                 .replicas
@@ -383,7 +390,7 @@ impl MasterServiceImpl {
             all_present = false;
         }
         // Release source replica refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             if let Some(src) = object
                 .replicas
                 .iter_mut()
@@ -392,11 +399,11 @@ impl MasterServiceImpl {
                 src.dec_refcnt();
             }
         }
-        self.state.replication_tasks.remove(&req.key);
+        self.state.replication_tasks.remove(&key);
         // C++ master_service.cpp:1988-1992 如果 source handle 在 Copy 过程中失效，撤销 targets
         if source_invalid {
             let mut removed_targets = Vec::new();
-            if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(mut object) = self.state.objects.get_mut(&key) {
                 object.replicas.retain(|replica| {
                     let matched = task
                         .targets
@@ -408,7 +415,7 @@ impl MasterServiceImpl {
                     !matched
                 });
             }
-            release_object_replicas(&self.state, &req.key, &removed_targets);
+            release_object_replicas(&self.state, &key, &removed_targets);
             return Err(Status::failed_precondition(
                 "source replica handle became invalid during transfer",
             ));
@@ -427,6 +434,7 @@ impl MasterServiceImpl {
         request: Request<proto::CopyRevokeRequest>,
     ) -> Result<Response<proto::CopyRevokeResponse>, Status> {
         let req = request.into_inner();
+        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -435,7 +443,7 @@ impl MasterServiceImpl {
         let task = self
             .state
             .replication_tasks
-            .get(&req.key)
+            .get(&key)
             .ok_or(Status::failed_precondition("no replication task"))?
             .clone();
         if task.client_id != client_id || task.kind != ReplicationTaskKind::Copy {
@@ -444,7 +452,7 @@ impl MasterServiceImpl {
 
         let mut removed = Vec::new();
         let mut remove_object = false;
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             object.replicas.retain(|replica| {
                 let matched = task
                     .targets
@@ -457,12 +465,12 @@ impl MasterServiceImpl {
             });
             remove_object = object.replicas.is_empty();
         }
-        release_object_replicas(&self.state, &req.key, &removed);
+        release_object_replicas(&self.state, &key, &removed);
         if remove_object {
-            self.state.objects.remove(&req.key);
+            self.state.objects.remove(&key);
         }
         // Release source replica refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             if let Some(src) = object
                 .replicas
                 .iter_mut()
@@ -471,7 +479,7 @@ impl MasterServiceImpl {
                 src.dec_refcnt();
             }
         }
-        self.state.replication_tasks.remove(&req.key);
+        self.state.replication_tasks.remove(&key);
         Ok(Response::new(proto::CopyRevokeResponse {}))
     }
 
@@ -483,6 +491,7 @@ impl MasterServiceImpl {
         request: Request<proto::MoveStartRequest>,
     ) -> Result<Response<proto::MoveStartResponse>, Status> {
         let req = request.into_inner();
+        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -494,9 +503,9 @@ impl MasterServiceImpl {
         let object = self
             .state
             .objects
-            .get(&req.key)
+            .get(&key)
             .ok_or(Status::not_found("key not found"))?;
-        if self.state.replication_tasks.contains_key(&req.key) {
+        if self.state.replication_tasks.contains_key(&key) {
             return Err(Status::failed_precondition(
                 "object already has an ongoing replication task",
             ));
@@ -524,8 +533,8 @@ impl MasterServiceImpl {
                     return Err(Status::invalid_argument("target segment not mounted"));
                 }
                 let replica =
-                    allocate_replica_on_segment(&self.state, &req.key, size, &req.target)?;
-                if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+                    allocate_replica_on_segment(&self.state, &key, size, &req.target)?;
+                if let Some(mut object) = self.state.objects.get_mut(&key) {
                     object.replicas.push(replica.clone());
                 }
                 replica
@@ -539,7 +548,7 @@ impl MasterServiceImpl {
             vec![target.clone()]
         };
         // Pin source replica via refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             if let Some(src) = object
                 .replicas
                 .iter_mut()
@@ -549,7 +558,7 @@ impl MasterServiceImpl {
             }
         }
         self.state.replication_tasks.insert(
-            req.key.clone(),
+            key.clone(),
             ReplicationTaskEntry {
                 client_id,
                 kind: ReplicationTaskKind::Move,
@@ -571,6 +580,7 @@ impl MasterServiceImpl {
         request: Request<proto::MoveEndRequest>,
     ) -> Result<Response<proto::MoveEndResponse>, Status> {
         let req = request.into_inner();
+        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -579,7 +589,7 @@ impl MasterServiceImpl {
         let task = self
             .state
             .replication_tasks
-            .get(&req.key)
+            .get(&key)
             .ok_or(Status::failed_precondition("no replication task"))?
             .clone();
         if task.client_id != client_id || task.kind != ReplicationTaskKind::Move {
@@ -590,7 +600,7 @@ impl MasterServiceImpl {
         // 若 source handle 已失效，撤销 target 并返回错误
         let mut source_invalid = false;
         let remove_object;
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             // C++ master_service.cpp:2238-2240 检查 source replica handle 是否仍然有效
             if let Some(source_replica) = object
                 .replicas
@@ -633,7 +643,7 @@ impl MasterServiceImpl {
         let release_timeout = self.state.runtime_config.put_start_release_timeout;
         let state = self.state.clone();
         let source_replicas = removed_source.clone();
-        let key_clone = req.key.clone();
+        let key_clone = key.clone();
         tokio::spawn(async move {
             tracing::info!(
                 "MoveEnd: starting delayed release for {} source replicas of key={}, timeout={:?}",
@@ -654,7 +664,7 @@ impl MasterServiceImpl {
         if source_invalid {
             // C++ master_service.cpp:2240-2243 source handle 失效时撤销 target replicas
             let mut removed_targets = Vec::new();
-            if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(mut object) = self.state.objects.get_mut(&key) {
                 object.replicas.retain(|replica| {
                     let matched = task
                         .targets
@@ -666,9 +676,9 @@ impl MasterServiceImpl {
                     !matched
                 });
             }
-            release_object_replicas(&self.state, &req.key, &removed_targets);
+            release_object_replicas(&self.state, &key, &removed_targets);
             // Release source replica refcnt
-            if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+            if let Some(mut object) = self.state.objects.get_mut(&key) {
                 if let Some(src) = object
                     .replicas
                     .iter_mut()
@@ -677,17 +687,17 @@ impl MasterServiceImpl {
                     src.dec_refcnt();
                 }
             }
-            self.state.replication_tasks.remove(&req.key);
+            self.state.replication_tasks.remove(&key);
             return Err(Status::failed_precondition(
                 "source replica handle became invalid during move",
             ));
         }
 
         if remove_object {
-            self.state.objects.remove(&req.key);
+            self.state.objects.remove(&key);
         }
         // Release source replica refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             if let Some(src) = object
                 .replicas
                 .iter_mut()
@@ -696,7 +706,7 @@ impl MasterServiceImpl {
                 src.dec_refcnt();
             }
         }
-        self.state.replication_tasks.remove(&req.key);
+        self.state.replication_tasks.remove(&key);
         Ok(Response::new(proto::MoveEndResponse {}))
     }
 
@@ -706,6 +716,7 @@ impl MasterServiceImpl {
         request: Request<proto::MoveRevokeRequest>,
     ) -> Result<Response<proto::MoveRevokeResponse>, Status> {
         let req = request.into_inner();
+        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -714,14 +725,14 @@ impl MasterServiceImpl {
         let task = self
             .state
             .replication_tasks
-            .get(&req.key)
+            .get(&key)
             .ok_or(Status::failed_precondition("no replication task"))?
             .clone();
         if task.client_id != client_id || task.kind != ReplicationTaskKind::Move {
             return Err(Status::permission_denied("replication task owner mismatch"));
         }
         let mut removed = Vec::new();
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             object.replicas.retain(|replica| {
                 let matched = task
                     .targets
@@ -733,9 +744,9 @@ impl MasterServiceImpl {
                 !matched
             });
         }
-        release_object_replicas(&self.state, &req.key, &removed);
+        release_object_replicas(&self.state, &key, &removed);
         // Release source replica refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut object) = self.state.objects.get_mut(&key) {
             if let Some(src) = object
                 .replicas
                 .iter_mut()
@@ -744,7 +755,7 @@ impl MasterServiceImpl {
                 src.dec_refcnt();
             }
         }
-        self.state.replication_tasks.remove(&req.key);
+        self.state.replication_tasks.remove(&key);
         Ok(Response::new(proto::MoveRevokeResponse {}))
     }
 }

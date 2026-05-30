@@ -49,6 +49,7 @@ async fn test_create_and_query_task_returns_real_state() {
             }),
             key: "task-key".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -70,6 +71,7 @@ async fn test_create_and_query_task_returns_real_state() {
         Request::new(proto::CreateCopyTaskRequest {
             key: "task-key".into(),
             targets: vec!["target-a".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -130,6 +132,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
             }),
             key: "fetch-task-key".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -154,6 +157,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
             }),
             key: "fetch-task-key".into(),
             replica_type: 0,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -164,6 +168,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
         Request::new(proto::CreateCopyTaskRequest {
             key: "fetch-task-key".into(),
             targets: vec!["segment_1".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -178,6 +183,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
             key: "fetch-task-key".into(),
             source: "segment_0".into(),
             target: "segment_1".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -287,6 +293,7 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
             }),
             key: "complete-task-key".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -311,6 +318,7 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
             }),
             key: "complete-task-key".into(),
             replica_type: 0,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -321,6 +329,7 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
         Request::new(proto::CreateCopyTaskRequest {
             key: "complete-task-key".into(),
             targets: vec!["segment_b".into()],
+        tenant_id: String::new(),
         }),
     )
     .await

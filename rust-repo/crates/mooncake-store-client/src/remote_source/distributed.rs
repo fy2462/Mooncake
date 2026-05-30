@@ -208,6 +208,7 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                 low: self.client_id.as_u64_pair().1,
             }),
             key: key.to_string(),
+            tenant_id: String::new(),
         };
 
         let response = master
@@ -243,6 +244,7 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                     low: self.client_id.as_u64_pair().1,
                 }),
                 key: key.to_string(),
+                tenant_id: String::new(),
                 success,
                 data_size,
             })

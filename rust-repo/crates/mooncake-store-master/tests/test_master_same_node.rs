@@ -81,6 +81,7 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
             client_id: Some(proto_uuid(client_id)),
             key: "same-node-nof-key".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 1,
@@ -154,6 +155,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
             client_id: Some(proto_uuid(client_id)),
             key: "same-node-nof-miss".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 1,
@@ -203,6 +205,7 @@ async fn test_client_monitor_reaps_expired_clients() {
             client_id: Some(proto_uuid(client_id)),
             key: "ttl-key".into(),
             slice_length: 64,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -224,6 +227,7 @@ async fn test_client_monitor_reaps_expired_clients() {
             client_id: Some(proto_uuid(client_id)),
             key: "ttl-key".into(),
             replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -256,6 +260,7 @@ async fn test_client_monitor_reaps_expired_clients() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "ttl-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await

@@ -256,6 +256,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
     let mut evicted = Vec::new();
     for key in selected {
         if let Some(mut object) = state.objects.get_mut(&key) {
+            let user_key = object.user_key.clone();
             let has_local_disk = object
                 .replicas
                 .iter()
@@ -296,7 +297,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
             drop(object);
             if !removed.is_empty() {
                 release_replicas(state, &removed);
-                evicted.push(key.clone());
+                evicted.push(user_key.clone());
             }
             if became_empty {
                 state.objects.remove(&key);

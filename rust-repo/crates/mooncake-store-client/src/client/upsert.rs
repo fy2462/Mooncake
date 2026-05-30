@@ -88,6 +88,7 @@ impl MooncakeClient {
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
             }),
+            tenant_id: String::new(),
         };
 
         let response = self
@@ -108,6 +109,7 @@ impl MooncakeClient {
                     client_id: Some(self.client_id_proto()),
                     key: key.to_string(),
                     replica_type: 0,
+                    tenant_id: String::new(),
                 };
                 let _ = self.master.put_revoke(revoke_req).await;
                 return Err(e);
@@ -125,6 +127,7 @@ impl MooncakeClient {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 slice_length: value.len() as u64,
+                tenant_id: String::new(),
                 config: Some(proto::ReplicateConfig {
                     replica_num: cfg.replica_num,
                     nof_replica_num: cfg.nof_replica_num,
@@ -188,6 +191,7 @@ impl MooncakeClient {
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
             }),
+            tenant_id: String::new(),
         };
 
         let response = self
@@ -207,6 +211,7 @@ impl MooncakeClient {
                     client_id: Some(self.client_id_proto()),
                     key: key.to_string(),
                     replica_type: 0,
+                    tenant_id: String::new(),
                 };
                 let _ = self.master.put_revoke(revoke_req).await;
                 return Err(e);
@@ -219,6 +224,7 @@ impl MooncakeClient {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 slice_length: size as u64,
+                tenant_id: String::new(),
                 config: Some(proto::ReplicateConfig {
                     replica_num: cfg.replica_num,
                     nof_replica_num: cfg.nof_replica_num,

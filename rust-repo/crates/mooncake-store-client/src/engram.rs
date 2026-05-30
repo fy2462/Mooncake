@@ -14,7 +14,7 @@
 //!
 //! ## 数据模型 (Data Model)
 //!
-//! ```
+//! ```text
 //! Embedding Table:
 //!    num_heads × table_vocab_sizes[head] × embedding_dim × sizeof(f32)
 //! ```

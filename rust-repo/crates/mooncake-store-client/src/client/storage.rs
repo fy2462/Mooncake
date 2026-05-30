@@ -204,6 +204,7 @@ impl MooncakeClient {
                 key: key.to_string(),
                 size,
                 preferred_segments,
+                tenant_id: String::new(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
@@ -228,6 +229,7 @@ impl MooncakeClient {
             .notify_promotion_success(proto::NotifyPromotionSuccessRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
+                tenant_id: String::new(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -245,6 +247,7 @@ impl MooncakeClient {
             .notify_promotion_failure(proto::NotifyPromotionFailureRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
+                tenant_id: String::new(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;

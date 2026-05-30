@@ -6,6 +6,8 @@ use uuid::Uuid;
 struct ObjectEntry {
     replicas: Vec<ReplicaDescriptor>,
     size: u64,
+    tenant_id: String,
+    user_key: String,
 }
 
 #[test]
@@ -17,6 +19,8 @@ fn test_batch_remove_logic() {
             ObjectEntry {
                 replicas: vec![],
                 size: 0,
+                tenant_id: "default".to_string(),
+                user_key: String::new(),
             },
         );
     }
@@ -44,6 +48,8 @@ fn test_batch_put_revoke_logic() {
         ObjectEntry {
             replicas: vec![],
             size: 0,
+            tenant_id: "default".to_string(),
+            user_key: String::new(),
         },
     );
     objects.insert(
@@ -51,6 +57,8 @@ fn test_batch_put_revoke_logic() {
         ObjectEntry {
             replicas: vec![],
             size: 0,
+            tenant_id: "default".to_string(),
+            user_key: String::new(),
         },
     );
 
@@ -84,6 +92,8 @@ fn test_batch_put_end_status_transition() {
                 holder_client_id: None,
             }],
             size: 128,
+            tenant_id: "default".to_string(),
+            user_key: String::new(),
         },
     );
 
@@ -127,6 +137,8 @@ fn test_batch_upsert_end_allocates_new() {
                     holder_client_id: None,
                 }],
                 size: *size,
+                tenant_id: "default".to_string(),
+                user_key: String::new(),
             },
         );
     }
@@ -152,6 +164,8 @@ fn test_batch_upsert_end_allocates_new() {
                 holder_client_id: None,
             }],
             size: 200,
+            tenant_id: "default".to_string(),
+            user_key: String::new(),
         },
     );
 

@@ -221,6 +221,8 @@ fn test_object_entry_creation() {
         put_start_time: None,
         lease_timeout: None,
         soft_pin_timeout: None,
+        tenant_id: "default".to_string(),
+        user_key: String::new(),
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");

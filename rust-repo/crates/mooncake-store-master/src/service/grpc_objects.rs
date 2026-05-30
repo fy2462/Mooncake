@@ -49,7 +49,8 @@ impl MasterServiceImpl {
         request: Request<proto::ExistKeyRequest>,
     ) -> Result<Response<proto::ExistKeyResponse>, Status> {
         let req = request.into_inner();
-        let exists = self.state.objects.contains_key(&req.key);
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let exists = self.state.objects.contains_key(&scoped_key);
         metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::ExistKeyResponse { exists }))
     }
@@ -59,13 +60,30 @@ impl MasterServiceImpl {
     // Return all currently stored object keys; used by clients for full scanning.
     pub(super) async fn get_all_keys_impl(
         &self,
-        _request: Request<proto::GetAllKeysRequest>,
+        request: Request<proto::GetAllKeysRequest>,
     ) -> Result<Response<proto::GetAllKeysResponse>, Status> {
+        let req = request.into_inner();
+        let tenant_filter = req.tenant_id.clone();
         let keys: Vec<String> = self
             .state
             .objects
             .iter()
-            .map(|entry| entry.key().clone())
+            .filter(|entry| {
+                if !tenant_filter.is_empty() {
+                    entry.tenant_id == normalize_tenant_id(&tenant_filter)
+                } else {
+                    true
+                }
+            })
+            .map(|entry| {
+                // Return user_key — C++ equivalent: item.second.user_key
+                // C++: item.second.user_key.empty() ? item.first : item.second.user_key
+                if entry.user_key.is_empty() {
+                    entry.key().clone()
+                } else {
+                    entry.user_key.clone()
+                }
+            })
             .collect();
         Ok(Response::new(proto::GetAllKeysResponse { keys }))
     }
@@ -151,8 +169,12 @@ impl MasterServiceImpl {
         if req.slice_length == 0 {
             return Err(Status::invalid_argument("zero slice_length"));
         }
+        // Validate key does not contain the tenant scope delimiter
+        validate_user_key(&req.key)?;
 
-        let key = req.key.clone();
+        let user_key = req.key.clone();
+        let tenant_id = normalize_tenant_id(&req.tenant_id);
+        let scoped_key = make_tenant_scoped_key(&tenant_id, &user_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -169,7 +191,7 @@ impl MasterServiceImpl {
         // 2. If all valid replicas cleaned, delete object and allow new PutStart
         // 3. If PutStart timed out with no Completed replicas, discard old object
         // 4. Otherwise return OBJECT_ALREADY_EXISTS
-        if let Some(mut existing) = self.state.objects.get_mut(&key) {
+        if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
             let alive_clients = get_alive_clients_snapshot(&self.state);
             let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
 
@@ -177,9 +199,9 @@ impl MasterServiceImpl {
                 // 所有有效副本已被清理（handle 失效或客户端死亡），删除对象并允许新 PutStart
                 // All valid replicas cleaned (stale handle or dead client); delete object and allow new PutStart
                 let old_replicas = existing.replicas.clone();
-                self.state.objects.remove(&key);
-                self.state.processing_keys.remove(&key);
-                self.state.replication_tasks.remove(&key);
+                self.state.objects.remove(&scoped_key);
+                self.state.processing_keys.remove(&scoped_key);
+                self.state.replication_tasks.remove(&scoped_key);
                 drop(existing);
                 release_replicas(&self.state, &old_replicas);
             } else {
@@ -204,9 +226,9 @@ impl MasterServiceImpl {
                                 .filter(|r| r.status == ReplicaStatus::Allocating)
                                 .cloned()
                                 .collect::<Vec<_>>();
-                            self.state.objects.remove(&key);
-                            self.state.processing_keys.remove(&key);
-                            self.state.replication_tasks.remove(&key);
+                            self.state.objects.remove(&scoped_key);
+                            self.state.processing_keys.remove(&scoped_key);
+                            self.state.replication_tasks.remove(&scoped_key);
                             drop(existing);
                             if !expired.is_empty() {
                                 release_replicas_scheduled(&self.state, expired);
@@ -216,19 +238,19 @@ impl MasterServiceImpl {
                         } else {
                             return Err(Status::already_exists(format!(
                                 "object already exists: {}",
-                                key
+                                user_key
                             )));
                         }
                     } else {
                         return Err(Status::already_exists(format!(
                             "object already exists: {}",
-                            key
+                            user_key
                         )));
                     }
                 } else {
                     return Err(Status::already_exists(format!(
                         "object already exists: {}",
-                        key
+                        user_key
                     )));
                 }
             }
@@ -250,7 +272,7 @@ impl MasterServiceImpl {
         let mut replicas = {
             let mut allocator = self.state.allocator.write();
             allocator.allocate_for_client(
-                &key,
+                &scoped_key,
                 Some(client_id),
                 req.slice_length,
                 replica_count,
@@ -259,7 +281,7 @@ impl MasterServiceImpl {
         };
         if replicas.is_empty() && replica_count > 0 {
             return Err(Status::resource_exhausted(format!(
-                "failed to allocate {replica_count} replica(s) for key {key}{}",
+                "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                 PUT_NO_SPACE_HELPER_STR,
             )));
         }
@@ -279,7 +301,7 @@ impl MasterServiceImpl {
             }
             let nof_replicas = allocate_nof_replicas(
                 &self.state,
-                &key,
+                &scoped_key,
                 req.slice_length,
                 config.nof_replica_num as usize,
                 &preferred_nof,
@@ -293,7 +315,7 @@ impl MasterServiceImpl {
 
         let now = SystemTime::now();
         self.state.objects.insert(
-            key.clone(),
+            scoped_key.clone(),
             ObjectEntry {
                 replicas,
                 size: req.slice_length,
@@ -305,11 +327,13 @@ impl MasterServiceImpl {
                 put_start_time: Some(now),
                 lease_timeout: None,
                 soft_pin_timeout: None,
+                tenant_id,
+                user_key,
             },
         );
         // 将 key 加入 processing_keys，防止并发 PutStart 冲突
         // Add key to processing_keys to prevent concurrent PutStart conflicts
-        self.state.processing_keys.insert(key, ());
+        self.state.processing_keys.insert(scoped_key, ());
 
         metrics::PUT_START_REQUESTS.inc();
         Ok(Response::new(proto::PutStartResponse {
@@ -331,12 +355,13 @@ impl MasterServiceImpl {
         request: Request<proto::PutEndRequest>,
     ) -> Result<Response<proto::PutEndResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
             // C++ master_service.cpp:1368-1372 校验调用者身份，防止其他 client 越权 PutEnd
             // Validate caller identity to prevent unauthorized PutEnd from other clients
             if entry.client_id != client_id {
@@ -392,13 +417,13 @@ impl MasterServiceImpl {
             let offload_enabled = !self.state.runtime_config.offload_on_evict;
             drop(entry);
             if offload_enabled {
-                push_offloading_queue(&self.state, client_id, &req.key, size);
+                push_offloading_queue(&self.state, client_id, &scoped_key, size);
             }
             // C++ 只在所有 replica 都 Complete 时才从 processing_keys 中移除，防止并发冲突
             // C++ only removes from processing_keys when ALL replicas are complete
             // AND the object is in the processing set.
-            if all_complete && self.state.processing_keys.contains_key(&req.key) {
-                self.state.processing_keys.remove(&req.key);
+            if all_complete && self.state.processing_keys.contains_key(&scoped_key) {
+                self.state.processing_keys.remove(&scoped_key);
             }
             // Maintain per-client object index for fast client cleanup.
             // 维护每个客户端的对象索引，用于快速客户端清理
@@ -407,9 +432,9 @@ impl MasterServiceImpl {
                     .client_objects
                     .entry(client_id)
                     .or_default()
-                    .insert(req.key.clone());
+                    .insert(scoped_key.clone());
             }
-            self.oplog_manager.lock().record_put_end(&req.key, size);
+            self.oplog_manager.lock().record_put_end(&scoped_key, size);
         }
         metrics::PUT_END_REQUESTS.inc();
         Ok(Response::new(proto::PutEndResponse {}))
@@ -427,6 +452,8 @@ impl MasterServiceImpl {
         request: Request<proto::AddReplicaRequest>,
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = normalize_tenant_id(&req.tenant_id);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -437,7 +464,7 @@ impl MasterServiceImpl {
             .as_ref()
             .map(replica_from_proto)
             .ok_or(Status::invalid_argument("missing replica"))?;
-        if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
             if replica.replica_type == ReplicaType::LocalDisk {
                 if let Some(existing) = entry.replicas.iter_mut().find(|existing| {
                     existing.replica_type == ReplicaType::LocalDisk
@@ -452,7 +479,7 @@ impl MasterServiceImpl {
             }
         } else if replica.replica_type == ReplicaType::LocalDisk {
             self.state.objects.insert(
-                req.key.clone(),
+                scoped_key.clone(),
                 ObjectEntry {
                     size: replica.size,
                     replicas: vec![replica],
@@ -464,6 +491,8 @@ impl MasterServiceImpl {
                     put_start_time: None,
                     lease_timeout: None,
                     soft_pin_timeout: None,
+                    tenant_id,
+                    user_key: req.key.clone(),
                 },
             );
         }
@@ -483,10 +512,11 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListRequest>,
     ) -> Result<Response<proto::GetReplicaListResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
 
         // Phase 1: read-only (uses get() — shared lock, allows concurrent reads).
         // 阶段 1：只读（使用 get() — 共享锁，允许并发读）
-        let (completed_replicas, promotion_eligible) = match self.state.objects.get(&req.key) {
+        let (completed_replicas, promotion_eligible) = match self.state.objects.get(&scoped_key) {
             Some(entry) => {
                 // 符合 promotion 条件：没有任何 Memory Complete 副本 + 有 LocalDisk Complete 副本
                 // Promotion eligible: no Memory Complete replicas + at least one LocalDisk Complete replica
@@ -513,7 +543,7 @@ impl MasterServiceImpl {
 
         // Phase 2: brief write lock for timestamp updates only (microseconds).
         // 阶段 2：短暂写锁仅更新时间戳（微秒级）
-        if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
+        if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
             let now = SystemTime::now();
             entry.last_access = now;
             let new_lease = now
@@ -537,7 +567,7 @@ impl MasterServiceImpl {
         // Phase 3: promotion after all locks released.
         // 阶段 3：锁释放后进行 promotion 条件检查和入队
         if promotion_eligible {
-            try_push_promotion_queue(&self.state, &req.key);
+            try_push_promotion_queue(&self.state, &scoped_key);
         }
         metrics::GET_REQUESTS.inc();
         let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
@@ -555,37 +585,44 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListByRegexRequest>,
     ) -> Result<Response<proto::GetReplicaListByRegexResponse>, Status> {
         let req = request.into_inner();
+        let tenant_filter = normalize_tenant_id(&req.tenant_id);
         let pattern = regex::Regex::new(&req.key_regex)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
         let mut entries = vec![];
-        // 遍历所有 key，按正则匹配后返回 COMPLETED 状态的 replica 列表
-        // Iterate all keys, match by regex, return only COMPLETED replicas
+        // 遍历所有 key，按租户过滤后，对 user_key 进行正则匹配
+        // Iterate all keys, filter by tenant, match regex against user_key
         for entry in self.state.objects.iter() {
-            if pattern.is_match(entry.key()) {
-                // Only include COMPLETE replicas, matching C++ GetReplicaListByRegex semantics
-                let completed_replicas: Vec<_> = entry
-                    .replicas
-                    .iter()
-                    .filter(|r| r.status == ReplicaStatus::Complete)
-                    .map(replica_to_proto)
-                    .collect();
-
-                // Skip keys that match but have no complete replicas
-                // 跳过匹配但无 Complete 副本的 key
-                if completed_replicas.is_empty() {
-                    tracing::warn!(
-                        "key={} matched by regex, but has no complete replicas.",
-                        entry.key()
-                    );
-                    continue;
-                }
-
-                entries.push(proto::get_replica_list_by_regex_response::ObjectEntry {
-                    key: entry.key().clone(),
-                    replicas: completed_replicas,
-                });
+            if entry.tenant_id != tenant_filter {
+                continue;
             }
+            if !pattern.is_match(&entry.user_key) {
+                continue;
+            }
+            // Only include COMPLETE replicas, matching C++ GetReplicaListByRegex semantics
+            let completed_replicas: Vec<_> = entry
+                .replicas
+                .iter()
+                .filter(|r| r.status == ReplicaStatus::Complete)
+                .map(replica_to_proto)
+                .collect();
+
+            // Skip keys that match but have no complete replicas
+            // 跳过匹配但无 Complete 副本的 key
+            if completed_replicas.is_empty() {
+                tracing::warn!(
+                    "user_key={} matched by regex, but has no complete replicas.",
+                    entry.user_key
+                );
+                continue;
+            }
+
+            entries.push(proto::get_replica_list_by_regex_response::ObjectEntry {
+                key: entry.key().clone(),
+                replicas: completed_replicas,
+                tenant_id: entry.tenant_id.clone(),
+                user_key: entry.user_key.clone(),
+            });
         }
 
         metrics::GET_REQUESTS.inc();
@@ -605,13 +642,14 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
-        if !req.force && self.state.replication_tasks.contains_key(&req.key) {
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        if !req.force && self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
             ));
         }
         if !req.force {
-            if let Some(entry) = self.state.objects.get(&req.key) {
+            if let Some(entry) = self.state.objects.get(&scoped_key) {
                 // C++ master_service.cpp:2314 只有 lease 过期或 force=true 才允许删除
                 // Only allow delete when lease is expired or force=true
                 if !is_lease_expired(&entry) {
@@ -628,14 +666,14 @@ impl MasterServiceImpl {
                 }
             }
         }
-        if let Some((_, object)) = self.state.objects.remove(&req.key) {
+        if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
             for mut entry in self.state.client_objects.iter_mut() {
-                entry.value_mut().remove(&req.key);
+                entry.value_mut().remove(&scoped_key);
             }
-            clear_offloading_task(&self.state, &req.key);
-            clear_promotion_task(&self.state, &req.key);
+            clear_offloading_task(&self.state, &scoped_key);
+            clear_promotion_task(&self.state, &scoped_key);
             release_replicas(&self.state, &object.replicas);
-            self.oplog_manager.lock().record_remove(&req.key);
+            self.oplog_manager.lock().record_remove(&scoped_key);
         }
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
@@ -649,6 +687,7 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveByRegexRequest>,
     ) -> Result<Response<proto::RemoveByRegexResponse>, Status> {
         let req = request.into_inner();
+        let tenant_filter = normalize_tenant_id(&req.tenant_id);
         let pattern = regex::Regex::new(&req.pattern)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
@@ -657,7 +696,9 @@ impl MasterServiceImpl {
             .state
             .objects
             .iter()
-            .filter(|entry| pattern.is_match(entry.key()))
+            .filter(|entry| {
+                entry.tenant_id == tenant_filter && pattern.is_match(&entry.user_key)
+            })
             .map(|entry| entry.key().clone())
             .collect();
 
@@ -705,18 +746,25 @@ impl MasterServiceImpl {
         request: Request<proto::QueryByRegexRequest>,
     ) -> Result<Response<proto::QueryByRegexResponse>, Status> {
         let req = request.into_inner();
+        let tenant_filter = normalize_tenant_id(&req.tenant_id);
         let pattern = regex::Regex::new(&req.pattern)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
         let mut entries = vec![];
         for entry in self.state.objects.iter() {
-            if pattern.is_match(entry.key()) {
-                let r = entry.replicas.iter().map(replica_to_proto).collect();
-                entries.push(proto::query_by_regex_response::Entry {
-                    key: entry.key().clone(),
-                    replicas: r,
-                });
+            if entry.tenant_id != tenant_filter {
+                continue;
             }
+            if !pattern.is_match(&entry.user_key) {
+                continue;
+            }
+            let r = entry.replicas.iter().map(replica_to_proto).collect();
+            entries.push(proto::query_by_regex_response::Entry {
+                key: entry.key().clone(),
+                replicas: r,
+                tenant_id: entry.tenant_id.clone(),
+                user_key: entry.user_key.clone(),
+            });
         }
         Ok(Response::new(proto::QueryByRegexResponse { entries }))
     }
@@ -774,6 +822,9 @@ impl MasterServiceImpl {
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
         let req = request.into_inner();
+        let user_key = req.key.clone();
+        let tenant_id = normalize_tenant_id(&req.tenant_id);
+        let scoped_key = make_tenant_scoped_key(&tenant_id, &user_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -793,15 +844,15 @@ impl MasterServiceImpl {
 
         // C++ 检查是否有进行中的 replication/offloading 任务，以及 replica 是否 busy
         // C++ checks if replication_tasks or offloading_tasks exist for the key.
-        if self.state.replication_tasks.contains_key(&req.key) {
+        if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition("object has replication task"));
         }
-        if self.state.offloading_tasks.contains_key(&req.key) {
+        if self.state.offloading_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition("object has offloading task"));
         }
 
         let (replicas, previous_soft_pinned, previous_hard_pinned) =
-            if let Some(mut existing) = self.state.objects.get_mut(&req.key) {
+            if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
                 // C++ 先调用 CleanupStaleHandles 清理无效副本
                 // First call CleanupStaleHandles to clean invalid replicas
                 let alive_clients = get_alive_clients_snapshot(&self.state);
@@ -842,7 +893,7 @@ impl MasterServiceImpl {
                 let mut allocator = self.state.allocator.write();
                 (
                     allocator.allocate_for_client(
-                        &req.key,
+                        &scoped_key,
                         Some(client_id),
                         req.slice_length,
                         replica_count,
@@ -867,7 +918,7 @@ impl MasterServiceImpl {
             }
             let nof_replicas = allocate_nof_replicas(
                 &self.state,
-                &req.key,
+                &scoped_key,
                 req.slice_length,
                 config.nof_replica_num as usize,
                 &preferred_nof,
@@ -880,7 +931,7 @@ impl MasterServiceImpl {
             replicas.iter().map(replica_to_proto).collect();
 
         self.state.objects.insert(
-            req.key.clone(),
+            scoped_key.clone(),
             ObjectEntry {
                 replicas,
                 size: req.slice_length,
@@ -892,6 +943,8 @@ impl MasterServiceImpl {
                 put_start_time: Some(SystemTime::now()),
                 lease_timeout: None,
                 soft_pin_timeout: None,
+                tenant_id,
+                user_key,
             },
         );
 

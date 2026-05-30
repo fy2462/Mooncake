@@ -182,6 +182,7 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
         let request = proto::GetReplicaListRequest {
             key: key.to_string(),
+            tenant_id: String::new(),
         };
         let response = self
             .master

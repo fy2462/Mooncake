@@ -1,9 +1,14 @@
+use mooncake_store_master::make_tenant_scoped_key;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
+
+fn sk(key: &str) -> String {
+    make_tenant_scoped_key("", key)
+}
 
 #[tokio::test]
 async fn test_promotion_flow_success_and_failure() {
@@ -46,7 +51,7 @@ async fn test_promotion_flow_success_and_failure() {
                     high: holder_id.as_u64_pair().0,
                     low: holder_id.as_u64_pair().1,
                 }),
-                keys: vec![key.into()],
+                keys: vec![key.to_string()],
                 metadatas: vec![proto::StorageObjectMetadata {
                     bucket_id: 0,
                     offset: 0,
@@ -61,7 +66,7 @@ async fn test_promotion_flow_success_and_failure() {
 
         MasterService::get_replica_list(
             &service,
-            Request::new(proto::GetReplicaListRequest { key: key.into() }),
+            Request::new(proto::GetReplicaListRequest { key: key.into() , tenant_id: String::new()}),
         )
         .await
         .unwrap();
@@ -108,6 +113,7 @@ async fn test_promotion_flow_success_and_failure() {
             key: first_key.clone(),
             size: 256,
             preferred_segments: vec!["dram-a".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -126,6 +132,7 @@ async fn test_promotion_flow_success_and_failure() {
                 low: holder_id.as_u64_pair().1,
             }),
             key: first_key.clone(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -133,7 +140,7 @@ async fn test_promotion_flow_success_and_failure() {
 
     let promoted = MasterService::get_replica_list(
         &service,
-        Request::new(proto::GetReplicaListRequest { key: first_key }),
+        Request::new(proto::GetReplicaListRequest { key: first_key , tenant_id: String::new()}),
     )
     .await
     .unwrap()
@@ -152,6 +159,7 @@ async fn test_promotion_flow_success_and_failure() {
             key: second_key.clone(),
             size: 256,
             preferred_segments: vec!["dram-a".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -164,6 +172,7 @@ async fn test_promotion_flow_success_and_failure() {
                 low: holder_id.as_u64_pair().1,
             }),
             key: second_key.clone(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -171,7 +180,7 @@ async fn test_promotion_flow_success_and_failure() {
 
     let failed = MasterService::get_replica_list(
         &service,
-        Request::new(proto::GetReplicaListRequest { key: second_key }),
+        Request::new(proto::GetReplicaListRequest { key: second_key , tenant_id: String::new()}),
     )
     .await
     .unwrap()
@@ -230,7 +239,7 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "threshold-key".into(),
+            key: "threshold-key".into(), tenant_id: String::new(),
         }),
     )
     .await
@@ -252,7 +261,7 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "threshold-key".into(),
+            key: "threshold-key".into(), tenant_id: String::new(),
         }),
     )
     .await
@@ -315,7 +324,7 @@ async fn test_promotion_queue_limit_released_after_success() {
                     high: holder_id.as_u64_pair().0,
                     low: holder_id.as_u64_pair().1,
                 }),
-                keys: vec![key.into()],
+                keys: vec![key.to_string()],
                 metadatas: vec![proto::StorageObjectMetadata {
                     bucket_id: 0,
                     offset: 0,
@@ -329,7 +338,7 @@ async fn test_promotion_queue_limit_released_after_success() {
         .unwrap();
         MasterService::get_replica_list(
             &service,
-            Request::new(proto::GetReplicaListRequest { key: key.into() }),
+            Request::new(proto::GetReplicaListRequest { key: key.into() , tenant_id: String::new()}),
         )
         .await
         .unwrap();
@@ -374,6 +383,7 @@ async fn test_promotion_queue_limit_released_after_success() {
             key: "limit-a".into(),
             size: 128,
             preferred_segments: vec!["limit-dram".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -386,6 +396,7 @@ async fn test_promotion_queue_limit_released_after_success() {
                 low: holder_id.as_u64_pair().1,
             }),
             key: "limit-a".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -394,7 +405,7 @@ async fn test_promotion_queue_limit_released_after_success() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "limit-b".into(),
+            key: "limit-b".into(), tenant_id: String::new(),
         }),
     )
     .await
@@ -483,7 +494,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "reaper-key".into(),
+            key: "reaper-key".into(), tenant_id: String::new(),
         }),
     )
     .await
@@ -500,6 +511,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             key: "reaper-key".into(),
             size: 256,
             preferred_segments: vec!["reaper-dram".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -553,6 +565,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             key: "reaper-key".into(),
             size: 256,
             preferred_segments: vec!["reaper-dram".into()],
+        tenant_id: String::new(),
         }),
     )
     .await;

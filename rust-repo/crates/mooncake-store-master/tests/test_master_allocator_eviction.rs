@@ -169,6 +169,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
             }),
             key: "prefill".into(),
             slice_length: 800,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -194,6 +195,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
             }),
             key: "strategy-key".into(),
             slice_length: 100,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,

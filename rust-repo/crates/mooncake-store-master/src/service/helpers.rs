@@ -491,3 +491,73 @@ pub(crate) fn cleanup_stale_handles(
     // If some replicas were cleaned and no valid Complete replicas remain, the object should be removed
     entry.replicas.len() != original_len && !has_completed
 }
+
+// =============================================================================
+// Tenant helpers — 租户工具函数
+// C++ equivalent: NormalizeTenantId in types.h, MakeTenantScopedKey / MakeObjectIdentity in master_service.h
+// =============================================================================
+
+/// Sentinel delimiter between tenant_id and user_key.
+/// NUL byte ('\0') is used because it cannot appear in user-provided keys.
+/// NUL 字节分隔符，因为用户提供的 key 不能包含 '\0'。
+pub const TENANT_SCOPE_DELIMITER: char = '\0';
+
+/// Default tenant identifier when none is provided.
+/// 未提供租户标识符时的默认值。
+/// C++ equivalent: NormalizeTenantId("") -> "default"
+pub const DEFAULT_TENANT: &str = "default";
+
+/// Normalize an incoming tenant_id: empty string → "default".
+/// 规范化传入的 tenant_id：空字符串 → "default"。
+/// C++ equivalent: types.h:225-227 NormalizeTenantId()
+pub fn normalize_tenant_id(tenant_id: &str) -> String {
+    if tenant_id.is_empty() {
+        DEFAULT_TENANT.to_string()
+    } else {
+        tenant_id.to_string()
+    }
+}
+
+/// Build a tenant-scoped internal key: `"{tenant_id}\0{user_key}"`.
+/// 构造租户作用域的内部 key："{tenant_id}\0{user_key}"。
+/// C++ equivalent: master_service.h MakeTenantScopedKey()
+pub fn make_tenant_scoped_key(tenant_id: &str, user_key: &str) -> String {
+    let tenant = normalize_tenant_id(tenant_id);
+    let mut buf = String::with_capacity(tenant.len() + 1 + user_key.len());
+    buf.push_str(&tenant);
+    buf.push(TENANT_SCOPE_DELIMITER);
+    buf.push_str(user_key);
+    buf
+}
+
+/// Reverse: extract (tenant_id, user_key) from a scoped key.
+/// If no delimiter is found, the whole key is the user_key with tenant="default"
+/// (handles legacy/upgrade keys).
+///
+/// 反向提取：从作用域 key 中提取 (tenant_id, user_key)。
+/// 如果找不到分隔符，整个 key 即为 user_key，tenant 为 "default"（处理旧格式/升级数据）。
+pub fn split_scoped_key(scoped: &str) -> (String, String) {
+    scoped
+        .find(TENANT_SCOPE_DELIMITER)
+        .map(|pos| {
+            (
+                scoped[..pos].to_string(),
+                scoped[pos + 1..].to_string(),
+            )
+        })
+        .unwrap_or_else(|| (DEFAULT_TENANT.to_string(), scoped.to_string()))
+}
+
+/// Validate that a user key does not contain the tenant scope delimiter.
+/// Returns Ok(()) if valid, Err(Status) with invalid_argument if it contains '\0'.
+/// 验证用户 key 不包含租户作用域分隔符。
+/// 有效时返回 Ok(())，包含 '\0' 时返回 invalid_argument 的 Err(Status)。
+pub fn validate_user_key(key: &str) -> Result<(), Status> {
+    if key.contains(TENANT_SCOPE_DELIMITER) {
+        Err(Status::invalid_argument(format!(
+            "key must not contain NUL byte (U+0000)"
+        )))
+    } else {
+        Ok(())
+    }
+}

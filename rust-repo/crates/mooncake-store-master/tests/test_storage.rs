@@ -12,6 +12,23 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use uuid::Uuid;
 
+fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
+    ObjectEntry {
+        replicas,
+        size,
+        last_access: SystemTime::now(),
+        soft_pinned: false,
+        hard_pinned: false,
+        data_type: Default::default(),
+        client_id: Uuid::nil(),
+        put_start_time: None,
+        lease_timeout: None,
+        soft_pin_timeout: None,
+        tenant_id: "default".to_string(),
+        user_key: String::new(),
+    }
+}
+
 fn hf3fs_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -40,6 +57,36 @@ impl Hf3fsApi for MockHf3fsApi {
     fn dereg_fd(&self, _fd: std::os::fd::RawFd) -> Result<i32, std::io::Error> {
         self.dereg_calls.fetch_add(1, Ordering::Relaxed);
         Ok(0)
+    }
+}
+
+fn make_mem_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDescriptor {
+    ReplicaDescriptor {
+        base_addr: 0,
+        refcnt: 0,
+        handle_valid: true,
+        segment_id: sid,
+        segment_name: seg_name.into(),
+        offset: off,
+        size: sz,
+        status: ReplicaStatus::Complete,
+        replica_type: ReplicaType::Memory,
+        holder_client_id: None,
+    }
+}
+
+fn make_disk_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDescriptor {
+    ReplicaDescriptor {
+        base_addr: 0,
+        refcnt: 0,
+        handle_valid: true,
+        segment_id: sid,
+        segment_name: seg_name.into(),
+        offset: off,
+        size: sz,
+        status: ReplicaStatus::Complete,
+        replica_type: ReplicaType::Disk,
+        holder_client_id: None,
     }
 }
 
@@ -73,29 +120,7 @@ fn test_storage_backend_save_and_load() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     objects.insert(
         "key1".into(),
-        ObjectEntry {
-            replicas: vec![ReplicaDescriptor {
-                base_addr: 0,
-                refcnt: 0,
-                handle_valid: true,
-                segment_id: sid,
-                segment_name: "node1:12345".into(),
-                offset: 0x1000,
-                size: 256,
-                status: ReplicaStatus::Complete,
-                replica_type: ReplicaType::Memory,
-                holder_client_id: None,
-            }],
-            size: 256,
-            last_access: SystemTime::now(),
-            soft_pinned: false,
-            hard_pinned: false,
-            data_type: Default::default(),
-            client_id: Uuid::nil(),
-            put_start_time: None,
-            lease_timeout: None,
-            soft_pin_timeout: None,
-        },
+        make_entry(vec![make_mem_replica(sid, "node1:12345", 0x1000, 256)], 256),
     );
 
     backend
@@ -157,29 +182,7 @@ fn test_storage_backend_multiple_objects() {
         let key = format!("key_{}", i);
         objects.insert(
             key.clone(),
-            ObjectEntry {
-                replicas: vec![ReplicaDescriptor {
-                    base_addr: 0,
-                    refcnt: 0,
-                    handle_valid: true,
-                    segment_id: sid,
-                    segment_name: "s1".into(),
-                    offset: i * 100,
-                    size: 100,
-                    status: ReplicaStatus::Complete,
-                    replica_type: ReplicaType::Memory,
-                    holder_client_id: None,
-                }],
-                size: 100,
-                last_access: SystemTime::now(),
-                soft_pinned: false,
-                hard_pinned: false,
-                data_type: Default::default(),
-                client_id: Uuid::nil(),
-                put_start_time: None,
-                lease_timeout: None,
-                soft_pin_timeout: None,
-            },
+            make_entry(vec![make_mem_replica(sid, "s1", i * 100, 100)], 100),
         );
     }
 
@@ -243,29 +246,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     objects.insert(
         "hf3fs-key".into(),
-        ObjectEntry {
-            replicas: vec![ReplicaDescriptor {
-                base_addr: 0,
-                refcnt: 0,
-                handle_valid: true,
-                segment_id: sid,
-                segment_name: "hf3fs-node".into(),
-                offset: 64,
-                size: 128,
-                status: ReplicaStatus::Complete,
-                replica_type: ReplicaType::Disk,
-                holder_client_id: None,
-            }],
-            size: 128,
-            last_access: SystemTime::now(),
-            soft_pinned: false,
-            hard_pinned: false,
-            data_type: Default::default(),
-            client_id: Uuid::nil(),
-            put_start_time: None,
-            lease_timeout: None,
-            soft_pin_timeout: None,
-        },
+        make_entry(vec![make_disk_replica(sid, "hf3fs-node", 64, 128)], 128),
     );
 
     backend
@@ -312,7 +293,6 @@ fn test_storage_backend_load_falls_back_to_json() {
     fs::create_dir_all(&subdir).unwrap();
     let backend = StorageBackend::new(StorageBackendType::LocalDisk, &subdir);
 
-    // Manually write a legacy JSON snapshot.
     let json_path = subdir.join("master_snapshot.json");
     let snap = serde_json::json!({
         "segments": [{
@@ -350,11 +330,9 @@ fn test_storage_backend_clear_removes_both_formats() {
     let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
 
-    // Save msgpack.
     backend
         .save(&segments, &nof_segments, &objects, &tasks)
         .unwrap();
-    // Create a legacy JSON file manually.
     let json_path = tmp.join("master_snapshot.json");
     fs::write(&json_path, "{}").unwrap();
 

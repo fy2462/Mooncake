@@ -150,6 +150,22 @@ pub struct ObjectEntry {
     /// 软锁定超时时间（运行时）/ Soft-pin timeout (runtime).
     #[serde(skip)]
     pub soft_pin_timeout: Option<SystemTime>,
+    /// 租户标识符（规范化后，未设置时默认为 "default"）。
+    /// Tenant identifier (normalized; defaults to "default" when not set).
+    /// C++ equivalent: ObjectMetadata::tenant_id
+    #[serde(default = "default_tenant_id")]
+    pub tenant_id: String,
+    /// 用户提供的原始 key（不包含租户作用域前缀）。
+    /// Original user-provided key (without tenant scope prefix).
+    /// C++ equivalent: ObjectMetadata::user_key
+    #[serde(default)]
+    pub user_key: String,
+}
+
+/// Default tenant identifier — matches C++ NormalizeTenantId in types.h.
+/// 默认租户标识符 —— 对应 C++ types.h 中的 NormalizeTenantId。
+fn default_tenant_id() -> String {
+    "default".to_string()
 }
 
 /// Segment 条目：Memory segment 的注册信息。

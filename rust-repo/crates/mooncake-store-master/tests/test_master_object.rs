@@ -36,6 +36,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             client_id: Some(proto_uuid(client_id)),
             key: "batch-clear-key".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 2,
                 nof_replica_num: 0,
@@ -60,6 +61,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             client_id: Some(proto_uuid(client_id)),
             key: "batch-clear-key".into(),
             replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -83,6 +85,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             object_keys: vec!["batch-clear-key".into()],
             client_id: Some(proto_uuid(client_id)),
             segment_name: put.replicas[0].segment_name.clone(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -94,6 +97,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "batch-clear-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -111,6 +115,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             object_keys: vec!["batch-clear-key".into()],
             client_id: Some(proto_uuid(other_client_id)),
             segment_name: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -122,6 +127,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "batch-clear-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -157,6 +163,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
                 client_id: Some(proto_uuid(client_id)),
                 key: key.into(),
                 slice_length: 512,
+                tenant_id: String::new(),
                 config: Some(proto::ReplicateConfig {
                     replica_num: 1,
                     nof_replica_num: 0,
@@ -178,6 +185,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
                 client_id: Some(proto_uuid(client_id)),
                 key: key.into(),
                 replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
             }),
         )
         .await
@@ -192,6 +200,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "hard-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -203,6 +212,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "normal-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await;
@@ -233,6 +243,7 @@ async fn test_copy_move_and_revoke_workflow() {
             client_id: Some(proto_uuid(client_id)),
             key: "copy-move-key".into(),
             slice_length: 256,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -254,6 +265,7 @@ async fn test_copy_move_and_revoke_workflow() {
             client_id: Some(proto_uuid(client_id)),
             key: "copy-move-key".into(),
             replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -266,6 +278,7 @@ async fn test_copy_move_and_revoke_workflow() {
             key: "copy-move-key".into(),
             source: "copy-src:1".into(),
             targets: vec!["copy-dst:1".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -279,6 +292,7 @@ async fn test_copy_move_and_revoke_workflow() {
         Request::new(proto::CopyEndRequest {
             client_id: Some(proto_uuid(client_id)),
             key: "copy-move-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -288,6 +302,7 @@ async fn test_copy_move_and_revoke_workflow() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "copy-move-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -302,6 +317,7 @@ async fn test_copy_move_and_revoke_workflow() {
             key: "copy-move-key".into(),
             source: "copy-src:1".into(),
             target: "move-dst:1".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -314,6 +330,7 @@ async fn test_copy_move_and_revoke_workflow() {
         Request::new(proto::MoveEndRequest {
             client_id: Some(proto_uuid(client_id)),
             key: "copy-move-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -323,6 +340,7 @@ async fn test_copy_move_and_revoke_workflow() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "copy-move-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -349,6 +367,7 @@ async fn test_copy_move_and_revoke_workflow() {
             key: "copy-move-key".into(),
             source: "copy-dst:1".into(),
             targets: vec!["copy-src:1".into()],
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -358,6 +377,7 @@ async fn test_copy_move_and_revoke_workflow() {
         Request::new(proto::CopyRevokeRequest {
             client_id: Some(proto_uuid(client_id)),
             key: "copy-move-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -367,6 +387,7 @@ async fn test_copy_move_and_revoke_workflow() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "copy-move-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -408,6 +429,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 client_id: Some(proto_uuid(client_id)),
                 key: key.into(),
                 slice_length: 128,
+                tenant_id: String::new(),
                 config: Some(proto::ReplicateConfig {
                     replica_num: 1,
                     nof_replica_num: 0,
@@ -429,6 +451,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 client_id: Some(proto_uuid(client_id)),
                 key: key.into(),
                 replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
             }),
         )
         .await
@@ -442,6 +465,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
             client_id: Some(proto_uuid(client_id)),
             key: "revoke-key".into(),
             slice_length: 128,
+            tenant_id: String::new(),
             config: Some(proto::ReplicateConfig {
                 replica_num: 1,
                 nof_replica_num: 0,
@@ -464,6 +488,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
             client_id: Some(proto_uuid(client_id)),
             key: "revoke-key".into(),
             replica_type: proto::replica_descriptor::ReplicaType::All as i32,
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -472,6 +497,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "revoke-key".into(),
+        tenant_id: String::new(),
         }),
     )
     .await
@@ -479,7 +505,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
 
     let removed = MasterService::remove_all(
         &service,
-        Request::new(proto::RemoveAllRequest { force: true }),
+        Request::new(proto::RemoveAllRequest { force: true, tenant_id: String::new() }),
     )
     .await
     .unwrap()

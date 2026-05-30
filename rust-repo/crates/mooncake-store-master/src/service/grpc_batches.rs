@@ -73,11 +73,12 @@ impl MasterServiceImpl {
         );
         let clear_all_segments = req.segment_name.is_empty();
         let mut cleared = vec![];
-        for key in &req.object_keys {
+        for raw_key in &req.object_keys {
+            let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
             let mut remove_entire_object = false;
             let mut removed_replicas = Vec::new();
             let mut had_match = false;
-            if let Some(mut object) = self.state.objects.get_mut(key) {
+            if let Some(mut object) = self.state.objects.get_mut(&key) {
                 if object_owner_client_id(&self.state, &object) != Some(client_id) {
                     continue;
                 }
@@ -110,13 +111,13 @@ impl MasterServiceImpl {
                 }
             }
             if had_match {
-                clear_offloading_task(&self.state, key);
-                clear_promotion_task(&self.state, key);
+                clear_offloading_task(&self.state, &key);
+                clear_promotion_task(&self.state, &key);
                 release_replicas(&self.state, &removed_replicas);
                 if remove_entire_object {
-                    self.state.objects.remove(key);
+                    self.state.objects.remove(&key);
                 }
-                cleared.push(key.clone());
+                cleared.push(raw_key.clone());
             }
         }
         Ok(Response::new(proto::BatchReplicaClearResponse {
@@ -318,8 +319,10 @@ impl MasterServiceImpl {
             let proto_r: Vec<proto::ReplicaDescriptor> =
                 replicas.iter().map(replica_to_proto).collect();
             sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
+            let scoped = make_tenant_scoped_key(&entry.tenant_id, &entry.key);
+            let (t_id, u_key) = split_scoped_key(&scoped);
             self.state.objects.insert(
-                entry.key.clone(),
+                scoped,
                 ObjectEntry {
                     replicas,
                     size: entry.slice_length,
@@ -331,6 +334,8 @@ impl MasterServiceImpl {
                     put_start_time: Some(SystemTime::now()),
                     lease_timeout: None,
                     soft_pin_timeout: None,
+                    tenant_id: t_id,
+                    user_key: u_key,
                 },
             );
             all_replicas.extend(proto_r);
@@ -366,14 +371,15 @@ impl MasterServiceImpl {
         );
         let replica_count = config.replica_num.max(1) as usize;
         let mut all_replicas = Vec::new();
-        for (key, slice_len) in req.keys.iter().zip(req.slice_lengths.iter()) {
-            if self.state.objects.contains_key(key) {
+        for (raw_key, slice_len) in req.keys.iter().zip(req.slice_lengths.iter()) {
+            let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+            if self.state.objects.contains_key(&key) {
                 continue;
             }
             let replicas = {
                 let mut allocator = self.state.allocator.write();
                 allocator.allocate_for_client(
-                    key,
+                    &key,
                     Some(client_id),
                     *slice_len,
                     replica_count,
@@ -384,6 +390,7 @@ impl MasterServiceImpl {
                 let proto_r: Vec<_> = replicas.iter().map(replica_to_proto).collect();
                 sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
                 let now = SystemTime::now();
+                let (t_id, u_key) = split_scoped_key(&key);
                 self.state.objects.insert(
                     key.clone(),
                     ObjectEntry {
@@ -397,6 +404,8 @@ impl MasterServiceImpl {
                         put_start_time: Some(now),
                         lease_timeout: None,
                         soft_pin_timeout: None,
+                        tenant_id: t_id,
+                        user_key: u_key,
                     },
                 );
                 self.state.processing_keys.insert(key.clone(), ());

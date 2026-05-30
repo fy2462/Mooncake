@@ -176,7 +176,7 @@ impl OpLogStore for InMemoryOpLog {
 /// Each segment file is named `oplog_<start_seq:020>.bin`. Entries use a
 /// length-prefixed binary frame format:
 /// 每个分段文件命名为 `oplog_<start_seq:020>.bin`。条目采用长度前缀帧格式：
-/// ```
+/// ```text
 /// [4 bytes seq LE][4 bytes payload_len LE][payload bytes]
 /// ```
 ///

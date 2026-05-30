@@ -40,6 +40,7 @@ impl MasterServiceImpl {
         request: Request<proto::CreateCopyTaskRequest>,
     ) -> Result<Response<proto::CreateCopyTaskResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
 
         // Validate key — must exist in the object store.
         // 验证 key —— 必须存在于对象存储中。
@@ -55,7 +56,7 @@ impl MasterServiceImpl {
         let object = self
             .state
             .objects
-            .get(&req.key)
+            .get(&scoped_key)
             .ok_or(Status::not_found("key not found"))?;
         if object.replicas.is_empty() {
             return Err(Status::failed_precondition("object has no source replicas"));
@@ -79,7 +80,7 @@ impl MasterServiceImpl {
 
         // Serialise the task payload — JSON string sent to the worker.
         // 序列化任务负载 —— 发送给 worker 的 JSON 字符串。
-        let task_key = req.key.clone();
+        let task_key = scoped_key.clone();
         let task_payload = serde_json::to_string(&ReplicaCopyPayload {
             key: &req.key,
             source: &source_segment,
@@ -90,7 +91,7 @@ impl MasterServiceImpl {
         // Drop the read lock before re-checking existence (defensive).
         // 在重新检查存在性之前释放读锁（防御性）。
         drop(object);
-        if !self.state.objects.contains_key(&req.key) {
+        if !self.state.objects.contains_key(&scoped_key) {
             return Err(Status::not_found("key not found"));
         }
 
@@ -108,7 +109,7 @@ impl MasterServiceImpl {
                     created_at: now,
                     last_updated_at: now,
                     assigned_client: Some(assigned_client),
-                    message: format!("copy {} to {} target(s)", req.key, req.targets.len()),
+                    message: format!("copy {} to {} target(s)", scoped_key, req.targets.len()),
                 },
                 key: task_key,
                 payload: task_payload,
@@ -138,6 +139,7 @@ impl MasterServiceImpl {
         request: Request<proto::CreateMoveTaskRequest>,
     ) -> Result<Response<proto::CreateMoveTaskResponse>, Status> {
         let req = request.into_inner();
+        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
 
         // All three fields are required. / 三个字段都是必需的。
         if req.key.is_empty() || req.source.is_empty() || req.target.is_empty() {
@@ -152,7 +154,7 @@ impl MasterServiceImpl {
         let object = self
             .state
             .objects
-            .get(&req.key)
+            .get(&scoped_key)
             .ok_or(Status::not_found("key not found"))?;
         if !object
             .replicas
@@ -171,7 +173,7 @@ impl MasterServiceImpl {
         }
 
         // Serialise the move payload. / 序列化移动负载。
-        let task_key = req.key.clone();
+        let task_key = scoped_key.clone();
         let task_payload = serde_json::to_string(&ReplicaMovePayload {
             key: &req.key,
             source: &req.source,
@@ -194,7 +196,7 @@ impl MasterServiceImpl {
                     created_at: now,
                     last_updated_at: now,
                     assigned_client: Some(assigned_client),
-                    message: format!("move {} from {} to {}", req.key, req.source, req.target),
+                    message: format!("move {} from {} to {}", scoped_key, req.source, req.target),
                 },
                 key: task_key,
                 payload: task_payload,

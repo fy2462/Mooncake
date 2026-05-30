@@ -354,6 +354,7 @@ impl MooncakeClient {
         let request = proto::PingRequest {
             client_id: Some(self.client_id_proto()),
             mounted_segments: vec![],
+            tenant_id: String::new(),
         };
         self.master
             .ping(request)

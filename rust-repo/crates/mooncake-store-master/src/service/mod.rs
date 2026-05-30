@@ -30,7 +30,7 @@ mod grpc_objects;
 mod grpc_replication;
 mod grpc_tasks;
 mod grpc_trait;
-mod helpers;
+pub(crate) mod helpers;
 mod proto_conv;
 pub(crate) mod state;
 mod workers;
@@ -66,10 +66,13 @@ use self::background_ops::{
 use self::helpers::{
     addresses_for_client, allocate_nof_replicas, bump_view_version, cleanup_stale_handles,
     client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
-    get_alive_clients_snapshot, host_from_segment_name, is_lease_expired, object_owner_client_id,
+    get_alive_clients_snapshot, host_from_segment_name, is_lease_expired,
+    make_tenant_scoped_key, normalize_tenant_id, object_owner_client_id,
     preferred_nof_segment_names, register_metadata_segments, release_object_replicas,
-    release_replicas, release_replicas_scheduled, sync_client_segments, sync_nof_segment_usage,
+    release_replicas, release_replicas_scheduled, validate_user_key,
+    split_scoped_key, sync_client_segments, sync_nof_segment_usage,
     sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
+    DEFAULT_TENANT,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
