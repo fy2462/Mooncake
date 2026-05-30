@@ -1,13 +1,15 @@
-// ============================================================================
-// gRPC task management handlers — master-side implementation.
-// gRPC 任务管理处理器 —— master 侧实现。
-//
-// These handlers manage the server-side lifecycle of copy/move tasks:
-//   create (client submits) → queue (master assigns to worker) →
-//   fetch (worker claims) → mark_complete (worker reports result).
-//
-// 这些处理器管理复制/移动任务的服务端生命周期：
-//   创建（客户端提交） → 排队（master 分配给 worker） →
+//! # Task Queue — 任务队列管理 / Task Queue Management
+//!
+//! ============================================================================
+//! gRPC task management handlers — master-side implementation.
+//! gRPC 任务管理处理器 —— master 侧实现。
+//!
+//! These handlers manage the server-side lifecycle of copy/move tasks:
+//!   create (client submits) → queue (master assigns to worker) →
+//!   fetch (worker claims) → mark_complete (worker reports result).
+//!
+//! 这些处理器管理复制/移动任务的服务端生命周期：
+//!   创建（客户端提交） → 排队（master 分配给 worker） →
 //   获取（worker 认领） → 标记完成（worker 报告结果）。
 //
 // C++ equivalent: master_service.cpp task-related RPC handlers.

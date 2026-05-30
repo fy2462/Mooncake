@@ -1,5 +1,51 @@
+//! # Replica Replication — 副本复制与迁移 / Replica Copy & Move
+//!
+//! 本模块实现副本复制（Copy）和迁移（Move）的完整生命周期，对应 C++ master_service.cpp
+//! 中的 CopyStart/CopyEnd/CopyRevoke、MoveStart/MoveEnd/MoveRevoke。
+//!
+//! This module implements the complete lifecycle of replica Copy and Move operations,
+//! corresponding to CopyStart/CopyEnd/CopyRevoke, MoveStart/MoveEnd/MoveRevoke in C++ master_service.cpp.
+//!
+//! ## Copy 流程 / Copy Flow
+//!
+//! ```text
+//! CopyStart → allocate target replicas on specified segments
+//!          → pin source replica (inc refcnt, prevents concurrent eviction)
+//!          → create ReplicationTaskEntry (kind=Copy)
+//!          → client RDMA copies data to targets
+//! CopyEnd   → mark targets Complete (only if handle is still valid)
+//!          → unpin source (dec refcnt)
+//!          → if source handle became invalid during copy: revoke all targets to prevent inconsistency
+//! CopyRevoke → remove allocated targets, release source refcnt
+//! ```
+//!
+//! ## Move 流程 / Move Flow
+//!
+//! ```text
+//! MoveStart → allocate target replica (or reuse existing)
+//!          → pin source (inc refcnt)
+//!          → create ReplicationTaskEntry (kind=Move)
+//!          → client RDMA copies data to target
+//! MoveEnd   → mark target Complete
+//!          → remove source replica (delayed release after put_start_release_timeout
+//!            to prevent RDMA in-flight from accessing reclaimed memory)
+//!          → unpin source (dec refcnt)
+//! MoveRevoke → remove allocated targets, release source refcnt
+//! ```
+//!
+//! ## 关键设计 / Key Design Decisions
+//!
+//! 1. **refcnt 引用计数**: Copy/Move 期间对 source replica 递增 refcnt 防止被并发驱逐。
+//! 2. **handle_valid 校验**: 标记 Complete 前检查 handle 是否仍然有效（Copy/Move 期间可能因
+//!    segment 卸载等原因失效）。
+//! 3. **延迟释放 (delayed release)**: Move 完成后源副本不立即释放，而是延迟
+//!    put_start_release_timeout (默认 600s) 后释放，防止仍在 RDMA 传输中的读写访问已回收的内存。
+//! 4. **不完整故障回滚**: source handle 失效时撤销所有 target 副本，防止数据不一致。
+
 use super::*;
 
+/// 在指定的 Memory 或 NoF segment 上分配一个副本，若分配成功则同步 usage。
+/// Allocate one replica on a specified Memory or NoF segment; sync usage on success.
 fn allocate_replica_on_segment(
     state: &MasterState,
     key: &str,

@@ -1,3 +1,27 @@
+//! # Batch Operations — 批量操作 / Batch Operations
+//!
+//! 本模块实现所有 gRPC 批量操作接口，用于在单次 RPC 调用中处理多个 key，
+//! 减少网络往返开销。每个 batch 方法独立处理各 key，互不影响。
+//!
+//! This module implements all gRPC batch operation interfaces, processing
+//! multiple keys in a single RPC call to reduce network round-trips.
+//! Each batch method processes keys independently.
+//!
+//! ## 批量操作类型 / Batch Operation Types
+//!
+//! | RPC | 功能 / Function | 返回码 / Return Codes |
+//! |-----|----------------|----------------------|
+//! | `BatchExistKey` | 批量检查 key 是否存在 / Batch key existence check | `Vec<bool>` |
+//! | `BatchQueryIp` | 批量查询客户端 IP / Batch client IP query | `HashMap<id, addresses>` |
+//! | `BatchReplicaClear` | 批量清理副本 / Batch replica cleanup | 0=成功, 跳过不满足条件的 key |
+//! | `BatchPutEnd` | 批量 PutEnd / Batch PutEnd | 0=成功, -1=key不存在 |
+//! | `BatchPutRevoke` | 批量撤销 / Batch revoke | 0=成功, -1=key不存在, -2=有复制任务, -3=权限拒绝 |
+//! | `BatchRemove` | 批量删除 / Batch remove | 0=成功, -2=force=false且有复制任务 |
+//! | `BatchUpsertEnd` | 批量 Upsert / Batch upsert | 返回全部分配的副本列表 |
+//! | `BatchPutStart` | 批量 PutStart / Batch PutStart | 返回全部分配的副本列表 |
+//! | `EvictDiskReplica` | 驱逐单个对象的磁盘副本 / Evict disk replicas for one key |
+//! | `BatchEvictDiskReplica` | 批量驱逐磁盘副本 / Batch evict disk replicas |
+
 use super::*;
 
 impl MasterServiceImpl {
