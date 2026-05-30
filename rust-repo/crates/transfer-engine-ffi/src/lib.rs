@@ -24,8 +24,7 @@ mod transfer;
 pub use error::{TransferEngineError, TransferEngineResult};
 pub use segment::{SegmentDesc, SegmentId};
 pub use transfer::{
-    BatchId, NotifyMsg, NotifyMsgBuf, Opcode, TransferRequest, TransferStatus,
-    TransferStatusEnum,
+    BatchId, NotifyMsg, NotifyMsgBuf, Opcode, TransferRequest, TransferStatus, TransferStatusEnum,
 };
 
 use std::ffi::{c_void, CStr, CString};
@@ -90,10 +89,7 @@ impl TransferEngine {
         let matrix_c = topology_matrix.map(CString::new).transpose()?;
         let matrix_ptr = matrix_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
 
-        let mut args: [*const c_void; 2] = [
-            matrix_ptr as *const c_void,
-            std::ptr::null(),
-        ];
+        let mut args: [*const c_void; 2] = [matrix_ptr as *const c_void, std::ptr::null()];
 
         let xport = unsafe {
             ffi::installTransport(
@@ -112,9 +108,7 @@ impl TransferEngine {
     /// Uninstall a previously installed transport protocol.
     pub fn uninstall_transport(&self, protocol: &str) -> TransferEngineResult<()> {
         let proto_c = CString::new(protocol)?;
-        let rc = unsafe {
-            ffi::uninstallTransport(self.handle.as_ptr(), proto_c.as_ptr())
-        };
+        let rc = unsafe { ffi::uninstallTransport(self.handle.as_ptr(), proto_c.as_ptr()) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
@@ -229,14 +223,9 @@ impl TransferEngine {
         &self,
         addrs: &[usize],
     ) -> TransferEngineResult<()> {
-        let mut ptrs: Vec<*mut c_void> =
-            addrs.iter().map(|a| *a as *mut c_void).collect();
+        let mut ptrs: Vec<*mut c_void> = addrs.iter().map(|a| *a as *mut c_void).collect();
         let rc = unsafe {
-            ffi::unregisterLocalMemoryBatch(
-                self.handle.as_ptr(),
-                ptrs.as_mut_ptr(),
-                ptrs.len(),
-            )
+            ffi::unregisterLocalMemoryBatch(self.handle.as_ptr(), ptrs.as_mut_ptr(), ptrs.len())
         };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
@@ -268,13 +257,9 @@ impl TransferEngine {
     }
 
     /// Open a remote segment without using the local cache.
-    pub fn open_segment_no_cache(
-        &self,
-        segment_name: &str,
-    ) -> TransferEngineResult<SegmentId> {
+    pub fn open_segment_no_cache(&self, segment_name: &str) -> TransferEngineResult<SegmentId> {
         let name_c = CString::new(segment_name)?;
-        let id =
-            unsafe { ffi::openSegmentNoCache(self.handle.as_ptr(), name_c.as_ptr()) };
+        let id = unsafe { ffi::openSegmentNoCache(self.handle.as_ptr(), name_c.as_ptr()) };
         if id < 0 {
             return Err(TransferEngineError::OperationFailed(id));
         }
@@ -283,14 +268,9 @@ impl TransferEngine {
 
     /// Eagerly pre-connect all EFA endpoints to the given segment.
     /// No-op on non-EFA installs. Returns `Ok(())` on success.
-    pub fn warmup_efa_segment(
-        &self,
-        segment_name: &str,
-    ) -> TransferEngineResult<()> {
+    pub fn warmup_efa_segment(&self, segment_name: &str) -> TransferEngineResult<()> {
         let name_c = CString::new(segment_name)?;
-        let rc = unsafe {
-            ffi::warmupEfaSegment(self.handle.as_ptr(), name_c.as_ptr())
-        };
+        let rc = unsafe { ffi::warmupEfaSegment(self.handle.as_ptr(), name_c.as_ptr()) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
@@ -298,14 +278,9 @@ impl TransferEngine {
     }
 
     /// Remove a locally registered segment.
-    pub fn remove_local_segment(
-        &self,
-        segment_name: &str,
-    ) -> TransferEngineResult<()> {
+    pub fn remove_local_segment(&self, segment_name: &str) -> TransferEngineResult<()> {
         let name_c = CString::new(segment_name)?;
-        let rc = unsafe {
-            ffi::removeLocalSegment(self.handle.as_ptr(), name_c.as_ptr())
-        };
+        let rc = unsafe { ffi::removeLocalSegment(self.handle.as_ptr(), name_c.as_ptr()) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
@@ -328,7 +303,7 @@ impl TransferEngine {
     /// Allocate a batch ID for submitting a group of transfer requests.
     pub fn allocate_batch_id(&self, batch_size: usize) -> TransferEngineResult<BatchId> {
         let id = unsafe { ffi::allocateBatchID(self.handle.as_ptr(), batch_size) };
-        if id == ffi::INVALID_BATCH as u64 {
+        if id == ffi::INVALID_BATCH {
             return Err(TransferEngineError::OperationFailed(-1));
         }
         Ok(BatchId(id))
@@ -452,9 +427,7 @@ impl TransferEngine {
             name: name_c.as_ptr() as *mut i8,
             msg: msg_c.as_ptr() as *mut i8,
         };
-        let rc = unsafe {
-            ffi::genNotifyInEngine(self.handle.as_ptr(), target_id, ffi_notify)
-        };
+        let rc = unsafe { ffi::genNotifyInEngine(self.handle.as_ptr(), target_id, ffi_notify) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
@@ -464,9 +437,7 @@ impl TransferEngine {
     /// Poll for incoming notification messages.
     pub fn get_notifs_from_engine(&self) -> TransferEngineResult<Vec<NotifyMsg>> {
         let mut size: i32 = 0;
-        let raw = unsafe {
-            ffi::getNotifsFromEngine(self.handle.as_ptr(), &mut size)
-        };
+        let raw = unsafe { ffi::getNotifsFromEngine(self.handle.as_ptr(), &mut size) };
         if raw.is_null() && size > 0 {
             return Err(TransferEngineError::OperationFailed(-1));
         }
@@ -474,12 +445,8 @@ impl TransferEngine {
         let mut out = Vec::with_capacity(count);
         for i in 0..count {
             let entry = unsafe { &*raw.add(i) };
-            let name = unsafe { CStr::from_ptr(entry.name) }
-                .to_str()?
-                .to_string();
-            let msg = unsafe { CStr::from_ptr(entry.msg) }
-                .to_str()?
-                .to_string();
+            let name = unsafe { CStr::from_ptr(entry.name) }.to_str()?.to_string();
+            let msg = unsafe { CStr::from_ptr(entry.msg) }.to_str()?.to_string();
             out.push(NotifyMsg { name, msg });
         }
         if count > 0 {

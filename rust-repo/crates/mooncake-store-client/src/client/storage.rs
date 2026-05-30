@@ -1,5 +1,5 @@
-use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::collections::HashMap;
 
 use super::MooncakeClient;
@@ -64,9 +64,7 @@ impl MooncakeClient {
         Ok(())
     }
 
-    pub async fn promotion_object_heartbeat(
-        &mut self,
-    ) -> StoreResult<HashMap<String, i64>> {
+    pub async fn promotion_object_heartbeat(&mut self) -> StoreResult<HashMap<String, i64>> {
         let response = self
             .master
             .promotion_object_heartbeat(proto::PromotionObjectHeartbeatRequest {
@@ -99,7 +97,9 @@ impl MooncakeClient {
             .memory_descriptor
             .as_ref()
             .ok_or(StoreError::OperationFailed(-1))?;
-        Ok(self.replicas_from_proto(std::slice::from_ref(descriptor)).remove(0))
+        Ok(self
+            .replicas_from_proto(std::slice::from_ref(descriptor))
+            .remove(0))
     }
 
     pub async fn notify_promotion_success(&mut self, key: &str) -> StoreResult<()> {

@@ -73,7 +73,11 @@ mod tests {
             location: "cpu:0".into(),
         };
         match desc {
-            SegmentDesc::Rdma { addr, size, location } => {
+            SegmentDesc::Rdma {
+                addr,
+                size,
+                location,
+            } => {
                 assert_eq!(addr, 0xDEAD);
                 assert_eq!(size, 4096);
                 assert_eq!(location, "cpu:0");
@@ -92,7 +96,13 @@ mod tests {
             port: 4420,
         };
         match desc {
-            SegmentDesc::Nvmeof { file_path, subsystem_name, proto, ip, port } => {
+            SegmentDesc::Nvmeof {
+                file_path,
+                subsystem_name,
+                proto,
+                ip,
+                port,
+            } => {
                 assert_eq!(file_path, "/dev/nvme0n1");
                 assert_eq!(subsystem_name, "nqn.2024-01");
                 assert_eq!(proto, "tcp");
@@ -112,7 +122,11 @@ mod tests {
         };
         let cloned = desc.clone();
         match cloned {
-            SegmentDesc::Rdma { addr, size, location } => {
+            SegmentDesc::Rdma {
+                addr,
+                size,
+                location,
+            } => {
                 assert_eq!(addr, 0x1000);
                 assert_eq!(size, 8192);
                 assert_eq!(location, "cuda:0");

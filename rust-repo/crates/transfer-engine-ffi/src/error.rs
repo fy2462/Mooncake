@@ -36,29 +36,50 @@ mod tests {
 
     #[test]
     fn test_null_handle_display() {
-        assert_eq!(TransferEngineError::NullHandle.to_string(), "Transfer Engine returned null handle");
+        assert_eq!(
+            TransferEngineError::NullHandle.to_string(),
+            "Transfer Engine returned null handle"
+        );
     }
 
     #[test]
     fn test_operation_failed_display() {
-        assert_eq!(TransferEngineError::OperationFailed(42).to_string(), "Transfer Engine operation failed with code 42");
-        assert_eq!(TransferEngineError::OperationFailed(-1).to_string(), "Transfer Engine operation failed with code -1");
-        assert_eq!(TransferEngineError::OperationFailed(0).to_string(), "Transfer Engine operation failed with code 0");
+        assert_eq!(
+            TransferEngineError::OperationFailed(42).to_string(),
+            "Transfer Engine operation failed with code 42"
+        );
+        assert_eq!(
+            TransferEngineError::OperationFailed(-1).to_string(),
+            "Transfer Engine operation failed with code -1"
+        );
+        assert_eq!(
+            TransferEngineError::OperationFailed(0).to_string(),
+            "Transfer Engine operation failed with code 0"
+        );
     }
 
     #[test]
     fn test_install_transport_failed_display() {
-        assert_eq!(TransferEngineError::InstallTransportFailed.to_string(), "Failed to install transport protocol");
+        assert_eq!(
+            TransferEngineError::InstallTransportFailed.to_string(),
+            "Failed to install transport protocol"
+        );
     }
 
     #[test]
     fn test_invalid_status_display() {
-        assert_eq!(TransferEngineError::InvalidStatus(99).to_string(), "Invalid status code: 99");
+        assert_eq!(
+            TransferEngineError::InvalidStatus(99).to_string(),
+            "Invalid status code: 99"
+        );
     }
 
     #[test]
     fn test_invalid_opcode_display() {
-        assert_eq!(TransferEngineError::InvalidOpcode(7).to_string(), "Invalid opcode: 7");
+        assert_eq!(
+            TransferEngineError::InvalidOpcode(7).to_string(),
+            "Invalid opcode: 7"
+        );
     }
 
     #[test]
@@ -109,8 +130,17 @@ mod tests {
 
     #[test]
     fn test_error_comparison() {
-        assert!(matches!(TransferEngineError::NullHandle, TransferEngineError::NullHandle));
-        assert!(matches!(TransferEngineError::OperationFailed(5), TransferEngineError::OperationFailed(5)));
-        assert!(!matches!(TransferEngineError::OperationFailed(5), TransferEngineError::OperationFailed(6)));
+        assert!(matches!(
+            TransferEngineError::NullHandle,
+            TransferEngineError::NullHandle
+        ));
+        assert!(matches!(
+            TransferEngineError::OperationFailed(5),
+            TransferEngineError::OperationFailed(5)
+        ));
+        assert!(!matches!(
+            TransferEngineError::OperationFailed(5),
+            TransferEngineError::OperationFailed(6)
+        ));
     }
 }

@@ -18,6 +18,7 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
             }),
             segment_name: "mem-a".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -51,7 +52,10 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "mem-a".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )

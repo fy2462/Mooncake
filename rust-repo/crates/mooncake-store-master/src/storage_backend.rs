@@ -310,9 +310,9 @@ impl StorageBackend {
                         _ => TaskStatus::Pending,
                     },
                     created_at: chrono::DateTime::from_timestamp_millis(t.created_at_ms)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     last_updated_at: chrono::DateTime::from_timestamp_millis(t.last_updated_at_ms)
-                        .unwrap_or_else(|| Utc::now()),
+                        .unwrap_or_else(Utc::now),
                     assigned_client: t.assigned_client.and_then(|id| Uuid::parse_str(&id).ok()),
                     message: t.message,
                 },
@@ -394,7 +394,10 @@ impl StorageBackend {
 
     /// 批量下沉：将多个 key 的二进制数据写入独立文件。
     /// 用于将热数据从内存 offload 到本地磁盘。
-    pub fn batch_offload(&self, entries: &[(String, Vec<u8>)]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn batch_offload(
+        &self,
+        entries: &[(String, Vec<u8>)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let dir = self.key_dir();
         std::fs::create_dir_all(&dir)?;
         for (key, value) in entries {
@@ -407,7 +410,10 @@ impl StorageBackend {
 
     /// 批量加载：从磁盘读取多个 key 的二进制数据。
     /// 不存在的 key 直接跳过，不报错。
-    pub fn batch_load(&self, keys: &[String]) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+    pub fn batch_load(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
         let mut results = Vec::new();
         for key in keys {
             let path = self.key_path(key);

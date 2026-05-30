@@ -1,5 +1,5 @@
-use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::StoreError;
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
@@ -67,7 +67,8 @@ impl MooncakeClient {
         size: usize,
     ) -> StoreResult<usize> {
         let replicas = self.fetch_replicas(key).await?;
-        let replica = self.select_best_replica(&replicas)
+        let replica = self
+            .select_best_replica(&replicas)
             .ok_or(StoreError::KeyNotFound(key.to_string()))?;
         self.zero_copy_read(replica, buffer, size).await
     }
@@ -84,7 +85,12 @@ impl MooncakeClient {
         src_offsets: &[Vec<Vec<usize>>],
         sizes: &[Vec<Vec<usize>>],
     ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
-        let count = buffers.len().min(keys.len()).min(dst_offsets.len()).min(src_offsets.len()).min(sizes.len());
+        let count = buffers
+            .len()
+            .min(keys.len())
+            .min(dst_offsets.len())
+            .min(src_offsets.len())
+            .min(sizes.len());
         let mut results = Vec::with_capacity(count);
         for buf_idx in 0..count {
             let mut buf_results = vec![];
@@ -98,7 +104,9 @@ impl MooncakeClient {
                     }
                 };
                 let seg = self.engine.open_segment(&replica.segment_name)?;
-                let batch_id = self.engine.allocate_batch_id(sizes[buf_idx][key_idx].len())?;
+                let batch_id = self
+                    .engine
+                    .allocate_batch_id(sizes[buf_idx][key_idx].len())?;
 
                 let reqs: Vec<TransferRequest> = sizes[buf_idx][key_idx]
                     .iter()
@@ -107,7 +115,9 @@ impl MooncakeClient {
                         opcode: Opcode::Read,
                         source: buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri]),
                         target_id: seg,
-                        target_offset: replica.offset + src_offsets[buf_idx][key_idx][ri] as u64,
+                        target_offset: replica.base_addr
+                            + replica.offset
+                            + src_offsets[buf_idx][key_idx][ri] as u64,
                         length: sz as u64,
                     })
                     .collect();
@@ -142,10 +152,7 @@ impl MooncakeClient {
     // Batch Get
     // -----------------------------------------------------------------------
 
-    pub async fn batch_get(
-        &mut self,
-        keys: &[String],
-    ) -> StoreResult<Vec<Option<Vec<u8>>>> {
+    pub async fn batch_get(&mut self, keys: &[String]) -> StoreResult<Vec<Option<Vec<u8>>>> {
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
             match self.get(key).await {
@@ -202,7 +209,7 @@ impl MooncakeClient {
                     opcode: Opcode::Read,
                     source: all_buffers[key_idx][i],
                     target_id: seg,
-                    target_offset: replica.offset,
+                    target_offset: replica.base_addr + replica.offset,
                     length: all_sizes[key_idx][i] as u64,
                 })
                 .collect();
@@ -235,10 +242,7 @@ impl MooncakeClient {
     // Buffer-based get (returns owned BufferHandle)
     // -----------------------------------------------------------------------
 
-    pub async fn get_buffer(
-        &mut self,
-        key: &str,
-    ) -> StoreResult<BufferHandle> {
+    pub async fn get_buffer(&mut self, key: &str) -> StoreResult<BufferHandle> {
         let data = self.get(key).await?;
         let size = data.len();
         Ok(BufferHandle {

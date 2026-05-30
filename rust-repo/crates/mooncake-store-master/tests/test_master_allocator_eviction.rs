@@ -13,24 +13,30 @@ fn test_allocator_random_strategy() {
     let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::Random);
 
     let cid = Uuid::new_v4();
-    allocator.add_segment(Segment {
-
-        id: Uuid::new_v4(),
-        name: "n1:1".into(),
-        size: 1000,
+    allocator.add_segment(
+        Segment {
+            id: Uuid::new_v4(),
+            name: "n1:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 0, cid);
-    allocator.add_segment(Segment {
-
-        id: Uuid::new_v4(),
-        name: "n2:1".into(),
-        size: 1000,
+        },
+        0,
+        cid,
+    );
+    allocator.add_segment(
+        Segment {
+            id: Uuid::new_v4(),
+            name: "n2:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 0, cid);
+        },
+        0,
+        cid,
+    );
 
     let replicas = allocator.allocate("key1", 100, 2, &ReplicateConfig::default());
     assert_eq!(replicas.len(), 2);
@@ -48,24 +54,30 @@ fn test_allocator_insufficient_space() {
 fn test_allocator_preferred_segment() {
     let mut allocator = SegmentAllocator::new();
     let cid = Uuid::new_v4();
-    allocator.add_segment(Segment {
-
-        id: Uuid::new_v4(),
-        name: "far:1".into(),
-        size: 1000,
+    allocator.add_segment(
+        Segment {
+            id: Uuid::new_v4(),
+            name: "far:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 0, cid);
-    allocator.add_segment(Segment {
-
-        id: Uuid::new_v4(),
-        name: "preferred:1".into(),
-        size: 1000,
+        },
+        0,
+        cid,
+    );
+    allocator.add_segment(
+        Segment {
+            id: Uuid::new_v4(),
+            name: "preferred:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 0, cid);
+        },
+        0,
+        cid,
+    );
 
     let config = ReplicateConfig {
         preferred_segment: "preferred:1".into(),
@@ -80,24 +92,30 @@ fn test_allocator_preferred_segment() {
 fn test_allocator_free_ratio_first() {
     let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
     let cid = Uuid::new_v4();
-    allocator.add_segment(Segment {
-
-        id: Uuid::new_v4(),
-        name: "fuller:1".into(),
-        size: 1000,
+    allocator.add_segment(
+        Segment {
+            id: Uuid::new_v4(),
+            name: "fuller:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 800, cid);
-    allocator.add_segment(Segment {
-
-        id: Uuid::new_v4(),
-        name: "emptier:1".into(),
-        size: 1000,
+        },
+        800,
+        cid,
+    );
+    allocator.add_segment(
+        Segment {
+            id: Uuid::new_v4(),
+            name: "emptier:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 100, cid);
+        },
+        100,
+        cid,
+    );
 
     let replicas = allocator.allocate("k", 100, 1, &ReplicateConfig::default());
     assert_eq!(replicas.len(), 1);
@@ -122,6 +140,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
             }),
             segment_name: "fuller:1".into(),
             size: 1000,
+            base_addr: 0,
         }),
     )
     .await
@@ -135,6 +154,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
             }),
             segment_name: "emptier:1".into(),
             size: 1000,
+            base_addr: 0,
         }),
     )
     .await
@@ -155,7 +175,10 @@ async fn test_runtime_config_applies_allocator_strategy() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "fuller:1".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -177,7 +200,10 @@ async fn test_runtime_config_applies_allocator_strategy() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -194,15 +220,18 @@ fn test_allocator_advances_offsets_and_reuses_freed_space() {
     let mut allocator = SegmentAllocator::new();
     let cid = Uuid::new_v4();
     let sid = Uuid::new_v4();
-    allocator.add_segment(Segment {
-
-        id: sid,
-        name: "solo:1".into(),
-        size: 1000,
+    allocator.add_segment(
+        Segment {
+            id: sid,
+            name: "solo:1".into(),
+            size: 1000,
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
-        }, 0, cid);
+        },
+        0,
+        cid,
+    );
 
     let first = allocator.allocate("k1", 100, 1, &ReplicateConfig::default());
     let second = allocator.allocate("k2", 100, 1, &ReplicateConfig::default());

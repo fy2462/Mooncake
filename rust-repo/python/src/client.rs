@@ -1,11 +1,11 @@
 use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
-use mooncake_store_client::MooncakeClient;
 use mooncake_store_client::proto::StorageObjectMetadata;
+use mooncake_store_client::MooncakeClient;
 use parking_lot::Mutex;
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::ffi::c_void;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -29,18 +29,14 @@ fn get_buffer_ptr(obj: &Bound<'_, PyAny>) -> PyResult<(*mut c_void, usize)> {
     Ok((buf.buf_ptr() as *mut c_void, buf.item_count()))
 }
 
-pub(crate) fn take_client(
-    inner: &Arc<Mutex<Option<MooncakeClient>>>,
-) -> PyResult<MooncakeClient> {
+pub(crate) fn take_client(inner: &Arc<Mutex<Option<MooncakeClient>>>) -> PyResult<MooncakeClient> {
     inner
         .lock()
         .take()
         .ok_or_else(|| to_py_err("client already closed"))
 }
 
-pub(crate) fn replicas_to_py(
-    replicas: Vec<mooncake_store_core::ReplicaDescriptor>,
-) -> Py<PyAny> {
+pub(crate) fn replicas_to_py(replicas: Vec<mooncake_store_core::ReplicaDescriptor>) -> Py<PyAny> {
     let py = unsafe { Python::assume_attached() };
     let out: Vec<Py<PyAny>> = replicas
         .iter()
@@ -52,7 +48,7 @@ pub(crate) fn replicas_to_py(
             d.into()
         })
         .collect();
-    out.into_pyobject(py).unwrap().unbind()
+    out.into_pyobject(py).expect("replicas_to_py: into_pyobject failed").unbind()
 }
 
 // -- Python-exported methods --
@@ -139,7 +135,7 @@ impl PythonMooncakeClient {
                         let _ = s3_py; // used only with s3 feature
                         return Err(to_py_err(
                             "S3 remote source configured but 's3' feature is not enabled. \
-                             Rebuild with --features s3"
+                             Rebuild with --features s3",
                         ));
                     }
                 } else if let Some(ref root) = py_cfg.local_fs_root {
@@ -147,7 +143,7 @@ impl PythonMooncakeClient {
                     client = client.with_remote_source(source, config);
                 } else if config.enabled {
                     return Err(to_py_err(
-                        "RemoteSourceConfig.enabled=true requires s3_config or local_fs_root"
+                        "RemoteSourceConfig.enabled=true requires s3_config or local_fs_root",
                     ));
                 }
             }
@@ -292,14 +288,11 @@ impl PythonMooncakeClient {
             let result = client.batch_get(&keys).await;
             *inner.lock() = Some(client);
             let results = result.map_err(to_py_err)?;
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                let out: Vec<Option<Py<PyBytes>>> = results
-                    .into_iter()
-                    .map(|opt| opt.map(|d| bytes_to_py(py, &d)))
-                    .collect();
-                out.into_pyobject(py).unwrap().unbind()
-            })
+            let py = unsafe { Python::assume_attached() };
+            let list = PyList::new(py, results.iter().map(|opt| {
+                opt.as_ref().map_or(py.None(), |d| PyBytes::new(py, d).into())
+            }));
+            Ok(list.unbind())
         })
     }
 
@@ -380,10 +373,7 @@ impl PythonMooncakeClient {
         })
     }
 
-    fn remove_all<'py>(
-        slf: &Bound<'py, Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn remove_all<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -420,10 +410,7 @@ impl PythonMooncakeClient {
         }
     }
 
-    fn health_check<'py>(
-        slf: &Bound<'py, Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn health_check<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -434,10 +421,7 @@ impl PythonMooncakeClient {
         })
     }
 
-    fn tear_down_all<'py>(
-        slf: &Bound<'py, Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn tear_down_all<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -559,8 +543,8 @@ impl PythonMooncakeClient {
         py: Python<'py>,
         task_id_str: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let task_id = Uuid::parse_str(&task_id_str)
-            .map_err(|e| to_py_err(format!("invalid UUID: {e}")))?;
+        let task_id =
+            Uuid::parse_str(&task_id_str).map_err(|e| to_py_err(format!("invalid UUID: {e}")))?;
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -572,11 +556,8 @@ impl PythonMooncakeClient {
                 let py = unsafe { Python::assume_attached() };
                 let d = PyDict::new(py);
                 if let Some(id) = &resp.id {
-                    d.set_item(
-                        "task_id",
-                        Uuid::from_u64_pair(id.high, id.low).to_string(),
-                    )
-                    .ok();
+                    d.set_item("task_id", Uuid::from_u64_pair(id.high, id.low).to_string())
+                        .ok();
                 }
                 d.set_item("status", resp.status).ok();
                 d.set_item("message", &resp.message).ok();
@@ -596,30 +577,24 @@ impl PythonMooncakeClient {
             let mut client = take_client(&inner)?;
             let tasks = client.fetch_tasks(batch_size).await.map_err(to_py_err)?;
             *inner.lock() = Some(client);
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                let out: Vec<Py<PyAny>> = tasks
-                    .iter()
+            let py = unsafe { Python::assume_attached() };
+            let out: Vec<Py<PyAny>> = tasks
+                .iter()
                     .map(|t| {
                         let d = PyDict::new(py);
                         if let Some(id) = &t.id {
-                            d.set_item(
-                                "id",
-                                Uuid::from_u64_pair(id.high, id.low).to_string(),
-                            )
-                            .ok();
+                            d.set_item("id", Uuid::from_u64_pair(id.high, id.low).to_string())
+                                .ok();
                         }
                         d.set_item("task_type", t.r#type).ok();
                         d.set_item("payload", &t.payload).ok();
                         d.set_item("created_at_ms_epoch", t.created_at_ms_epoch)
                             .ok();
-                        d.set_item("max_retry_attempts", t.max_retry_attempts)
-                            .ok();
+                        d.set_item("max_retry_attempts", t.max_retry_attempts).ok();
                         d.into()
                     })
                     .collect();
-                out.into_pyobject(py).unwrap().unbind()
-            })
+            Ok(out.into_pyobject(py)?.unbind())
         })
     }
 
@@ -631,8 +606,8 @@ impl PythonMooncakeClient {
         status: i32,
         message: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let task_id = Uuid::parse_str(&task_id_str)
-            .map_err(|e| to_py_err(format!("invalid UUID: {e}")))?;
+        let task_id =
+            Uuid::parse_str(&task_id_str).map_err(|e| to_py_err(format!("invalid UUID: {e}")))?;
         let inner = slf.borrow().inner.clone();
 
         let proto_status = mooncake_store_client::proto::TaskStatus::try_from(status)
@@ -676,11 +651,7 @@ impl PythonMooncakeClient {
     // Zero-copy read (sync — uses block_on to work around non-Send futures)
     // ===================================================================
 
-    fn get_into(
-        slf: &Bound<'_, Self>,
-        key: String,
-        buffer: Bound<'_, PyAny>,
-    ) -> PyResult<usize> {
+    fn get_into(slf: &Bound<'_, Self>, key: String, buffer: Bound<'_, PyAny>) -> PyResult<usize> {
         let (ptr, size) = get_buffer_ptr(&buffer)?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
@@ -707,8 +678,7 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
-            let result =
-                unsafe { client.batch_get_into(&keys, &ptrs, &sizes) }.await;
+            let result = unsafe { client.batch_get_into(&keys, &ptrs, &sizes) }.await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -734,9 +704,7 @@ impl PythonMooncakeClient {
         tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
             let result = unsafe {
-                client.batch_get_into_multi_buffers(
-                    &keys, &ptrs, &all_sizes, prefer_same_node,
-                )
+                client.batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
             }
             .await;
             *inner.lock() = Some(client);
@@ -761,8 +729,7 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
-            let result =
-                unsafe { client.put_from(&key, ptr, size, cfg) }.await;
+            let result = unsafe { client.put_from(&key, ptr, size, cfg) }.await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -784,9 +751,7 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
-            let result =
-                unsafe { client.batch_put_from(&keys, &ptrs, &sizes, cfg) }
-                    .await;
+            let result = unsafe { client.batch_put_from(&keys, &ptrs, &sizes, cfg) }.await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -827,14 +792,12 @@ impl PythonMooncakeClient {
             let result = client.batch_get_buffer(&keys).await;
             *inner.lock() = Some(client);
             let results = result.map_err(to_py_err)?;
-            Ok({
-                let py = unsafe { Python::assume_attached() };
-                let out: Vec<Option<Py<PyBytes>>> = results
-                    .into_iter()
-                    .map(|opt| opt.map(|bh| PyBytes::new(py, &bh.data).unbind()))
-                    .collect();
-                out.into_pyobject(py).unwrap().unbind()
-            })
+            let py = unsafe { Python::assume_attached() };
+            let out: Vec<Option<Py<PyBytes>>> = results
+                .into_iter()
+                .map(|opt| opt.map(|bh| PyBytes::new(py, &bh.data).unbind()))
+                .collect();
+            Ok(out.into_pyobject(py).expect("batch_get_buffer into_pyobject").unbind())
         })
     }
 
@@ -855,8 +818,7 @@ impl PythonMooncakeClient {
             let client = guard
                 .as_ref()
                 .ok_or_else(|| to_py_err("client already closed"))?;
-            unsafe { client.register_buffer(ptr, size, &location) }
-                .map_err(to_py_err)?;
+            unsafe { client.register_buffer(ptr, size, &location) }.map_err(to_py_err)?;
         }
         slf.borrow()
             .registered_py_buffers
@@ -865,10 +827,7 @@ impl PythonMooncakeClient {
         Ok(())
     }
 
-    fn unregister_buffer(
-        slf: &Bound<'_, Self>,
-        buffer: Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    fn unregister_buffer(slf: &Bound<'_, Self>, buffer: Bound<'_, PyAny>) -> PyResult<()> {
         let (ptr, _) = get_buffer_ptr(&buffer)?;
         {
             let slf_ref = slf.borrow();
@@ -902,8 +861,7 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         let replicas = tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
-            let result =
-                unsafe { client.upsert_from(&key, ptr, size, cfg) }.await;
+            let result = unsafe { client.upsert_from(&key, ptr, size, cfg) }.await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })?;
@@ -926,20 +884,16 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         let results = tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
-            let result =
-                unsafe { client.batch_upsert_from(&keys, &ptrs, &sizes, cfg) }
-                    .await;
+            let result = unsafe { client.batch_upsert_from(&keys, &ptrs, &sizes, cfg) }.await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })?;
-        Ok({
-            let py = unsafe { Python::assume_attached() };
-            let out: Vec<Py<PyAny>> = results
-                .iter()
-                .map(|replicas| replicas_to_py(replicas.clone()))
-                .collect();
-            out.into_pyobject(py).unwrap().unbind()
-        })
+        let py = unsafe { Python::assume_attached() };
+        let out: Vec<Py<PyAny>> = results
+            .iter()
+            .map(|replicas| replicas_to_py(replicas.clone()))
+            .collect();
+        Ok(out.into_pyobject(py)?.unbind())
     }
 
     // ===================================================================
@@ -970,8 +924,7 @@ impl PythonMooncakeClient {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
-            let result =
-                client.offload_object_heartbeat(enable_offloading).await;
+            let result = client.offload_object_heartbeat(enable_offloading).await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -1002,19 +955,42 @@ impl PythonMooncakeClient {
         let proto_metas: Vec<StorageObjectMetadata> = metadatas
             .iter()
             .map(|d| StorageObjectMetadata {
-                bucket_id: d.get_item("bucket_id").ok().flatten().and_then(|v| v.extract::<i64>().ok()).unwrap_or(0),
-                offset: d.get_item("offset").ok().flatten().and_then(|v| v.extract::<i64>().ok()).unwrap_or(0),
-                key_size: d.get_item("key_size").ok().flatten().and_then(|v| v.extract::<i64>().ok()).unwrap_or(0),
-                data_size: d.get_item("data_size").ok().flatten().and_then(|v| v.extract::<i64>().ok()).unwrap_or(0),
-                transport_endpoint: d.get_item("transport_endpoint").ok().flatten().and_then(|v| v.extract::<String>().ok()).unwrap_or_default(),
+                bucket_id: d
+                    .get_item("bucket_id")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<i64>().ok())
+                    .unwrap_or(0),
+                offset: d
+                    .get_item("offset")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<i64>().ok())
+                    .unwrap_or(0),
+                key_size: d
+                    .get_item("key_size")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<i64>().ok())
+                    .unwrap_or(0),
+                data_size: d
+                    .get_item("data_size")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<i64>().ok())
+                    .unwrap_or(0),
+                transport_endpoint: d
+                    .get_item("transport_endpoint")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.extract::<String>().ok())
+                    .unwrap_or_default(),
             })
             .collect();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
-            let result = client
-                .notify_offload_success(keys, proto_metas)
-                .await;
+            let result = client.notify_offload_success(keys, proto_metas).await;
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -1060,7 +1036,8 @@ impl PythonMooncakeClient {
                 d.set_item("segment_name", &replica.segment_name).ok();
                 d.set_item("offset", replica.offset).ok();
                 d.set_item("size", replica.size).ok();
-                d.set_item("segment_id", replica.segment_id.to_string()).ok();
+                d.set_item("segment_id", replica.segment_id.to_string())
+                    .ok();
                 d.unbind()
             })
         })

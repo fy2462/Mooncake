@@ -15,11 +15,7 @@ pub trait OpLogStore: Send + Sync {
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError>;
 
     /// 从 since_seq（含）开始读取最多 max_count 条记录。
-    fn read_since(
-        &self,
-        since_seq: u64,
-        max_count: usize,
-    ) -> Result<Vec<OpLogRecord>, HaError>;
+    fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError>;
 
     /// 获取最新已提交的序列号。
     fn latest_sequence(&self) -> u64;
@@ -53,14 +49,11 @@ impl InMemoryOpLog {
         producer_view_version: u64,
         payload: impl Into<String>,
     ) -> u64 {
-        match self.append(&OpLogRecord {
+        self.append(&OpLogRecord {
             seq: 0,
             producer_view_version,
             payload: payload.into(),
-        }) {
-            Ok(seq) => seq,
-            Err(_) => 0,
-        }
+        }).unwrap_or_default()
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -82,11 +75,7 @@ impl OpLogStore for InMemoryOpLog {
         Ok(self.last_seq)
     }
 
-    fn read_since(
-        &self,
-        since_seq: u64,
-        max_count: usize,
-    ) -> Result<Vec<OpLogRecord>, HaError> {
+    fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
         Ok(self
             .buffer
             .iter()
@@ -137,9 +126,8 @@ impl LocalFsOpLogStore {
     /// - 启动后台 flush 线程（通过 mpsc channel 接收待刷盘的 buffer）
     /// - 从已有分段文件恢复 last_seq
     pub fn new(dir: &Path, max_entries_per_segment: usize) -> Result<Self, HaError> {
-        fs::create_dir_all(dir).map_err(|e| {
-            HaError::InvalidBackend(format!("oplog dir create: {e}"))
-        })?;
+        fs::create_dir_all(dir)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog dir create: {e}")))?;
 
         let dir_buf = dir.to_path_buf();
         let (flush_tx, flush_rx) = mpsc::channel::<Vec<OpLogRecord>>();
@@ -174,9 +162,8 @@ impl LocalFsOpLogStore {
         segments.sort();
         if let Some(&highest_start) = segments.last() {
             let path = self.segment_path(highest_start);
-            let data = fs::read(&path).map_err(|e| {
-                HaError::InvalidBackend(format!("oplog read segment: {e}"))
-            })?;
+            let data = fs::read(&path)
+                .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
             let entries = Self::parse_entries(&data);
             if let Some(last) = entries.last() {
                 self.last_seq = last.seq;
@@ -188,17 +175,16 @@ impl LocalFsOpLogStore {
 
     fn list_segment_files(&self) -> Result<Vec<u64>, HaError> {
         let mut segments = Vec::new();
-        let dir_entries = fs::read_dir(&self.dir).map_err(|e| {
-            HaError::InvalidBackend(format!("oplog read dir: {e}"))
-        })?;
+        let dir_entries = fs::read_dir(&self.dir)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog read dir: {e}")))?;
         for entry in dir_entries {
-            let entry = entry.map_err(|e| {
-                HaError::InvalidBackend(format!("oplog dir entry: {e}"))
-            })?;
+            let entry =
+                entry.map_err(|e| HaError::InvalidBackend(format!("oplog dir entry: {e}")))?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if let Some(rest) =
-                name_str.strip_prefix("oplog_").and_then(|s| s.strip_suffix(".bin"))
+            if let Some(rest) = name_str
+                .strip_prefix("oplog_")
+                .and_then(|s| s.strip_suffix(".bin"))
             {
                 if let Ok(seq) = rest.parse::<u64>() {
                     segments.push(seq);
@@ -230,12 +216,10 @@ impl LocalFsOpLogStore {
             data.extend_from_slice(payload);
         }
 
-        fs::write(&tmp_path, &data).map_err(|e| {
-            HaError::InvalidBackend(format!("oplog write segment: {e}"))
-        })?;
-        fs::rename(&tmp_path, &final_path).map_err(|e| {
-            HaError::InvalidBackend(format!("oplog rename segment: {e}"))
-        })?;
+        fs::write(&tmp_path, &data)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog write segment: {e}")))?;
+        fs::rename(&tmp_path, &final_path)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog rename segment: {e}")))?;
         // fsync parent directory for durability
         if let Ok(f) = fs::File::open(dir) {
             let _ = f.sync_all();
@@ -276,8 +260,7 @@ impl LocalFsOpLogStore {
             if offset + payload_len > data.len() {
                 break;
             }
-            let payload =
-                String::from_utf8_lossy(&data[offset..offset + payload_len]).into_owned();
+            let payload = String::from_utf8_lossy(&data[offset..offset + payload_len]).into_owned();
             entries.push(OpLogRecord {
                 seq,
                 producer_view_version: 0,
@@ -300,7 +283,7 @@ impl OpLogStore for LocalFsOpLogStore {
         });
         // buffer 满时触发异步刷盘：swap 空 buffer 后将旧数据发给后台线程
         if self.buffer.len() >= self.max_entries_per_segment {
-            let to_flush = std::mem::replace(&mut self.buffer, Vec::new());
+            let to_flush = std::mem::take(&mut self.buffer);
             match self.flush_tx.send(to_flush) {
                 Ok(()) => {} // 后台线程接管刷盘
                 Err(mpsc::SendError(entries)) => {
@@ -314,11 +297,7 @@ impl OpLogStore for LocalFsOpLogStore {
         Ok(self.last_seq)
     }
 
-    fn read_since(
-        &self,
-        since_seq: u64,
-        max_count: usize,
-    ) -> Result<Vec<OpLogRecord>, HaError> {
+    fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
         let segments = self.list_segment_files()?;
         let mut all_entries = Vec::new();
 
@@ -329,9 +308,8 @@ impl OpLogStore for LocalFsOpLogStore {
             if start_seq > since_seq + 100_000 {
                 break; // optimization: don't read far-ahead segments
             }
-            let data = fs::read(self.segment_path(start_seq)).map_err(|e| {
-                HaError::InvalidBackend(format!("oplog read segment: {e}"))
-            })?;
+            let data = fs::read(self.segment_path(start_seq))
+                .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
             for entry in Self::parse_entries(&data) {
                 if entry.seq >= since_seq {
                     all_entries.push(entry);
@@ -389,10 +367,7 @@ pub struct EtcdOpLogStore {
 
 impl EtcdOpLogStore {
     /// 创建 etcd oplog store，通过读取 `/latest` key 恢复 last_seq。
-    pub async fn new(
-        client: etcd_client::Client,
-        key_prefix: &str,
-    ) -> Result<Self, HaError> {
+    pub async fn new(client: etcd_client::Client, key_prefix: &str) -> Result<Self, HaError> {
         let prefix = key_prefix.trim_end_matches('/').to_string();
         let mut store = Self {
             client,
@@ -408,11 +383,7 @@ impl EtcdOpLogStore {
     async fn recover(&mut self) -> Result<(), HaError> {
         let latest_key = format!("{}/latest", self.key_prefix);
         let c = self.client.clone();
-        match c
-            .kv_client()
-            .get(latest_key.as_bytes(), None)
-            .await
-        {
+        match c.kv_client().get(latest_key.as_bytes(), None).await {
             Ok(resp) => {
                 if let Some(kv) = resp.kvs().first() {
                     if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
@@ -443,29 +414,20 @@ impl EtcdOpLogStore {
         let c = self.client.clone();
         for entry in &self.buffer {
             let key = self.entry_key(entry.seq);
-            let value = serde_json::to_string(entry).map_err(|e| {
-                HaError::InvalidBackend(format!("oplog serialize: {e}"))
-            })?;
+            let value = serde_json::to_string(entry)
+                .map_err(|e| HaError::InvalidBackend(format!("oplog serialize: {e}")))?;
             c.kv_client()
                 .put(key.as_bytes(), value.as_bytes(), None)
                 .await
-                .map_err(|e| {
-                    HaError::InvalidBackend(format!("etcd put oplog: {e}"))
-                })?;
+                .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog: {e}")))?;
         }
         // Update latest pointer
         let max_seq = self.buffer.last().unwrap().seq;
         let latest_val = max_seq.to_string();
         c.kv_client()
-            .put(
-                self.latest_key().as_bytes(),
-                latest_val.as_bytes(),
-                None,
-            )
+            .put(self.latest_key().as_bytes(), latest_val.as_bytes(), None)
             .await
-            .map_err(|e| {
-                HaError::InvalidBackend(format!("etcd put oplog latest: {e}"))
-            })?;
+            .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog latest: {e}")))?;
 
         self.buffer.clear();
         Ok(())
@@ -482,11 +444,7 @@ impl OpLogStore for EtcdOpLogStore {
         Ok(self.last_seq)
     }
 
-    fn read_since(
-        &self,
-        since_seq: u64,
-        max_count: usize,
-    ) -> Result<Vec<OpLogRecord>, HaError> {
+    fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
         // Read from buffered entries first (fast path)
         let mut entries: Vec<OpLogRecord> = self
             .buffer
@@ -565,11 +523,10 @@ impl EtcdOpLogStore {
 
         // Supplement with buffered entries
         for entry in &self.buffer {
-            if entry.seq >= since_seq && entries.len() < max_count {
-                if !entries.iter().any(|e| e.seq == entry.seq) {
+            if entry.seq >= since_seq && entries.len() < max_count
+                && !entries.iter().any(|e| e.seq == entry.seq) {
                     entries.push(entry.clone());
                 }
-            }
         }
 
         entries.sort_by_key(|e| e.seq);
@@ -597,7 +554,10 @@ pub struct OpLogManager {
 
 impl OpLogManager {
     pub fn new(store: Option<Box<dyn OpLogStore + Send>>, view_version: u64) -> Self {
-        Self { store, view_version }
+        Self {
+            store,
+            view_version,
+        }
     }
 
     pub fn latest_sequence(&self) -> u64 {
@@ -803,7 +763,7 @@ mod tests {
         store.append(&make_entry(0)).unwrap();
         store.append(&make_entry(0)).unwrap();
         store.append(&make_entry(0)).unwrap(); // flush triggered for entries 1-2
-        // Manually flush remaining buffer so entry 3 is on disk
+                                               // Manually flush remaining buffer so entry 3 is on disk
         store.flush().unwrap();
 
         let entries = store.read_since(1, 10).unwrap();
@@ -845,7 +805,11 @@ mod tests {
 
         // read_since reads from both on-disk segments and in-memory buffer.
         let entries = store.read_since(1, 10).unwrap();
-        assert_eq!(entries.len(), 7, "all 7 entries should be readable after async flush");
+        assert_eq!(
+            entries.len(),
+            7,
+            "all 7 entries should be readable after async flush"
+        );
         assert_eq!(entries[0].seq, 1);
         assert_eq!(entries[6].seq, 7);
     }

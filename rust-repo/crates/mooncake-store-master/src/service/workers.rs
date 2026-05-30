@@ -295,9 +295,9 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
             if let Some(mut object) = state.objects.get_mut(key) {
                 let mut removed_any = false;
                 object.replicas.retain(|replica| {
-                    let owner = replica
-                        .holder_client_id
-                        .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name));
+                    let owner = replica.holder_client_id.or_else(|| {
+                        client_id_by_replica_segment_name(state, &replica.segment_name)
+                    });
                     let keep = owner != Some(client_id);
                     if !keep {
                         removed_any = true;

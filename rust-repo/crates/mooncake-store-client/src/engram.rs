@@ -77,8 +77,10 @@ impl EngramClient for MooncakeClient {
         config: Option<ReplicateConfig>,
     ) -> ClientFuture<'a, StoreResult<Vec<i32>>> {
         Box::pin(async move {
-            let ptrs: Vec<*mut std::ffi::c_void> =
-                buffers.iter().map(|b| b.as_ptr() as *mut std::ffi::c_void).collect();
+            let ptrs: Vec<*mut std::ffi::c_void> = buffers
+                .iter()
+                .map(|b| b.as_ptr() as *mut std::ffi::c_void)
+                .collect();
             let sizes: Vec<usize> = buffers.iter().map(|b| b.len()).collect();
             unsafe { MooncakeClient::batch_put_from(self, keys, &ptrs, &sizes, config).await }
         })
@@ -95,7 +97,8 @@ impl EngramClient for MooncakeClient {
         let ptr = buffer.as_mut_ptr() as *mut std::ffi::c_void;
         Box::pin(async move {
             unsafe {
-                MooncakeClient::get_into_ranges(self, &[ptr], keys, dst_offsets, src_offsets, sizes).await
+                MooncakeClient::get_into_ranges(self, &[ptr], keys, dst_offsets, src_offsets, sizes)
+                    .await
             }
         })
     }
@@ -170,7 +173,9 @@ impl<C: EngramClient> EngramStore<C> {
         output_buffer: &mut [u8],
     ) -> StoreResult<()> {
         if row_ids.is_empty() || row_ids[0].is_empty() {
-            return Err(StoreError::InvalidParams("row_ids must not be empty".to_string()));
+            return Err(StoreError::InvalidParams(
+                "row_ids must not be empty".to_string(),
+            ));
         }
 
         let batch = row_ids.len();
@@ -277,18 +282,21 @@ impl<C: EngramClient> EngramStore<C> {
 
         let result = self
             .store
-            .get_into_ranges(output_buffer, &all_keys, &all_dst_offsets, &all_src_offsets, &all_sizes)
+            .get_into_ranges(
+                output_buffer,
+                &all_keys,
+                &all_dst_offsets,
+                &all_src_offsets,
+                &all_sizes,
+            )
             .await;
-        let unregister_result = self.store.unregister_buffer(&output_buffer[..expected_size]);
+        let unregister_result = self
+            .store
+            .unregister_buffer(&output_buffer[..expected_size]);
 
         let results = match result {
             Ok(results) => results,
-            Err(err) => {
-                return fail_lookup(
-                    output_buffer,
-                    unregister_result.err().unwrap_or(err),
-                )
-            }
+            Err(err) => return fail_lookup(output_buffer, unregister_result.err().unwrap_or(err)),
         };
         if let Err(err) = unregister_result {
             return fail_lookup(output_buffer, err);
@@ -379,10 +387,7 @@ impl<C: EngramClient> EngramStore<C> {
         }
 
         for (index, buffer) in embedding_buffers.iter().enumerate() {
-            if let Err(err) = self
-                .store
-                .register_buffer(buffer, &self.buffer_location)
-            {
+            if let Err(err) = self.store.register_buffer(buffer, &self.buffer_location) {
                 for registered in &embedding_buffers[..index] {
                     let _ = self.store.unregister_buffer(registered);
                 }

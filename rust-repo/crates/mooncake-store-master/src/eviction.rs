@@ -19,7 +19,12 @@ impl EvictionManager {
     /// 仅用于已有测试；生产路径应使用下面的 select_for_eviction_with_hard_pin。
     pub fn select_for_eviction(
         &self,
-        candidates: &[(&str, &[mooncake_store_core::ReplicaDescriptor], bool, SystemTime)],
+        candidates: &[(
+            &str,
+            &[mooncake_store_core::ReplicaDescriptor],
+            bool,
+            SystemTime,
+        )],
         target_count: usize,
     ) -> Vec<String> {
         let mut owned: Vec<(String, bool, bool, SystemTime)> = candidates

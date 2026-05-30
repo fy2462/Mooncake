@@ -1,5 +1,5 @@
-use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// 简单的 Count-Min Sketch，用于跟踪 key 的访问频率。
 /// 被 frequency admission policy 使用，决定一个 key 是否应该被 promotion 到本地热点缓存。
@@ -22,8 +22,16 @@ impl CountMinSketch {
     }
 
     pub fn with_dimensions(width: usize, depth: usize) -> Self {
-        let width = if width > 0 { width } else { Self::DEFAULT_WIDTH };
-        let depth = if depth > 0 { depth } else { Self::DEFAULT_DEPTH };
+        let width = if width > 0 {
+            width
+        } else {
+            Self::DEFAULT_WIDTH
+        };
+        let depth = if depth > 0 {
+            depth
+        } else {
+            Self::DEFAULT_DEPTH
+        };
         Self {
             width,
             depth,
@@ -38,9 +46,7 @@ impl CountMinSketch {
         let mut min_val = u8::MAX;
         for i in 0..self.depth {
             let idx = self.hash(key, i as u64) % self.width;
-            if self.table[i][idx] < u8::MAX {
-                self.table[i][idx] += 1;
-            }
+            self.table[i][idx] = self.table[i][idx].saturating_add(1);
             min_val = min_val.min(self.table[i][idx]);
         }
         self.total_increments += 1;
@@ -79,7 +85,10 @@ impl CountMinSketch {
         key.hash(&mut hasher);
         let h = hasher.finish();
         // 与 C++ 保持一致的哈希混合常数
-        let h = h ^ (seed.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(0x517cc1b727220a95));
+        let h = h
+            ^ (seed
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add(0x517cc1b727220a95));
         let h = h ^ (h >> 33);
         let h = h.wrapping_mul(0xff51afd7ed558ccd);
         let h = h ^ (h >> 33);

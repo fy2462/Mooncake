@@ -25,6 +25,6 @@ Homepage = "https://github.com/kvcache-ai/Mooncake"
 Source = "https://github.com/kvcache-ai/Mooncake"
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "link-native"]
 module-name = "mooncake_store._mooncake_store"
 bindings = "pyo3"

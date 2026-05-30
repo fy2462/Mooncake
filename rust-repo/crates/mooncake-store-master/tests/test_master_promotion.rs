@@ -32,6 +32,7 @@ async fn test_promotion_flow_success_and_failure() {
             }),
             segment_name: "dram-a".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -300,6 +301,7 @@ async fn test_promotion_queue_limit_released_after_success() {
             }),
             segment_name: "limit-dram".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -442,6 +444,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             }),
             segment_name: "reaper-dram".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await

@@ -773,7 +773,9 @@ impl CachelibSegmentState {
     }
 
     pub(super) fn pool_unallocated_slab_memory(&self, pool_id: PoolId) -> Option<u64> {
-        self.pools.get(&pool_id).map(|p| p.get_unallocated_slab_memory())
+        self.pools
+            .get(&pool_id)
+            .map(|p| p.get_unallocated_slab_memory())
     }
 
     pub(super) fn advised_memory_size(&self) -> u64 {
@@ -792,20 +794,12 @@ impl CachelibPoolState {
 
     pub(super) fn get_pool_usable_size(&self) -> u64 {
         let advised = self.get_pool_advised_size();
-        if self.configured_size_bytes <= advised {
-            0
-        } else {
-            self.configured_size_bytes - advised
-        }
+        self.configured_size_bytes.saturating_sub(advised)
     }
 
     pub(super) fn get_unallocated_slab_memory(&self) -> u64 {
         let total = self.current_used_size() + self.get_pool_advised_size();
-        if total >= self.configured_size_bytes {
-            0
-        } else {
-            self.configured_size_bytes - total
-        }
+        self.configured_size_bytes.saturating_sub(total)
     }
 
     pub(super) fn releasable_slabs(&self) -> Vec<u32> {

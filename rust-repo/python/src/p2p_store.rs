@@ -1,4 +1,4 @@
-use mooncake_p2p_store::{P2pStore, PayloadInfo, P2pStoreError};
+use mooncake_p2p_store::{P2pStore, P2pStoreError, PayloadInfo};
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -23,15 +23,16 @@ impl P2pStorePy {
         local_server_name: String,
         nic_priority_matrix: String,
     ) -> PyResult<Self> {
-        let store = tokio::runtime::Handle::current().block_on(async {
-            P2pStore::new(
-                &metadata_conn_string,
-                &local_server_name,
-                &nic_priority_matrix,
-            )
-            .await
-        })
-        .map_err(map_p2p_err)?;
+        let store = tokio::runtime::Handle::current()
+            .block_on(async {
+                P2pStore::new(
+                    &metadata_conn_string,
+                    &local_server_name,
+                    &nic_priority_matrix,
+                )
+                .await
+            })
+            .map_err(map_p2p_err)?;
 
         Ok(P2pStorePy {
             inner: Arc::new(Mutex::new(Some(store))),
@@ -58,9 +59,10 @@ impl P2pStorePy {
     ) -> PyResult<()> {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let store = inner.lock().take().ok_or_else(|| {
-                to_py_err("P2pStore already closed")
-            })?;
+            let store = inner
+                .lock()
+                .take()
+                .ok_or_else(|| to_py_err("P2pStore already closed"))?;
             let result = store
                 .register(
                     &name,
@@ -76,40 +78,33 @@ impl P2pStorePy {
         })
     }
 
-    fn unregister(
-        slf: &Bound<'_, Self>,
-        name: String,
-    ) -> PyResult<()> {
+    fn unregister(slf: &Bound<'_, Self>, name: String) -> PyResult<()> {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let store = inner.lock().take().ok_or_else(|| {
-                to_py_err("P2pStore already closed")
-            })?;
+            let store = inner
+                .lock()
+                .take()
+                .ok_or_else(|| to_py_err("P2pStore already closed"))?;
             let result = store.unregister(&name).await;
             *inner.lock() = Some(store);
             result.map_err(map_p2p_err)
         })
     }
 
-    fn list(
-        slf: &Bound<'_, Self>,
-        prefix: String,
-    ) -> PyResult<Py<PyAny>> {
+    fn list(slf: &Bound<'_, Self>, prefix: String) -> PyResult<Py<PyAny>> {
         let inner = slf.borrow().inner.clone();
         let payloads = tokio::runtime::Handle::current().block_on(async {
-            let store = inner.lock().take().ok_or_else(|| {
-                to_py_err("P2pStore already closed")
-            })?;
+            let store = inner
+                .lock()
+                .take()
+                .ok_or_else(|| to_py_err("P2pStore already closed"))?;
             let result = store.list(&prefix).await;
             *inner.lock() = Some(store);
             result.map_err(map_p2p_err)
         })?;
         Ok({
             let py = unsafe { Python::assume_attached() };
-            let out: Vec<Py<PyAny>> = payloads
-                .iter()
-                .map(|p| payload_info_to_py(py, p))
-                .collect();
+            let out: Vec<Py<PyAny>> = payloads.iter().map(|p| payload_info_to_py(py, p)).collect();
             out.into_pyobject(py).unwrap().unbind()
         })
     }
@@ -122,12 +117,11 @@ impl P2pStorePy {
     ) -> PyResult<()> {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let store = inner.lock().take().ok_or_else(|| {
-                to_py_err("P2pStore already closed")
-            })?;
-            let result = store
-                .get_replica(&name, &addr_list, &size_list)
-                .await;
+            let store = inner
+                .lock()
+                .take()
+                .ok_or_else(|| to_py_err("P2pStore already closed"))?;
+            let result = store.get_replica(&name, &addr_list, &size_list).await;
             *inner.lock() = Some(store);
             result.map_err(map_p2p_err)
         })

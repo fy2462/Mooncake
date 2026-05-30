@@ -1,13 +1,13 @@
-pub(crate) mod write;
 pub(crate) mod read;
 pub(crate) mod remove;
-pub(crate) mod upsert;
-pub(crate) mod tasks;
 pub(crate) mod storage;
+pub(crate) mod tasks;
 pub(crate) mod transfer;
+pub(crate) mod upsert;
+pub(crate) mod write;
 
-use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::StoreError;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -39,6 +39,9 @@ pub struct MooncakeClient {
     pub(crate) client_id: Uuid,
     pub(crate) local_hostname: String,
     pub(crate) local_buffer: Vec<u8>,
+    /// Segment memory buffer (only for storage nodes with global_segment_size > 0).
+    /// Must be kept alive for the lifetime of the client so the TE can access it.
+    pub(crate) segment_buffer: Option<Vec<u8>>,
     pub(crate) registered_buffers: RwLock<HashMap<usize, (usize, String)>>,
     pub(crate) tear_down: Arc<RwLock<bool>>,
     /// 本地已挂载 segment 的传输端点集合，用于 SelectBestReplica 本地性检查。
@@ -67,20 +70,13 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
 
-        let mut master =
-            proto::master_service_client::MasterServiceClient::new(channel);
+        let mut master = proto::master_service_client::MasterServiceClient::new(channel);
 
         let parts: Vec<&str> = local_host.split(':').collect();
         let ip = parts.first().copied().unwrap_or(local_host);
         let port: u64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
 
-        let engine = TransferEngine::create(
-            metadata_conn_string,
-            local_host,
-            ip,
-            port,
-            true,
-        )?;
+        let engine = TransferEngine::create(metadata_conn_string, local_host, ip, port, true)?;
 
         if protocol != "tcp" {
             engine.install_transport(protocol, Some(device))?;
@@ -104,7 +100,28 @@ impl MooncakeClient {
 
         let client_id = Uuid::new_v4();
 
+        let mut segment_buffer: Option<Vec<u8>> = None;
         if global_segment_size > 0 {
+            // Allocate and register segment memory with the TE so that
+            // remote nodes can read from / write to this segment via RDMA/TCP.
+            let seg_buf = vec![0u8; global_segment_size as usize];
+            let base_addr = seg_buf.as_ptr() as u64;
+            unsafe {
+                engine.register_local_memory(
+                    seg_buf.as_ptr() as *mut c_void,
+                    global_segment_size as usize,
+                    "cpu:0",
+                    true,
+                )?;
+            }
+
+            // Create a local TE segment so the transfer engine can discover
+            // and resolve this node's segment memory for remote transfers.
+            // Without this openSegment, the TE on this node does not know
+            // which registered memory backs the segment.
+            engine.open_segment(local_host)?;
+
+            segment_buffer = Some(seg_buf);
             let request = proto::MountSegmentRequest {
                 client_id: Some(proto::Uuid {
                     high: client_id.as_u64_pair().0,
@@ -112,8 +129,12 @@ impl MooncakeClient {
                 }),
                 segment_name: local_host.to_string(),
                 size: global_segment_size,
+                base_addr,
             };
-            master.mount_segment(request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+            master
+                .mount_segment(request)
+                .await
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
         }
 
         // 将当前节点的 hostname 注册为本地端点（传输地址），
@@ -128,6 +149,7 @@ impl MooncakeClient {
             client_id,
             local_hostname: local_host.to_string(),
             local_buffer,
+            segment_buffer,
             registered_buffers: RwLock::new(HashMap::new()),
             tear_down: Arc::new(RwLock::new(false)),
             local_endpoints: RwLock::new(endpoints),
@@ -199,12 +221,18 @@ impl MooncakeClient {
         *self.tear_down.write() = true;
 
         // unregister local buffer
-        unsafe { let _ = self.engine.unregister_local_memory(self.local_buffer.as_ptr() as *mut c_void); }
+        unsafe {
+            let _ = self
+                .engine
+                .unregister_local_memory(self.local_buffer.as_ptr() as *mut c_void);
+        }
 
         // unregister all user-registered buffers
         let ptrs: Vec<usize> = self.registered_buffers.read().keys().copied().collect();
         for ptr in &ptrs {
-            unsafe { let _ = self.engine.unregister_local_memory(*ptr as *mut c_void); }
+            unsafe {
+                let _ = self.engine.unregister_local_memory(*ptr as *mut c_void);
+            }
         }
         self.registered_buffers.write().clear();
         Ok(())

@@ -59,6 +59,7 @@ message ReplicaDescriptor {
   string file_path = 10;
   uint64 object_size = 11;
   Uuid local_disk_client_id = 12;
+  uint64 base_addr = 13;  // segment buffer physical address on storage node
 }
 
 message ReplicateConfig {
@@ -109,6 +110,7 @@ message MountSegmentRequest {
   Uuid client_id = 1;
   string segment_name = 2;
   uint64 size = 3;
+  uint64 base_addr = 4;  // physical base address of segment buffer on storage node
 }
 
 message MountSegmentResponse {}

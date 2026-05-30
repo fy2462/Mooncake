@@ -47,10 +47,7 @@ impl EngramClient for MockClient {
         Ok(())
     }
 
-    fn unregister_buffer(
-        &self,
-        buffer: &[u8],
-    ) -> mooncake_store_core::error::StoreResult<()> {
+    fn unregister_buffer(&self, buffer: &[u8]) -> mooncake_store_core::error::StoreResult<()> {
         let mut state = self.state.lock().unwrap();
         state.unregistrations.push(buffer.as_ptr() as usize);
         if let Some(err) = state.unregister_failures.pop_front() {
@@ -62,7 +59,8 @@ impl EngramClient for MockClient {
     fn batch_is_exist<'a>(
         &'a mut self,
         _keys: &'a [String],
-    ) -> Pin<Box<dyn Future<Output = mooncake_store_core::error::StoreResult<Vec<bool>>> + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = mooncake_store_core::error::StoreResult<Vec<bool>>> + 'a>>
+    {
         Box::pin(async move { Ok(self.state.lock().unwrap().exists_results.clone()) })
     }
 
@@ -82,17 +80,16 @@ impl EngramClient for MockClient {
         dst_offsets: &'a [Vec<Vec<usize>>],
         src_offsets: &'a [Vec<Vec<usize>>],
         sizes: &'a [Vec<Vec<usize>>],
-    ) -> Pin<Box<dyn Future<Output = mooncake_store_core::error::StoreResult<Vec<Vec<Vec<i64>>>>> + 'a>> {
+    ) -> Pin<
+        Box<dyn Future<Output = mooncake_store_core::error::StoreResult<Vec<Vec<Vec<i64>>>>> + 'a>,
+    > {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
             state.get_keys = keys.to_vec();
             state.get_dst_offsets = dst_offsets.to_vec();
             state.get_src_offsets = src_offsets.to_vec();
             state.get_sizes = sizes.to_vec();
-            Ok(state
-                .get_into_ranges_result
-                .clone()
-                .unwrap_or_default())
+            Ok(state.get_into_ranges_result.clone().unwrap_or_default())
         })
     }
 
@@ -100,7 +97,11 @@ impl EngramClient for MockClient {
         &'a mut self,
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = mooncake_store_core::error::StoreResult<()>> + 'a>> {
-        self.state.lock().unwrap().removed_keys.push(key.to_string());
+        self.state
+            .lock()
+            .unwrap()
+            .removed_keys
+            .push(key.to_string());
         Box::pin(std::future::ready(Ok(())))
     }
 }
@@ -129,8 +130,7 @@ fn test_engram_store_builds_expected_keys() {
 #[tokio::test]
 async fn test_engram_lookup_rows_contiguous_builds_range_layout() {
     let mut state = MockState::default();
-    state.get_into_ranges_result =
-        Some(vec![vec![vec![64; 4]; 2]; 1]);
+    state.get_into_ranges_result = Some(vec![vec![vec![64; 4]; 2]; 1]);
 
     let mut store = EngramStore::new(
         0,
@@ -144,12 +144,7 @@ async fn test_engram_lookup_rows_contiguous_builds_range_layout() {
     .unwrap();
 
     let mut output = vec![0u8; 2 * 2 * 2 * 64];
-    let row_ids: Vec<i64> = vec![
-        0, 0,
-        5, 10,
-        1, 0,
-        3, 20,
-    ];
+    let row_ids: Vec<i64> = vec![0, 0, 5, 10, 1, 0, 3, 20];
 
     store
         .lookup_rows_contiguous(&row_ids, 2, 2, &mut output)
@@ -201,9 +196,8 @@ async fn test_engram_populate_rolls_back_when_unregister_fails() {
     let mut state = MockState::default();
     state.exists_results = vec![false];
     state.batch_put_statuses = vec![0];
-    state.unregister_failures = VecDeque::from(vec![StoreError::Internal(
-        "unregister failed".to_string(),
-    )]);
+    state.unregister_failures =
+        VecDeque::from(vec![StoreError::Internal("unregister failed".to_string())]);
 
     let mut store = EngramStore::new(
         0,

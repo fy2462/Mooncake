@@ -1,5 +1,5 @@
-use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use std::ffi::c_void;
 
 use super::MooncakeClient;
@@ -34,7 +34,12 @@ impl MooncakeClient {
             }),
         };
 
-        let response = self.master.upsert(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let response = self
+            .master
+            .upsert(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
@@ -68,7 +73,10 @@ impl MooncakeClient {
                 }),
             }],
         };
-        self.master.batch_upsert_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.master
+            .batch_upsert_end(end_request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(replicas)
     }
@@ -98,7 +106,12 @@ impl MooncakeClient {
             }),
         };
 
-        let response = self.master.upsert(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let response = self
+            .master
+            .upsert(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
@@ -132,7 +145,10 @@ impl MooncakeClient {
                 }),
             }],
         };
-        self.master.batch_upsert_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.master
+            .batch_upsert_end(end_request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(replicas)
     }
@@ -148,7 +164,7 @@ impl MooncakeClient {
         for (i, key) in keys.iter().enumerate() {
             results.push(
                 self.upsert_from(key, buffers[i], sizes[i], config.clone())
-                    .await?
+                    .await?,
             );
         }
         Ok(results)

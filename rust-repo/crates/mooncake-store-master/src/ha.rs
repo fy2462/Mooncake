@@ -1,5 +1,5 @@
-use crate::service::ObjectEntry;
 use crate::service::NoFSegmentEntry;
+use crate::service::ObjectEntry;
 use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use mooncake_store_core::Segment;
@@ -210,7 +210,10 @@ impl SnapshotProvider for LocalSnapshotProvider {
         Ok(Some(LoadedSnapshot {
             snapshot_id,
             snapshot_sequence_id: 0,
-            segments: segments.into_iter().map(|s: crate::service::SegmentEntry| s.segment).collect(),
+            segments: segments
+                .into_iter()
+                .map(|s: crate::service::SegmentEntry| s.segment)
+                .collect(),
             nof_segments,
             objects,
             tasks,
@@ -731,7 +734,9 @@ impl LeaderCoordinator {
                 client,
                 election_key,
             } => {
-                let mut conn = client.get_multiplexed_async_connection().await
+                let mut conn = client
+                    .get_multiplexed_async_connection()
+                    .await
                     .map_err(|e| HaError::InvalidBackend(format!("redis connect: {e}")))?;
                 let result: Option<String> = redis::cmd("GET")
                     .arg(election_key)
@@ -767,9 +772,10 @@ impl LeaderCoordinator {
                 let current = self.read_current_view().await?;
 
                 // Grant a TTL lease
-                let lease_resp = client.lease_grant(lease_ttl_secs, None).await.map_err(|e| {
-                    HaError::InvalidBackend(format!("etcd lease grant error: {e}"))
-                })?;
+                let lease_resp = client
+                    .lease_grant(lease_ttl_secs, None)
+                    .await
+                    .map_err(|e| HaError::InvalidBackend(format!("etcd lease grant error: {e}")))?;
                 let lease_id = lease_resp.id();
 
                 // Campaign for leadership
@@ -818,7 +824,9 @@ impl LeaderCoordinator {
                 client,
                 election_key,
             } => {
-                let mut conn = client.get_multiplexed_async_connection().await
+                let mut conn = client
+                    .get_multiplexed_async_connection()
+                    .await
                     .map_err(|e| HaError::InvalidBackend(format!("redis connect: {e}")))?;
                 let ttl_ms = (lease_ttl_secs * 1000) as usize;
                 let value = format!("{}|{}", leader_address, "1");
@@ -913,7 +921,9 @@ impl LeaderCoordinator {
                     Err(e) => {
                         error!("Redis keepalive connection failed: {}", e);
                         let _ = self.role_tx.send(LeaderRole::Standby);
-                        return Ok(LeadershipHandle { cancel_tx: Some(cancel_tx) });
+                        return Ok(LeadershipHandle {
+                            cancel_tx: Some(cancel_tx),
+                        });
                     }
                 };
                 let lease_ms = lease_id * 1000;
@@ -956,9 +966,10 @@ impl LeaderCoordinator {
         match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
                 let mut client = client.clone();
-                client.resign(None).await.map_err(|e| {
-                    HaError::InvalidBackend(format!("etcd resign error: {e}"))
-                })?;
+                client
+                    .resign(None)
+                    .await
+                    .map_err(|e| HaError::InvalidBackend(format!("etcd resign error: {e}")))?;
                 let _ = self.role_tx.send(LeaderRole::Standby);
                 info!("Leadership released via resign");
                 Ok(())
@@ -967,7 +978,9 @@ impl LeaderCoordinator {
                 client,
                 election_key,
             } => {
-                let mut conn = client.get_multiplexed_async_connection().await
+                let mut conn = client
+                    .get_multiplexed_async_connection()
+                    .await
                     .map_err(|e| HaError::InvalidBackend(format!("redis connect: {e}")))?;
                 let _: Result<(), _> = redis::cmd("DEL")
                     .arg(election_key)
@@ -1052,4 +1065,3 @@ impl LeaderCoordinator {
         let _ = self.role_tx.send(role);
     }
 }
-

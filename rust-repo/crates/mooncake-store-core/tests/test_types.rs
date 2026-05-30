@@ -212,6 +212,7 @@ fn test_segment_serde_json_keys() {
 #[test]
 fn test_replica_descriptor() {
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
@@ -220,7 +221,7 @@ fn test_replica_descriptor() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
-                handle_valid: true,
+        handle_valid: true,
     };
     assert_eq!(rd.offset, 0x1000);
     assert_eq!(rd.size, 256);
@@ -229,6 +230,7 @@ fn test_replica_descriptor() {
 #[test]
 fn test_replica_descriptor_disk() {
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "disk-node:1".into(),
@@ -237,7 +239,7 @@ fn test_replica_descriptor_disk() {
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
-                handle_valid: true,
+        handle_valid: true,
     };
     assert_eq!(rd.replica_type, ReplicaType::Disk);
     assert_eq!(rd.status, ReplicaStatus::Written);
@@ -254,6 +256,7 @@ fn test_replica_descriptor_all_statuses() {
         ReplicaStatus::Failed,
     ] {
         let rd = ReplicaDescriptor {
+            base_addr: 0,
             refcnt: 0,
             segment_id: Uuid::new_v4(),
             segment_name: "s1".into(),
@@ -262,7 +265,7 @@ fn test_replica_descriptor_all_statuses() {
             status: *status,
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
-                handle_valid: true,
+            handle_valid: true,
         };
         assert_eq!(rd.status, *status);
     }
@@ -271,6 +274,7 @@ fn test_replica_descriptor_all_statuses() {
 #[test]
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
         segment_id: Uuid::new_v4(),
         segment_name: "cl".into(),
@@ -279,7 +283,7 @@ fn test_replica_descriptor_clone() {
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
-                handle_valid: true,
+        handle_valid: true,
     };
     let cloned = rd.clone();
     assert_eq!(rd.segment_id, cloned.segment_id);
@@ -292,6 +296,7 @@ fn test_replica_descriptor_clone() {
 fn test_replica_descriptor_serde_roundtrip() {
     let sid = Uuid::new_v4();
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
         segment_id: sid,
         segment_name: "serde-rep:1".into(),
@@ -300,7 +305,7 @@ fn test_replica_descriptor_serde_roundtrip() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
-                handle_valid: true,
+        handle_valid: true,
     };
     let json = serde_json::to_string(&rd).unwrap();
     let restored: ReplicaDescriptor = serde_json::from_str(&json).unwrap();
@@ -351,7 +356,13 @@ fn test_replica_status_serde_all_variants() {
 
 #[test]
 fn test_replica_type_serde_all_variants() {
-    for ty in &[ReplicaType::Memory, ReplicaType::Disk, ReplicaType::LocalDisk, ReplicaType::NoFSsd, ReplicaType::All] {
+    for ty in &[
+        ReplicaType::Memory,
+        ReplicaType::Disk,
+        ReplicaType::LocalDisk,
+        ReplicaType::NoFSsd,
+        ReplicaType::All,
+    ] {
         let json = serde_json::to_string(ty).unwrap();
         let restored: ReplicaType = serde_json::from_str(&json).unwrap();
         assert_eq!(*ty, restored);
@@ -542,17 +553,41 @@ fn test_error_all_variants() {
     use mooncake_store_core::StoreError;
 
     let cases: Vec<(&str, StoreError)> = vec![
-        ("operation failed with code 42", StoreError::OperationFailed(42)),
+        (
+            "operation failed with code 42",
+            StoreError::OperationFailed(42),
+        ),
         ("null handle returned", StoreError::NullHandle),
-        ("object already exists: dup", StoreError::ObjectExists("dup".into())),
+        (
+            "object already exists: dup",
+            StoreError::ObjectExists("dup".into()),
+        ),
         ("replica is not ready", StoreError::ReplicaNotReady),
-        ("invalid parameters: bad", StoreError::InvalidParams("bad".into())),
-        ("client not found: c1", StoreError::ClientNotFound("c1".into())),
-        ("segment not found: s1", StoreError::SegmentNotFound("s1".into())),
+        (
+            "invalid parameters: bad",
+            StoreError::InvalidParams("bad".into()),
+        ),
+        (
+            "client not found: c1",
+            StoreError::ClientNotFound("c1".into()),
+        ),
+        (
+            "segment not found: s1",
+            StoreError::SegmentNotFound("s1".into()),
+        ),
         ("service unavailable", StoreError::ServiceUnavailable),
-        ("etcd error: etcd-down", StoreError::EtcdError("etcd-down".into())),
-        ("redis error: redis-down", StoreError::RedisError("redis-down".into())),
-        ("K8s error: k8s-down", StoreError::K8sError("k8s-down".into())),
+        (
+            "etcd error: etcd-down",
+            StoreError::EtcdError("etcd-down".into()),
+        ),
+        (
+            "redis error: redis-down",
+            StoreError::RedisError("redis-down".into()),
+        ),
+        (
+            "K8s error: k8s-down",
+            StoreError::K8sError("k8s-down".into()),
+        ),
         ("S3 error: s3-down", StoreError::S3Error("s3-down".into())),
     ];
 

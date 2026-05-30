@@ -150,10 +150,7 @@ impl MasterServiceImpl {
         request: Request<proto::BatchPutRevokeRequest>,
     ) -> Result<Response<proto::BatchPutRevokeResponse>, Status> {
         let req = request.into_inner();
-        let client_id = req
-            .client_id
-            .as_ref()
-            .map(uuid_from_proto);
+        let client_id = req.client_id.as_ref().map(uuid_from_proto);
         let segment_name = if req.segment_name.is_empty() {
             None
         } else {
@@ -176,7 +173,7 @@ impl MasterServiceImpl {
                     object.replicas.retain(|replica| {
                         let matched = segment_name
                             .as_ref()
-                            .map_or(true, |seg| replica.segment_name == *seg);
+                            .is_none_or(|seg| replica.segment_name == *seg);
                         if matched {
                             removed.push(replica.clone());
                         }
@@ -329,7 +326,9 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
         let req = request.into_inner();
         if req.keys.len() != req.slice_lengths.len() || req.keys.is_empty() {
-            return Err(Status::invalid_argument("keys and slice_lengths mismatch or empty"));
+            return Err(Status::invalid_argument(
+                "keys and slice_lengths mismatch or empty",
+            ));
         }
         let config = req
             .config
@@ -349,7 +348,13 @@ impl MasterServiceImpl {
             }
             let replicas = {
                 let mut allocator = self.state.allocator.write();
-                allocator.allocate_for_client(key, Some(client_id), *slice_len, replica_count, &config)
+                allocator.allocate_for_client(
+                    key,
+                    Some(client_id),
+                    *slice_len,
+                    replica_count,
+                    &config,
+                )
             };
             if !replicas.is_empty() {
                 let proto_r: Vec<_> = replicas.iter().map(replica_to_proto).collect();
@@ -375,7 +380,9 @@ impl MasterServiceImpl {
             }
         }
         metrics::PUT_START_REQUESTS.inc_by(req.keys.len() as u64);
-        Ok(Response::new(proto::BatchPutStartResponse { replicas: all_replicas }))
+        Ok(Response::new(proto::BatchPutStartResponse {
+            replicas: all_replicas,
+        }))
     }
 
     // ---- EvictDiskReplica ----
@@ -398,8 +405,10 @@ impl MasterServiceImpl {
                         r.replica_type != ReplicaType::LocalDisk
                     }
                     // ALL (4) or default: evict both Disk and LocalDisk
-                    _ => !(r.replica_type == ReplicaType::LocalDisk
-                        || r.replica_type == ReplicaType::Disk),
+                    _ => {
+                        !(r.replica_type == ReplicaType::LocalDisk
+                            || r.replica_type == ReplicaType::Disk)
+                    }
                 }
             });
             if entry.replicas.is_empty() {
@@ -429,8 +438,10 @@ impl MasterServiceImpl {
                             r.replica_type != ReplicaType::LocalDisk
                         }
                         // ALL (4) or default: evict both Disk and LocalDisk
-                        _ => !(r.replica_type == ReplicaType::LocalDisk
-                            || r.replica_type == ReplicaType::Disk),
+                        _ => {
+                            !(r.replica_type == ReplicaType::LocalDisk
+                                || r.replica_type == ReplicaType::Disk)
+                        }
                     }
                 });
                 if entry.replicas.is_empty() {

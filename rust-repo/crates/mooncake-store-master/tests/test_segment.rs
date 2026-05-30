@@ -1,17 +1,31 @@
 use dashmap::DashMap;
-use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment};
+use mooncake_store_core::{
+    ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment,
+};
 use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
-use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
+use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
 use std::time::SystemTime;
 use uuid::Uuid;
 
 fn make_test_seg(id: Uuid, name: &str, size: u64) -> Segment {
-    Segment { id, name: name.into(), size, base: 0, te_endpoint: String::new(), protocol: "tcp".into() }
+    Segment {
+        id,
+        name: name.into(),
+        size,
+        base: 0,
+        te_endpoint: String::new(),
+        protocol: "tcp".into(),
+    }
 }
 
 fn make_test_entry(id: Uuid, name: &str, size: u64, used: u64, client_id: Uuid) -> SegmentEntry {
-    SegmentEntry { segment: make_test_seg(id, name, size), used, client_id, status: ProtoSegmentStatus::Active }
+    SegmentEntry {
+        segment: make_test_seg(id, name, size),
+        used,
+        client_id,
+        status: ProtoSegmentStatus::Active,
+    }
 }
 
 #[test]
@@ -90,7 +104,13 @@ fn test_replica_status_serde_roundtrip() {
 
 #[test]
 fn test_replica_type_serde_roundtrip() {
-    for ty in &[ReplicaType::Memory, ReplicaType::Disk, ReplicaType::LocalDisk, ReplicaType::NoFSsd, ReplicaType::All] {
+    for ty in &[
+        ReplicaType::Memory,
+        ReplicaType::Disk,
+        ReplicaType::LocalDisk,
+        ReplicaType::NoFSsd,
+        ReplicaType::All,
+    ] {
         let json = serde_json::to_string(ty).unwrap();
         let restored: ReplicaType = serde_json::from_str(&json).unwrap();
         assert_eq!(*ty, restored);
@@ -101,8 +121,9 @@ fn test_replica_type_serde_roundtrip() {
 fn test_replica_descriptor_full() {
     let sid = Uuid::new_v4();
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
-                handle_valid: true,
+        handle_valid: true,
         segment_id: sid,
         segment_name: "node1:12345".into(),
         offset: 0xDEAD,
@@ -122,8 +143,9 @@ fn test_replica_descriptor_full() {
 #[test]
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
-                handle_valid: true,
+        handle_valid: true,
         segment_id: Uuid::new_v4(),
         segment_name: "s1".into(),
         offset: 100,
@@ -165,13 +187,40 @@ fn test_object_entry_creation() {
     let sid = Uuid::new_v4();
     let entry = ObjectEntry {
         replicas: vec![
-            ReplicaDescriptor { refcnt: 0,
-                handle_valid: true, segment_id: sid, segment_name: "s1".into(), offset: 0, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
-            ReplicaDescriptor { refcnt: 0,
-                handle_valid: true, segment_id: sid, segment_name: "s2".into(), offset: 128, size: 128, status: ReplicaStatus::Complete, replica_type: ReplicaType::Memory, holder_client_id: None },
+            ReplicaDescriptor {
+                base_addr: 0,
+                refcnt: 0,
+                handle_valid: true,
+                segment_id: sid,
+                segment_name: "s1".into(),
+                offset: 0,
+                size: 128,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Memory,
+                holder_client_id: None,
+            },
+            ReplicaDescriptor {
+                base_addr: 0,
+                refcnt: 0,
+                handle_valid: true,
+                segment_id: sid,
+                segment_name: "s2".into(),
+                offset: 128,
+                size: 128,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Memory,
+                holder_client_id: None,
+            },
         ],
-        size: 256, last_access: SystemTime::now(), soft_pinned: false, hard_pinned: false,
-        data_type: ObjectDataType::Unknown, client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+        size: 256,
+        last_access: SystemTime::now(),
+        soft_pinned: false,
+        hard_pinned: false,
+        data_type: ObjectDataType::Unknown,
+        client_id: Uuid::nil(),
+        put_start_time: None,
+        lease_timeout: None,
+        soft_pin_timeout: None,
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");
@@ -185,9 +234,22 @@ fn test_allocator_prefers_same_node() {
     let cid_other = Uuid::new_v4();
     let cid_third = Uuid::new_v4();
     allocator.add_segment(make_test_seg(Uuid::new_v4(), "same:1", 10000), 0, cid_same);
-    allocator.add_segment(make_test_seg(Uuid::new_v4(), "other:1", 10000), 0, cid_other);
-    allocator.add_segment(make_test_seg(Uuid::new_v4(), "third:1", 10000), 0, cid_third);
-    let config = ReplicateConfig { prefer_alloc_in_same_node: true, replica_num: 1, nof_replica_num: 0, ..Default::default() };
+    allocator.add_segment(
+        make_test_seg(Uuid::new_v4(), "other:1", 10000),
+        0,
+        cid_other,
+    );
+    allocator.add_segment(
+        make_test_seg(Uuid::new_v4(), "third:1", 10000),
+        0,
+        cid_third,
+    );
+    let config = ReplicateConfig {
+        prefer_alloc_in_same_node: true,
+        replica_num: 1,
+        nof_replica_num: 0,
+        ..Default::default()
+    };
     let replicas = allocator.allocate_for_client("k", Some(cid_same), 100, 1, &config);
     assert_eq!(replicas.len(), 1);
     assert_eq!(replicas[0].segment_name, "same:1");
@@ -205,7 +267,11 @@ fn test_multi_replica_different_segments() {
     let mut allocator = SegmentAllocator::new();
     let cid = Uuid::new_v4();
     for i in 0..4 {
-        allocator.add_segment(make_test_seg(Uuid::new_v4(), &format!("n{}:1", i), 10000), 0, cid);
+        allocator.add_segment(
+            make_test_seg(Uuid::new_v4(), &format!("n{}:1", i), 10000),
+            0,
+            cid,
+        );
     }
     let replicas = allocator.allocate("k", 100, 3, &Default::default());
     if replicas.len() >= 2 {

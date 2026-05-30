@@ -5,16 +5,15 @@ use common::temp_dir;
 
 use mooncake_store_master::ha::{
     build_standby_runtime_capabilities, parse_ha_backend_type, CapabilityDrivenStandbyController,
-    HABackendSpec, HABackendType, LeaderCoordinator, LeaderRole,
-    LocalSnapshotProvider, MasterRuntimeState, MasterServiceSupervisor,
-    MasterServiceSupervisorConfig, MasterView, SnapshotProvider, StandbyController,
-    StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
+    HABackendSpec, HABackendType, LeaderCoordinator, LeaderRole, LocalSnapshotProvider,
+    MasterRuntimeState, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    SnapshotProvider, StandbyController, StandbyRuntimeCapabilities, StandbyState,
+    StandbySyncStatus,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
 use std::time::SystemTime;
 use uuid::Uuid;
-
 
 #[test]
 fn test_leader_role_values() {
@@ -130,6 +129,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
         "ha-key".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                base_addr: 0,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id,
@@ -144,10 +144,16 @@ fn test_local_snapshot_provider_loads_snapshot() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
         },
     );
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
 
     let provider = LocalSnapshotProvider::new(root, StorageBackendType::LocalDisk);
     let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
@@ -166,7 +172,9 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
     let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
     let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
 
     let spec = HABackendSpec {
         backend_type: HABackendType::Redis,

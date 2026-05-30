@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{Mutex, oneshot, Semaphore};
+use tokio::sync::{oneshot, Mutex, Semaphore};
 
 use super::config::RemoteSourceConfig;
 use super::{RemoteSource, RemoteSourceError, RemoteSourceResult};
@@ -87,9 +87,13 @@ impl<S: RemoteSource + 'static> MissHandler<S> {
         self
     }
 
-    pub fn is_enabled(&self) -> bool { self.config.enabled }
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
 
-    pub fn config(&self) -> &RemoteSourceConfig { &self.config }
+    pub fn config(&self) -> &RemoteSourceConfig {
+        &self.config
+    }
 
     pub async fn handle_miss(&self, key: &str) -> RemoteSourceResult<Vec<u8>> {
         if let Some(ref cache) = self.hot_cache {
@@ -126,22 +130,25 @@ impl<S: RemoteSource + 'static> MissHandler<S> {
             }
         }
 
-        let _permit = self.admission.acquire().await.map_err(|_| {
-            RemoteSourceError::Internal("admission semaphore closed".to_string())
-        })?;
+        let _permit =
+            self.admission.acquire().await.map_err(|_| {
+                RemoteSourceError::Internal("admission semaphore closed".to_string())
+            })?;
 
         let start = Instant::now();
         let result = self.source.get(key).await;
         let elapsed_us = start.elapsed().as_micros() as u64;
 
-        self.fetch_latency_us_sum.fetch_add(elapsed_us, Ordering::Relaxed);
+        self.fetch_latency_us_sum
+            .fetch_add(elapsed_us, Ordering::Relaxed);
         self.fetch_count.fetch_add(1, Ordering::Relaxed);
 
         if let Ok(ref data) = result {
             if let Some(ref cache) = self.hot_cache {
                 cache.put(key, data);
             }
-            self.bytes_transferred.fetch_add(data.len() as u64, Ordering::Relaxed);
+            self.bytes_transferred
+                .fetch_add(data.len() as u64, Ordering::Relaxed);
             self.successful_fetches.fetch_add(1, Ordering::Relaxed);
         } else {
             self.failed_fetches.fetch_add(1, Ordering::Relaxed);
@@ -184,7 +191,8 @@ impl<S: RemoteSource + 'static> MissHandler<S> {
             }
         }
         if succeeded > 0 {
-            self.prefetch_keys_succeeded.fetch_add(succeeded, Ordering::Relaxed);
+            self.prefetch_keys_succeeded
+                .fetch_add(succeeded, Ordering::Relaxed);
         }
     }
 
@@ -203,8 +211,16 @@ impl<S: RemoteSource + 'static> MissHandler<S> {
             bytes_transferred: self.bytes_transferred.load(Ordering::Relaxed),
             prefetch_keys_requested: self.prefetch_keys_requested.load(Ordering::Relaxed),
             prefetch_keys_succeeded: self.prefetch_keys_succeeded.load(Ordering::Relaxed),
-            avg_fetch_latency_us: if fetch_n > 0 { latency_sum / fetch_n } else { 0 },
-            miss_rate: if total > 0 { total as f64 / (total + hits) as f64 } else { 0.0 },
+            avg_fetch_latency_us: if fetch_n > 0 {
+                latency_sum / fetch_n
+            } else {
+                0
+            },
+            miss_rate: if total > 0 {
+                total as f64 / (total + hits) as f64
+            } else {
+                0.0
+            },
         }
     }
 
@@ -223,9 +239,13 @@ impl<S: RemoteSource + 'static> MissHandler<S> {
         }
     }
 
-    pub fn source(&self) -> &Arc<S> { &self.source }
+    pub fn source(&self) -> &Arc<S> {
+        &self.source
+    }
 
-    pub fn hot_cache(&self) -> Option<&Arc<LocalHotCache>> { self.hot_cache.as_ref() }
+    pub fn hot_cache(&self) -> Option<&Arc<LocalHotCache>> {
+        self.hot_cache.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -240,9 +260,19 @@ mod tests {
     }
 
     impl MemSource {
-        fn new() -> Self { Self { data: StdMutex::new(HashMap::new()), delay: false } }
-        fn with_delay(mut self) -> Self { self.delay = true; self }
-        fn put(&self, k: &str, v: &[u8]) { self.data.lock().unwrap().insert(k.into(), v.to_vec()); }
+        fn new() -> Self {
+            Self {
+                data: StdMutex::new(HashMap::new()),
+                delay: false,
+            }
+        }
+        fn with_delay(mut self) -> Self {
+            self.delay = true;
+            self
+        }
+        fn put(&self, k: &str, v: &[u8]) {
+            self.data.lock().unwrap().insert(k.into(), v.to_vec());
+        }
     }
 
     #[async_trait::async_trait]
@@ -251,7 +281,11 @@ mod tests {
             if self.delay {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
-            self.data.lock().unwrap().get(key).cloned()
+            self.data
+                .lock()
+                .unwrap()
+                .get(key)
+                .cloned()
                 .ok_or_else(|| RemoteSourceError::NotFound(key.to_string()))
         }
     }
@@ -260,7 +294,13 @@ mod tests {
     async fn enabled_handler_fetches() {
         let s = MemSource::new();
         s.put("hello", b"world");
-        let h = MissHandler::new(s, RemoteSourceConfig { enabled: true, ..Default::default() });
+        let h = MissHandler::new(
+            s,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(h.handle_miss("hello").await.unwrap(), b"world");
     }
 
@@ -268,15 +308,30 @@ mod tests {
     async fn disabled_returns_not_found() {
         let s = MemSource::new();
         s.put("hello", b"world");
-        let h = MissHandler::new(s, RemoteSourceConfig { enabled: false, ..Default::default() });
-        assert!(matches!(h.handle_miss("hello").await, Err(RemoteSourceError::NotFound(_))));
+        let h = MissHandler::new(
+            s,
+            RemoteSourceConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            h.handle_miss("hello").await,
+            Err(RemoteSourceError::NotFound(_))
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dedup_same_key_returns_correct_data() {
         let s = MemSource::new().with_delay();
         s.put("k", b"v");
-        let h = Arc::new(MissHandler::new(s, RemoteSourceConfig { enabled: true, ..Default::default() }));
+        let h = Arc::new(MissHandler::new(
+            s,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        ));
         let h1 = h.clone();
         let h2 = h.clone();
         // tokio::spawn on multi-thread runtime → true parallelism
@@ -293,11 +348,21 @@ mod tests {
     #[tokio::test]
     async fn batch_fetch_stats() {
         let s = MemSource::new();
-        s.put("a", b"1"); s.put("b", b"2");
+        s.put("a", b"1");
+        s.put("b", b"2");
         let cache = Arc::new(LocalHotCache::default());
-        let h = MissHandler::new(s, RemoteSourceConfig { enabled: true, ..Default::default() })
-            .with_hot_cache(cache);
-        let keys: Vec<String> = ["a", "b", "missing"].iter().map(|s| s.to_string()).collect();
+        let h = MissHandler::new(
+            s,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .with_hot_cache(cache);
+        let keys: Vec<String> = ["a", "b", "missing"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         h.batch_fetch(&keys).await;
         let snap = h.snapshot();
         assert_eq!(snap.prefetch_keys_requested, 3);

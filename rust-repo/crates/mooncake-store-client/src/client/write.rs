@@ -1,5 +1,5 @@
-use mooncake_store_core::{ReplicateConfig, StoreError};
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::{ReplicateConfig, StoreError};
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
@@ -105,7 +105,12 @@ impl MooncakeClient {
             }),
         };
 
-        let response = self.master.put_start(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let response = self
+            .master
+            .put_start(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
 
         for replica in &replicas {
@@ -126,7 +131,10 @@ impl MooncakeClient {
             key: key.to_string(),
             replica_type: 0,
         };
-        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.master
+            .put_end(end_request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(())
     }
@@ -161,7 +169,12 @@ impl MooncakeClient {
             }),
         };
 
-        let response = self.master.put_start(request).await.map_err(|e| StoreError::Internal(e.to_string()))?.into_inner();
+        let response = self
+            .master
+            .put_start(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
 
         if replicas.is_empty() {
@@ -187,7 +200,9 @@ impl MooncakeClient {
                     }
                     TransferRequest {
                         opcode: Opcode::Write,
-                        source: unsafe { self.local_buffer.as_ptr().add(src_offset) as *mut c_void },
+                        source: unsafe {
+                            self.local_buffer.as_ptr().add(src_offset) as *mut c_void
+                        },
                         target_id: segment_id,
                         target_offset: tgt_offset,
                         length: data.len() as u64,
@@ -226,7 +241,10 @@ impl MooncakeClient {
             key: key.to_string(),
             replica_type: 0,
         };
-        self.master.put_end(end_request).await.map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.master
+            .put_end(end_request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
 
         Ok(())
     }
@@ -265,7 +283,10 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<i32>> {
         let mut statuses = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
-            match self.put_from(key, buffers[i], sizes[i], config.clone()).await {
+            match self
+                .put_from(key, buffers[i], sizes[i], config.clone())
+                .await
+            {
                 Ok(()) => statuses.push(0),
                 Err(_) => statuses.push(-1),
             }

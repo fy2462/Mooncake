@@ -70,7 +70,9 @@ impl MasterServiceImpl {
         }
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
             if object_owner_client_id(&self.state, &object) != Some(client_id) {
-                return Err(Status::permission_denied("object owned by different client"));
+                return Err(Status::permission_denied(
+                    "object owned by different client",
+                ));
             }
             let mut removed = Vec::new();
             // C++ master_service.cpp:1492-1504 只允许撤销 PROCESSING 状态的 replica，已完成的不能撤销
@@ -223,16 +225,14 @@ impl MasterServiceImpl {
             }
             // C++ master_service.cpp:1867-1872 检查目标 segment 是否处于可分配状态
             // Gap 20: verify target segment is allocatable (Active)
-            let is_active = self
-                .state
-                .segments
-                .iter()
-                .any(|e| e.segment.name == *target && e.status == proto::SegmentStatus::Active)
-                || self
-                    .state
-                    .nof_segments
+            let is_active =
+                self.state
+                    .segments
                     .iter()
-                    .any(|e| e.segment.name == *target && e.status == proto::SegmentStatus::Active);
+                    .any(|e| e.segment.name == *target && e.status == proto::SegmentStatus::Active)
+                    || self.state.nof_segments.iter().any(|e| {
+                        e.segment.name == *target && e.status == proto::SegmentStatus::Active
+                    });
             if !is_active {
                 release_object_replicas(&self.state, &req.key, &allocated);
                 return Err(Status::failed_precondition(format!(
@@ -252,7 +252,11 @@ impl MasterServiceImpl {
         }
         // Pin source replica via refcnt
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &source)) {
+            if let Some(src) = object
+                .replicas
+                .iter_mut()
+                .find(|r| same_replica(r, &source))
+            {
                 src.inc_refcnt();
             }
         }
@@ -299,7 +303,11 @@ impl MasterServiceImpl {
         // 如果 source handle 已失效，中止操作并撤销 targets
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
             // C++ master_service.cpp:1985-1988 检查 source replica 是否 still present 且 handle_valid
-            match object.replicas.iter().find(|r| same_replica(r, &task.source)) {
+            match object
+                .replicas
+                .iter()
+                .find(|r| same_replica(r, &task.source))
+            {
                 Some(source_replica) => {
                     if !source_replica.handle_valid {
                         source_invalid = true;
@@ -330,7 +338,11 @@ impl MasterServiceImpl {
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+            if let Some(src) = object
+                .replicas
+                .iter_mut()
+                .find(|r| same_replica(r, &task.source))
+            {
                 src.dec_refcnt();
             }
         }
@@ -405,7 +417,11 @@ impl MasterServiceImpl {
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+            if let Some(src) = object
+                .replicas
+                .iter_mut()
+                .find(|r| same_replica(r, &task.source))
+            {
                 src.dec_refcnt();
             }
         }
@@ -478,7 +494,11 @@ impl MasterServiceImpl {
         };
         // Pin source replica via refcnt
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &source)) {
+            if let Some(src) = object
+                .replicas
+                .iter_mut()
+                .find(|r| same_replica(r, &source))
+            {
                 src.inc_refcnt();
             }
         }
@@ -526,14 +546,19 @@ impl MasterServiceImpl {
         let remove_object;
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
             // C++ master_service.cpp:2238-2240 检查 source replica handle 是否仍然有效
-            if let Some(source_replica) = object.replicas.iter().find(|r| same_replica(r, &task.source)) {
+            if let Some(source_replica) = object
+                .replicas
+                .iter()
+                .find(|r| same_replica(r, &task.source))
+            {
                 if !source_replica.handle_valid {
                     source_invalid = true;
                 }
             }
             if !source_invalid {
                 for target in &task.targets {
-                    if let Some(replica) = object.replicas.iter_mut().find(|r| same_replica(r, target))
+                    if let Some(replica) =
+                        object.replicas.iter_mut().find(|r| same_replica(r, target))
                     {
                         // C++ master_service.cpp:2240-2243 检查 target handle_valid
                         // handle 无效的 target 不标记为 Complete
@@ -598,7 +623,11 @@ impl MasterServiceImpl {
             release_object_replicas(&self.state, &req.key, &removed_targets);
             // Release source replica refcnt
             if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-                if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+                if let Some(src) = object
+                    .replicas
+                    .iter_mut()
+                    .find(|r| same_replica(r, &task.source))
+                {
                     src.dec_refcnt();
                 }
             }
@@ -613,7 +642,11 @@ impl MasterServiceImpl {
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+            if let Some(src) = object
+                .replicas
+                .iter_mut()
+                .find(|r| same_replica(r, &task.source))
+            {
                 src.dec_refcnt();
             }
         }
@@ -657,7 +690,11 @@ impl MasterServiceImpl {
         release_object_replicas(&self.state, &req.key, &removed);
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&req.key) {
-            if let Some(src) = object.replicas.iter_mut().find(|r| same_replica(r, &task.source)) {
+            if let Some(src) = object
+                .replicas
+                .iter_mut()
+                .find(|r| same_replica(r, &task.source))
+            {
                 src.dec_refcnt();
             }
         }

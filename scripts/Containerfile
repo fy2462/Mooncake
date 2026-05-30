@@ -1,0 +1,30 @@
+# Mooncake multi-node test container
+# Base: NVIDIA PyTorch 24.12 (Ubuntu 24.04, Python 3.12, CUDA 12.6)
+FROM nvcr.io/nvidia/pytorch:24.12-py3
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Mooncake C++ dependencies (engine.so needs these at runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libjsoncpp25 libgoogle-glog-dev libyaml-cpp0.8 \
+    libnuma1 libibverbs1 \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install etcd
+RUN curl -sL https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz \
+    | tar xz -C /usr/local/bin --strip-components=1 etcd-v3.5.17-linux-amd64/etcd \
+    etcd-v3.5.17-linux-amd64/etcdctl
+
+# Python deps for Mooncake
+RUN pip install --no-cache-dir aiohttp requests
+
+# Mooncake paths (must match host mount)
+ENV MOONCAKE_ROOT=/home/fy2462/workspace/Mooncake
+ENV LD_LIBRARY_PATH=${MOONCAKE_ROOT}/build/mooncake-common/etcd:${MOONCAKE_ROOT}/build/mooncake-common:${MOONCAKE_ROOT}/build/mooncake-transfer-engine/src
+ENV PYTHONPATH=${MOONCAKE_ROOT}/mooncake-wheel:${MOONCAKE_ROOT}/rust-repo/python:${MOONCAKE_ROOT}/build/mooncake-integration
+
+WORKDIR ${MOONCAKE_ROOT}
+
+COPY scripts/mooncake-e2e-test.py /test.py
+CMD ["python", "/test.py"]

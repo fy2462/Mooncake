@@ -54,8 +54,7 @@ pub enum ReplicaType {
     All = 4,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ObjectDataType {
     #[default]
     Unknown = 0,
@@ -69,7 +68,6 @@ pub enum ObjectDataType {
     Metadata = 8,
     General = 9,
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReplicaDescriptor {
@@ -90,11 +88,20 @@ pub struct ReplicaDescriptor {
     /// master_service.cpp:1985-1994 — CopyEnd/MoveEnd abort if source handle invalidated.
     #[serde(default = "default_handle_valid")]
     pub handle_valid: bool,
+    /// Physical base address of the segment buffer on the storage node.
+    /// Used to compute target_offset = base_addr + offset for TE transfers.
+    /// C++ equivalent: AllocatedBuffer::Descriptor::buffer_address_
+    #[serde(default)]
+    pub base_addr: u64,
 }
 
-fn default_refcnt() -> u32 { 0 }
+fn default_refcnt() -> u32 {
+    0
+}
 
-fn default_handle_valid() -> bool { true }
+fn default_handle_valid() -> bool {
+    true
+}
 
 impl Clone for ReplicaDescriptor {
     fn clone(&self) -> Self {
@@ -108,6 +115,7 @@ impl Clone for ReplicaDescriptor {
             holder_client_id: self.holder_client_id,
             refcnt: 0,
             handle_valid: self.handle_valid,
+            base_addr: self.base_addr,
         }
     }
 }

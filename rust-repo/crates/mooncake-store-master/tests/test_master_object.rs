@@ -7,7 +7,6 @@ use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
-
 #[tokio::test]
 async fn test_batch_replica_clear_respects_client_and_segment_name() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
@@ -24,6 +23,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 client_id: Some(proto_uuid(cid)),
                 segment_name: name.into(),
                 size: 1024,
+                base_addr: 0,
             }),
         )
         .await
@@ -42,7 +42,10 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -68,6 +71,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             client_id: Some(proto_uuid(other_client_id)),
             segment_name: "node-c:1".into(),
             size: 1024,
+            base_addr: 0,
         }),
     )
     .await
@@ -140,6 +144,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "hardpin:1".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -158,7 +163,10 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
                     with_soft_pin: false,
                     with_hard_pin,
                     preferred_segment: String::new(),
-                    prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                    prefer_alloc_in_same_node: false,
+                    preferred_segments: vec![],
+                    preferred_nof_segments: vec![],
+                    data_type: proto::ObjectDataType::Unknown as i32,
                 }),
             }),
         )
@@ -212,6 +220,7 @@ async fn test_copy_move_and_revoke_workflow() {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: name.into(),
                 size: 4096,
+                base_addr: 0,
             }),
         )
         .await
@@ -230,7 +239,10 @@ async fn test_copy_move_and_revoke_workflow() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "copy-src:1".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -383,6 +395,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "revoke:1".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -401,7 +414,10 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                     with_soft_pin: false,
                     with_hard_pin: false,
                     preferred_segment: "revoke:1".into(),
-                    prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                    prefer_alloc_in_same_node: false,
+                    preferred_segments: vec![],
+                    preferred_nof_segments: vec![],
+                    data_type: proto::ObjectDataType::Unknown as i32,
                 }),
             }),
         )
@@ -432,7 +448,10 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "revoke:1".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32,
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -458,10 +477,13 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .await
     .is_err());
 
-    let removed = MasterService::remove_all(&service, Request::new(proto::RemoveAllRequest { force: true }))
-        .await
-        .unwrap()
-        .into_inner();
+    let removed = MasterService::remove_all(
+        &service,
+        Request::new(proto::RemoveAllRequest { force: true }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
     assert_eq!(removed.removed_count, 2);
 
     let storage = MasterService::get_storage_config(

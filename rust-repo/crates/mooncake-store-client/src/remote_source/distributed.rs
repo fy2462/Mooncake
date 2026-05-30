@@ -5,9 +5,9 @@ use tonic::transport::Channel;
 use tracing;
 
 use super::{RemoteSource, RemoteSourceError, RemoteSourceResult};
+use crate::proto::{self, master_service_client::MasterServiceClient};
 use crate::MissHandler;
 use crate::RemoteSourceConfig;
-use crate::proto::{self, master_service_client::MasterServiceClient};
 
 /// Wraps [`MissHandler`] with cross-node coordination via the Master.
 ///
@@ -79,7 +79,13 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                 let result = self.inner.handle_miss(key).await;
 
                 // Notify master of completion
-                let _ = self.complete_pull(key, result.is_ok(), result.as_ref().map_or(0, |d| d.len() as u64)).await;
+                let _ = self
+                    .complete_pull(
+                        key,
+                        result.is_ok(),
+                        result.as_ref().map_or(0, |d| d.len() as u64),
+                    )
+                    .await;
 
                 // Call the data callback so the caller can PutStart/PutEnd into the store
                 if let Ok(ref data) = result {
@@ -92,9 +98,7 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                 // Step 2b: Another node is pulling — retry until they finish
                 self.wait_and_retry(key).await
             }
-            proto::RemotePullAction::Abandon => {
-                Err(RemoteSourceError::NotFound(key.to_string()))
-            }
+            proto::RemotePullAction::Abandon => Err(RemoteSourceError::NotFound(key.to_string())),
         }
     }
 
@@ -125,7 +129,12 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
     }
 
     /// Notify master that the pull completed (or failed).
-    async fn complete_pull(&self, key: &str, success: bool, data_size: u64) -> RemoteSourceResult<()> {
+    async fn complete_pull(
+        &self,
+        key: &str,
+        success: bool,
+        data_size: u64,
+    ) -> RemoteSourceResult<()> {
         let mut master = self.master.clone();
         let _ = master
             .complete_remote_pull(proto::CompleteRemotePullRequest {

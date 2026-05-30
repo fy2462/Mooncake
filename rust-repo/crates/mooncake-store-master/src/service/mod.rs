@@ -20,8 +20,8 @@ use crate::storage_backend::{StorageBackend, StorageBackendType};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{
-    NoFSegmentOwnerInfo, ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig,
-    TaskInfo, TaskStatus, TaskType,
+    NoFSegmentOwnerInfo, ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType,
+    ReplicateConfig, TaskInfo, TaskStatus, TaskType,
 };
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -39,15 +39,12 @@ use self::background_ops::{
     try_push_promotion_queue,
 };
 use self::helpers::{
-    addresses_for_client, allocate_nof_replicas, bump_view_version,
-    cleanup_stale_handles, client_id_by_nof_segment_name,
-    get_alive_clients_snapshot, is_lease_expired,
-    release_object_replicas, client_id_by_replica_segment_name,
-    client_id_by_segment_name, host_from_segment_name, object_owner_client_id,
-    preferred_nof_segment_names, register_metadata_segments, release_replicas,
-    release_replicas_scheduled, sync_client_segments, sync_nof_segment_usage,
-    sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned,
-    upsert_client_addresses,
+    addresses_for_client, allocate_nof_replicas, bump_view_version, cleanup_stale_handles,
+    client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
+    get_alive_clients_snapshot, host_from_segment_name, is_lease_expired, object_owner_client_id,
+    preferred_nof_segment_names, register_metadata_segments, release_object_replicas,
+    release_replicas, release_replicas_scheduled, sync_client_segments, sync_nof_segment_usage,
+    sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
@@ -55,8 +52,8 @@ use self::proto_conv::{
     task_type_to_proto, uuid_from_proto, uuid_to_proto,
 };
 use self::state::{
-    ActiveDrainTask, DrainJobEntry, LocalDiskSegmentEntry, MasterState,
-    ReplicationTaskEntry, ReplicationTaskKind,
+    ActiveDrainTask, DrainJobEntry, LocalDiskSegmentEntry, MasterState, ReplicationTaskEntry,
+    ReplicationTaskKind,
 };
 pub use self::state::{MasterRuntimeConfig, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use self::workers::{
@@ -175,7 +172,10 @@ impl MasterServiceImpl {
                     let backup_path = backup_dir.join("mooncake_snapshot_restore_backup");
                     if let Err(e) = std::fs::create_dir_all(&backup_path) {
                         tracing::warn!("Failed to create snapshot backup dir: {}", e);
-                    } else if let Err(e) = std::fs::copy(&existing, backup_path.join(existing.file_name().unwrap_or_default())) {
+                    } else if let Err(e) = std::fs::copy(
+                        &existing,
+                        backup_path.join(existing.file_name().unwrap_or_default()),
+                    ) {
                         tracing::warn!("Failed to backup snapshot: {}", e);
                     }
                 }
@@ -192,7 +192,10 @@ impl MasterServiceImpl {
                             status: seg.status,
                         },
                     );
-                    state.allocator.write().add_segment(seg.segment, seg.used, seg.client_id);
+                    state
+                        .allocator
+                        .write()
+                        .add_segment(seg.segment, seg.used, seg.client_id);
                 }
                 for seg in nof_segments {
                     let status = seg.status;
@@ -204,14 +207,18 @@ impl MasterServiceImpl {
                             status,
                         },
                     );
-                    state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
-                        id: seg.segment.id,
-                        name: seg.segment.name.clone(),
-                        base: seg.segment.base,
-                        size: seg.segment.size,
-                        te_endpoint: seg.segment.te_endpoint.clone(),
-                        protocol: String::new(),
-                    }, seg.used, seg.segment.client_id);
+                    state.nof_allocator.write().add_segment(
+                        mooncake_store_core::Segment {
+                            id: seg.segment.id,
+                            name: seg.segment.name.clone(),
+                            base: seg.segment.base,
+                            size: seg.segment.size,
+                            te_endpoint: seg.segment.te_endpoint.clone(),
+                            protocol: String::new(),
+                        },
+                        seg.used,
+                        seg.segment.client_id,
+                    );
                 }
                 for (key, object) in objects {
                     state.objects.insert(key, object);

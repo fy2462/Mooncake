@@ -50,6 +50,12 @@ pub struct SegmentAllocator {
     memory_allocator_kind: MemoryAllocatorKind,
 }
 
+impl Default for SegmentAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SegmentAllocator {
     pub fn new() -> Self {
         Self {
@@ -86,7 +92,10 @@ impl SegmentAllocator {
                 } else {
                     Vec::new()
                 };
-                (SegmentLayout::Offset(OffsetSegmentState { free_ranges }), used)
+                (
+                    SegmentLayout::Offset(OffsetSegmentState { free_ranges }),
+                    used,
+                )
             }
             MemoryAllocatorKind::CachelibLike => {
                 let reserved_bytes = align_up(used, CACHELIB_SLAB_SIZE).min(segment.size);
@@ -118,8 +127,15 @@ impl SegmentAllocator {
                 (SegmentLayout::Cachelib(cachelib), reserved_bytes)
             }
         };
-        self.segments
-            .insert(segment.id, SegmentState { segment, used: effective_used, client_id, layout });
+        self.segments.insert(
+            segment.id,
+            SegmentState {
+                segment,
+                used: effective_used,
+                client_id,
+                layout,
+            },
+        );
     }
 
     pub fn remove_segment(&mut self, segment_id: &Uuid) {
@@ -254,6 +270,7 @@ impl SegmentAllocator {
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                base_addr: state.segment.base,
             });
         }
         replicas
@@ -275,9 +292,7 @@ impl SegmentAllocator {
     }
 
     pub fn used_bytes(&self, segment_id: &Uuid) -> Option<u64> {
-        self.segments
-            .get(segment_id)
-            .map(|state| state.used)
+        self.segments.get(segment_id).map(|state| state.used)
     }
 
     pub fn usage_totals(&self) -> (u64, u64) {
@@ -474,11 +489,7 @@ impl SegmentAllocator {
         }
     }
 
-    pub fn pool_unallocated_slab_memory(
-        &self,
-        segment_id: &Uuid,
-        pool_id: PoolId,
-    ) -> Option<u64> {
+    pub fn pool_unallocated_slab_memory(&self, segment_id: &Uuid, pool_id: PoolId) -> Option<u64> {
         let state = self.segments.get(segment_id)?;
         match &state.layout {
             SegmentLayout::Offset(_) => None,

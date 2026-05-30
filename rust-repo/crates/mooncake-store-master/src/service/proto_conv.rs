@@ -31,6 +31,7 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         file_path: String::new(),
         object_size: r.size,
         local_disk_client_id: r.holder_client_id.map(uuid_to_proto),
+        base_addr: r.base_addr,
     }
 }
 
@@ -43,6 +44,7 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
         segment_name: p.segment_name.clone(),
         offset: p.offset,
         size: p.size,
+        base_addr: p.base_addr,
         status: match p.status {
             1 => ReplicaStatus::Allocating,
             2 => ReplicaStatus::Written,
@@ -81,24 +83,16 @@ pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
         preferred_nof_segments: c.preferred_nof_segments.clone(),
         prefer_alloc_in_same_node: c.prefer_alloc_in_same_node,
         data_type: match c.data_type {
-            x if x == proto::ObjectDataType::Kvcache as i32 => {
-                ObjectDataType::Kvcache
-            }
+            x if x == proto::ObjectDataType::Kvcache as i32 => ObjectDataType::Kvcache,
             x if x == proto::ObjectDataType::Tensor as i32 => ObjectDataType::Tensor,
             x if x == proto::ObjectDataType::Weight as i32 => ObjectDataType::Weight,
             x if x == proto::ObjectDataType::Sample as i32 => ObjectDataType::Sample,
-            x if x == proto::ObjectDataType::Activation as i32 => {
-                ObjectDataType::Activation
-            }
-            x if x == proto::ObjectDataType::Gradient as i32 => {
-                ObjectDataType::Gradient
-            }
+            x if x == proto::ObjectDataType::Activation as i32 => ObjectDataType::Activation,
+            x if x == proto::ObjectDataType::Gradient as i32 => ObjectDataType::Gradient,
             x if x == proto::ObjectDataType::OptimizerState as i32 => {
                 ObjectDataType::OptimizerState
             }
-            x if x == proto::ObjectDataType::Metadata as i32 => {
-                ObjectDataType::Metadata
-            }
+            x if x == proto::ObjectDataType::Metadata as i32 => ObjectDataType::Metadata,
             x if x == proto::ObjectDataType::General as i32 => ObjectDataType::General,
             _ => ObjectDataType::Unknown,
         },
@@ -125,11 +119,16 @@ pub(crate) fn nof_segment_from_proto(segment: &proto::NoFSegment) -> NoFSegment 
         base: segment.base,
         size: segment.size,
         te_endpoint: segment.te_endpoint.clone(),
-        client_id: segment.client_id.as_ref().map_or(Uuid::nil(), uuid_from_proto),
+        client_id: segment
+            .client_id
+            .as_ref()
+            .map_or(Uuid::nil(), uuid_from_proto),
     }
 }
 
-pub(crate) fn nof_segment_owner_to_proto(owner: &NoFSegmentOwnerInfo) -> proto::NoFSegmentOwnerInfo {
+pub(crate) fn nof_segment_owner_to_proto(
+    owner: &NoFSegmentOwnerInfo,
+) -> proto::NoFSegmentOwnerInfo {
     proto::NoFSegmentOwnerInfo {
         segment_id: Some(uuid_to_proto(owner.segment_id)),
         client_id: Some(uuid_to_proto(owner.client_id)),

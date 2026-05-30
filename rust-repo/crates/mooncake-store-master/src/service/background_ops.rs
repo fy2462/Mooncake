@@ -4,9 +4,7 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::{Instant, SystemTime};
 use uuid::Uuid;
 
-use super::helpers::{
-    client_id_by_segment_name, memory_usage_ratio, release_replicas,
-};
+use super::helpers::{client_id_by_segment_name, memory_usage_ratio, release_replicas};
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
 /// 释放晋升过程中暂存的副本占位（Allocating 状态，尚未写入数据）。
@@ -190,8 +188,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         .iter()
         .filter(|entry| {
             let key = entry.key();
-            !state.replication_tasks.contains_key(key)
-                && !state.processing_keys.contains_key(key)
+            !state.replication_tasks.contains_key(key) && !state.processing_keys.contains_key(key)
         })
         .map(|entry| {
             (

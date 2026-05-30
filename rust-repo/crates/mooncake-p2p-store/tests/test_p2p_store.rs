@@ -1,6 +1,4 @@
-use mooncake_p2p_store::{
-    error::P2pStoreError, metadata::*, Buffer, MAX_CHUNK_SIZE, PayloadInfo,
-};
+use mooncake_p2p_store::{error::P2pStoreError, metadata::*, Buffer, PayloadInfo, MAX_CHUNK_SIZE};
 
 // =========================================================================
 // Location
@@ -8,17 +6,29 @@ use mooncake_p2p_store::{
 
 #[test]
 fn test_location_equality() {
-    let a = Location { segment_name: "s1".into(), offset: 100 };
-    let b = Location { segment_name: "s1".into(), offset: 100 };
+    let a = Location {
+        segment_name: "s1".into(),
+        offset: 100,
+    };
+    let b = Location {
+        segment_name: "s1".into(),
+        offset: 100,
+    };
     assert_eq!(a, b);
 
-    let c = Location { segment_name: "s1".into(), offset: 200 };
+    let c = Location {
+        segment_name: "s1".into(),
+        offset: 200,
+    };
     assert_ne!(a, c);
 }
 
 #[test]
 fn test_location_clone() {
-    let loc = Location { segment_name: "n1:12345".into(), offset: 0xDEAD };
+    let loc = Location {
+        segment_name: "n1:12345".into(),
+        offset: 0xDEAD,
+    };
     assert_eq!(loc, loc.clone());
 }
 
@@ -30,8 +40,14 @@ fn test_location_clone() {
 fn test_shard_location_random() {
     let shard = Shard {
         length: 128,
-        gold: vec![Location { segment_name: "s1".into(), offset: 0 }],
-        replica_list: vec![Location { segment_name: "r1".into(), offset: 100 }],
+        gold: vec![Location {
+            segment_name: "s1".into(),
+            offset: 0,
+        }],
+        replica_list: vec![Location {
+            segment_name: "r1".into(),
+            offset: 100,
+        }],
     };
     let loc = shard.get_random_location();
     assert!(loc.is_some());
@@ -51,28 +67,49 @@ fn test_shard_location_random_empty() {
 
 #[test]
 fn test_shard_location_random_only_gold() {
-    let locs = vec![Location { segment_name: "g".into(), offset: 0 }];
-    let shard = Shard { length: 64, gold: locs, replica_list: vec![] };
+    let locs = vec![Location {
+        segment_name: "g".into(),
+        offset: 0,
+    }];
+    let shard = Shard {
+        length: 64,
+        gold: locs,
+        replica_list: vec![],
+    };
     let result = shard.get_random_location();
     assert_eq!(result.unwrap().segment_name, "g");
 }
 
 #[test]
 fn test_shard_location_random_only_replica() {
-    let locs = vec![Location { segment_name: "r".into(), offset: 0 }];
-    let shard = Shard { length: 64, gold: vec![], replica_list: locs };
+    let locs = vec![Location {
+        segment_name: "r".into(),
+        offset: 0,
+    }];
+    let shard = Shard {
+        length: 64,
+        gold: vec![],
+        replica_list: locs,
+    };
     let result = shard.get_random_location();
     assert_eq!(result.unwrap().segment_name, "r");
 }
 
 #[test]
 fn test_shard_is_empty() {
-    let empty = Shard { length: 0, gold: vec![], replica_list: vec![] };
+    let empty = Shard {
+        length: 0,
+        gold: vec![],
+        replica_list: vec![],
+    };
     assert!(empty.is_empty());
 
     let non_empty = Shard {
         length: 128,
-        gold: vec![Location { segment_name: "x".into(), offset: 0 }],
+        gold: vec![Location {
+            segment_name: "x".into(),
+            offset: 0,
+        }],
         replica_list: vec![],
     };
     assert!(!non_empty.is_empty());
@@ -80,7 +117,10 @@ fn test_shard_is_empty() {
     let non_empty_replica = Shard {
         length: 128,
         gold: vec![],
-        replica_list: vec![Location { segment_name: "x".into(), offset: 0 }],
+        replica_list: vec![Location {
+            segment_name: "x".into(),
+            offset: 0,
+        }],
     };
     assert!(!non_empty_replica.is_empty());
 }
@@ -90,10 +130,19 @@ fn test_shard_get_retry_location() {
     let shard = Shard {
         length: 64,
         gold: vec![
-            Location { segment_name: "g0".into(), offset: 0 },
-            Location { segment_name: "g1".into(), offset: 64 },
+            Location {
+                segment_name: "g0".into(),
+                offset: 0,
+            },
+            Location {
+                segment_name: "g1".into(),
+                offset: 64,
+            },
         ],
-        replica_list: vec![Location { segment_name: "r0".into(), offset: 128 }],
+        replica_list: vec![Location {
+            segment_name: "r0".into(),
+            offset: 128,
+        }],
     };
 
     assert_eq!(shard.get_retry_location(0).unwrap().segment_name, "r0");
@@ -107,10 +156,19 @@ fn test_shard_get_location() {
     let shard = Shard {
         length: 64,
         gold: vec![
-            Location { segment_name: "g0".into(), offset: 0 },
-            Location { segment_name: "g1".into(), offset: 64 },
+            Location {
+                segment_name: "g0".into(),
+                offset: 0,
+            },
+            Location {
+                segment_name: "g1".into(),
+                offset: 64,
+            },
         ],
-        replica_list: vec![Location { segment_name: "r0".into(), offset: 128 }],
+        replica_list: vec![Location {
+            segment_name: "r0".into(),
+            offset: 128,
+        }],
     };
 
     assert_eq!(shard.get_location(1).unwrap().segment_name, "r0");
@@ -133,12 +191,18 @@ fn test_payload_serialization() {
         shards: vec![
             Shard {
                 length: 256,
-                gold: vec![Location { segment_name: "node1:12345".into(), offset: 0x1000 }],
+                gold: vec![Location {
+                    segment_name: "node1:12345".into(),
+                    offset: 0x1000,
+                }],
                 replica_list: vec![],
             },
             Shard {
                 length: 256,
-                gold: vec![Location { segment_name: "node1:12345".into(), offset: 0x1100 }],
+                gold: vec![Location {
+                    segment_name: "node1:12345".into(),
+                    offset: 0x1100,
+                }],
                 replica_list: vec![],
             },
         ],
@@ -160,11 +224,18 @@ fn test_payload_is_empty() {
         size: 0,
         size_list: vec![],
         max_shard_size: 64,
-        shards: vec![Shard { length: 0, gold: vec![], replica_list: vec![] }],
+        shards: vec![Shard {
+            length: 0,
+            gold: vec![],
+            replica_list: vec![],
+        }],
     };
     assert!(payload.is_empty());
 
-    payload.shards[0].gold.push(Location { segment_name: "s".into(), offset: 0 });
+    payload.shards[0].gold.push(Location {
+        segment_name: "s".into(),
+        offset: 0,
+    });
     assert!(!payload.is_empty());
 }
 
@@ -187,11 +258,16 @@ fn test_payload_multiple_shards() {
         size: 1024,
         size_list: vec![512, 512],
         max_shard_size: 128,
-        shards: (0..8).map(|i| Shard {
-            length: 128,
-            gold: vec![Location { segment_name: format!("s{}", i), offset: (i * 128) as u64 }],
-            replica_list: vec![],
-        }).collect(),
+        shards: (0..8)
+            .map(|i| Shard {
+                length: 128,
+                gold: vec![Location {
+                    segment_name: format!("s{}", i),
+                    offset: (i * 128) as u64,
+                }],
+                replica_list: vec![],
+            })
+            .collect(),
     };
     assert_eq!(payload.shards.len(), 8);
     assert!(!payload.is_empty());
@@ -234,14 +310,20 @@ fn test_payload_info_empty() {
 
 #[test]
 fn test_buffer_creation() {
-    let buf = Buffer { addr: 0xDEAD_BEEF, size: 4096 };
+    let buf = Buffer {
+        addr: 0xDEAD_BEEF,
+        size: 4096,
+    };
     assert_eq!(buf.addr, 0xDEAD_BEEF);
     assert_eq!(buf.size, 4096);
 }
 
 #[test]
 fn test_buffer_clone() {
-    let buf = Buffer { addr: 0x1000, size: 1024 };
+    let buf = Buffer {
+        addr: 0x1000,
+        size: 1024,
+    };
     let cloned = buf.clone();
     assert_eq!(cloned.addr, buf.addr);
     assert_eq!(cloned.size, buf.size);
@@ -284,7 +366,10 @@ fn test_p2p_store_error_display_all() {
         ("payload not opened", P2pStoreError::PayloadNotOpened),
         ("payload not found", P2pStoreError::PayloadNotFound),
         ("transfer engine error", P2pStoreError::TransferEngine),
-        ("metadata store error: etcd timeout", P2pStoreError::MetadataError("etcd timeout".into())),
+        (
+            "metadata store error: etcd timeout",
+            P2pStoreError::MetadataError("etcd timeout".into()),
+        ),
     ];
     for (expected, err) in &cases {
         assert_eq!(err.to_string(), *expected);

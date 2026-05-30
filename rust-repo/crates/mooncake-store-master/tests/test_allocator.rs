@@ -10,7 +10,6 @@ use mooncake_store_master::allocator::{
 };
 use uuid::Uuid;
 
-
 #[test]
 fn test_single_segment_single_replica() {
     let mut a = SegmentAllocator::new();
@@ -119,14 +118,18 @@ fn test_random_strategy_uses_available_segments() {
 fn test_remove_segment_and_reallocate() {
     let mut a = SegmentAllocator::new();
     let sid = Uuid::new_v4();
-    a.add_segment(Segment {
-        id: sid,
-        name: "to-remove:1".into(),
-        size: 1000,
-        base: 0,
-        te_endpoint: String::new(),
-        protocol: "tcp".into(),
-    }, 0, Uuid::new_v4());
+    a.add_segment(
+        Segment {
+            id: sid,
+            name: "to-remove:1".into(),
+            size: 1000,
+            base: 0,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+        },
+        0,
+        Uuid::new_v4(),
+    );
     let repls = a.allocate("k", 100, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
 
@@ -207,7 +210,11 @@ fn test_cachelib_like_allocator_rounds_to_size_class_usage() {
 #[test]
 fn test_cachelib_like_allocator_reuses_freed_slot() {
     let mut a = SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
-    a.add_segment(make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2), 0, Uuid::new_v4());
+    a.add_segment(
+        make_seg("cachelib:1", CACHELIB_SLAB_SIZE * 2),
+        0,
+        Uuid::new_v4(),
+    );
 
     let first = a.allocate("k1", 128, 1, &ReplicateConfig::default());
     let second = a.allocate("k2", 128, 1, &ReplicateConfig::default());
@@ -556,28 +563,60 @@ fn test_composite_sort_same_node_before_preferred_then_free_ratio() {
     // Result: "A:*" come first (same host), then "pref-seg" (different host, preferred),
     // then remaining "B:*" by free_ratio.
     let sid_same_90 = Uuid::new_v4();
-    a.add_segment(Segment {
-        id: sid_same_90, name: "A:10001".into(), size: 10000, base: 0,
-        te_endpoint: String::new(), protocol: "tcp".into(),
-    }, 1000, Uuid::new_v4());
+    a.add_segment(
+        Segment {
+            id: sid_same_90,
+            name: "A:10001".into(),
+            size: 10000,
+            base: 0,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+        },
+        1000,
+        Uuid::new_v4(),
+    );
 
     let sid_same_10 = Uuid::new_v4();
-    a.add_segment(Segment {
-        id: sid_same_10, name: "A:10002".into(), size: 10000, base: 0,
-        te_endpoint: String::new(), protocol: "tcp".into(),
-    }, 9000, Uuid::new_v4());
+    a.add_segment(
+        Segment {
+            id: sid_same_10,
+            name: "A:10002".into(),
+            size: 10000,
+            base: 0,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+        },
+        9000,
+        Uuid::new_v4(),
+    );
 
     let sid_pref = Uuid::new_v4();
-    a.add_segment(Segment {
-        id: sid_pref, name: "pref-seg".into(), size: 10000, base: 0,
-        te_endpoint: String::new(), protocol: "tcp".into(),
-    }, 1000, Uuid::new_v4()); // host "pref-seg" → different from "A"
+    a.add_segment(
+        Segment {
+            id: sid_pref,
+            name: "pref-seg".into(),
+            size: 10000,
+            base: 0,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+        },
+        1000,
+        Uuid::new_v4(),
+    ); // host "pref-seg" → different from "A"
 
     let sid_other = Uuid::new_v4();
-    a.add_segment(Segment {
-        id: sid_other, name: "B:10003".into(), size: 10000, base: 0,
-        te_endpoint: String::new(), protocol: "tcp".into(),
-    }, 5000, Uuid::new_v4()); // host "B" → different
+    a.add_segment(
+        Segment {
+            id: sid_other,
+            name: "B:10003".into(),
+            size: 10000,
+            base: 0,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+        },
+        5000,
+        Uuid::new_v4(),
+    ); // host "B" → different
 
     // Client is on "A" (segments A:10001 and A:10002 are linked to any client on "A")
     // Set client_id to match the host "A" behavior by linking it to a segment on "A".
@@ -593,17 +632,31 @@ fn test_composite_sort_same_node_before_preferred_then_free_ratio() {
     //
     // So we need a segment owned by `client` that is on host "A".
     let sid_owned_by_client = Uuid::new_v4();
-    a.add_segment(Segment {
-        id: sid_owned_by_client, name: "A:own".into(), size: 100, base: 0,
-        te_endpoint: String::new(), protocol: "tcp".into(),
-    }, 100, client); // ← this segment maps client → host "A"
-    // But this segment can't allocate (100 used out of 100), so it won't be in candidates.
+    a.add_segment(
+        Segment {
+            id: sid_owned_by_client,
+            name: "A:own".into(),
+            size: 100,
+            base: 0,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+        },
+        100,
+        client,
+    ); // ← this segment maps client → host "A"
+       // But this segment can't allocate (100 used out of 100), so it won't be in candidates.
 
     let repls = a.allocate_for_client("k", Some(client), 500, 4, &config);
     assert_eq!(repls.len(), 4);
     // Priority (C++ behaviour): same_node > preferred > free_ratio
-    assert_eq!(repls[0].segment_name, "A:10001",  "same host, most free");
-    assert_eq!(repls[1].segment_name, "A:10002",  "same host, less free");
-    assert_eq!(repls[2].segment_name, "pref-seg", "preferred, different host");
-    assert_eq!(repls[3].segment_name, "B:10003",  "different host, non-preferred");
+    assert_eq!(repls[0].segment_name, "A:10001", "same host, most free");
+    assert_eq!(repls[1].segment_name, "A:10002", "same host, less free");
+    assert_eq!(
+        repls[2].segment_name, "pref-seg",
+        "preferred, different host"
+    );
+    assert_eq!(
+        repls[3].segment_name, "B:10003",
+        "different host, non-preferred"
+    );
 }

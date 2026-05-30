@@ -1,7 +1,7 @@
 use crate::http_metadata::MetadataState;
 use crate::metrics;
-use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
 use chrono::Utc;
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -184,7 +184,11 @@ pub(crate) fn unmount_segment_owned(
 }
 
 // 卸载客户端拥有的 NoF segment，同时从 nof_segments 表和 nof_allocator 移除。
-pub(crate) fn unmount_nof_segment_owned(state: &MasterState, segment_id: Uuid, client_id: Uuid) -> bool {
+pub(crate) fn unmount_nof_segment_owned(
+    state: &MasterState,
+    segment_id: Uuid,
+    client_id: Uuid,
+) -> bool {
     let owned = state
         .nof_segments
         .get(&segment_id)
@@ -350,7 +354,7 @@ pub(crate) fn release_object_replicas(
 pub(crate) fn is_lease_expired(entry: &ObjectEntry) -> bool {
     entry
         .lease_timeout
-        .map_or(true, |timeout| timeout <= SystemTime::now())
+        .is_none_or(|timeout| timeout <= SystemTime::now())
 }
 
 /// 获取当前存活客户端的 UUID 快照。
@@ -394,10 +398,9 @@ pub(crate) fn cleanup_stale_handles(
         }
         let is_stale = match r.replica_type {
             ReplicaType::Memory | ReplicaType::NoFSsd => !r.handle_valid,
-            ReplicaType::LocalDisk => {
-                r.holder_client_id
-                    .map_or(false, |cid| !alive_clients.contains(&cid))
-            }
+            ReplicaType::LocalDisk => r
+                .holder_client_id
+                .is_some_and(|cid| !alive_clients.contains(&cid)),
             _ => false,
         };
         !is_stale
@@ -412,4 +415,3 @@ pub(crate) fn cleanup_stale_handles(
     // 如果清理掉了一些副本，且没有有效的 Complete 副本残留，对象应该被移除
     entry.replicas.len() != original_len && !has_completed
 }
-

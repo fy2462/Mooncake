@@ -1,9 +1,9 @@
+use super::to_py_err;
+use crate::client::PythonMooncakeClient;
 use mooncake_store_client::{EngramStore, EngramStoreConfig, MooncakeClient};
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use std::sync::Arc;
-use crate::client::PythonMooncakeClient;
-use super::to_py_err;
 
 #[pyclass(name = "EngramStoreConfig", skip_from_py_object)]
 #[derive(Clone)]
@@ -25,7 +25,11 @@ impl EngramStoreConfigPy {
         buffer_location = "cpu:0".to_string(),
     ))]
     fn new(table_vocab_sizes: Vec<i64>, embedding_dim: usize, buffer_location: String) -> Self {
-        Self { table_vocab_sizes, embedding_dim, buffer_location }
+        Self {
+            table_vocab_sizes,
+            embedding_dim,
+            buffer_location,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -100,9 +104,11 @@ impl EngramStorePy {
 
     /// Extract the MooncakeClient back out. EngramStore is consumed.
     fn into_inner(&self) -> PyResult<PythonMooncakeClient> {
-        let store = self.inner.lock().take().ok_or_else(|| {
-            to_py_err("EngramStore already closed")
-        })?;
+        let store = self
+            .inner
+            .lock()
+            .take()
+            .ok_or_else(|| to_py_err("EngramStore already closed"))?;
         let client = store.into_inner();
         Ok(PythonMooncakeClient {
             inner: Arc::new(Mutex::new(Some(client))),
@@ -129,7 +135,10 @@ impl EngramStorePy {
 
     fn __repr__(&self) -> String {
         if self.inner.lock().is_some() {
-            format!("EngramStore(heads={}, dim={})", self.num_heads, self.embedding_dim)
+            format!(
+                "EngramStore(heads={}, dim={})",
+                self.num_heads, self.embedding_dim
+            )
         } else {
             "EngramStore(closed)".to_string()
         }

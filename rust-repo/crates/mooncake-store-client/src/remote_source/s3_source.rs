@@ -31,16 +31,16 @@ impl S3RemoteSource {
     pub async fn new(config: &S3Config) -> RemoteSourceResult<Self> {
         let region = Region::new(config.region.clone());
 
-        let mut sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(region);
+        let mut sdk_config =
+            aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region);
 
         // Apply explicit credentials when provided
         if let (Some(key), Some(secret)) = (&config.access_key_id, &config.secret_access_key) {
             let credentials = Credentials::new(
                 key.clone(),
                 secret.clone(),
-                None,           // session token
-                None,           // expiry
+                None, // session token
+                None, // expiry
                 "mooncake-s3",
             );
             sdk_config = sdk_config.credentials_provider(credentials);
@@ -189,7 +189,6 @@ impl RemoteSource for S3RemoteSource {
         }
         results
     }
-
 }
 
 #[cfg(test)]

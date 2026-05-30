@@ -226,19 +226,46 @@ mod tests {
 
     #[test]
     fn test_transfer_status_enum_from_i32_all() {
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Waiting as i32), TransferStatusEnum::Waiting);
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Pending as i32), TransferStatusEnum::Pending);
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Invalid as i32), TransferStatusEnum::Invalid);
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Canceled as i32), TransferStatusEnum::Canceled);
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Completed as i32), TransferStatusEnum::Completed);
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Timeout as i32), TransferStatusEnum::Timeout);
-        assert_eq!(TransferStatusEnum::from_i32(TransferStatusEnum::Failed as i32), TransferStatusEnum::Failed);
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Waiting as i32),
+            TransferStatusEnum::Waiting
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Pending as i32),
+            TransferStatusEnum::Pending
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Invalid as i32),
+            TransferStatusEnum::Invalid
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Canceled as i32),
+            TransferStatusEnum::Canceled
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Completed as i32),
+            TransferStatusEnum::Completed
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Timeout as i32),
+            TransferStatusEnum::Timeout
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(TransferStatusEnum::Failed as i32),
+            TransferStatusEnum::Failed
+        );
     }
 
     #[test]
     fn test_transfer_status_enum_from_i32_unknown() {
-        assert_eq!(TransferStatusEnum::from_i32(99), TransferStatusEnum::Invalid);
-        assert_eq!(TransferStatusEnum::from_i32(-5), TransferStatusEnum::Invalid);
+        assert_eq!(
+            TransferStatusEnum::from_i32(99),
+            TransferStatusEnum::Invalid
+        );
+        assert_eq!(
+            TransferStatusEnum::from_i32(-5),
+            TransferStatusEnum::Invalid
+        );
     }
 
     #[test]
@@ -366,12 +393,10 @@ mod tests {
     #[test]
     fn test_notify_msg_buf_creation() {
         let buf = NotifyMsgBuf {
-            messages: vec![
-                NotifyMsg {
-                    name: "a".into(),
-                    msg: "x".into(),
-                },
-            ],
+            messages: vec![NotifyMsg {
+                name: "a".into(),
+                msg: "x".into(),
+            }],
         };
         assert_eq!(buf.messages.len(), 1);
         assert_eq!(buf.messages[0].name, "a");

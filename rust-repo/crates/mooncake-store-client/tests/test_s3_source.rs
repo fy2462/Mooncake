@@ -27,21 +27,24 @@ mod s3_tests {
         objects: Store,
     }
 
-    async fn handle_all(
-        State(state): State<ServerState>,
-        req: Request,
-    ) -> Response<Body> {
+    async fn handle_all(State(state): State<ServerState>, req: Request) -> Response<Body> {
         let path = req.uri().path();
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         match segments.len() {
-            0 => Response::builder().status(StatusCode::OK).body(Body::empty()).unwrap(),
+            0 => Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .unwrap(),
             1 => {
                 let query = req.uri().query().unwrap_or("");
                 if query.contains("list-type") {
                     handle_list(&state, segments[0], query).await
                 } else {
-                    Response::builder().status(StatusCode::OK).body(Body::empty()).unwrap()
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::empty())
+                        .unwrap()
                 }
             }
             _ => {
@@ -53,10 +56,15 @@ mod s3_tests {
                             .await
                             .unwrap_or_default();
                         state.objects.lock().insert(key, body.to_vec());
-                        Response::builder().status(StatusCode::OK).body(Body::empty()).unwrap()
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(Body::empty())
+                            .unwrap()
                     }
-                    _ => Response::builder().status(StatusCode::METHOD_NOT_ALLOWED)
-                        .body(Body::empty()).unwrap(),
+                    _ => Response::builder()
+                        .status(StatusCode::METHOD_NOT_ALLOWED)
+                        .body(Body::empty())
+                        .unwrap(),
                 }
             }
         }
@@ -182,7 +190,9 @@ mod s3_tests {
     #[tokio::test]
     async fn test_mock_s3_get_existing_key() {
         let store: Store = Arc::new(Mutex::new(HashMap::new()));
-        store.lock().insert("hello".to_string(), b"world data".to_vec());
+        store
+            .lock()
+            .insert("hello".to_string(), b"world data".to_vec());
         let (endpoint, _server) = start_mock(store.clone()).await;
         let config = s3_config(&endpoint);
         let source = S3RemoteSource::new(&config).await.unwrap();
@@ -233,7 +243,9 @@ mod s3_tests {
     #[tokio::test]
     async fn test_mock_s3_with_prefix() {
         let store: Store = Arc::new(Mutex::new(HashMap::new()));
-        store.lock().insert("prefix_hello".to_string(), b"prefixed data".to_vec());
+        store
+            .lock()
+            .insert("prefix_hello".to_string(), b"prefixed data".to_vec());
         let (endpoint, _server) = start_mock(store.clone()).await;
         let config = S3Config {
             bucket: TEST_BUCKET.to_string(),
@@ -261,7 +273,13 @@ mod s3_tests {
         store.lock().insert("key_002".into(), b"world".to_vec());
         let (endpoint, _server) = start_mock(store).await;
         let source = S3RemoteSource::new(&s3_config(&endpoint)).await.unwrap();
-        let handler = MissHandler::new(source, RemoteSourceConfig { enabled: true, ..Default::default() });
+        let handler = MissHandler::new(
+            source,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(handler.handle_miss("key_001").await.unwrap(), b"hello");
         assert!(matches!(
@@ -283,10 +301,19 @@ mod s3_tests {
         let (endpoint, _server) = start_mock(store).await;
         let source = S3RemoteSource::new(&s3_config(&endpoint)).await.unwrap();
         let cache = Arc::new(LocalHotCache::default());
-        let handler = MissHandler::new(source, RemoteSourceConfig { enabled: true, ..Default::default() })
-            .with_hot_cache(cache);
+        let handler = MissHandler::new(
+            source,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .with_hot_cache(cache);
 
-        let keys: Vec<String> = ["k1", "k2", "missing"].iter().map(|s| s.to_string()).collect();
+        let keys: Vec<String> = ["k1", "k2", "missing"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         handler.batch_fetch(&keys).await;
 
         // handle_miss should hit hot cache for k1
@@ -305,7 +332,13 @@ mod s3_tests {
         store.lock().insert("key_001".into(), b"data".to_vec());
         let (endpoint, _server) = start_mock(store).await;
         let source = S3RemoteSource::new(&s3_config(&endpoint)).await.unwrap();
-        let handler = MissHandler::new(source, RemoteSourceConfig { enabled: false, ..Default::default() });
+        let handler = MissHandler::new(
+            source,
+            RemoteSourceConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
 
         assert!(matches!(
             handler.handle_miss("key_001").await.unwrap_err(),

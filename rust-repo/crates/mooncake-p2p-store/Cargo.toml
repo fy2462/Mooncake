@@ -15,3 +15,7 @@ parking_lot.workspace = true
 rand.workspace = true
 etcd-client.workspace = true
 tracing.workspace = true
+
+[features]
+default = []
+link-native = ["transfer-engine-ffi/link-native"]

@@ -5,6 +5,8 @@ from mooncake_store._mooncake_store import (
     EngramStore,
     EngramStoreConfig,
     P2pStore,
+    S3Config,
+    RemoteSourceConfig,
 )
 
 __all__ = [
@@ -14,5 +16,7 @@ __all__ = [
     "EngramStore",
     "EngramStoreConfig",
     "P2pStore",
+    "S3Config",
+    "RemoteSourceConfig",
 ]
 __version__ = "0.1.0"

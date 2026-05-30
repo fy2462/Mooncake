@@ -63,9 +63,7 @@ impl HotStandbyService {
                 status.state = StandbyState::Recovering;
                 drop(status);
 
-                if let Ok(Some(snapshot)) =
-                    provider.load_latest_snapshot(&self.config.cluster_id)
-                {
+                if let Ok(Some(snapshot)) = provider.load_latest_snapshot(&self.config.cluster_id) {
                     // Apply snapshot segments (Segment only, default to Active status)
                     for seg in &snapshot.segments {
                         let sid = seg.id;
@@ -80,7 +78,10 @@ impl HotStandbyService {
                                 },
                             );
                             // Also register with allocator
-                            self.state.allocator.write().add_segment(seg.clone(), 0, Uuid::nil());
+                            self.state
+                                .allocator
+                                .write()
+                                .add_segment(seg.clone(), 0, Uuid::nil());
                         }
                     }
                     // Apply NoF segments
@@ -88,17 +89,18 @@ impl HotStandbyService {
                         let sid = nof.segment.id;
                         if !self.state.nof_segments.contains_key(&sid) {
                             self.state.nof_segments.insert(sid, nof.clone());
-                            self.state
-                                .nof_allocator
-                                .write()
-                                .add_segment(mooncake_store_core::Segment {
+                            self.state.nof_allocator.write().add_segment(
+                                mooncake_store_core::Segment {
                                     id: nof.segment.id,
                                     name: nof.segment.name.clone(),
                                     base: nof.segment.base,
                                     size: nof.segment.size,
                                     te_endpoint: nof.segment.te_endpoint.clone(),
                                     protocol: String::new(),
-                                }, nof.used, nof.segment.client_id);
+                                },
+                                nof.used,
+                                nof.segment.client_id,
+                            );
                         }
                     }
                     // Apply objects

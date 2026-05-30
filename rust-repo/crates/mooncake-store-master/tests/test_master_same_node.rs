@@ -7,7 +7,6 @@ use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
-
 fn proto_nof_segment(id: Uuid, client_id: Uuid, name: &str) -> proto::NoFSegment {
     proto::NoFSegment {
         id: Some(proto_uuid(id)),
@@ -33,6 +32,7 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "same-host:1001".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -43,6 +43,7 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
             client_id: Some(proto_uuid(remote_client_id)),
             segment_name: "remote-host:1001".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -86,7 +87,10 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: true, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: true,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -98,12 +102,16 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
     let memory = response
         .replicas
         .iter()
-        .find(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+        .find(|replica| {
+            replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32
+        })
         .unwrap();
     let nof = response
         .replicas
         .iter()
-        .find(|replica| replica.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32)
+        .find(|replica| {
+            replica.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32
+        })
         .unwrap();
     assert_eq!(memory.segment_name, "same-host:1001");
     assert_eq!(nof.segment_name, "same-host:nof-1");
@@ -121,6 +129,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "same-host:1001".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -151,7 +160,10 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: String::new(),
-                prefer_alloc_in_same_node: true, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: true,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -179,6 +191,7 @@ async fn test_client_monitor_reaps_expired_clients() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "ttl:1".into(),
             size: 2048,
+            base_addr: 0,
         }),
     )
     .await
@@ -196,7 +209,10 @@ async fn test_client_monitor_reaps_expired_clients() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "ttl:1".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )

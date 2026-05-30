@@ -77,7 +77,9 @@ impl MasterServiceImpl {
                 })
             })
             .collect();
-        Ok(Response::new(proto::GetNoFSegmentsByNameResponse { owners }))
+        Ok(Response::new(proto::GetNoFSegmentsByNameResponse {
+            owners,
+        }))
     }
 
     // ---- PutStart ----
@@ -132,12 +134,8 @@ impl MasterServiceImpl {
                     .any(|r| r.status == ReplicaStatus::Complete);
                 if !has_completed {
                     if let Some(start) = existing.put_start_time {
-                        let elapsed = SystemTime::now()
-                            .duration_since(start)
-                            .unwrap_or_default();
-                        if elapsed
-                            >= self.state.runtime_config.put_start_discard_timeout
-                        {
+                        let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
+                        if elapsed >= self.state.runtime_config.put_start_discard_timeout {
                             // PutStart 超时，删除对象
                             let old_replicas = existing.replicas.clone();
                             let expired = existing
@@ -151,14 +149,9 @@ impl MasterServiceImpl {
                             self.state.replication_tasks.remove(&key);
                             drop(existing);
                             if !expired.is_empty() {
-                                release_replicas_scheduled(
-                                    &self.state, expired,
-                                );
+                                release_replicas_scheduled(&self.state, expired);
                             } else if !old_replicas.is_empty() {
-                                release_replicas(
-                                    &self.state,
-                                    &old_replicas,
-                                );
+                                release_replicas(&self.state, &old_replicas);
                             }
                         } else {
                             return Err(Status::already_exists(format!(
@@ -318,7 +311,10 @@ impl MasterServiceImpl {
                     _ => new_soft_pin,
                 });
             }
-            let all_complete = entry.replicas.iter().all(|r| r.status == ReplicaStatus::Complete);
+            let all_complete = entry
+                .replicas
+                .iter()
+                .all(|r| r.status == ReplicaStatus::Complete);
             let size = entry.size;
             let offload_enabled = !self.state.runtime_config.offload_on_evict;
             drop(entry);
@@ -458,7 +454,10 @@ impl MasterServiceImpl {
         }
         metrics::GET_REQUESTS.inc();
         let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
-        Ok(Response::new(proto::GetReplicaListResponse { replicas: completed_replicas, lease_ttl_ms }))
+        Ok(Response::new(proto::GetReplicaListResponse {
+            replicas: completed_replicas,
+            lease_ttl_ms,
+        }))
     }
 
     // ---- GetReplicaListByRegex ----
@@ -500,7 +499,9 @@ impl MasterServiceImpl {
         }
 
         metrics::GET_REQUESTS.inc();
-        Ok(Response::new(proto::GetReplicaListByRegexResponse { entries }))
+        Ok(Response::new(proto::GetReplicaListByRegexResponse {
+            entries,
+        }))
     }
 
     // ---- Remove ----
@@ -696,29 +697,42 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("object has offloading task"));
         }
 
-        let (replicas, previous_soft_pinned, previous_hard_pinned) = if let Some(mut existing) =
-            self.state.objects.get_mut(&req.key)
-        {
-            // C++ 先调用 CleanupStaleHandles 清理无效副本
-            let alive_clients = get_alive_clients_snapshot(&self.state);
-            let _ = cleanup_stale_handles(&mut existing, &alive_clients);
+        let (replicas, previous_soft_pinned, previous_hard_pinned) =
+            if let Some(mut existing) = self.state.objects.get_mut(&req.key) {
+                // C++ 先调用 CleanupStaleHandles 清理无效副本
+                let alive_clients = get_alive_clients_snapshot(&self.state);
+                let _ = cleanup_stale_handles(&mut existing, &alive_clients);
 
-            // C++ checks HasReplica(&Replica::fn_is_busy)
-            if existing.replicas.iter().any(|r| r.refcnt > 0) {
-                return Err(Status::failed_precondition("object replica busy"));
-            }
-            if existing.size == req.slice_length {
-                (
-                    existing.replicas.clone(),
-                    existing.soft_pinned,
-                    existing.hard_pinned,
-                )
+                // C++ checks HasReplica(&Replica::fn_is_busy)
+                if existing.replicas.iter().any(|r| r.refcnt > 0) {
+                    return Err(Status::failed_precondition("object replica busy"));
+                }
+                if existing.size == req.slice_length {
+                    (
+                        existing.replicas.clone(),
+                        existing.soft_pinned,
+                        existing.hard_pinned,
+                    )
+                } else {
+                    let previous_soft_pinned = existing.soft_pinned;
+                    let previous_hard_pinned = existing.hard_pinned;
+                    let old_replicas = existing.replicas.clone();
+                    drop(existing);
+                    release_replicas(&self.state, &old_replicas);
+                    let mut allocator = self.state.allocator.write();
+                    (
+                        allocator.allocate_for_client(
+                            &req.key,
+                            Some(client_id),
+                            req.slice_length,
+                            replica_count,
+                            &config,
+                        ),
+                        previous_soft_pinned,
+                        previous_hard_pinned,
+                    )
+                }
             } else {
-                let previous_soft_pinned = existing.soft_pinned;
-                let previous_hard_pinned = existing.hard_pinned;
-                let old_replicas = existing.replicas.clone();
-                drop(existing);
-                release_replicas(&self.state, &old_replicas);
                 let mut allocator = self.state.allocator.write();
                 (
                     allocator.allocate_for_client(
@@ -728,24 +742,10 @@ impl MasterServiceImpl {
                         replica_count,
                         &config,
                     ),
-                    previous_soft_pinned,
-                    previous_hard_pinned,
+                    false,
+                    false,
                 )
-            }
-        } else {
-            let mut allocator = self.state.allocator.write();
-            (
-                allocator.allocate_for_client(
-                    &req.key,
-                    Some(client_id),
-                    req.slice_length,
-                    replica_count,
-                    &config,
-                ),
-                false,
-                false,
-            )
-        };
+            };
         let mut replicas = replicas;
         if config.nof_replica_num > 0 {
             let preferred_nof = if config.prefer_alloc_in_same_node {

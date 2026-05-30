@@ -73,10 +73,8 @@ fn test_store_error_from_transfer_engine() {
     use transfer_engine_ffi::TransferEngineError;
 
     let te_err = TransferEngineError::NullHandle;
-    let store_err = mooncake_store_core::StoreError::Internal(format!(
-        "transfer engine error: {}",
-        te_err
-    ));
+    let store_err =
+        mooncake_store_core::StoreError::Internal(format!("transfer engine error: {}", te_err));
     assert!(store_err.to_string().contains("transfer engine error"));
 }
 

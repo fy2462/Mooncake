@@ -49,7 +49,10 @@ impl LocalHotCache {
                 *tail = 0;
                 break;
             }
-            let oldest_key = entries.iter().min_by_key(|(_, &(off, _))| off).map(|(k, _)| k.clone());
+            let oldest_key = entries
+                .iter()
+                .min_by_key(|(_, &(off, _))| off)
+                .map(|(k, _)| k.clone());
             if let Some(k) = oldest_key {
                 entries.remove(&k);
             }

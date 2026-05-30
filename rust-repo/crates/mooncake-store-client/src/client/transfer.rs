@@ -1,5 +1,5 @@
-use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 use uuid::Uuid;
@@ -8,6 +8,57 @@ use super::MooncakeClient;
 use crate::proto;
 
 impl MooncakeClient {
+    // -----------------------------------------------------------------------
+    // LOCAL_MEMCPY — bypass TE for same-node transfers (matches C++ strategy)
+    // -----------------------------------------------------------------------
+
+    fn is_local_replica(&self, replica: &ReplicaDescriptor) -> bool {
+        self.local_endpoints.read().contains(&replica.segment_name)
+    }
+
+    fn local_memcpy_write(&self, replica: &ReplicaDescriptor, data: &[u8]) -> StoreResult<()> {
+        let seg = self
+            .segment_buffer
+            .as_ref()
+            .ok_or_else(|| StoreError::Internal("no local segment buffer".into()))?;
+        let offset = replica.offset as usize;
+        let len = data.len();
+        if offset + len > seg.len() {
+            return Err(StoreError::InvalidParams(format!(
+                "local write out of bounds: offset={} len={} segment_size={}",
+                offset,
+                len,
+                seg.len()
+            )));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), seg.as_ptr().add(offset) as *mut u8, len);
+        }
+        Ok(())
+    }
+
+    fn local_memcpy_read(&self, replica: &ReplicaDescriptor) -> StoreResult<Vec<u8>> {
+        let seg = self
+            .segment_buffer
+            .as_ref()
+            .ok_or_else(|| StoreError::Internal("no local segment buffer".into()))?;
+        let offset = replica.offset as usize;
+        let len = replica.size as usize;
+        if offset + len > seg.len() {
+            return Err(StoreError::InvalidParams(format!(
+                "local read out of bounds: offset={} len={} segment_size={}",
+                offset,
+                len,
+                seg.len()
+            )));
+        }
+        let mut result = vec![0u8; len];
+        unsafe {
+            std::ptr::copy_nonoverlapping(seg.as_ptr().add(offset), result.as_mut_ptr(), len);
+        }
+        Ok(result)
+    }
+
     // -----------------------------------------------------------------------
     // Buffer registration (zero-copy path)
     // -----------------------------------------------------------------------
@@ -29,7 +80,9 @@ impl MooncakeClient {
     }
 
     pub unsafe fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()> {
-        unsafe { self.engine.unregister_local_memory(buffer)?; }
+        unsafe {
+            self.engine.unregister_local_memory(buffer)?;
+        }
         self.registered_buffers.write().remove(&(buffer as usize));
         Ok(())
     }
@@ -43,46 +96,59 @@ impl MooncakeClient {
         proto::Uuid { high: h, low: l }
     }
 
-    pub(crate) async fn fetch_replicas(&mut self, key: &str) -> StoreResult<Vec<ReplicaDescriptor>> {
-        let request = proto::GetReplicaListRequest { key: key.to_string() };
+    pub(crate) async fn fetch_replicas(
+        &mut self,
+        key: &str,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let request = proto::GetReplicaListRequest {
+            key: key.to_string(),
+        };
         let response = self
             .master
             .get_replica_list(request)
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
-        Ok(self.replicas_from_proto(&response.replicas))
+        let replicas = self.replicas_from_proto(&response.replicas);
+        Ok(replicas)
     }
 
-    pub(crate) fn replicas_from_proto(&self, replicas: &[proto::ReplicaDescriptor]) -> Vec<ReplicaDescriptor> {
-        replicas.iter().filter_map(|r| {
-            let sid = r.segment_id.as_ref()?;
-            Some(ReplicaDescriptor {
-                refcnt: 0,
-                segment_id: Uuid::from_u64_pair(sid.high, sid.low),
-                segment_name: r.segment_name.clone(),
-                offset: r.offset,
-                size: r.size,
-                status: match r.status {
-                    1 => mooncake_store_core::ReplicaStatus::Allocating,
-                    2 => mooncake_store_core::ReplicaStatus::Written,
-                    3 => mooncake_store_core::ReplicaStatus::Complete,
-                    4 => mooncake_store_core::ReplicaStatus::Failed,
-                    _ => mooncake_store_core::ReplicaStatus::Undefined,
-                },
-                replica_type: match r.replica_type {
-                    1 => mooncake_store_core::ReplicaType::Disk,
-                    2 => mooncake_store_core::ReplicaType::LocalDisk,
-                    3 => mooncake_store_core::ReplicaType::NoFSsd,
-                    _ => mooncake_store_core::ReplicaType::Memory,
-                },
-                holder_client_id: r
-                    .holder_client_id
-                    .as_ref()
-                    .map(|id| Uuid::from_u64_pair(id.high, id.low)),
-                handle_valid: true,
+    pub(crate) fn replicas_from_proto(
+        &self,
+        replicas: &[proto::ReplicaDescriptor],
+    ) -> Vec<ReplicaDescriptor> {
+        replicas
+            .iter()
+            .filter_map(|r| {
+                let sid = r.segment_id.as_ref()?;
+                Some(ReplicaDescriptor {
+                    refcnt: 0,
+                    segment_id: Uuid::from_u64_pair(sid.high, sid.low),
+                    segment_name: r.segment_name.clone(),
+                    offset: r.offset,
+                    size: r.size,
+                    base_addr: r.base_addr,
+                    status: match r.status {
+                        1 => mooncake_store_core::ReplicaStatus::Allocating,
+                        2 => mooncake_store_core::ReplicaStatus::Written,
+                        3 => mooncake_store_core::ReplicaStatus::Complete,
+                        4 => mooncake_store_core::ReplicaStatus::Failed,
+                        _ => mooncake_store_core::ReplicaStatus::Undefined,
+                    },
+                    replica_type: match r.replica_type {
+                        1 => mooncake_store_core::ReplicaType::Disk,
+                        2 => mooncake_store_core::ReplicaType::LocalDisk,
+                        3 => mooncake_store_core::ReplicaType::NoFSsd,
+                        _ => mooncake_store_core::ReplicaType::Memory,
+                    },
+                    holder_client_id: r
+                        .holder_client_id
+                        .as_ref()
+                        .map(|id| Uuid::from_u64_pair(id.high, id.low)),
+                    handle_valid: true,
+                })
             })
-        }).collect()
+            .collect()
     }
 
     /// 从副本列表中选择最优副本，完全匹配 C++ `SelectBestReplica` 逻辑。
@@ -127,7 +193,6 @@ impl MooncakeClient {
                 _ => {}
             }
         }
-        drop(endpoints);
 
         if let Some(r) = first_memory {
             return Some(r);
@@ -146,11 +211,10 @@ impl MooncakeClient {
                 mooncake_store_core::ReplicaType::LocalDisk => {
                     best = Some(r); // LOCAL_DISK 始终覆盖 DISK
                 }
-                mooncake_store_core::ReplicaType::Disk => {
-                    if best.is_none() {
+                mooncake_store_core::ReplicaType::Disk
+                    if best.is_none() => {
                         best = Some(r);
                     }
-                }
                 _ => {}
             }
         }
@@ -162,6 +226,11 @@ impl MooncakeClient {
         replica: &ReplicaDescriptor,
         data: &[u8],
     ) -> StoreResult<()> {
+        // Fast path: local segment — direct memcpy, no TE overhead
+        if self.is_local_replica(replica) && self.segment_buffer.is_some() {
+            return self.local_memcpy_write(replica, data);
+        }
+
         if data.len() > self.local_buffer.len() {
             return Err(StoreError::InvalidParams(format!(
                 "data size {} exceeds local buffer size {}",
@@ -181,16 +250,19 @@ impl MooncakeClient {
             );
         }
 
+        let target_offset = replica.base_addr + replica.offset;
         let request = TransferRequest {
             opcode: Opcode::Write,
             source: self.local_buffer.as_ptr() as *mut c_void,
             target_id: segment_id,
-            target_offset: replica.offset,
+            target_offset,
             length: data.len() as u64,
         };
 
         self.engine.submit_transfer(batch_id, &[request])?;
 
+        let start = tokio::time::Instant::now();
+        let timeout = tokio::time::Duration::from_secs(10);
         loop {
             let status = self.engine.get_transfer_status(batch_id, 0)?;
             if status.status == TransferStatusEnum::Completed {
@@ -198,6 +270,10 @@ impl MooncakeClient {
             }
             if status.status == TransferStatusEnum::Failed {
                 return Err(StoreError::OperationFailed(-1));
+            }
+            if start.elapsed() > timeout {
+                self.engine.free_batch_id(batch_id)?;
+                return Err(StoreError::OperationFailed(-2));
             }
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
@@ -220,7 +296,7 @@ impl MooncakeClient {
             opcode: Opcode::Write,
             source: buffer,
             target_id: segment_id,
-            target_offset: replica.offset,
+            target_offset: replica.base_addr + replica.offset,
             length: size as u64,
         };
 
@@ -246,6 +322,11 @@ impl MooncakeClient {
         &self,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
+        // Fast path: local segment — direct memcpy, no TE overhead
+        if self.is_local_replica(replica) && self.segment_buffer.is_some() {
+            return self.local_memcpy_read(replica);
+        }
+
         if replica.size > self.local_buffer.len() as u64 {
             return Err(StoreError::InvalidParams(format!(
                 "object size {} exceeds local buffer size {}",
@@ -258,25 +339,33 @@ impl MooncakeClient {
         let read_len = replica.size as usize;
         let batch_id = self.engine.allocate_batch_id(1)?;
 
+        let target_offset = replica.base_addr + replica.offset;
         let request = TransferRequest {
             opcode: Opcode::Read,
             source: self.local_buffer.as_ptr() as *mut c_void,
             target_id: segment_id,
-            target_offset: replica.offset,
+            target_offset,
             length: read_len as u64,
         };
 
         self.engine.submit_transfer(batch_id, &[request])?;
 
         let mut transferred: u64;
+        let start = tokio::time::Instant::now();
+        let timeout = tokio::time::Duration::from_secs(10);
         loop {
-            let status: transfer_engine_ffi::TransferStatus = self.engine.get_transfer_status(batch_id, 0)?;
+            let status: transfer_engine_ffi::TransferStatus =
+                self.engine.get_transfer_status(batch_id, 0)?;
             transferred = status.transferred_bytes;
             if status.status == TransferStatusEnum::Completed {
                 break;
             }
             if status.status == TransferStatusEnum::Failed {
                 return Err(StoreError::OperationFailed(-1));
+            }
+            if start.elapsed() > timeout {
+                self.engine.free_batch_id(batch_id)?;
+                return Err(StoreError::OperationFailed(-2));
             }
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
@@ -294,14 +383,15 @@ impl MooncakeClient {
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<usize> {
-        let segment_id: transfer_engine_ffi::SegmentId = self.engine.open_segment(&replica.segment_name)?;
+        let segment_id: transfer_engine_ffi::SegmentId =
+            self.engine.open_segment(&replica.segment_name)?;
         let batch_id: transfer_engine_ffi::BatchId = self.engine.allocate_batch_id(1)?;
 
         let request: TransferRequest = TransferRequest {
             opcode: Opcode::Read,
             source: buffer,
             target_id: segment_id,
-            target_offset: replica.offset,
+            target_offset: replica.base_addr + replica.offset,
             length: size as u64,
         };
 
@@ -309,7 +399,8 @@ impl MooncakeClient {
 
         let mut transferred: u64;
         loop {
-            let status: transfer_engine_ffi::TransferStatus = self.engine.get_transfer_status(batch_id, 0)?;
+            let status: transfer_engine_ffi::TransferStatus =
+                self.engine.get_transfer_status(batch_id, 0)?;
             transferred = status.transferred_bytes;
             if status.status.is_terminal() {
                 break;

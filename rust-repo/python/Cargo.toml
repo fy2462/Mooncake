@@ -10,8 +10,12 @@ name = "_mooncake_store"
 crate-type = ["cdylib"]
 
 [features]
-default = []
+default = ["link-native"]
 s3 = ["mooncake-store-client/s3"]
+link-native = [
+    "mooncake-store-client/link-native",
+    "mooncake-p2p-store/link-native",
+]
 
 [dependencies]
 mooncake-store-client = { path = "../crates/mooncake-store-client" }

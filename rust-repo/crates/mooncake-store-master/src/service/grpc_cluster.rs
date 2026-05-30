@@ -29,7 +29,9 @@ impl MasterServiceImpl {
         register_metadata_segments(&self.metadata_state, &req.mounted_segments).await;
         metrics::PING_REQUESTS.inc();
         let view_version_id = if existed {
-            self.state.view_version.load(std::sync::atomic::Ordering::Relaxed)
+            self.state
+                .view_version
+                .load(std::sync::atomic::Ordering::Relaxed)
         } else {
             bump_view_version(&self.state)
         };
@@ -63,7 +65,7 @@ impl MasterServiceImpl {
         let segment = mooncake_store_core::Segment {
             id: segment_id,
             name: req.segment_name.clone(),
-            base: 0,
+            base: req.base_addr,
             size: req.size,
             te_endpoint: String::new(),
             protocol: String::new(),
@@ -80,13 +82,15 @@ impl MasterServiceImpl {
         );
         upsert_client_addresses(&self.state, client_id, vec![host]);
         sync_client_segments(&self.state, client_id);
-        register_metadata_segments(&self.metadata_state, &[req.segment_name.clone()]).await;
+        register_metadata_segments(&self.metadata_state, std::slice::from_ref(&req.segment_name)).await;
 
         let mut allocator = self.state.allocator.write();
         allocator.add_segment(segment, 0, client_id);
 
         bump_view_version(&self.state);
-        self.oplog_manager.lock().record_mount_segment(&req.segment_name, segment_id, req.size);
+        self.oplog_manager
+            .lock()
+            .record_mount_segment(&req.segment_name, segment_id, req.size);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
         Ok(Response::new(proto::MountSegmentResponse {}))
     }
@@ -118,16 +122,22 @@ impl MasterServiceImpl {
                 status: proto::SegmentStatus::Active,
             },
         );
-        self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
-            id: segment.id,
-            name: segment.name.clone(),
-            base: segment.base,
-            size: segment.size,
-            te_endpoint: segment.te_endpoint.clone(),
-            protocol: String::new(),
-        }, 0, client_id);
+        self.state.nof_allocator.write().add_segment(
+            mooncake_store_core::Segment {
+                id: segment.id,
+                name: segment.name.clone(),
+                base: segment.base,
+                size: segment.size,
+                te_endpoint: segment.te_endpoint.clone(),
+                protocol: String::new(),
+            },
+            0,
+            client_id,
+        );
         bump_view_version(&self.state);
-        self.oplog_manager.lock().record_mount_nof_segment(&segment.name, segment.id, segment.size);
+        self.oplog_manager
+            .lock()
+            .record_mount_nof_segment(&segment.name, segment.id, segment.size);
         Ok(Response::new(proto::MountNoFSegmentResponse {}))
     }
 
@@ -160,7 +170,9 @@ impl MasterServiceImpl {
             return Err(Status::not_found("segment not found for client"));
         }
         bump_view_version(&self.state);
-        self.oplog_manager.lock().record_unmount_segment(&segment_name, segment_id);
+        self.oplog_manager
+            .lock()
+            .record_unmount_segment(&segment_name, segment_id);
         Ok(Response::new(proto::UnmountSegmentResponse {}))
     }
 
@@ -192,7 +204,9 @@ impl MasterServiceImpl {
             return Err(Status::not_found("NoF segment not found for client"));
         }
         bump_view_version(&self.state);
-        self.oplog_manager.lock().record_unmount_nof_segment(&nof_segment_name, segment_id);
+        self.oplog_manager
+            .lock()
+            .record_unmount_nof_segment(&nof_segment_name, segment_id);
         Ok(Response::new(proto::UnmountNoFSegmentResponse {}))
     }
 
@@ -254,9 +268,10 @@ impl MasterServiceImpl {
         register_metadata_segments(&self.metadata_state, &req.segment_names).await;
 
         for (segment_name, size) in req.segment_names.iter().zip(req.segment_sizes.iter()) {
-            let exists = self.state.segments.iter().any(|entry| {
-                entry.client_id == client_id && entry.segment.name == *segment_name
-            });
+            let exists =
+                self.state.segments.iter().any(|entry| {
+                    entry.client_id == client_id && entry.segment.name == *segment_name
+                });
             if exists {
                 continue;
             }
@@ -278,7 +293,10 @@ impl MasterServiceImpl {
                     status: proto::SegmentStatus::Active,
                 },
             );
-            self.state.allocator.write().add_segment(segment, 0, client_id);
+            self.state
+                .allocator
+                .write()
+                .add_segment(segment, 0, client_id);
         }
         sync_client_segments(&self.state, client_id);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
@@ -300,11 +318,10 @@ impl MasterServiceImpl {
         for proto_segment in &req.segments {
             let mut segment = nof_segment_from_proto(proto_segment);
             segment.client_id = client_id;
-            let exists = self
-                .state
-                .nof_segments
-                .iter()
-                .any(|entry| entry.segment.id == segment.id || entry.segment.name == segment.name);
+            let exists =
+                self.state.nof_segments.iter().any(|entry| {
+                    entry.segment.id == segment.id || entry.segment.name == segment.name
+                });
             if exists {
                 continue;
             }
@@ -316,14 +333,18 @@ impl MasterServiceImpl {
                     status: proto::SegmentStatus::Active,
                 },
             );
-            self.state.nof_allocator.write().add_segment(mooncake_store_core::Segment {
-                id: segment.id,
-                name: segment.name.clone(),
-                base: segment.base,
-                size: segment.size,
-                te_endpoint: segment.te_endpoint.clone(),
-                protocol: String::new(),
-            }, 0, client_id);
+            self.state.nof_allocator.write().add_segment(
+                mooncake_store_core::Segment {
+                    id: segment.id,
+                    name: segment.name.clone(),
+                    base: segment.base,
+                    size: segment.size,
+                    te_endpoint: segment.te_endpoint.clone(),
+                    protocol: String::new(),
+                },
+                0,
+                client_id,
+            );
         }
         Ok(Response::new(proto::ReMountNoFSegmentResponse {}))
     }
@@ -448,6 +469,7 @@ impl MasterServiceImpl {
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::LocalDisk,
                 holder_client_id: Some(client_id),
+                base_addr: 0,
             };
             if let Some(mut object) = self.state.objects.get_mut(key) {
                 if let Some(existing) = object.replicas.iter_mut().find(|existing| {
@@ -672,12 +694,22 @@ impl MasterServiceImpl {
         request: Request<proto::QuerySegmentStatusRequest>,
     ) -> Result<Response<proto::QuerySegmentStatusResponse>, Status> {
         let req = request.into_inner();
-        if let Some(entry) = self.state.segments.iter().find(|e| e.segment.name == req.segment_name) {
+        if let Some(entry) = self
+            .state
+            .segments
+            .iter()
+            .find(|e| e.segment.name == req.segment_name)
+        {
             return Ok(Response::new(proto::QuerySegmentStatusResponse {
                 status: entry.status as i32,
             }));
         }
-        if let Some(entry) = self.state.nof_segments.iter().find(|e| e.segment.name == req.segment_name) {
+        if let Some(entry) = self
+            .state
+            .nof_segments
+            .iter()
+            .find(|e| e.segment.name == req.segment_name)
+        {
             return Ok(Response::new(proto::QuerySegmentStatusResponse {
                 status: entry.status as i32,
             }));
@@ -727,11 +759,12 @@ impl MasterServiceImpl {
         }
         // Validate that all source segments exist and are in ACTIVE state
         for seg_name in &req.segments {
-            let found = self.state.segments.iter().any(|e| {
-                e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
-            }) || self.state.nof_segments.iter().any(|e| {
-                e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
-            });
+            let found =
+                self.state.segments.iter().any(|e| {
+                    e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
+                }) || self.state.nof_segments.iter().any(|e| {
+                    e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
+                });
             if !found {
                 return Err(Status::failed_precondition(format!(
                     "segment not found or not active: {seg_name}"
@@ -740,9 +773,10 @@ impl MasterServiceImpl {
         }
         // Validate that all target segments exist
         for tgt_name in &req.target_segments {
-            let found = self.state.segments.iter().any(|e| {
-                e.segment.name == *tgt_name && e.status == proto::SegmentStatus::Active
-            });
+            let found =
+                self.state.segments.iter().any(|e| {
+                    e.segment.name == *tgt_name && e.status == proto::SegmentStatus::Active
+                });
             if !found {
                 return Err(Status::failed_precondition(format!(
                     "target segment not found or not active: {tgt_name}"
@@ -938,7 +972,12 @@ impl MasterServiceImpl {
             let payload = serde_json::to_string(&ReplicaCopyPayload {
                 key: &key,
                 source: &job.active_tasks.get(&task_id).unwrap().source_segment,
-                targets: &[job.active_tasks.get(&task_id).unwrap().target_segment.clone()],
+                targets: &[job
+                    .active_tasks
+                    .get(&task_id)
+                    .unwrap()
+                    .target_segment
+                    .clone()],
             })
             .unwrap_or_default();
             let now = Utc::now();
@@ -999,9 +1038,10 @@ impl MasterServiceImpl {
         request: Request<proto::AcquireRemotePullRequest>,
     ) -> Result<Response<proto::AcquireRemotePullResponse>, Status> {
         let req = request.into_inner();
-        let proto_id = req.client_id.as_ref().ok_or_else(|| {
-            Status::invalid_argument("client_id is required")
-        })?;
+        let proto_id = req
+            .client_id
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("client_id is required"))?;
         let client_id = uuid_from_proto(proto_id);
         let key = req.key;
 

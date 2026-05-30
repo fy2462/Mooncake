@@ -76,8 +76,7 @@ impl ClientBufferAllocator {
             }
             insert_idx = i + 1;
         }
-        self.free_regions
-            .insert(insert_idx, (offset, aligned_size));
+        self.free_regions.insert(insert_idx, (offset, aligned_size));
         self.coalesce();
     }
 

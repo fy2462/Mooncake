@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use uuid::Uuid;
 
-
 fn hf3fs_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -76,6 +75,7 @@ fn test_storage_backend_save_and_load() {
         "key1".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                base_addr: 0,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id: sid,
@@ -90,13 +90,20 @@ fn test_storage_backend_save_and_load() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
         },
     );
 
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
 
-    let (loaded_segs, loaded_nof_segs, loaded_objs, _loaded_tasks) = backend.load().unwrap().unwrap();
+    let (loaded_segs, loaded_nof_segs, loaded_objs, _loaded_tasks) =
+        backend.load().unwrap().unwrap();
     let loaded_segs: Vec<_> = loaded_segs.into_iter().map(|s| s.segment).collect();
     assert_eq!(loaded_segs.len(), 1);
     assert!(loaded_nof_segs.is_empty());
@@ -152,8 +159,9 @@ fn test_storage_backend_multiple_objects() {
             key.clone(),
             ObjectEntry {
                 replicas: vec![ReplicaDescriptor {
+                    base_addr: 0,
                     refcnt: 0,
-                handle_valid: true,
+                    handle_valid: true,
                     segment_id: sid,
                     segment_name: "s1".into(),
                     offset: i * 100,
@@ -166,12 +174,18 @@ fn test_storage_backend_multiple_objects() {
                 last_access: SystemTime::now(),
                 soft_pinned: false,
                 hard_pinned: false,
-                data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+                data_type: Default::default(),
+                client_id: Uuid::nil(),
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
             },
         );
     }
 
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
     let (_, loaded_nof_segs, loaded_objs, _loaded_tasks) = backend.load().unwrap().unwrap();
     assert!(loaded_nof_segs.is_empty());
     assert_eq!(loaded_objs.len(), 5);
@@ -186,7 +200,9 @@ fn test_storage_backend_clear() {
     let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
     let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
 
     assert!(backend.load().unwrap().is_some());
     backend.clear().unwrap();
@@ -229,6 +245,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
         "hf3fs-key".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
+                base_addr: 0,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id: sid,
@@ -243,11 +260,17 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
             last_access: SystemTime::now(),
             soft_pinned: false,
             hard_pinned: false,
-            data_type: Default::default(), client_id: Uuid::nil(), put_start_time: None, lease_timeout: None, soft_pin_timeout: None,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
         },
     );
 
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
     let loaded = backend.load().unwrap().unwrap();
     assert_eq!(loaded.0.len(), 1);
     assert!(loaded.1.is_empty());
@@ -261,8 +284,9 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
 #[test]
 fn test_serialize_replica_status_roundtrip() {
     let rd = ReplicaDescriptor {
+        base_addr: 0,
         refcnt: 0,
-                handle_valid: true,
+        handle_valid: true,
         segment_id: Uuid::new_v4(),
         segment_name: "node1:12345".into(),
         offset: 0x2000,
@@ -327,7 +351,9 @@ fn test_storage_backend_clear_removes_both_formats() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
 
     // Save msgpack.
-    backend.save(&segments, &nof_segments, &objects, &tasks).unwrap();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
     // Create a legacy JSON file manually.
     let json_path = tmp.join("master_snapshot.json");
     fs::write(&json_path, "{}").unwrap();

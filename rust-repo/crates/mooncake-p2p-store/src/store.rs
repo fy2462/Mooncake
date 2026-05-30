@@ -38,8 +38,9 @@ impl P2pStore {
         let ip = parts.first().copied().unwrap_or(local_server_name);
         let port: u64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
 
-        let engine = TransferEngine::create(metadata_conn_string, local_server_name, ip, port, true)
-            .map_err(|_| P2pStoreError::TransferEngine)?;
+        let engine =
+            TransferEngine::create(metadata_conn_string, local_server_name, ip, port, true)
+                .map_err(|_| P2pStoreError::TransferEngine)?;
 
         if nic_priority_matrix.is_empty() {
             engine
@@ -143,7 +144,10 @@ impl P2pStore {
     pub async fn unregister(&self, name: &str) -> Result<(), P2pStoreError> {
         let catalog_entry = {
             let catalog = self.catalog.lock();
-            catalog.get(name).cloned().ok_or(P2pStoreError::PayloadNotOpened)?
+            catalog
+                .get(name)
+                .cloned()
+                .ok_or(P2pStoreError::PayloadNotOpened)?
         };
 
         loop {

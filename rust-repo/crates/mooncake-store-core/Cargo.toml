@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 transfer-engine = ["dep:transfer-engine-ffi"]
+link-native = ["transfer-engine-ffi/link-native"]
 
 [dependencies]
 uuid.workspace = true

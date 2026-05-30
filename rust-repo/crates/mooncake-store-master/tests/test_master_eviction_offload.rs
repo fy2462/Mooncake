@@ -24,6 +24,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 }),
                 segment_name: segment_name.into(),
                 size: 4096,
+                base_addr: 0,
             }),
         )
         .await
@@ -57,7 +58,10 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -136,6 +140,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
             }),
             segment_name: "evict-localdisk".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -168,7 +173,10 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "evict-localdisk".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -262,6 +270,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 }),
                 segment_name: segment_name.into(),
                 size: 4096,
+                base_addr: 0,
             }),
         )
         .await
@@ -295,7 +304,10 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 with_soft_pin: false,
                 with_hard_pin: false,
                 preferred_segment: "".into(),
-                prefer_alloc_in_same_node: false, preferred_segments: vec![], preferred_nof_segments: vec![], data_type: proto::ObjectDataType::Unknown as i32, 
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
     )
@@ -370,6 +382,7 @@ async fn test_processing_keys_excluded_from_eviction() {
             }),
             segment_name: "proc-key-seg".into(),
             size: 4096,
+            base_addr: 0,
         }),
     )
     .await
@@ -386,11 +399,14 @@ async fn test_processing_keys_excluded_from_eviction() {
             key: "evictable".into(),
             slice_length: 128,
             config: Some(proto::ReplicateConfig {
-                replica_num: 1, nof_replica_num: 0,
-                with_soft_pin: false, with_hard_pin: false,
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
                 preferred_segment: "".into(),
                 prefer_alloc_in_same_node: false,
-                preferred_segments: vec![], preferred_nof_segments: vec![],
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),
@@ -424,11 +440,14 @@ async fn test_processing_keys_excluded_from_eviction() {
             key: "still-processing".into(),
             slice_length: 128,
             config: Some(proto::ReplicateConfig {
-                replica_num: 1, nof_replica_num: 0,
-                with_soft_pin: false, with_hard_pin: false,
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
                 preferred_segment: "".into(),
                 prefer_alloc_in_same_node: false,
-                preferred_segments: vec![], preferred_nof_segments: vec![],
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
             }),
         }),

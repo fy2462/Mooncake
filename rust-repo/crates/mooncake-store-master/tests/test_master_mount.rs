@@ -18,6 +18,7 @@ async fn test_query_ip_derives_address_from_mounted_segment() {
             }),
             segment_name: "10.0.0.1:1234".into(),
             size: 1024,
+            base_addr: 0,
         }),
     )
     .await
@@ -53,6 +54,7 @@ async fn test_mount_segment_updates_http_metadata_state() {
             }),
             segment_name: "10.0.0.2:4321".into(),
             size: 1024,
+            base_addr: 0,
         }),
     )
     .await
@@ -108,6 +110,7 @@ async fn test_graceful_unmount_segment_removes_after_delay() {
             }),
             segment_name: "host-g:3333".into(),
             size: 1024,
+            base_addr: 0,
         }),
     )
     .await

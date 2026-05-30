@@ -116,7 +116,10 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     });
-    let snapshot_dir = args.snapshot_backup_dir.clone().map(std::path::PathBuf::from);
+    let snapshot_dir = args
+        .snapshot_backup_dir
+        .clone()
+        .map(std::path::PathBuf::from);
 
     // --- Build the gRPC service once (reusable via Arc clones) ---
     let runtime_config = build_runtime_config(&args)?;
@@ -138,8 +141,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         snapshot_backup_dir: snapshot_dir.clone(),
         snapshot_backend_type,
     };
-    let standby_controller =
-        CapabilityDrivenStandbyController::new(ha_spec, supervisor_config);
+    let standby_controller = CapabilityDrivenStandbyController::new(ha_spec, supervisor_config);
     let mut supervisor = MasterServiceSupervisor::new(Box::new(standby_controller));
 
     info!("HA loop started — entering standby mode");
@@ -193,20 +195,15 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Start keepalive
-                    let keepalive_handle = match coordinator
-                        .start_leadership_keepalive(lease_id)
-                        .await
-                    {
-                        Ok(h) => h,
-                        Err(e) => {
-                            error!(
-                                "Failed to start keepalive: {}, releasing and retrying",
-                                e
-                            );
-                            let _ = coordinator.release_leadership(lease_id).await;
-                            continue;
-                        }
-                    };
+                    let keepalive_handle =
+                        match coordinator.start_leadership_keepalive(lease_id).await {
+                            Ok(h) => h,
+                            Err(e) => {
+                                error!("Failed to start keepalive: {}, releasing and retrying", e);
+                                let _ = coordinator.release_leadership(lease_id).await;
+                                continue;
+                            }
+                        };
 
                     // Warmup: wait for lease_ttl to pass so state is stable
                     let warmup_duration = Duration::from_secs(args.ha_lease_ttl_secs as u64);
@@ -223,12 +220,8 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     supervisor.activate_serving_state();
 
                     // Start gRPC + metadata + metrics + snapshots
-                    let server_result = run_leader_server(
-                        service_arc.clone(),
-                        &args,
-                        keepalive_handle,
-                    )
-                    .await;
+                    let server_result =
+                        run_leader_server(service_arc.clone(), &args, keepalive_handle).await;
 
                     match &server_result {
                         Ok(()) => info!("gRPC server exited cleanly"),
@@ -254,10 +247,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 3. Wait for view change before retrying
-        let known_version = current_view
-            .as_ref()
-            .map(|v| v.view_version)
-            .unwrap_or(0);
+        let known_version = current_view.as_ref().map(|v| v.view_version).unwrap_or(0);
         info!(
             "Waiting for view change (version={}) for up to 30s",
             known_version
@@ -301,7 +291,10 @@ async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     });
-    let snapshot_dir = args.snapshot_backup_dir.clone().map(std::path::PathBuf::from);
+    let snapshot_dir = args
+        .snapshot_backup_dir
+        .clone()
+        .map(std::path::PathBuf::from);
 
     let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);
     let metadata_addr = SocketAddr::new(
@@ -369,9 +362,7 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
     })
 }
 
-async fn create_coordinator(
-    args: &Args,
-) -> Result<LeaderCoordinator, Box<dyn std::error::Error>> {
+async fn create_coordinator(args: &Args) -> Result<LeaderCoordinator, Box<dyn std::error::Error>> {
     let endpoints: Vec<String> = args
         .etcd_endpoints
         .as_deref()

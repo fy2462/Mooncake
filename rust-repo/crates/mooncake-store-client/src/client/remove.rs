@@ -1,5 +1,5 @@
-use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::StoreError;
 
 use super::MooncakeClient;
 use crate::proto;
@@ -10,7 +10,10 @@ impl MooncakeClient {
     // -----------------------------------------------------------------------
 
     pub async fn remove(&mut self, key: &str, force: bool) -> StoreResult<()> {
-        let request = proto::RemoveRequest { key: key.to_string(), force };
+        let request = proto::RemoveRequest {
+            key: key.to_string(),
+            force,
+        };
         self.master
             .remove(request)
             .await
@@ -19,7 +22,9 @@ impl MooncakeClient {
     }
 
     pub async fn exists(&mut self, key: &str) -> StoreResult<bool> {
-        let request = proto::ExistKeyRequest { key: key.to_string() };
+        let request = proto::ExistKeyRequest {
+            key: key.to_string(),
+        };
         let response = self
             .master
             .exist_key(request)
@@ -33,11 +38,7 @@ impl MooncakeClient {
     // Batch Remove / Exist
     // -----------------------------------------------------------------------
 
-    pub async fn batch_remove(
-        &mut self,
-        keys: &[String],
-        force: bool,
-    ) -> StoreResult<Vec<i32>> {
+    pub async fn batch_remove(&mut self, keys: &[String], force: bool) -> StoreResult<Vec<i32>> {
         let request = proto::BatchRemoveRequest {
             keys: keys.to_vec(),
             force,
@@ -51,10 +52,7 @@ impl MooncakeClient {
         Ok(response.statuses)
     }
 
-    pub async fn batch_is_exist(
-        &mut self,
-        keys: &[String],
-    ) -> StoreResult<Vec<bool>> {
+    pub async fn batch_is_exist(&mut self, keys: &[String]) -> StoreResult<Vec<bool>> {
         let request = proto::BatchExistKeyRequest {
             keys: keys.to_vec(),
         };
@@ -71,11 +69,7 @@ impl MooncakeClient {
     // Remove by regex / Remove all
     // -----------------------------------------------------------------------
 
-    pub async fn remove_by_regex(
-        &mut self,
-        pattern: &str,
-        force: bool,
-    ) -> StoreResult<i64> {
+    pub async fn remove_by_regex(&mut self, pattern: &str, force: bool) -> StoreResult<i64> {
         let request = proto::RemoveByRegexRequest {
             pattern: pattern.to_string(),
             force,
