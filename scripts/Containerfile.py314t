@@ -1,0 +1,50 @@
+# Mooncake multi-node test container with Python 3.14t (free-threaded)
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Mooncake C++ runtime dependencies (engine.so needs these)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libjsoncpp25 libgoogle-glog-dev libyaml-cpp0.8 \
+    libnuma1 libibverbs1 libcurl4 libssl3 \
+    libunwind8 libgflags2.2 libsasl2-2 libldap2 \
+    libgnutls30 libp11-kit0 libtasn1-6 libkeyutils1 \
+    libkrb5-3 libkrb5support0 libk5crypto3 libcom-err2 \
+    libgssapi-krb5-2 libnghttp2-14 libpsl5 librtmp1 \
+    libssh-4 libnettle8 libhogweed6 libgmp10 libidn2-0 \
+    libunistring5 libbrotli1 libzstd1 liblzma5 libffi8 \
+    libnl-3-200 libnl-route-3-200 \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install etcd v3.5.17
+RUN curl -sL https://github.com/etcd-io/etcd/releases/download/v3.5.17/etcd-v3.5.17-linux-amd64.tar.gz \
+    | tar xz -C /usr/local/bin --strip-components=1 etcd-v3.5.17-linux-amd64/etcd \
+    etcd-v3.5.17-linux-amd64/etcdctl
+
+# Install uv (fast Python package manager)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# Install Python 3.14t (free-threaded) via uv
+RUN uv python install 3.14t
+
+# Create venv with Python 3.14t
+RUN uv venv /opt/venv --python 3.14t
+ENV PATH="/opt/venv/bin:$PATH"
+ENV VIRTUAL_ENV=/opt/venv
+
+# Mooncake paths (must match host mount)
+ENV MOONCAKE_ROOT=/home/fy2462/workspace/Mooncake
+ENV LD_LIBRARY_PATH=${MOONCAKE_ROOT}/build/mooncake-common/etcd:${MOONCAKE_ROOT}/build/mooncake-common:${MOONCAKE_ROOT}/build/mooncake-transfer-engine/src
+
+WORKDIR ${MOONCAKE_ROOT}
+
+# Entrypoint: install wheel + run test script
+COPY scripts/debug_multi_node_batch_get.py /test.py
+CMD ["/bin/bash", "-c", "\
+    uv pip install --force-reinstall ${MOONCAKE_ROOT}/rust-repo/target/wheels/mooncake_store_rust-0.1.0-cp314-cp314t-manylinux_2_39_x86_64.whl 2>&1 && \
+    echo '[docker] wheel installed' && \
+    python --version && \
+    python /test.py \
+"]
