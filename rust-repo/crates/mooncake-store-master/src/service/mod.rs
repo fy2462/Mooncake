@@ -25,7 +25,7 @@
 
 mod background_ops;
 mod grpc_batches;
-mod grpc_cluster;
+pub mod cluster;
 mod grpc_objects;
 mod grpc_replication;
 mod grpc_tasks;

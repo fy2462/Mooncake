@@ -11,6 +11,7 @@ use mooncake_store_core::StoreError;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
@@ -166,6 +167,20 @@ pub struct MooncakeClient {
     /// 挂载后，get() 在任何网络调用之前首先检查此缓存。
     /// 成功的获取（来自副本或远程数据源）会填充此缓存。
     pub(crate) hot_cache: Option<Arc<LocalHotCache>>,
+
+    /// Segment name registered with the master (equals `local_hostname` when a
+    /// storage segment is mounted). Used by ReMountSegment on NeedRemount.
+    /// 向 master 注册的 segment 名称（挂载存储 segment 时等于 local_hostname）。
+    /// NeedRemount 时用于 ReMountSegment。
+    pub(crate) segment_name: String,
+
+    /// Size of the storage segment buffer (0 if this is not a storage node).
+    /// 存储 segment 缓冲区的大小（非存储节点时为 0）。
+    pub(crate) segment_size: u64,
+
+    /// Guard to ensure at most one remount is in progress at any time.
+    /// 确保同一时间最多只有一个 remount 在进行中。C++ equivalent: remount_segment_future.valid()
+    pub(crate) remount_in_progress: Arc<AtomicBool>,
 }
 
 impl MooncakeClient {
@@ -265,6 +280,8 @@ impl MooncakeClient {
         }
 
         let client_id = Uuid::new_v4();
+        let mut segment_name = String::new();
+        let mut segment_size = 0u64;
 
         // Step 7: If this node is a storage node (global_segment_size > 0),
         // allocate, register, open, and mount a segment.
@@ -297,6 +314,8 @@ impl MooncakeClient {
             engine.open_segment(local_host)?;
 
             segment_buffer = Some(seg_buf);
+            segment_name = local_host.to_string();
+            segment_size = global_segment_size;
 
             // Notify master about this segment so peers can discover it.
             // 通知 master 此 segment，使对等节点可以发现它。
@@ -305,7 +324,7 @@ impl MooncakeClient {
                     high: client_id.as_u64_pair().0,
                     low: client_id.as_u64_pair().1,
                 }),
-                segment_name: local_host.to_string(),
+                segment_name: segment_name.clone(),
                 size: global_segment_size,
                 base_addr,
             };
@@ -336,6 +355,9 @@ impl MooncakeClient {
             local_endpoints: RwLock::new(endpoints),
             miss_handler: None,
             hot_cache: None,
+            segment_name,
+            segment_size,
+            remount_in_progress: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -348,19 +370,73 @@ impl MooncakeClient {
         self.local_hostname.clone()
     }
 
-    /// Send a ping to the master to verify the connection is alive.
-    /// 向 master 发送 ping 以验证连接是否存活。
+    /// Send a ping to the master. If the master returns NeedRemount, trigger an
+    /// asynchronous ReMountSegment call (at most one in-flight at any time).
+    ///
+    /// 向 master 发送 ping。如果 master 返回 NeedRemount，触发异步 ReMountSegment 调用
+    /// （同一时间最多只有一个在途）。C++ equivalent: Client::Ping in client_service.cpp:3530
     pub async fn health_check(&mut self) -> StoreResult<()> {
         let request = proto::PingRequest {
             client_id: Some(self.client_id_proto()),
             mounted_segments: vec![],
             tenant_id: String::new(),
         };
-        self.master
+        let response = self
+            .master
             .ping(request)
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+
+        // C++ client_service.cpp:3547 — check client_status for NeedRemount
+        // C++ 中检查 client_status 是否为 NeedRemount
+        if response.client_status == proto::ClientStatus::NeedRemount as i32 {
+            self.try_trigger_remount();
+        }
+
         Ok(())
+    }
+
+    /// Trigger an asynchronous ReMountSegment if one is not already in progress.
+    /// 如果没有正在进行的 remount，触发异步 ReMountSegment。
+    ///
+    /// C++ equivalent: the std::async + remount_segment_future guard in client_service.cpp:L3546-L3551
+    fn try_trigger_remount(&self) {
+        // Ensure at most one remount segment task is running.
+        // 确保同一时间最多只有一个 remount 任务在运行。
+        if self.remount_in_progress.swap(true, Ordering::SeqCst) {
+            return; // already in progress / 已有在途
+        }
+
+        if self.segment_name.is_empty() || self.segment_size == 0 {
+            self.remount_in_progress.store(false, Ordering::SeqCst);
+            return; // not a storage node / 非存储节点
+        }
+
+        let mut master = self.master.clone();
+        let client_id = self.client_id_proto();
+        let segment_name = self.segment_name.clone();
+        let segment_size = self.segment_size;
+        let remount_flag = self.remount_in_progress.clone();
+
+        // Spawn a background task so we don't block the caller.
+        // 启动后台任务，不阻塞调用方。
+        tokio::spawn(async move {
+            let request = proto::ReMountSegmentRequest {
+                client_id: Some(client_id),
+                segment_names: vec![segment_name],
+                segment_sizes: vec![segment_size],
+            };
+            match master.re_mount_segment(request).await {
+                Ok(_) => {
+                    tracing::info!("ReMountSegment succeeded");
+                }
+                Err(e) => {
+                    tracing::error!("ReMountSegment failed: {}", e);
+                }
+            }
+            remount_flag.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Register a local transport endpoint (e.g. the `te_endpoint` of a newly
