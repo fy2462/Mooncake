@@ -233,7 +233,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
     );
     // 收集驱逐候选：排除正在复制或正在 PutStart 的对象
     // Collect eviction candidates: exclude objects being replicated or in PutStart
-    let mut candidates: Vec<(String, bool, bool, SystemTime)> = state
+    let mut candidates: Vec<(String, Option<SystemTime>, bool, SystemTime)> = state
         .objects
         .iter()
         .filter(|entry| {
@@ -243,7 +243,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         .map(|entry| {
             (
                 entry.key().clone(),
-                entry.soft_pinned,
+                entry.soft_pin_timeout,
                 entry.hard_pinned,
                 entry.last_access,
             )

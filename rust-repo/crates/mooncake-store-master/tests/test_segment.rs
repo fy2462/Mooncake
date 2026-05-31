@@ -214,7 +214,6 @@ fn test_object_entry_creation() {
         ],
         size: 256,
         last_access: SystemTime::now(),
-        soft_pinned: false,
         hard_pinned: false,
         data_type: ObjectDataType::Unknown,
         client_id: Uuid::nil(),

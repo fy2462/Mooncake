@@ -17,7 +17,6 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         replicas,
         size,
         last_access: SystemTime::now(),
-        soft_pinned: false,
         hard_pinned: false,
         data_type: Default::default(),
         client_id: Uuid::nil(),

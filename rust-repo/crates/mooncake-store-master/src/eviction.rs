@@ -78,10 +78,12 @@ impl EvictionManager {
         )],
         target_count: usize,
     ) -> Vec<String> {
-        let mut owned: Vec<(String, bool, bool, SystemTime)> = candidates
+        let now = SystemTime::now();
+        let mut owned: Vec<(String, Option<SystemTime>, bool, SystemTime)> = candidates
             .iter()
             .map(|(key, _replicas, soft_pinned, last_access)| {
-                (key.to_string(), *soft_pinned, false, *last_access)
+                let timeout = soft_pinned.then(|| now + self.soft_pin_ttl);
+                (key.to_string(), timeout, false, *last_access)
             })
             .collect();
         self.select_for_eviction_with_hard_pin(&mut owned, target_count)
@@ -120,7 +122,7 @@ impl EvictionManager {
     /// 这是显著的性能优化。
     pub fn select_for_eviction_with_hard_pin(
         &self,
-        candidates: &mut [(String, bool, bool, SystemTime)],
+        candidates: &mut [(String, Option<SystemTime>, bool, SystemTime)],
         target_count: usize,
     ) -> Vec<String> {
         if target_count == 0 {
@@ -133,8 +135,9 @@ impl EvictionManager {
         let mut valid: Vec<usize> = candidates
             .iter()
             .enumerate()
-            .filter(|(_, (_, soft_pinned, hard_pinned, last_access))| {
-                !*soft_pinned && !*hard_pinned && self.is_lease_expired(*last_access, now)
+            .filter(|(_, (_, soft_pin_timeout, hard_pinned, last_access))| {
+                let is_soft_pinned = soft_pin_timeout.map_or(false, |t| now < t);
+                !is_soft_pinned && !*hard_pinned && self.is_lease_expired(*last_access, now)
             })
             .map(|(i, _)| i)
             .collect();

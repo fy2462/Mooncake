@@ -128,8 +128,6 @@ pub struct ObjectEntry {
     pub size: u64,
     /// 最后访问时间 / Last access time (for LRU eviction ranking).
     pub last_access: SystemTime,
-    /// 软固定状态：优先保留但允许驱逐 / Soft-pinned: prefer retaining but evictable.
-    pub soft_pinned: bool,
     /// 硬固定状态：禁止驱逐 / Hard-pinned: never evicted.
     #[serde(default)]
     pub hard_pinned: bool,
@@ -158,6 +156,45 @@ pub struct ObjectEntry {
     /// C++ equivalent: ObjectMetadata::user_key
     #[serde(default)]
     pub user_key: String,
+}
+
+impl ObjectEntry {
+    /// 授予对象租约，刷新 lease 和 soft-pin 超时。
+    /// C++ equivalent: ObjectMetadata::GrantLease(key_ttl, soft_ttl)
+    ///
+    /// Grant a lease on this object. Extends `lease_timeout` to
+    /// `max(lease_timeout, now + key_ttl)`. If `soft_pin_timeout` is set,
+    /// also extends it to `max(soft_pin_timeout, now + soft_ttl)`.
+    pub fn grant_lease(&mut self, key_ttl: Duration, soft_ttl: Duration) {
+        let now = SystemTime::now();
+        let next_lease = now + key_ttl;
+        self.lease_timeout = Some(match self.lease_timeout {
+            Some(t) if t > next_lease => t,
+            _ => next_lease,
+        });
+        if let Some(ref mut soft) = self.soft_pin_timeout {
+            let next_soft = now + soft_ttl;
+            if next_soft > *soft {
+                *soft = next_soft;
+            }
+        }
+    }
+
+    /// 检查软锁定是否有效（超时未过期）。
+    /// C++ equivalent: ObjectMetadata::IsSoftPinned()
+    ///
+    /// Returns true if `soft_pin_timeout` is set and the current time
+    /// has not yet exceeded it.
+    pub fn is_soft_pinned(&self) -> bool {
+        self.soft_pin_timeout
+            .map_or(false, |t| SystemTime::now() < t)
+    }
+
+    /// 检查软锁定是否有效（相对于给定时间点）。
+    /// C++ equivalent: ObjectMetadata::IsSoftPinned(now)
+    pub fn is_soft_pinned_at(&self, now: SystemTime) -> bool {
+        self.soft_pin_timeout.map_or(false, |t| now < t)
+    }
 }
 
 /// Default tenant identifier — matches C++ NormalizeTenantId in types.h.

@@ -571,7 +571,6 @@ impl MasterServiceImpl {
                         replicas: vec![replica],
                         size: metadata.data_size.max(0) as u64,
                         last_access: SystemTime::now(),
-                        soft_pinned: false,
                         hard_pinned: false,
                         data_type: ObjectDataType::Unknown,
                         client_id: Uuid::nil(),

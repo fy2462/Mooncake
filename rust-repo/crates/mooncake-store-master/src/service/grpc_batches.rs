@@ -327,13 +327,17 @@ impl MasterServiceImpl {
                     replicas,
                     size: entry.slice_length,
                     last_access: SystemTime::now(),
-                    soft_pinned: config.with_soft_pin,
                     hard_pinned: config.with_hard_pin,
                     data_type: config.data_type,
                     client_id: Uuid::nil(),
                     put_start_time: Some(SystemTime::now()),
                     lease_timeout: None,
-                    soft_pin_timeout: None,
+                    soft_pin_timeout: if config.with_soft_pin {
+                        crate::metrics::SOFT_PIN_KEY_COUNT.inc();
+                        Some(SystemTime::UNIX_EPOCH)
+                    } else {
+                        None
+                    },
                     tenant_id: t_id,
                     user_key: u_key,
                 },
@@ -397,13 +401,17 @@ impl MasterServiceImpl {
                         replicas,
                         size: *slice_len,
                         last_access: now,
-                        soft_pinned: config.with_soft_pin,
                         hard_pinned: config.with_hard_pin,
                         data_type: config.data_type,
                         client_id: Uuid::nil(),
                         put_start_time: Some(now),
                         lease_timeout: None,
-                        soft_pin_timeout: None,
+                        soft_pin_timeout: if config.with_soft_pin {
+                            crate::metrics::SOFT_PIN_KEY_COUNT.inc();
+                            Some(SystemTime::UNIX_EPOCH)
+                        } else {
+                            None
+                        },
                         tenant_id: t_id,
                         user_key: u_key,
                     },

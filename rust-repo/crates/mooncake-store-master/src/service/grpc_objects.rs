@@ -320,13 +320,17 @@ impl MasterServiceImpl {
                 replicas,
                 size: req.slice_length,
                 last_access: now,
-                soft_pinned: config.with_soft_pin,
                 hard_pinned: config.with_hard_pin,
                 data_type: config.data_type,
                 client_id,
                 put_start_time: Some(now),
                 lease_timeout: None,
-                soft_pin_timeout: None,
+                soft_pin_timeout: if config.with_soft_pin {
+                    crate::metrics::SOFT_PIN_KEY_COUNT.inc();
+                    Some(SystemTime::UNIX_EPOCH)
+                } else {
+                    None
+                },
                 tenant_id,
                 user_key,
             },
@@ -390,25 +394,8 @@ impl MasterServiceImpl {
                     }
                 }
             }
-            // 更新 lease 超时：多次 PutEnd 取最晚超时 / Update lease timeout: latest wins across multiple PutEnds
-            let now = SystemTime::now();
-            let new_lease = now
-                .checked_add(self.state.runtime_config.lease_ttl)
-                .unwrap_or(now);
-            entry.lease_timeout = Some(match entry.lease_timeout {
-                Some(current) if current > new_lease => current,
-                _ => new_lease,
-            });
-            // 更新 soft_pin 超时 / Update soft_pin timeout
-            if entry.soft_pinned {
-                let new_soft_pin = now
-                    .checked_add(self.state.runtime_config.soft_pin_ttl)
-                    .unwrap_or(now);
-                entry.soft_pin_timeout = Some(match entry.soft_pin_timeout {
-                    Some(current) if current > new_soft_pin => current,
-                    _ => new_soft_pin,
-                });
-            }
+            // 更新 lease + soft_pin 超时：多次 PutEnd 取最晚超时 / Update lease + soft_pin timeout: latest wins
+            entry.grant_lease(self.state.runtime_config.lease_ttl, self.state.runtime_config.soft_pin_ttl);
             let all_complete = entry
                 .replicas
                 .iter()
@@ -484,7 +471,6 @@ impl MasterServiceImpl {
                     size: replica.size,
                     replicas: vec![replica],
                     last_access: SystemTime::now(),
-                    soft_pinned: false,
                     hard_pinned: false,
                     data_type: ObjectDataType::Unknown,
                     client_id,
@@ -544,24 +530,8 @@ impl MasterServiceImpl {
         // Phase 2: brief write lock for timestamp updates only (microseconds).
         // 阶段 2：短暂写锁仅更新时间戳（微秒级）
         if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
-            let now = SystemTime::now();
-            entry.last_access = now;
-            let new_lease = now
-                .checked_add(self.state.runtime_config.lease_ttl)
-                .unwrap_or(now);
-            entry.lease_timeout = Some(match entry.lease_timeout {
-                Some(current) if current > new_lease => current,
-                _ => new_lease,
-            });
-            if entry.soft_pinned {
-                let new_soft_pin = now
-                    .checked_add(self.state.runtime_config.soft_pin_ttl)
-                    .unwrap_or(now);
-                entry.soft_pin_timeout = Some(match entry.soft_pin_timeout {
-                    Some(current) if current > new_soft_pin => current,
-                    _ => new_soft_pin,
-                });
-            }
+            entry.last_access = SystemTime::now();
+            entry.grant_lease(self.state.runtime_config.lease_ttl, self.state.runtime_config.soft_pin_ttl);
         }
 
         // Phase 3: promotion after all locks released.
@@ -851,7 +821,7 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("object has offloading task"));
         }
 
-        let (replicas, previous_soft_pinned, previous_hard_pinned) =
+        let (replicas, previous_soft_pin_timeout, previous_hard_pinned) =
             if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
                 // C++ 先调用 CleanupStaleHandles 清理无效副本
                 // First call CleanupStaleHandles to clean invalid replicas
@@ -866,12 +836,12 @@ impl MasterServiceImpl {
                     // 大小匹配，复用现有副本 / Size matches; reuse existing replicas
                     (
                         existing.replicas.clone(),
-                        existing.soft_pinned,
+                        existing.soft_pin_timeout,
                         existing.hard_pinned,
                     )
                 } else {
                     // 大小不匹配，释放旧副本后重新分配 / Size mismatch; release old and reallocate
-                    let previous_soft_pinned = existing.soft_pinned;
+                    let previous_soft_pin_timeout = existing.soft_pin_timeout;
                     let previous_hard_pinned = existing.hard_pinned;
                     let old_replicas = existing.replicas.clone();
                     drop(existing);
@@ -885,7 +855,7 @@ impl MasterServiceImpl {
                             replica_count,
                             &config,
                         ),
-                        previous_soft_pinned,
+                        previous_soft_pin_timeout,
                         previous_hard_pinned,
                     )
                 }
@@ -899,7 +869,7 @@ impl MasterServiceImpl {
                         replica_count,
                         &config,
                     ),
-                    false,
+                    None,
                     false,
                 )
             };
@@ -930,19 +900,33 @@ impl MasterServiceImpl {
         let proto_replicas: Vec<proto::ReplicaDescriptor> =
             replicas.iter().map(replica_to_proto).collect();
 
+        // Reconcile soft_pin state with incoming config (C++ master_service.cpp:2044-2057)
+        // 与 C++ 一致的软固定调和逻辑：enable 时仅在尚未设置时设置，disable 时显式清除。
+        let soft_pin_timeout = match (config.with_soft_pin, previous_soft_pin_timeout) {
+            (true, None) => {
+                crate::metrics::SOFT_PIN_KEY_COUNT.inc();
+                Some(SystemTime::UNIX_EPOCH)
+            }
+            (true, Some(existing)) => Some(existing),
+            (false, Some(_)) => {
+                crate::metrics::SOFT_PIN_KEY_COUNT.dec();
+                None
+            }
+            (false, None) => None,
+        };
+
         self.state.objects.insert(
             scoped_key.clone(),
             ObjectEntry {
                 replicas,
                 size: req.slice_length,
                 last_access: SystemTime::now(),
-                soft_pinned: config.with_soft_pin || previous_soft_pinned,
                 hard_pinned: config.with_hard_pin || previous_hard_pinned,
                 data_type: config.data_type,
                 client_id,
                 put_start_time: Some(SystemTime::now()),
                 lease_timeout: None,
-                soft_pin_timeout: None,
+                soft_pin_timeout,
                 tenant_id,
                 user_key,
             },
