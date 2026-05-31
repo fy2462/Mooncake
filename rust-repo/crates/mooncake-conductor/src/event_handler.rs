@@ -1,6 +1,17 @@
-//! KV event handler: converts ZMQ events to prefix-index operations.
-//!
-//! Ported from Go: kvevent/event_handler.go
+// ============================================================================
+// KV Event Handler — ZMQ 事件 → 前缀索引操作
+//
+// Converts decoded ZMQ KV events (BlockStored, BlockRemoved) into prefix-index
+// operations (process_store_event, process_remove_event). Each KVEventHandler
+// is bound to a single service instance and holds a reference to the shared
+// PrefixCacheTable.
+//
+// 将解码后的 ZMQ KV 事件（BlockStored、BlockRemoved）转换为前缀索引操作
+// （process_store_event、process_remove_event）。每个 KVEventHandler
+// 绑定到单个服务实例并持有共享 PrefixCacheTable 的引用。
+//
+// Ported from Go: mooncake-conductor/conductor-ctrl/kvevent/event_handler.go
+// ============================================================================
 
 use std::sync::Arc;
 
@@ -9,14 +20,22 @@ use tracing::{debug, error, warn};
 use crate::prefix_index::PrefixCacheTable;
 use crate::types::*;
 
-/// Handles KV events by routing them to the prefix cache table.
+/// Routes KV events from ZMQ to the prefix cache table for indexing.
+/// 将 ZMQ 的 KV 事件路由到前缀缓存表进行索引。
 pub struct KVEventHandler {
+    /// Unique instance identifier. / 唯一实例标识符。
     pub instance_id: String,
+    /// Model name for this handler. / 此处理器对应的模型名称。
     pub model_name: String,
+    /// LoRA adapter name. / LoRA 适配器名称。
     pub lora_name: String,
+    /// Block size for hash computation. / 哈希计算的块大小。
     pub block_size: i64,
+    /// Additional salt for hash separation. / 哈希隔离的额外盐值。
     pub additional_salt: String,
+    /// Tenant ID for multi-tenant isolation. / 租户隔离 ID。
     pub tenant_id: String,
+    /// Reference to the shared prefix cache table. / 共享前缀缓存表的引用。
     pub indexer: Arc<PrefixCacheTable>,
 }
 
@@ -33,7 +52,8 @@ impl KVEventHandler {
         }
     }
 
-    /// Process a single KV event.
+    /// Dispatch a single KV event to the appropriate handler.
+    /// 将单个 KV 事件分派到相应的处理器。
     pub fn handle_event(&self, event: &KVEventData, dp_rank: i64) {
         match event {
             KVEventData::BlockStored(e) => self.handle_block_stored(e, dp_rank),
@@ -42,6 +62,8 @@ impl KVEventHandler {
         }
     }
 
+    /// Handle a BlockStored event: convert to StoredEvent and index.
+    /// 处理 BlockStored 事件：转换为 StoredEvent 并建立索引。
     fn handle_block_stored(&self, event: &BlockStoredEvent, dp_rank: i64) {
         debug!(
             "BlockStored: instance_id={}, dp_rank={}, blocks={}",
@@ -50,6 +72,8 @@ impl KVEventHandler {
             event.block_hashes.len()
         );
 
+        // Map ZMQ event fields to the conductor-internal StoredEvent.
+        // 将 ZMQ 事件字段映射到 conductor 内部 StoredEvent。
         let stored = StoredEvent {
             block_hashes: event.block_hashes.clone(),
             block_size: event.block_size,
@@ -71,6 +95,8 @@ impl KVEventHandler {
         debug!("handle_block_stored: stored_event={:?}", stored);
     }
 
+    /// Handle a BlockRemoved event: convert to RemovedEvent and remove from index.
+    /// 处理 BlockRemoved 事件：转换为 RemovedEvent 并从索引中移除。
     fn handle_block_removed(&self, event: &BlockRemovedEvent, dp_rank: i64) {
         debug!(
             "BlockRemoved: instance_id={}, dp_rank={}, blocks={}",

@@ -1,7 +1,12 @@
-//! Configuration loading for mooncake-conductor.
-//!
-//! Reads a JSON config file specified by `CONDUCTOR_CONFIG_PATH`.
-//! Mirrors the Go conductor's config parsing in main.go.
+// ============================================================================
+// Configuration loading for mooncake-conductor.
+// mooncake-conductor 的配置加载。
+//
+// Reads a JSON config file specified by `CONDUCTOR_CONFIG_PATH` env var.
+// Mirrors the Go conductor's config parsing in main.go.
+// 从 `CONDUCTOR_CONFIG_PATH` 环境变量指定的 JSON 文件加载配置，
+// 对应 Go conductor main.go 中的配置解析。
+// ============================================================================
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -10,48 +15,82 @@ use tracing::{error, info, warn};
 
 use crate::types::ServiceConfig;
 
-/// Top-level JSON config file structure.
+// ----------------------------------------------------------------------------
+// Config file schema / 配置文件结构
+// ----------------------------------------------------------------------------
+
+/// Top-level JSON config file structure matching the Go conductor format.
+/// 顶层 JSON 配置文件结构，匹配 Go conductor 格式。
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
+    /// Map of instance name → service configuration.
+    /// 实例名称 → 服务配置的映射。
     #[serde(default)]
     kvevent_instance: HashMap<String, ServiceRaw>,
+    /// Optional HTTP server port (default: 13333).
+    /// 可选的 HTTP 服务器端口（默认: 13333）。
     #[serde(default)]
     http_server_port: Option<u16>,
 }
 
-/// Raw per-instance entry from config JSON.
+/// Raw per-instance entry from the config JSON, before normalization.
+/// 配置文件中的原始单实例条目，规范化前。
 #[derive(Debug, Deserialize)]
 struct ServiceRaw {
+    /// ZMQ PUB endpoint. / ZMQ PUB 端点。
     #[serde(default)]
     endpoint: String,
+    /// ZMQ DEALER replay endpoint. / ZMQ DEALER 重放端点。
     #[serde(default)]
     replay_endpoint: String,
+    /// Service type string: "vLLM" or "Mooncake". / 服务类型字符串。
     #[serde(rename = "type", default)]
     type_str: String,
+    /// Model name. / 模型名称。
     #[serde(default)]
     modelname: String,
+    /// LoRA name. / LoRA 名称。
     #[serde(default)]
     lora_name: String,
+    /// Tenant ID. / 租户 ID。
     #[serde(default)]
     tenant_id: String,
+    /// Instance ID (falls back to the JSON key if empty).
+    /// 实例 ID（为空时回退到 JSON key）。
     #[serde(default)]
     instance_id: String,
+    /// Block size in tokens. / 块大小。
     #[serde(default)]
     block_size: i64,
+    /// Data parallel rank. / 数据并行 rank。
     #[serde(default)]
     dp_rank: i64,
+    /// Additional hash salt. / 额外哈希盐值。
     #[serde(default)]
     additionalsalt: String,
 }
 
-/// Parsed conductor configuration.
+// ----------------------------------------------------------------------------
+// Parsed config / 解析后配置
+// ----------------------------------------------------------------------------
+
+/// Fully parsed and normalized conductor configuration.
+/// 完全解析并规范化后的 conductor 配置。
 #[derive(Debug, Clone)]
 pub struct ConductorConfig {
+    /// List of service configurations for ZMQ subscriptions.
+    /// ZMQ 订阅的服务配置列表。
     pub services: Vec<ServiceConfig>,
+    /// HTTP server listen port. / HTTP 服务器监听端口。
     pub http_port: u16,
 }
 
+// ----------------------------------------------------------------------------
+// Helpers / 辅助函数
+// ----------------------------------------------------------------------------
+
 /// Map raw service type string to canonical form.
+/// 将原始服务类型字符串映射为规范形式。
 fn map_service_type(s: &str) -> Option<String> {
     match s {
         "vLLM" => Some("vLLM".to_string()),
@@ -60,9 +99,16 @@ fn map_service_type(s: &str) -> Option<String> {
     }
 }
 
-/// Load config from `CONDUCTOR_CONFIG_PATH` env var.
+// ----------------------------------------------------------------------------
+// load_config / 加载配置
+// ----------------------------------------------------------------------------
+
+/// Load config from `CONDUCTOR_CONFIG_PATH` env var (defaults to
+/// `/root/conductor_config.json`). Returns a `ConductorConfig` with parsed
+/// services and HTTP port.
 ///
-/// Returns `(Vec<ServiceConfig>, http_port)`.
+/// 从 `CONDUCTOR_CONFIG_PATH` 环境变量加载配置（默认为 `/root/conductor_config.json`）。
+/// 返回包含解析后服务和 HTTP 端口的 `ConductorConfig`。
 pub fn load_config() -> ConductorConfig {
     let config_path = std::env::var("CONDUCTOR_CONFIG_PATH")
         .unwrap_or_else(|_| "/root/conductor_config.json".into());
@@ -108,6 +154,7 @@ pub fn load_config() -> ConductorConfig {
         };
 
         // Go: map key is used as instance_id if the instance_id field is empty
+        // Go 风格：如果 instance_id 字段为空，用 map key 作为 instance_id
         let instance_id = if raw.instance_id.is_empty() {
             name.clone()
         } else {
@@ -140,7 +187,8 @@ pub fn load_config() -> ConductorConfig {
     }
 }
 
-/// Parse log level from `CONDUCTOR_LOG_LEVEL` env var.
+/// Parse log level from `CONDUCTOR_LOG_LEVEL` env var (default: "info").
+/// 从 `CONDUCTOR_LOG_LEVEL` 环境变量解析日志级别（默认: "info"）。
 pub fn parse_log_level() -> String {
     std::env::var("CONDUCTOR_LOG_LEVEL").unwrap_or_else(|_| "info".into())
 }
