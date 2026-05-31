@@ -375,16 +375,8 @@ impl MasterServiceImpl {
             // C++ checks !replica.has_invalid_mem_handle() and !replica.has_invalid_nof_handle()
             // before marking replicas Complete. If handle became invalid, replica stays in Allocating.
             for r in &mut entry.replicas {
-                let matches_type = match req.replica_type {
-                    x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
-                    x if x == proto::replica_descriptor::ReplicaType::Memory as i32 => {
-                        r.replica_type == ReplicaType::Memory
-                    }
-                    x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
-                        r.replica_type == ReplicaType::NoFSsd
-                    }
-                    _ => r.replica_type == ReplicaType::Memory,
-                };
+                let target = replica_type_from_i32(req.replica_type);
+                let matches_type = target == ReplicaType::All || r.replica_type == target;
                 if matches_type && r.status == ReplicaStatus::Allocating {
                     // C++ master_service.cpp:1368-1372 检查 !replica.has_invalid_mem_handle()
                     // 和 !replica.has_invalid_nof_handle()。handle 失效时 replica 保持在 Allocating 状态。

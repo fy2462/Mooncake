@@ -24,6 +24,31 @@
 
 use super::*;
 
+/// 批量操作返回状态码，对应 proto 层 BatchXxxResponse.statuses 的 int32 值。
+/// 对标 C++ 的 ErrorCode 子集，提供类型安全的 batch 操作返回值。
+///
+/// Batch operation status codes, corresponding to int32 values in
+/// BatchXxxResponse.statuses on the proto layer.
+/// Mirrors a subset of C++ ErrorCode for type-safe batch return values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+enum BatchStatus {
+    /// 操作成功 / Operation succeeded.
+    Success = 0,
+    /// key 不存在 / Key not found.
+    KeyNotFound = -1,
+    /// 有进行中的复制任务，跳过操作 / In-flight replication task, skipped.
+    HasReplicationTask = -2,
+    /// 权限拒绝（非法客户端）/ Permission denied (illegal client).
+    IllegalClient = -3,
+}
+
+impl From<BatchStatus> for i32 {
+    fn from(status: BatchStatus) -> Self {
+        status as i32
+    }
+}
+
 impl MasterServiceImpl {
     // ---- BatchExistKey ----
     // 批量检查 key 是否存在，返回布尔数组与输入 keys 一一对应。
@@ -140,16 +165,8 @@ impl MasterServiceImpl {
                 if let Some(mut obj) = self.state.objects.get_mut(&entry.key) {
                     let size = obj.size;
                     for r in &mut obj.replicas {
-                        let matches_type = match entry.replica_type {
-                            x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
-                            x if x == proto::replica_descriptor::ReplicaType::Memory as i32 => {
-                                r.replica_type == ReplicaType::Memory
-                            }
-                            x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
-                                r.replica_type == ReplicaType::NoFSsd
-                            }
-                            _ => r.replica_type == ReplicaType::Memory,
-                        };
+                        let target = replica_type_from_i32(entry.replica_type);
+                        let matches_type = target == ReplicaType::All || r.replica_type == target;
                         if matches_type && r.status == ReplicaStatus::Allocating {
                             r.status = ReplicaStatus::Complete;
                         }
@@ -158,9 +175,9 @@ impl MasterServiceImpl {
                     if let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) {
                         push_offloading_queue(&self.state, client_id, &entry.key, size);
                     }
-                    0
+                    BatchStatus::Success.into()
                 } else {
-                    -1
+                    BatchStatus::KeyNotFound.into()
                 }
             })
             .collect();
@@ -186,12 +203,12 @@ impl MasterServiceImpl {
             .iter()
             .map(|key| {
                 if self.state.replication_tasks.contains_key(key) {
-                    return -2;
+                    return BatchStatus::HasReplicationTask.into();
                 }
                 if let Some(mut object) = self.state.objects.get_mut(key) {
                     if let Some(cid) = client_id {
                         if object_owner_client_id(&self.state, &object) != Some(cid) {
-                            return -3;
+                            return BatchStatus::IllegalClient.into();
                         }
                     }
                     let mut removed = Vec::new();
@@ -212,9 +229,9 @@ impl MasterServiceImpl {
                     if remove_object {
                         self.state.objects.remove(key);
                     }
-                    0
+                    BatchStatus::Success.into()
                 } else {
-                    -1
+                    BatchStatus::KeyNotFound.into()
                 }
             })
             .collect();
@@ -233,7 +250,7 @@ impl MasterServiceImpl {
             .iter()
             .map(|key| {
                 if !req.force && self.state.replication_tasks.contains_key(key) {
-                    return -2;
+                    return BatchStatus::HasReplicationTask.into();
                 }
                 if let Some((_, object)) = self.state.objects.remove(key) {
                     clear_offloading_task(&self.state, key);
@@ -241,7 +258,7 @@ impl MasterServiceImpl {
                     release_replicas(&self.state, &object.replicas);
                     self.oplog_manager.lock().record_remove(key);
                 }
-                0
+                BatchStatus::Success.into()
             })
             .collect();
         metrics::BATCH_REMOVE_REQUESTS.inc_by(req.keys.len() as u64);
@@ -435,22 +452,13 @@ impl MasterServiceImpl {
         let req = request.into_inner();
         if let Some(mut entry) = self.state.objects.get_mut(&req.key) {
             // C++ 根据请求的 replica_type 参数过滤要驱逐的 replica 类型
-            entry.replicas.retain(|r| {
-                match req.replica_type {
-                    // DISK = 1: only evict Disk replicas
-                    x if x == proto::replica_descriptor::ReplicaType::Disk as i32 => {
-                        r.replica_type != ReplicaType::Disk
-                    }
-                    // LOCAL_DISK = 2: only evict LocalDisk replicas
-                    x if x == proto::replica_descriptor::ReplicaType::LocalDisk as i32 => {
-                        r.replica_type != ReplicaType::LocalDisk
-                    }
-                    // ALL (4) or default: evict both Disk and LocalDisk
-                    _ => {
-                        !(r.replica_type == ReplicaType::LocalDisk
-                            || r.replica_type == ReplicaType::Disk)
-                    }
+            let target = replica_type_from_i32(req.replica_type);
+            entry.replicas.retain(|r| match target {
+                ReplicaType::All => {
+                    !(r.replica_type == ReplicaType::LocalDisk
+                        || r.replica_type == ReplicaType::Disk)
                 }
+                _ => r.replica_type != target,
             });
             if entry.replicas.is_empty() {
                 self.state.objects.remove(&req.key);
@@ -468,22 +476,13 @@ impl MasterServiceImpl {
         let req = request.into_inner();
         for key in &req.keys {
             if let Some(mut entry) = self.state.objects.get_mut(key) {
-                entry.replicas.retain(|r| {
-                    match req.replica_type {
-                        // DISK = 1: only evict Disk replicas
-                        x if x == proto::replica_descriptor::ReplicaType::Disk as i32 => {
-                            r.replica_type != ReplicaType::Disk
-                        }
-                        // LOCAL_DISK = 2: only evict LocalDisk replicas
-                        x if x == proto::replica_descriptor::ReplicaType::LocalDisk as i32 => {
-                            r.replica_type != ReplicaType::LocalDisk
-                        }
-                        // ALL (4) or default: evict both Disk and LocalDisk
-                        _ => {
-                            !(r.replica_type == ReplicaType::LocalDisk
-                                || r.replica_type == ReplicaType::Disk)
-                        }
+                let target = replica_type_from_i32(req.replica_type);
+                entry.replicas.retain(|r| match target {
+                    ReplicaType::All => {
+                        !(r.replica_type == ReplicaType::LocalDisk
+                            || r.replica_type == ReplicaType::Disk)
                     }
+                    _ => r.replica_type != target,
                 });
                 if entry.replicas.is_empty() {
                     self.state.objects.remove(key);

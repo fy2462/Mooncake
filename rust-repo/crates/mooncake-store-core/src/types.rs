@@ -164,6 +164,23 @@ pub enum ReplicaType {
     All = 4,
 }
 
+/// Convert from the proto wire format (i32) to the internal enum.
+/// Unknown values fall back to Memory.
+/// 从 proto 线格式 (i32) 转换为内部枚举。未知值回退为 Memory。
+impl TryFrom<i32> for ReplicaType {
+    type Error = String;
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::Memory),
+            1 => Ok(Self::Disk),
+            2 => Ok(Self::LocalDisk),
+            3 => Ok(Self::NoFSsd),
+            4 => Ok(Self::All),
+            _ => Err(format!("unknown ReplicaType: {}", v)),
+        }
+    }
+}
+
 /// Semantic category of stored data.
 ///
 /// Used by the allocator to make placement decisions (e.g. co-locate kvcache
@@ -207,6 +224,25 @@ pub enum ObjectDataType {
     /// Catch-all for unclassified data.
     /// 未分类数据的兜底类型。
     General = 9,
+}
+
+impl TryFrom<i32> for ObjectDataType {
+    type Error = String;
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::Unknown),
+            1 => Ok(Self::Kvcache),
+            2 => Ok(Self::Tensor),
+            3 => Ok(Self::Weight),
+            4 => Ok(Self::Sample),
+            5 => Ok(Self::Activation),
+            6 => Ok(Self::Gradient),
+            7 => Ok(Self::OptimizerState),
+            8 => Ok(Self::Metadata),
+            9 => Ok(Self::General),
+            _ => Err(format!("unknown ObjectDataType: {}", v)),
+        }
+    }
 }
 
 /// Describes a single replica — the unit of data placement.
@@ -428,6 +464,12 @@ pub enum TaskType {
     ReplicaMove = 1,
 }
 
+impl From<TaskType> for i32 {
+    fn from(t: TaskType) -> i32 {
+        t as i32
+    }
+}
+
 /// Execution state of a background task.
 /// 后台任务的执行状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -444,6 +486,25 @@ pub enum TaskStatus {
     /// Completed with an error.
     /// 以错误结束。
     Failed = 3,
+}
+
+impl From<TaskStatus> for i32 {
+    fn from(s: TaskStatus) -> i32 {
+        s as i32
+    }
+}
+
+impl TryFrom<i32> for TaskStatus {
+    type Error = String;
+    fn try_from(v: i32) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(Self::Pending),
+            1 => Ok(Self::Processing),
+            2 => Ok(Self::Success),
+            3 => Ok(Self::Failed),
+            _ => Err(format!("unknown TaskStatus: {}", v)),
+        }
+    }
 }
 
 /// Full record of a background task tracked by the master.

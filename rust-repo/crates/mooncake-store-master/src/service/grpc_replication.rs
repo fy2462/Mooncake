@@ -128,13 +128,8 @@ impl MasterServiceImpl {
 
             // Check if all matching replicas are already complete
             for replica in &object.replicas {
-                let matches = match req.replica_type {
-                    x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
-                    x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
-                        replica.replica_type == ReplicaType::NoFSsd
-                    }
-                    _ => replica.replica_type == ReplicaType::Memory,
-                };
+                let target = replica_type_from_i32(req.replica_type);
+                let matches = target == ReplicaType::All || replica.replica_type == target;
                 if matches {
                     has_matching = true;
                     if replica.status != ReplicaStatus::Complete {
@@ -152,13 +147,8 @@ impl MasterServiceImpl {
             // 仅移除 Allocating 等非 Complete 状态的 replica
             // Remove only non-complete matching replicas
             object.replicas.retain(|replica| {
-                let matches = match req.replica_type {
-                    x if x == proto::replica_descriptor::ReplicaType::All as i32 => true,
-                    x if x == proto::replica_descriptor::ReplicaType::NofSsd as i32 => {
-                        replica.replica_type == ReplicaType::NoFSsd
-                    }
-                    _ => replica.replica_type == ReplicaType::Memory,
-                };
+                let target = replica_type_from_i32(req.replica_type);
+                let matches = target == ReplicaType::All || replica.replica_type == target;
                 if matches && replica.status != ReplicaStatus::Complete {
                     removed.push(replica.clone());
                     false

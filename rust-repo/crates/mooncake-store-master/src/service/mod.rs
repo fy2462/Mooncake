@@ -75,8 +75,8 @@ use self::helpers::{
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
-    replica_from_proto, replica_to_proto, task_status_from_proto, task_status_to_proto,
-    task_type_to_proto, uuid_from_proto, uuid_to_proto,
+    replica_from_proto, replica_to_proto, replica_type_from_i32, task_status_from_proto,
+    task_status_to_proto, task_type_to_proto, uuid_from_proto, uuid_to_proto,
 };
 use self::state::{
     ActiveDrainTask, DrainJobEntry, LocalDiskSegmentEntry, MasterState, ReplicationTaskEntry,

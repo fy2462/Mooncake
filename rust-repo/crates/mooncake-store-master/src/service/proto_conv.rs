@@ -16,6 +16,18 @@ use mooncake_store_core::{
 };
 use uuid::Uuid;
 
+/// 将 proto 的 replica_type (i32) 转为内部 ReplicaType，未知值回退为 Memory。
+/// Convert proto replica_type (i32) to internal ReplicaType; unknown values fall back to Memory.
+pub(crate) fn replica_type_from_i32(v: i32) -> ReplicaType {
+    ReplicaType::try_from(v).unwrap_or(ReplicaType::Memory)
+}
+
+/// 将 proto 的 data_type (i32) 转为内部 ObjectDataType，未知值回退为 Unknown。
+/// Convert proto data_type (i32) to internal ObjectDataType; unknown values fall back to Unknown.
+pub(crate) fn object_data_type_from_i32(v: i32) -> ObjectDataType {
+    ObjectDataType::try_from(v).unwrap_or(ObjectDataType::Unknown)
+}
+
 // UUID 转换为 proto 格式（拆分为高64位和低64位）。
 // Convert UUID to proto format (split into high 64 bits and low 64 bits).
 pub(crate) fn uuid_to_proto(id: Uuid) -> proto::Uuid {
@@ -101,20 +113,7 @@ pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
         preferred_segments,
         preferred_nof_segments: c.preferred_nof_segments.clone(),
         prefer_alloc_in_same_node: c.prefer_alloc_in_same_node,
-        data_type: match c.data_type {
-            x if x == proto::ObjectDataType::Kvcache as i32 => ObjectDataType::Kvcache,
-            x if x == proto::ObjectDataType::Tensor as i32 => ObjectDataType::Tensor,
-            x if x == proto::ObjectDataType::Weight as i32 => ObjectDataType::Weight,
-            x if x == proto::ObjectDataType::Sample as i32 => ObjectDataType::Sample,
-            x if x == proto::ObjectDataType::Activation as i32 => ObjectDataType::Activation,
-            x if x == proto::ObjectDataType::Gradient as i32 => ObjectDataType::Gradient,
-            x if x == proto::ObjectDataType::OptimizerState as i32 => {
-                ObjectDataType::OptimizerState
-            }
-            x if x == proto::ObjectDataType::Metadata as i32 => ObjectDataType::Metadata,
-            x if x == proto::ObjectDataType::General as i32 => ObjectDataType::General,
-            _ => ObjectDataType::Unknown,
-        },
+        data_type: object_data_type_from_i32(c.data_type),
     }
 }
 
@@ -160,31 +159,18 @@ pub(crate) fn nof_segment_owner_to_proto(
 // TaskType/Status 枚举的 proto 转换，用于任务查询接口。
 // Proto conversions for TaskType/TaskStatus enums, used in task query APIs.
 
-/// TaskType 转换为 proto 枚举值 / Convert TaskType to proto enum value.
+/// TaskType 转换为 proto i32 / Convert TaskType to proto i32.
 pub(crate) fn task_type_to_proto(task_type: TaskType) -> i32 {
-    match task_type {
-        TaskType::ReplicaCopy => proto::TaskType::ReplicaCopy as i32,
-        TaskType::ReplicaMove => proto::TaskType::ReplicaMove as i32,
-    }
+    task_type.into()
 }
 
-/// TaskStatus 转换为 proto 枚举值 / Convert TaskStatus to proto enum value.
+/// TaskStatus 转换为 proto i32 / Convert TaskStatus to proto i32.
 pub(crate) fn task_status_to_proto(status: TaskStatus) -> i32 {
-    match status {
-        TaskStatus::Pending => proto::TaskStatus::TaskPending as i32,
-        TaskStatus::Processing => proto::TaskStatus::TaskProcessing as i32,
-        TaskStatus::Success => proto::TaskStatus::TaskSuccess as i32,
-        TaskStatus::Failed => proto::TaskStatus::TaskFailed as i32,
-    }
+    status.into()
 }
 
-/// 从 proto 枚举值还原 TaskStatus / Restore TaskStatus from proto enum value.
-///   1=Processing, 2=Success, 3=Failed, _=Pending (default)
+/// 从 proto i32 还原 TaskStatus，未知值回退为 Pending。
+/// Restore TaskStatus from proto i32; unknown values fall back to Pending.
 pub(crate) fn task_status_from_proto(status: i32) -> TaskStatus {
-    match status {
-        1 => TaskStatus::Processing,
-        2 => TaskStatus::Success,
-        3 => TaskStatus::Failed,
-        _ => TaskStatus::Pending,
-    }
+    TaskStatus::try_from(status).unwrap_or(TaskStatus::Pending)
 }
