@@ -67,15 +67,6 @@ mod ffi {
     // Include the bindgen-generated FFI bindings for the C++ Transfer Engine.
     // 包含由 bindgen 生成的 C++ Transfer Engine 的 FFI 绑定。
     include!(concat!(env!("OUT_DIR"), "/transfer_engine_bindings.rs"));
-
-    // INVALID_BATCH is defined as UINT64_MAX in transfer_engine_c.h;
-    // bindgen cannot resolve it because it requires system headers.
-    // Supply the constant ourselves so the ffi module stays self-contained.
-    //
-    // INVALID_BATCH 在 transfer_engine_c.h 中定义为 UINT64_MAX；
-    // bindgen 无法解析它（因为需要系统头文件）。
-    // 我们自己提供该常量，使 ffi 模块保持自包含。
-    pub const INVALID_BATCH: u64 = u64::MAX;
 }
 
 mod error;
@@ -537,7 +528,7 @@ impl TransferEngine {
         tracing::info!(target: "te_debug", batch_size, "allocate_batch_id: calling C API");
         let id = unsafe { ffi::allocateBatchID(self.handle.as_ptr(), batch_size) };
         tracing::info!(target: "te_debug", batch_size, batch_id = id, "allocate_batch_id: C API returned");
-        if id == ffi::INVALID_BATCH {
+        if id as i32 == ffi::INVALID_BATCH {
             tracing::error!(target: "te_debug", batch_size, "allocate_batch_id: INVALID_BATCH");
             return Err(TransferEngineError::OperationFailed(-1));
         }

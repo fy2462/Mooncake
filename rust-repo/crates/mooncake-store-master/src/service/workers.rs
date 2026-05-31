@@ -5,18 +5,15 @@
 //! This module contains the four background worker threads of the Master service,
 //! each running on its own std::thread:
 //!
-//! | Worker | 职责 / Responsibility |
-//! |--------|----------------------|
-//! | `GracefulUnmountScheduler` | 优雅卸载调度：延迟释放 segment（等待 grace_period 后执行实际卸载） |
-//! | `ProcessingReaper` | 任务回收：周期清理超时的 offload/promotion/PutStart 任务 |
-//! | `EvictionWorker` | 驱逐工作：周期检查内存水位，超过高水位线时触发自动驱逐 |
-//! | `ClientMonitorWorker` | 客户端监控：检测心跳超时的客户端并执行 purge_expired_client 清理 |
+//! | Worker | 职责 / Responsibility | 停止方式 |
+//! |--------|----------------------|---------|
+//! | `GracefulUnmountScheduler` | 优雅卸载调度：Condvar + BinaryHeap，按 deadline 触发 | notify_all → join |
+//! | `ProcessingReaper` | 任务回收：周期清理超时的 offload/promotion/PutStart 任务 | drop(tx) → join |
+//! | `EvictionWorker` | 驱逐工作：周期检查内存水位并触发自动驱逐 | drop(tx) → join |
+//! | `ClientMonitorWorker` | 客户端监控：检测心跳超时客户端并清理资源 | drop(tx) → join |
 //!
-//! 所有 worker 使用 `Mutex<bool> + Condvar + wait_timeout` 模式实现可停止的周期性循环。
-//! stop() 方法设置停止标志 → notify_all 唤醒 → join 线程。
-//!
-//! All workers use the `Mutex<bool> + Condvar + wait_timeout` pattern for stoppable periodic loops.
-//! The stop() method sets the stop flag → notify_all wakes the thread → join.
+//! GracefulUnmountScheduler 使用 Condvar 模式以确保紧急唤醒语义；
+//! 其余三个周期性 worker 使用 mpsc channel —— stop() 时 drop sender 即可中断 recv_timeout。
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -98,45 +95,35 @@ pub(crate) struct GracefulUnmountScheduler {
     worker: Option<JoinHandle<()>>,
 }
 
-/// 任务回收器的内部结构。
-/// Inner structure of the processing reaper.
-struct ProcessingReaperInner {
-    state: Mutex<bool>,
-    condvar: Condvar,
-}
-
 /// 任务回收器：周期清理超时的后台任务。
+/// 使用 mpsc channel 实现可停止的周期性循环：stop() 时 drop sender，
+/// worker 线程的 recv_timeout 收到 Disconnected 后退出。
+///
 /// ProcessingReaper: periodically cleans up expired background tasks.
+/// Uses mpsc channel for stoppable periodic loop: stop() drops the sender,
+/// worker thread exits on recv_timeout Disconnected.
 pub(crate) struct ProcessingReaper {
-    inner: Arc<ProcessingReaperInner>,
+    sender: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<JoinHandle<()>>,
-}
-
-/// 驱逐 worker 的内部结构。
-/// Inner structure of the eviction worker.
-struct EvictionWorkerInner {
-    state: Mutex<bool>,
-    condvar: Condvar,
 }
 
 /// 驱逐 worker：周期检查内存水位并触发自动驱逐。
+/// 使用 mpsc channel 实现可停止的周期性循环。
+///
 /// EvictionWorker: periodically checks memory watermark and triggers auto eviction.
+/// Uses mpsc channel for stoppable periodic loop.
 pub(crate) struct EvictionWorker {
-    inner: Arc<EvictionWorkerInner>,
+    sender: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
-/// 客户端监控 worker 的内部结构。
-/// Inner structure of the client monitor worker.
-struct ClientMonitorInner {
-    state: Mutex<bool>,
-    condvar: Condvar,
-}
-
 /// 客户端监控 worker：检测心跳超时的客户端并清理资源。
+/// 使用 mpsc channel 实现可停止的周期性循环。
+///
 /// ClientMonitorWorker: detects heartbeat-timeout clients and cleans up resources.
+/// Uses mpsc channel for stoppable periodic loop.
 pub(crate) struct ClientMonitorWorker {
-    inner: Arc<ClientMonitorInner>,
+    sender: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -247,42 +234,30 @@ impl GracefulUnmountScheduler {
 }
 
 impl ProcessingReaper {
-    /// 启动后台任务回收线程，周期性地清理超时的 offload/promotion 任务。
+    /// 启动后台任务回收线程，周期性地清理超时的 offload/promotion/PutStart 任务。
+    /// 使用 mpsc channel 实现可停止的周期性循环：stop() 时 drop sender 即中断。
+    ///
     /// Start background task reaper thread; periodically cleans up expired offload/promotion tasks.
+    /// Uses mpsc channel for stoppable periodic loop: drop sender to interrupt.
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
-        let inner = Arc::new(ProcessingReaperInner {
-            state: Mutex::new(false),
-            condvar: Condvar::new(),
-        });
-        let worker_inner = inner.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.reaper_interval;
         let worker = thread::spawn(move || loop {
-            let guard = worker_inner.state.lock().expect("reaper mutex poisoned");
-            let (guard, _) = worker_inner
-                .condvar
-                .wait_timeout(guard, interval)
-                .expect("reaper condvar timeout failed");
-            if *guard {
-                break;
+            match rx.recv_timeout(interval) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    reap_expired_background_tasks(&state, Instant::now());
+                }
             }
-            drop(guard);
-            reap_expired_background_tasks(&state, Instant::now());
         });
         Self {
-            inner,
+            sender: Some(tx),
             worker: Some(worker),
         }
     }
 
     pub(crate) fn stop(&mut self) {
-        {
-            let mut stopping = self.inner.state.lock().expect("reaper mutex poisoned");
-            if *stopping {
-                return;
-            }
-            *stopping = true;
-        }
-        self.inner.condvar.notify_all();
+        drop(self.sender.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -291,41 +266,29 @@ impl ProcessingReaper {
 
 impl EvictionWorker {
     /// 启动后台驱逐线程，按 eviction_interval 间隔检查内存水位并触发自动驱逐。
-    /// Start background eviction thread; checks memory watermark at eviction_interval and triggers auto eviction.
+    /// 使用 mpsc channel 实现可停止的周期性循环。
+    ///
+    /// Start background eviction thread; checks memory watermark at eviction_interval
+    /// and triggers auto eviction. Uses mpsc channel for stoppable periodic loop.
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
-        let inner = Arc::new(EvictionWorkerInner {
-            state: Mutex::new(false),
-            condvar: Condvar::new(),
-        });
-        let worker_inner = inner.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.eviction_interval;
         let worker = thread::spawn(move || loop {
-            let guard = worker_inner.state.lock().expect("eviction mutex poisoned");
-            let (guard, _) = worker_inner
-                .condvar
-                .wait_timeout(guard, interval)
-                .expect("eviction condvar timeout failed");
-            if *guard {
-                break;
+            match rx.recv_timeout(interval) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = run_automatic_eviction_once(&state);
+                }
             }
-            drop(guard);
-            let _ = run_automatic_eviction_once(&state);
         });
         Self {
-            inner,
+            sender: Some(tx),
             worker: Some(worker),
         }
     }
 
     pub(crate) fn stop(&mut self) {
-        {
-            let mut stopping = self.inner.state.lock().expect("eviction mutex poisoned");
-            if *stopping {
-                return;
-            }
-            *stopping = true;
-        }
-        self.inner.condvar.notify_all();
+        drop(self.sender.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -452,67 +415,44 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
 impl ClientMonitorWorker {
     /// 启动客户端存活监控线程，按 client_monitor_interval 间隔扫描所有 client，
     /// 将超过 client_live_ttl 未心跳的客户端标记为过期并执行 purge_expired_client 清理。
+    /// 使用 mpsc channel 实现可停止的周期性循环。
     ///
     /// Start client liveness monitor thread; scans all clients at client_monitor_interval,
     /// marks clients exceeding client_live_ttl without heartbeat as expired and runs
-    /// purge_expired_client cleanup.
+    /// purge_expired_client cleanup. Uses mpsc channel for stoppable periodic loop.
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
-        let inner = Arc::new(ClientMonitorInner {
-            state: Mutex::new(false),
-            condvar: Condvar::new(),
-        });
-        let worker_inner = inner.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.client_monitor_interval;
         let ttl = state.runtime_config.client_live_ttl;
         let worker = thread::spawn(move || loop {
-            let guard = worker_inner
-                .state
-                .lock()
-                .expect("client monitor mutex poisoned");
-            let (guard, _) = worker_inner
-                .condvar
-                .wait_timeout(guard, interval)
-                .expect("client monitor condvar timeout failed");
-            if *guard {
-                break;
-            }
-            drop(guard);
-
-            // 收集所有超过 TTL 的过期客户端 / Collect all clients exceeding TTL
-            let now = SystemTime::now();
-            let expired = state
-                .clients
-                .iter()
-                .filter_map(|entry| {
-                    now.duration_since(entry.last_ping)
-                        .ok()
-                        .filter(|elapsed| *elapsed >= ttl)
-                        .map(|_| *entry.key())
-                })
-                .collect::<Vec<_>>();
-            for client_id in expired {
-                purge_expired_client(&state, client_id);
+            match rx.recv_timeout(interval) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let now = SystemTime::now();
+                    let expired = state
+                        .clients
+                        .iter()
+                        .filter_map(|entry| {
+                            now.duration_since(entry.last_ping)
+                                .ok()
+                                .filter(|elapsed| *elapsed >= ttl)
+                                .map(|_| *entry.key())
+                        })
+                        .collect::<Vec<_>>();
+                    for client_id in expired {
+                        purge_expired_client(&state, client_id);
+                    }
+                }
             }
         });
         Self {
-            inner,
+            sender: Some(tx),
             worker: Some(worker),
         }
     }
 
     pub(crate) fn stop(&mut self) {
-        {
-            let mut stopping = self
-                .inner
-                .state
-                .lock()
-                .expect("client monitor mutex poisoned");
-            if *stopping {
-                return;
-            }
-            *stopping = true;
-        }
-        self.inner.condvar.notify_all();
+        drop(self.sender.take());
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
