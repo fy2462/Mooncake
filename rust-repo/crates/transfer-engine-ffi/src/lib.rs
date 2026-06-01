@@ -528,7 +528,7 @@ impl TransferEngine {
         tracing::info!(target: "te_debug", batch_size, "allocate_batch_id: calling C API");
         let id = unsafe { ffi::allocateBatchID(self.handle.as_ptr(), batch_size) };
         tracing::info!(target: "te_debug", batch_size, batch_id = id, "allocate_batch_id: C API returned");
-        if id as i32 == ffi::INVALID_BATCH {
+        if id == u64::MAX {
             tracing::error!(target: "te_debug", batch_size, "allocate_batch_id: INVALID_BATCH");
             return Err(TransferEngineError::OperationFailed(-1));
         }
