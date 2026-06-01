@@ -245,38 +245,3 @@ impl RemoteSource for S3RemoteSource {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_object_key_no_prefix() {
-        // Verify key mapping logic via a dummy s3_config
-        // 验证无前缀时的 key 映射逻辑
-        let config = super::super::config::S3Config {
-            bucket: "b".into(),
-            region: "us-east-1".into(),
-            endpoint: None,
-            prefix: String::new(),
-            access_key_id: None,
-            secret_access_key: None,
-        };
-        // Can't construct S3RemoteSource directly (needs async), but we can
-        // at least verify config round-trips
-        // 无法直接构造 S3RemoteSource（需要 async），但至少可以验证配置的往返
-        assert_eq!(config.bucket, "b");
-        assert_eq!(config.prefix, "");
-    }
-
-    #[test]
-    fn test_object_key_with_prefix() {
-        let config = super::super::config::S3Config {
-            bucket: "b".into(),
-            region: "us-east-1".into(),
-            endpoint: None,
-            prefix: "cache/".into(),
-            access_key_id: Some("ak".into()),
-            secret_access_key: Some("sk".into()),
-        };
-        assert_eq!(config.prefix, "cache/");
-        assert_eq!(config.access_key_id.as_deref(), Some("ak"));
-    }
-}

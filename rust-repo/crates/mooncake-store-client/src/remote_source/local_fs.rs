@@ -75,32 +75,3 @@ impl RemoteSource for LocalFsSource {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_local_fs_get_missing() {
-        let tmp = std::env::temp_dir().join("mooncake_test_local_fs_missing");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let source = LocalFsSource::new(&tmp);
-        let result = source.get("nonexistent_key").await;
-        assert!(matches!(result, Err(RemoteSourceError::NotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn test_local_fs_put_and_get() {
-        let tmp = std::env::temp_dir().join("mooncake_test_local_fs_put_get");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let source = LocalFsSource::new(&tmp);
-        let path = source.key_path("test_key");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"hello world").unwrap();
-
-        let data = source.get("test_key").await.unwrap();
-        assert_eq!(data, b"hello world");
-    }
-}

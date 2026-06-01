@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Tracks an active offload read batch.
 /// Each batch holds registered TE buffers that peers can RDMA-read from.
-pub(crate) struct OffloadBatch {
+pub struct OffloadBatch {
     /// Raw host memory buffers (one per key).
     /// The buffer's `as_ptr()` doubles as the TE-registered pointer.
     pub buffers: Vec<Vec<u8>>,
@@ -15,7 +15,7 @@ pub(crate) struct OffloadBatch {
 
 /// Thread-safe registry of active offload batches.
 /// C++ equivalent: `std::unordered_map<uint64_t, AllocatedBatch>` in FileStorage.
-pub(crate) struct OffloadBufferPool {
+pub struct OffloadBufferPool {
     next_batch_id: AtomicU64,
     batches: Mutex<HashMap<u64, OffloadBatch>>,
 }

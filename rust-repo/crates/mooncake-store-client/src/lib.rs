@@ -52,7 +52,7 @@ pub mod client;
 pub mod engram;
 pub mod hot_cache;
 pub mod local_storage_backend;
-pub(crate) mod offload;
+pub mod offload;
 pub mod remote_source;
 
 pub use client::{BufferHandle, MooncakeClient};
