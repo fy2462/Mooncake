@@ -9,9 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Each batch holds registered TE buffers that peers can RDMA-read from.
 pub(crate) struct OffloadBatch {
     /// Raw host memory buffers (one per key).
+    /// The buffer's `as_ptr()` doubles as the TE-registered pointer.
     pub buffers: Vec<Vec<u8>>,
-    /// TE-registered buffer pointers (one per key).
-    pub pointers: Vec<u64>,
 }
 
 /// Thread-safe registry of active offload batches.

@@ -65,7 +65,7 @@ impl OffloadReadService for OffloadReadHandler {
             pointers.push(ptr);
         }
 
-        let batch = OffloadBatch { buffers, pointers: pointers.clone() };
+        let batch = OffloadBatch { buffers };
         let batch_id = self.pool.register(batch);
 
         let response = BatchGetOffloadObjectResponse {

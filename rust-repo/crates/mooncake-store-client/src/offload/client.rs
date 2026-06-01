@@ -10,11 +10,9 @@ use tonic::transport::Channel;
 
 /// Result of a batch offload read from a peer.
 pub(crate) struct BatchOffloadResult {
-    pub keys: Vec<String>,
     pub pointers: Vec<u64>,
     pub transfer_engine_addr: String,
     pub batch_id: u64,
-    pub gc_ttl_ms: u64,
 }
 
 /// Call a peer's OffloadReadService to read offloaded objects.
@@ -46,11 +44,9 @@ pub(crate) async fn batch_get_offload_objects(
         .into_inner();
 
     Ok(BatchOffloadResult {
-        keys: keys.to_vec(),
         pointers: response.pointers,
         transfer_engine_addr: response.transfer_engine_addr,
         batch_id: response.batch_id,
-        gc_ttl_ms: response.gc_ttl_ms,
     })
 }
 
