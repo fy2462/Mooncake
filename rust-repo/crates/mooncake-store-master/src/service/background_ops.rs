@@ -22,7 +22,7 @@
 use crate::eviction::EvictionManager;
 use crate::proto;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::{Instant, SystemTime};
 use uuid::Uuid;

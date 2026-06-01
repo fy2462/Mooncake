@@ -663,7 +663,6 @@ impl DrainWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::allocator::SegmentAllocator;
     use crate::count_min_sketch::CountMinSketch;
     use crate::proto;
