@@ -82,6 +82,7 @@ impl MasterServiceImpl {
                 active_tasks: HashMap::new(),
                 completed_unit_keys: HashSet::new(),
                 terminal_failed_unit_keys: HashSet::new(),
+                retry_counts: HashMap::new(),
             },
         );
         // Start planning immediately (find objects to drain)
@@ -198,7 +199,7 @@ impl MasterServiceImpl {
     ///
     /// Helper: find all objects on draining segments and create ReplicaCopy tasks per key.
     /// Target segments are assigned round-robin to avoid single-target hotspots. One drain unit per key.
-    fn schedule_drain_job_tasks(&self, job_id: Uuid) {
+    pub(crate) fn schedule_drain_job_tasks(&self, job_id: Uuid) {
         let mut job = match self.state.drain_jobs.get_mut(&job_id) {
             Some(j) => j,
             None => return,
@@ -229,36 +230,36 @@ impl MasterServiceImpl {
             if job.active_tasks.len() >= max_concurrency {
                 break;
             }
-            let unit_key = format!("{key}@{source_seg}");
+            let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
             if job.completed_unit_keys.contains(&unit_key)
                 || job.terminal_failed_unit_keys.contains(&unit_key)
             {
                 continue;
             }
             let target_seg = targets[i % num_targets].clone();
+            let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
             let task_id = Uuid::new_v4();
             job.active_tasks.insert(
                 task_id,
                 ActiveDrainTask {
-                    source_segment: source_seg,
-                    target_segment: target_seg,
+                    source_segment: source_seg.clone(),
+                    target_segment: target_seg.clone(),
+                    bytes: _bytes,
+                    unit_key: unit_key.clone(),
                 },
             );
+            let task = job.active_tasks.get(&task_id).unwrap();
 
-            // Create a copy task for this drain unit
             // 为此 drain unit 创建 Copy 任务
+            // Create a copy task for this drain unit
             let payload = serde_json::to_string(&ReplicaCopyPayload {
                 key: &key,
-                source: &job.active_tasks.get(&task_id).unwrap().source_segment,
-                targets: &[job
-                    .active_tasks
-                    .get(&task_id)
-                    .unwrap()
-                    .target_segment
-                    .clone()],
+                source: &task.source_segment,
+                targets: &[task.target_segment.clone()],
             })
             .unwrap_or_default();
             let now = Utc::now();
+            let assigned = client_id_by_segment_name(&self.state, &task.source_segment);
             self.state.tasks.insert(
                 task_id,
                 TaskEntry {
@@ -268,15 +269,10 @@ impl MasterServiceImpl {
                         status: TaskStatus::Pending,
                         created_at: now,
                         last_updated_at: now,
-                        assigned_client: client_id_by_segment_name(
-                            &self.state,
-                            &job.active_tasks.get(&task_id).unwrap().source_segment,
-                        ),
+                        assigned_client: assigned,
                         message: format!(
                             "drain {} from {} to {}",
-                            key,
-                            job.active_tasks.get(&task_id).unwrap().source_segment,
-                            job.active_tasks.get(&task_id).unwrap().target_segment
+                            key, task.source_segment, task.target_segment,
                         ),
                     },
                     key: key.clone(),

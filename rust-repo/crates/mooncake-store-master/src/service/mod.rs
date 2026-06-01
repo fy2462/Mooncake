@@ -84,7 +84,7 @@ use self::state::{
 };
 pub use self::state::{MasterRuntimeConfig, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use self::workers::{
-    ClientMonitorWorker, EvictionWorker, GracefulUnmountScheduler, ProcessingReaper,
+    ClientMonitorWorker, DrainWorker, EvictionWorker, GracefulUnmountScheduler, ProcessingReaper,
 };
 
 /// Master 服务的核心实现，持有所有共享状态和后台 worker。
@@ -102,6 +102,7 @@ pub struct MasterServiceImpl {
     processing_reaper: ProcessingReaper,
     eviction_worker: EvictionWorker,
     client_monitor_worker: ClientMonitorWorker,
+    drain_worker: DrainWorker,
     oplog_manager: parking_lot::Mutex<crate::oplog::OpLogManager>,
 }
 
@@ -202,6 +203,7 @@ impl MasterServiceImpl {
         let processing_reaper = ProcessingReaper::new(state.clone());
         let eviction_worker = EvictionWorker::new(state.clone());
         let client_monitor_worker = ClientMonitorWorker::new(state.clone());
+        let drain_worker = DrainWorker::new(state.clone());
 
         // 如果提供了快照后端，尝试从快照恢复状态
         // If a snapshot backend is provided, try to restore from snapshot
@@ -297,6 +299,7 @@ impl MasterServiceImpl {
             processing_reaper,
             eviction_worker,
             client_monitor_worker,
+            drain_worker,
             oplog_manager: parking_lot::Mutex::new(oplog_manager),
         }
     }
@@ -371,6 +374,7 @@ impl Drop for MasterServiceImpl {
         self.processing_reaper.stop();
         self.eviction_worker.stop();
         self.client_monitor_worker.stop();
+        self.drain_worker.stop();
     }
 }
 

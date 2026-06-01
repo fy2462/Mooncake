@@ -24,8 +24,9 @@ impl MasterServiceImpl {
             .ok_or(Status::not_found("local disk segment not found"))?;
         entry.enable_offloading = req.enable_offloading;
         if !req.enable_offloading {
-            let keys = entry.offloading_objects.keys().cloned().collect::<Vec<_>>();
-            entry.offloading_objects.clear();
+            let keys: Vec<String> = std::mem::take(&mut entry.offloading_objects)
+                .into_keys()
+                .collect();
             drop(entry);
             for key in keys {
                 clear_offloading_task(&self.state, &key);

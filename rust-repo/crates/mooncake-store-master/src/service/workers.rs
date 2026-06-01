@@ -458,3 +458,46 @@ impl ClientMonitorWorker {
         }
     }
 }
+
+// ============================================================================
+// DrainWorker — periodic drain job processor
+// DrainWorker —— 周期性 drain 任务处理器
+// ============================================================================
+
+/// Periodically calls process_drain_jobs to refresh task statuses, retry
+/// failed tasks, and mark completed drain jobs. Uses mpsc channel for
+/// stoppable periodic loop.
+///
+/// C++ equivalent: JobDispatchThreadFunc in master_service.cpp:6934
+///
+/// 周期调用 process_drain_jobs 刷新任务状态、重试失败任务、标记完成。
+/// 使用 mpsc channel 实现可停止的周期性循环。
+pub(crate) struct DrainWorker {
+    sender: Option<std::sync::mpsc::Sender<()>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl DrainWorker {
+    pub(crate) fn new(state: Arc<MasterState>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let worker = thread::spawn(move || loop {
+            match rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    crate::service::background_ops::process_drain_jobs(&state);
+                }
+            }
+        });
+        Self {
+            sender: Some(tx),
+            worker: Some(worker),
+        }
+    }
+
+    pub(crate) fn stop(&mut self) {
+        drop(self.sender.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}

@@ -418,6 +418,20 @@ pub(crate) struct ActiveDrainTask {
     pub(crate) source_segment: String,
     /// 目标 segment 名称 / Target segment name.
     pub(crate) target_segment: String,
+    /// 迁移的字节数 / Bytes to migrate.
+    pub(crate) bytes: u64,
+    /// unit_key = "{key}@{source_segment}", used for dedup and retry tracking.
+    /// C++ equivalent: ActiveDrainTask::unit_key
+    pub(crate) unit_key: String,
+}
+
+impl ActiveDrainTask {
+    /// Build the unit_key used for deduplication and retry tracking.
+    /// 构建用于去重和重试跟踪的 unit_key。
+    /// C++ equivalent: ActiveDrainTask::unit_key = "{key}@{source_segment}"
+    pub(crate) fn unit_key_for(key: &str, source_segment: &str) -> String {
+        format!("{key}@{source_segment}")
+    }
 }
 
 /// A drain job that moves objects from draining segments to target segments.
@@ -454,4 +468,8 @@ pub(crate) struct DrainJobEntry {
     pub(crate) completed_unit_keys: HashSet<String>,
     /// 终极失败的单元 key 集合（不可重试）/ Terminal failed unit key set (non-retryable).
     pub(crate) terminal_failed_unit_keys: HashSet<String>,
+    /// 每个 unit_key 的重试计数，超过 kMaxDrainUnitRetries(3) 后标记为 terminal_failed。
+    /// Retry count per unit_key; after exceeding kMaxDrainUnitRetries(3), marked terminal_failed.
+    /// C++ equivalent: DrainJob::retry_counts
+    pub(crate) retry_counts: HashMap<String, u32>,
 }
