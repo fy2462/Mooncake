@@ -414,24 +414,30 @@ impl MooncakeClient {
     }
 
     // -----------------------------------------------------------------------
-    // Batch Put — write multiple keys sequentially with per-key error tolerance
-    // 批量写入 —— 顺序写入多个 key，每个 key 独立容错
+    // Batch Put — write multiple keys with batched RPCs
+    // 批量写入 —— 使用批量 RPC 写入多个 key
     //
-    // Each key is written independently via put(); failures are recorded as
-    // `-1` in the status vector rather than aborting the entire batch.
+    // C++ equivalent: Client::BatchPut():
+    //   BatchPutStart → per-key TE writes → BatchPutEnd / BatchPutRevoke
     //
-    // 每个 key 通过 put() 独立写入；失败在状态向量中记录为 -1 而非中止整个批次。
-    // C++ equivalent: Client::BatchPut()
+    // Uses a single BatchPutStart RPC to allocate replicas for all keys,
+    // then writes each key's data via TE, then commits with a single
+    // BatchPutEnd. Per-key error tolerance: failed keys record -1.
+    //
+    // 使用单次 BatchPutStart RPC 为所有 key 分配副本，
+    // 然后通过 TE 写入每个 key 的数据，最后用单次 BatchPutEnd 提交。
+    // 每个 key 独立容错：失败的 key 记录 -1。
     // -----------------------------------------------------------------------
 
-    /// Batch-write multiple key-value pairs. Each pair is written independently;
-    /// a failure on one pair does not abort the batch.
+    /// Batch-write multiple key-value pairs using batched RPCs.
+    /// Allocates replicas for all keys in one BatchPutStart call, writes each
+    /// key's data via TE, then commits with BatchPutEnd (or BatchPutRevoke on
+    /// failure). Returns per-key status: `0` = success, `-1` = failure.
     ///
-    /// 批量写入多个键值对。每对独立写入；某对失败不会中止整个批次。
-    ///
-    /// # Returns (返回值)
-    /// `Vec<i32>` where `0` = success, `-1` = failure, aligned with `keys`.
-    /// Vec<i32>，其中 0 = 成功，-1 = 失败，与 keys 对齐。
+    /// 使用批量 RPC 写入多个键值对。
+    /// 通过单次 BatchPutStart 为所有 key 分配副本，TE 写入数据，
+    /// 然后通过 BatchPutEnd 提交（失败则 BatchPutRevoke）。
+    /// 返回每个 key 的状态：0=成功, -1=失败。
     pub async fn batch_put(
         &mut self,
         keys: &[String],
@@ -443,13 +449,70 @@ impl MooncakeClient {
                 "keys and values length mismatch".to_string(),
             ));
         }
-        let mut statuses = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
-            match self.put(key, values[i], config.clone()).await {
-                Ok(()) => statuses.push(0),
-                Err(_) => statuses.push(-1), // per-key error tolerance / 按 key 容错
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let cfg = config.unwrap_or_default();
+        let replica_count = cfg.replica_num.max(1) as usize;
+        let nof_count = cfg.nof_replica_num as usize;
+        let per_key = replica_count + nof_count;
+
+        // Phase 1: BatchPutStart — allocate replicas for all keys in one RPC.
+        let slice_lengths: Vec<u64> = values.iter().map(|v| v.len() as u64).collect();
+        let all_replicas = match self
+            .batch_put_start(keys, &slice_lengths, &cfg, "")
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                // All allocation failed — all keys fail.
+                return Ok(vec![-1; keys.len()]);
+            }
+        };
+
+        // Phase 2: per-key TE writes. Replicas are returned in key order,
+        // per_key replicas per key. Write each key's replicas.
+        let mut statuses = vec![-1i32; keys.len()];
+        let mut success_keys: Vec<String> = Vec::new();
+        let mut failed_keys: Vec<String> = Vec::new();
+        let mut ri = 0usize;
+
+        for (ki, key) in keys.iter().enumerate() {
+            if ri + per_key > all_replicas.len() {
+                // No more replicas — this key (and subsequent) were skipped by master
+                // because they already existed or allocation failed.
+                break;
+            }
+            let replicas = &all_replicas[ri..ri + per_key];
+            ri += per_key;
+
+            let mut ok = true;
+            for replica in replicas {
+                if let Err(_) = self.write_to_replica(replica, values[ki]).await {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if ok {
+                statuses[ki] = 0;
+                success_keys.push(key.clone());
+            } else {
+                failed_keys.push(key.clone());
             }
         }
+
+        // Phase 3: BatchPutEnd / BatchPutRevoke.
+        if !success_keys.is_empty() {
+            let _ = self
+                .batch_put_end(&success_keys, 0 /* MEMORY */, "")
+                .await;
+        }
+        if !failed_keys.is_empty() {
+            let _ = self.batch_put_revoke(&failed_keys, "", "").await;
+        }
+
         Ok(statuses)
     }
 
