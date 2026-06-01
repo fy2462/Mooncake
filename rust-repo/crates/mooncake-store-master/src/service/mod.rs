@@ -54,7 +54,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicUsize};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
@@ -84,7 +84,8 @@ use self::state::{
 };
 pub use self::state::{MasterRuntimeConfig, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use self::workers::{
-    ClientMonitorWorker, DrainWorker, EvictionWorker, GracefulUnmountScheduler, ProcessingReaper,
+    ClientMonitorWorker, DrainWorker, EvictionWorker, GracefulUnmountScheduler,
+    NofHeartbeatWorker, ProcessingReaper,
 };
 
 /// Master 服务的核心实现，持有所有共享状态和后台 worker。
@@ -103,6 +104,7 @@ pub struct MasterServiceImpl {
     eviction_worker: EvictionWorker,
     client_monitor_worker: ClientMonitorWorker,
     drain_worker: DrainWorker,
+    nof_heartbeat_worker: NofHeartbeatWorker,
     oplog_manager: parking_lot::Mutex<crate::oplog::OpLogManager>,
 }
 
@@ -196,6 +198,7 @@ impl MasterServiceImpl {
             view_version: AtomicI64::new(0),
             runtime_config: runtime_config.clone(),
             pending_remote_pulls: DashMap::new(),
+            nof_heartbeat_states: DashMap::new(),
         });
         let metadata_state = MetadataState::new("");
         // 创建各后台 worker，各自持有 state 的 Arc 克隆
@@ -204,6 +207,12 @@ impl MasterServiceImpl {
         let eviction_worker = EvictionWorker::new(state.clone());
         let client_monitor_worker = ClientMonitorWorker::new(state.clone());
         let drain_worker = DrainWorker::new(state.clone());
+        // NoF heartbeat: default probe function always succeeds (no-op probe).
+        // For production with SPDK, inject the real probe function via configuration.
+        let nof_heartbeat_worker = NofHeartbeatWorker::new(
+            state.clone(),
+            Box::new(|_te_endpoint: &str, _timeout: Duration| Ok(())),
+        );
 
         // 如果提供了快照后端，尝试从快照恢复状态
         // If a snapshot backend is provided, try to restore from snapshot
@@ -300,6 +309,7 @@ impl MasterServiceImpl {
             eviction_worker,
             client_monitor_worker,
             drain_worker,
+            nof_heartbeat_worker,
             oplog_manager: parking_lot::Mutex::new(oplog_manager),
         }
     }
@@ -374,6 +384,7 @@ impl Drop for MasterServiceImpl {
         self.processing_reaper.stop();
         self.eviction_worker.stop();
         self.client_monitor_worker.stop();
+        self.nof_heartbeat_worker.stop();
         self.drain_worker.stop();
     }
 }

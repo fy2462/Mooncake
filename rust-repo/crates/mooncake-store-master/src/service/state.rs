@@ -95,6 +95,8 @@ pub(crate) struct MasterState {
     /// Tracks in-flight remote source pulls so only one node fetches a given key.
     /// 远端回源协调表：确保同一 key 只有一个节点从远端（如 S3）拉取数据。
     pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
+    /// NoF 心跳状态表 / NoF heartbeat state table: segment_id → heartbeat tracking state.
+    pub(crate) nof_heartbeat_states: DashMap<Uuid, NoFHeartbeatState>,
 }
 
 /// Tracks the start time of a remote fetch for a key.
@@ -227,6 +229,21 @@ pub struct NoFSegmentEntry {
     pub used: u64,
     /// Segment 状态 / Segment status.
     pub status: crate::proto::SegmentStatus,
+}
+
+/// NoF segment 心跳追踪状态 / NoF segment heartbeat tracking state.
+/// C++ equivalent: `NoFHeartbeatState` in master_service.h.
+#[derive(Debug, Clone)]
+pub(crate) struct NoFHeartbeatState {
+    pub(crate) segment_id: Uuid,
+    pub(crate) segment_name: String,
+    pub(crate) te_endpoint: String,
+    /// 下次探测时间 / Next probe time.
+    pub(crate) next_probe_at: Instant,
+    /// 最后一次成功探测的时间 / Last successful probe time.
+    pub(crate) last_success_at: Instant,
+    /// 连续失败次数 / Consecutive probe failures.
+    pub(crate) consecutive_failures: u32,
 }
 
 /// 本地磁盘 segment 条目：管理每个客户端的 SSD 存储和 offload/promotion 队列。
@@ -377,6 +394,12 @@ pub struct MasterRuntimeConfig {
     /// TTL for a pending remote pull entry before it is considered stale.
     /// 远端拉取条目的 TTL：超过后视为过期，允许其他节点重新拉取。
     pub remote_pull_ttl: Duration,
+    /// NoF 心跳探测间隔 / NoF heartbeat probe interval.
+    pub nof_heartbeat_interval: Duration,
+    /// NoF 心跳探测超时 / NoF heartbeat probe timeout.
+    pub nof_heartbeat_probe_timeout: Duration,
+    /// NoF 心跳连续失败阈值，超过后卸载 segment / NoF heartbeat consecutive failure threshold; unmounts segment when exceeded.
+    pub nof_heartbeat_failures_threshold: u32,
 }
 
 /// 默认运行时配置：生产环境建议通过 CLI 参数覆盖这些值。
@@ -406,6 +429,9 @@ impl Default for MasterRuntimeConfig {
             quota_bytes: 0,
             remote_source_enabled: false,
             remote_pull_ttl: Duration::from_secs(60),
+            nof_heartbeat_interval: Duration::from_secs(10),
+            nof_heartbeat_probe_timeout: Duration::from_secs(1),
+            nof_heartbeat_failures_threshold: 3,
         }
     }
 }

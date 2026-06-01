@@ -481,4 +481,50 @@ impl MooncakeClient {
         }
         Ok(statuses)
     }
+
+    /// Zero-copy batch put from multiple buffers per key.
+    ///
+    /// Each key may be assembled from multiple non-contiguous memory regions.
+    /// `all_buffers[i]` and `all_sizes[i]` correspond to the i-th key.
+    /// All buffers must be pre-registered with the TransferEngine.
+    ///
+    /// C++ equivalent: `RealClient::batch_put_from_multi_buffers`
+    ///
+    /// 多缓冲区零拷贝批量写入。
+    /// 每个 key 可由多个非连续内存区域拼接而成。
+    /// all_buffers[i] 和 all_sizes[i] 对应第 i 个 key。
+    /// 所有缓冲区必须预先向 TE 注册。
+    ///
+    /// # Safety
+    /// All buffers in `all_buffers` must be pre-registered with the TE.
+    pub async unsafe fn batch_put_from_multi_buffers(
+        &mut self,
+        keys: &[String],
+        all_buffers: &[Vec<*mut c_void>],
+        all_sizes: &[Vec<usize>],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<i32>> {
+        let mut statuses = Vec::with_capacity(keys.len());
+        for (i, key) in keys.iter().enumerate() {
+            let buffers = &all_buffers[i];
+            let sizes = &all_sizes[i];
+            let mut ok = true;
+            for (j, (&buf, &sz)) in buffers.iter().zip(sizes.iter()).enumerate() {
+                let part_key = if j == 0 {
+                    key.clone()
+                } else {
+                    format!("{key}:part:{j}")
+                };
+                match self.put_from(&part_key, buf, sz, config.clone()).await {
+                    Ok(()) => {}
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            statuses.push(if ok { 0 } else { -1 });
+        }
+        Ok(statuses)
+    }
 }

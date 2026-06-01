@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .join("proto");
 
+    // Master service proto — client stubs only.
     tonic_build::configure()
         .build_server(false)
         .build_client(true)
@@ -21,6 +22,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .to_str()
                     .unwrap(),
             ],
+            &[proto_path.clone()],
+        )?;
+
+    // Offload RPC proto — both client and server.
+    tonic_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .compile_protos(
+            &[proto_path
+                .join("mooncake_offload_rpc.proto")
+                .to_str()
+                .unwrap()],
             &[proto_path],
         )?;
 

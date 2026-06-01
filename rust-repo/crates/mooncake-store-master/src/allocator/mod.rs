@@ -285,9 +285,20 @@ impl SegmentAllocator {
             .collect();
 
         // Step 2: determine affinity preferences
-        // Pre-compute preferred hostname outside the sort comparator.
-        // 预先计算首选主机名，避免在排序比较器中重复计算。
-        let has_preferred = !config.preferred_segment.is_empty();
+        // Pre-compute preferred hostname and preferred names list.
+        // Merge singular preferred_segment into the plural list for unified lookup.
+        // 预先计算首选主机名和首选 segment 名称列表。
+        // 将单数 preferred_segment 合并到复数列表中以便统一处理。
+        let mut preferred_names: Vec<&str> = Vec::new();
+        if !config.preferred_segment.is_empty() {
+            preferred_names.push(&config.preferred_segment);
+        }
+        for name in &config.preferred_segments {
+            if !name.is_empty() && name != &config.preferred_segment {
+                preferred_names.push(name);
+            }
+        }
+        let has_preferred = !preferred_names.is_empty();
         let preferred_host = if config.prefer_alloc_in_same_node {
             client_id.and_then(|cid| {
                 self.segments
@@ -323,12 +334,20 @@ impl SegmentAllocator {
                         }
                     }
 
-                    // Tier 2: preferred segment
-                    // 第二级：首选 segment
+                    // Tier 2: preferred segment(s) — rank by position in preferred list
+                    // 第二级：首选 segment —— 按在首选列表中的位置排序
                     if has_preferred {
-                        let a_pref = sa.segment.name == config.preferred_segment;
-                        let b_pref = sb.segment.name == config.preferred_segment;
-                        let cmp = a_pref.cmp(&b_pref).reverse();
+                        let a_pos = preferred_names
+                            .iter()
+                            .position(|&n| n == sa.segment.name);
+                        let b_pos = preferred_names
+                            .iter()
+                            .position(|&n| n == sb.segment.name);
+                        // Lower position = higher priority; not-in-list = lowest priority
+                        // 位置越小优先级越高，不在列表中的优先级最低
+                        let a_rank = a_pos.map(|p| p as i64).unwrap_or(i64::MAX);
+                        let b_rank = b_pos.map(|p| p as i64).unwrap_or(i64::MAX);
+                        let cmp = a_rank.cmp(&b_rank);
                         if cmp != Ordering::Equal {
                             return cmp;
                         }
@@ -357,12 +376,13 @@ impl SegmentAllocator {
                 });
             }
             if has_preferred {
+                let pref_names = &preferred_names;
                 candidates.sort_by_key(|segment_id| {
-                    if self.segments[segment_id].segment.name == config.preferred_segment {
-                        0
-                    } else {
-                        1
-                    }
+                    pref_names
+                        .iter()
+                        .position(|&n| n == self.segments[segment_id].segment.name)
+                        .map(|p| p as i64)
+                        .unwrap_or(i64::MAX)
                 });
             }
         }

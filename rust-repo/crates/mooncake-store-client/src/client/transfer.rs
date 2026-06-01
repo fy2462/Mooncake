@@ -667,11 +667,21 @@ impl MooncakeClient {
             seg_name = %replica.segment_name,
             offset = replica.offset,
             base_addr = replica.base_addr,
+            replica_type = ?replica.replica_type,
             replica_size = replica.size,
             is_local = self.is_local_replica(replica),
             has_seg_buf = self.segment_buffer.is_some(),
             "read_from_replica: ENTER"
         );
+
+        // LOCAL_DISK on remote node: use P2P offload RPC.
+        // C++ equivalent: branch in real_client.cpp that calls
+        // `batch_get_into_offload_object_internal`.
+        if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
+            && !self.is_local_replica(replica)
+        {
+            return self.read_from_remote_local_disk(replica).await;
+        }
 
         // Fast path: local segment — direct memcpy, no TE overhead.
         // 快速路径：本地 segment —— 直接 memcpy，无 TE 开销。
@@ -915,5 +925,90 @@ impl MooncakeClient {
         self.engine.close_segment(segment_id)?;
         tracing::info!(target: "te_debug", transferred, "zero_copy_read: EXIT (success)");
         Ok(transferred as usize)
+    }
+
+    /// Read data from a remote LOCAL_DISK replica via P2P offload RPC.
+    ///
+    /// C++ equivalent: `RealClient::batch_get_into_offload_object_internal`
+    ///
+    /// 通过 P2P 卸载 RPC 从远端 LOCAL_DISK 副本读取数据。
+    async fn read_from_remote_local_disk(
+        &self,
+        replica: &ReplicaDescriptor,
+    ) -> StoreResult<Vec<u8>> {
+        let peer_addr = &replica.segment_name;
+        let key = "offload_read"; // synthetic key for the RPC
+        let size = replica.size as i64;
+
+        tracing::info!(
+            target: "te_debug",
+            peer_addr,
+            replica_size = replica.size,
+            "read_from_remote_local_disk: dispatching P2P offload read"
+        );
+
+        let result = crate::offload::client::batch_get_offload_objects(
+            peer_addr,
+            &[key.to_string()],
+            &[size],
+        )
+        .await
+        .map_err(|e| StoreError::Internal(format!("P2P offload read: {e}")))?;
+
+        // Read data from peer's TE buffer into our local_buffer.
+        let seg_id = self
+            .engine
+            .open_segment(&result.transfer_engine_addr)
+            .map_err(|e| StoreError::Internal(format!("open peer segment: {e}")))?;
+        let batch_id = self
+            .engine
+            .allocate_batch_id(1)
+            .map_err(|e| StoreError::Internal(format!("allocate batch: {e}")))?;
+
+        let read_len = replica.size as usize;
+        let request = TransferRequest {
+            opcode: Opcode::Read,
+            source: self.local_buffer.as_ptr() as *mut c_void,
+            target_id: seg_id,
+            target_offset: result.pointers[0],
+            length: read_len as u64,
+        };
+
+        self.engine
+            .submit_transfer(batch_id, &[request])
+            .map_err(|e| StoreError::Internal(format!("submit offload transfer: {e}")))?;
+
+        // Poll with 10s timeout.
+        let start = tokio::time::Instant::now();
+        let timeout = tokio::time::Duration::from_secs(10);
+        loop {
+            let status = self
+                .engine
+                .get_transfer_status(batch_id, 0)
+                .map_err(|e| StoreError::Internal(format!("poll offload transfer: {e}")))?;
+            if status.status == TransferStatusEnum::Completed {
+                break;
+            }
+            if status.status == TransferStatusEnum::Failed {
+                let _ = self.engine.close_segment(seg_id);
+                return Err(StoreError::OperationFailed(-1));
+            }
+            if start.elapsed() >= timeout {
+                let _ = self.engine.close_segment(seg_id);
+                return Err(StoreError::Internal("offload transfer timeout".to_string()));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        }
+
+        let _ = self.engine.close_segment(seg_id);
+
+        // Fire-and-forget: release remote buffer.
+        let release_addr = peer_addr.to_string();
+        tokio::spawn(async move {
+            crate::offload::client::release_offload_buffer(&release_addr, result.batch_id).await;
+        });
+
+        let data = self.local_buffer[..read_len].to_vec();
+        Ok(data)
     }
 }

@@ -51,9 +51,12 @@ pub mod buffer_allocator;
 pub mod client;
 pub mod engram;
 pub mod hot_cache;
+pub mod local_storage_backend;
+pub(crate) mod offload;
 pub mod remote_source;
 
 pub use client::{BufferHandle, MooncakeClient};
+pub use local_storage_backend::{LocalStorageBackend, LocalStorageConfig};
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
 pub use remote_source::{
@@ -72,4 +75,9 @@ pub use remote_source::s3_source::S3RemoteSource;
 // 自动生成的 Protobuf 代码（mooncake.store 包）
 pub mod proto {
     tonic::include_proto!("mooncake.store");
+}
+
+// Generated protobuf code for P2P offload RPC
+pub mod offload_proto {
+    tonic::include_proto!("mooncake.offload");
 }

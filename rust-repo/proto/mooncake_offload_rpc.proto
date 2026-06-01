@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package mooncake.offload;
+
+// ================================================================
+// P2P Offload Read — peer-to-peer offload data transfer protocol
+// ================================================================
+//
+// When a client needs to read data that has been offloaded to
+// another node's local SSD, it uses this service to request the
+// data from the peer. The peer reads from local SSD, registers
+// the data with its TransferEngine, and returns pointers + TE
+// endpoint. The caller then uses the TransferEngine to RDMA-read
+// the data directly from the peer's buffers.
+//
+// C++ equivalent: coro_rpc handlers
+//   RealClient::batch_get_offload_object
+//   RealClient::release_offload_buffer
+
+// Request to read a batch of offloaded objects from a peer.
+message BatchGetOffloadObjectRequest {
+  // Keys to read. Length must equal sizes.length.
+  repeated string keys = 1;
+  // Total size (bytes) for each key.
+  repeated int64 sizes = 2;
+}
+
+// Response containing pointers to the data in the peer's TE buffers.
+message BatchGetOffloadObjectResponse {
+  // Unique batch ID for lifecycle management (used to release).
+  uint64 batch_id = 1;
+  // Raw memory pointers (one per key) in the peer's registered TE buffer.
+  // The caller uses these as target_offset in TransferRequest::READ operations.
+  repeated uint64 pointers = 2;
+  // TransferEngine endpoint string (e.g. "10.0.0.1:12345").
+  // The caller opens a TE segment at this address to RDMA-read the data.
+  string transfer_engine_addr = 3;
+  // GC lease TTL in milliseconds. Buffers may be recycled after this time.
+  // The caller must complete the TE read within this window.
+  uint64 gc_ttl_ms = 4;
+}
+
+// Request to release a previously-allocated offload batch.
+message ReleaseOffloadBufferRequest {
+  uint64 batch_id = 1;
+}
+
+// No content needed for release response (fire-and-forget).
+message ReleaseOffloadBufferResponse {}
+
+// P2P offload read service — runs on every node with local SSD storage.
+service OffloadReadService {
+  // Read a batch of objects from local SSD and return TE buffer pointers.
+  rpc BatchGetOffloadObject(BatchGetOffloadObjectRequest) returns (BatchGetOffloadObjectResponse);
+  // Release a previously-allocated offload batch (fire-and-forget).
+  rpc ReleaseOffloadBuffer(ReleaseOffloadBufferRequest) returns (ReleaseOffloadBufferResponse);
+}

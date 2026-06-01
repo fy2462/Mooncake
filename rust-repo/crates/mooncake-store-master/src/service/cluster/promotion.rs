@@ -75,6 +75,7 @@ impl MasterServiceImpl {
         if let Some(preferred) = req.preferred_segments.first() {
             config.preferred_segment = preferred.clone();
         }
+        config.preferred_segments = req.preferred_segments.clone();
         let replicas = {
             let mut allocator = self.state.allocator.write();
             allocator.allocate_for_client(&scoped_key, Some(client_id), req.size, 1, &config)

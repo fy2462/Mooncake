@@ -357,6 +357,7 @@ pub(crate) fn allocate_nof_replicas(
             .unwrap_or_default();
         let config = ReplicateConfig {
             preferred_segment,
+            preferred_segments: preferred_segment_names.to_vec(),
             replica_num: 1,
             ..Default::default()
         };

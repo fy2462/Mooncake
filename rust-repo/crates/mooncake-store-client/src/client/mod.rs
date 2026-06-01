@@ -7,7 +7,7 @@ pub(crate) mod upsert;
 pub(crate) mod write;
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::StoreError;
+use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -17,6 +17,7 @@ use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
 
+use crate::local_storage_backend::LocalStorageBackend;
 use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource, RemoteSourceConfig};
 
@@ -168,6 +169,15 @@ pub struct MooncakeClient {
     /// 成功的获取（来自副本或远程数据源）会填充此缓存。
     pub(crate) hot_cache: Option<Arc<LocalHotCache>>,
 
+    /// Local storage backend for persisting offloaded data to local disk.
+    /// When set, the full offload cycle (heartbeat → read memory → write disk
+    /// → notify master) and promotion cycle (heartbeat → read disk → alloc
+    /// memory replica → write replica → notify master) is enabled.
+    ///
+    /// 本地存储后端，用于将 offload 数据持久化到本地磁盘。
+    /// 设置后，完整的 offload 循环和 promotion 循环将启用。
+    pub(crate) local_storage: Option<Arc<LocalStorageBackend>>,
+
     /// Segment name registered with the master (equals `local_hostname` when a
     /// storage segment is mounted). Used by ReMountSegment on NeedRemount.
     /// 向 master 注册的 segment 名称（挂载存储 segment 时等于 local_hostname）。
@@ -181,6 +191,21 @@ pub struct MooncakeClient {
     /// Guard to ensure at most one remount is in progress at any time.
     /// 确保同一时间最多只有一个 remount 在进行中。C++ equivalent: remount_segment_future.valid()
     pub(crate) remount_in_progress: Arc<AtomicBool>,
+
+    /// Whether the last ping to the master succeeded.
+    /// 最后一次 ping master 是否成功。C++ equivalent: Client::is_ping_healthy()
+    pub(crate) last_ping_success: Arc<AtomicBool>,
+
+    /// Handle to the offload RPC server task.
+    pub(crate) offload_server_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Port the offload RPC server is listening on (0 if not started).
+    /// C++ equivalent: `RealClient::offload_rpc_port_`
+    pub(crate) offload_server_port: Arc<std::sync::atomic::AtomicU16>,
+
+    /// P2P offload RPC address (`hostname:port`).
+    /// C++ equivalent: `RealClient::local_rpc_addr`
+    pub(crate) offload_rpc_addr: RwLock<String>,
 }
 
 impl MooncakeClient {
@@ -355,9 +380,14 @@ impl MooncakeClient {
             local_endpoints: RwLock::new(endpoints),
             miss_handler: None,
             hot_cache: None,
+            local_storage: None,
             segment_name,
             segment_size,
             remount_in_progress: Arc::new(AtomicBool::new(false)),
+            last_ping_success: Arc::new(AtomicBool::new(false)),
+            offload_server_handle: RwLock::new(None),
+            offload_server_port: Arc::new(std::sync::atomic::AtomicU16::new(0)),
+            offload_rpc_addr: RwLock::new(String::new()),
         })
     }
 
@@ -385,8 +415,13 @@ impl MooncakeClient {
             .master
             .ping(request)
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(|e| {
+                self.last_ping_success.store(false, Ordering::SeqCst);
+                StoreError::Internal(e.to_string())
+            })?
             .into_inner();
+
+        self.last_ping_success.store(true, Ordering::SeqCst);
 
         // C++ client_service.cpp:3547 — check client_status for NeedRemount
         // C++ 中检查 client_status 是否为 NeedRemount
@@ -496,6 +531,109 @@ impl MooncakeClient {
         self
     }
 
+    /// Attach a local storage backend for offload/promotion to local disk.
+    ///
+    /// When set, [`offload_objects`](Self::offload_objects) and
+    /// [`promote_objects`](Self::promote_objects) will perform actual disk I/O
+    /// (write, read, delete) as part of the offload/promotion cycle.
+    ///
+    /// Builder-pattern method: call it on the client after `create()`.
+    ///
+    /// 附加一个本地存储后端用于 offload/promotion 到本地磁盘。
+    /// 设置后，offload_objects() 和 promote_objects() 将在 offload/promotion
+    /// 循环中执行实际的磁盘 I/O（写、读、删）。
+    ///
+    /// 构建器模式方法：在 create() 之后调用。
+    pub fn with_local_storage_backend(mut self, backend: Arc<LocalStorageBackend>) -> Self {
+        self.local_storage = Some(backend);
+        self
+    }
+
+    /// Start the P2P offload RPC server on an auto-allocated port.
+    /// This enables peers to read offloaded data from this node's local SSD.
+    /// Must be called after `with_local_storage_backend` and from within a tokio runtime.
+    ///
+    /// C++ equivalent: offload_rpc_server_ startup in `RealClient::setup_internal`.
+    ///
+    /// 在自动分配的端口上启动 P2P 卸载 RPC 服务器。
+    /// 这使得对等节点可以从本节点的本地 SSD 读取卸载的数据。
+    /// 必须在 with_local_storage_backend 之后、tokio 运行时内调用。
+    pub async fn start_offload_server(&self) -> StoreResult<u16> {
+        let storage = self.local_storage.as_ref().ok_or_else(|| {
+            StoreError::Internal(
+                "no local storage backend — call with_local_storage_backend first".to_string(),
+            )
+        })?;
+
+        let handler = crate::offload::server::OffloadReadHandler {
+            storage: Arc::clone(storage),
+            engine: Arc::clone(&self.engine),
+            pool: Arc::new(crate::offload::buffer::OffloadBufferPool::new()),
+            te_endpoint: self.local_hostname.clone(),
+        };
+
+        let (port, handle) = crate::offload::server::start_offload_server(handler).await;
+        *self.offload_server_handle.write() = Some(handle);
+        self.offload_server_port
+            .store(port, std::sync::atomic::Ordering::SeqCst);
+
+        // Build the RPC address: hostname (without port) + offload port.
+        let addr = if let Some(pos) = self.local_hostname.rfind(':') {
+            format!("{}:{port}", &self.local_hostname[..pos])
+        } else {
+            format!("{}:{port}", self.local_hostname)
+        };
+        *self.offload_rpc_addr.write() = addr;
+
+        Ok(port)
+    }
+
+    /// Returns the P2P offload RPC address (`hostname:port`) if the server is running.
+    /// C++ equivalent: `RealClient::local_rpc_addr`
+    pub fn offload_rpc_address(&self) -> String {
+        self.offload_rpc_addr.read().clone()
+    }
+
+    /// Returns `true` if the last ping to the master was successful.
+    /// This is a cheap, non-blocking call suitable for polling loops.
+    ///
+    /// C++ equivalent: `Client::is_ping_healthy()`
+    ///
+    /// 如果最后一次向 master 的 ping 成功则返回 true。
+    /// 这是一个轻量的、非阻塞的调用，适合轮询循环。
+    pub fn is_ping_healthy(&self) -> bool {
+        self.last_ping_success.load(Ordering::SeqCst)
+    }
+
+    /// Manually trigger a ReMountSegment request. Only one remount may be
+    /// in-flight at a time; subsequent calls while one is pending are no-ops.
+    /// This is also called automatically from [`health_check`](Self::health_check)
+    /// when the master returns `NeedRemount`.
+    ///
+    /// C++ equivalent: `Client::ReMountSegment`
+    ///
+    /// 手动触发 ReMountSegment 请求。同一时间最多只有一个 remount 在途；
+    /// 在已有的 remount 完成前，后续调用为 no-op。
+    /// 当 master 返回 NeedRemount 时，health_check 也会自动调用此方法。
+    pub fn remount_segment(&self) {
+        self.try_trigger_remount();
+    }
+
+    /// Query the master for the list of replicas hosting a given key,
+    /// without fetching the data. Returns an empty vector if the key is
+    /// not found.
+    ///
+    /// C++ equivalent: `Client::Query` / `GetReplicaList`
+    ///
+    /// 查询 master 获取某个 key 的副本列表，但不获取数据。
+    /// 如果 key 未找到则返回空向量。
+    pub async fn get_replica_list(
+        &mut self,
+        key: &str,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        self.fetch_replicas(key).await
+    }
+
     /// Returns `true` if the client has been torn down. / 如果客户端已关闭则返回 true。
     pub fn is_closed(&self) -> bool {
         *self.tear_down.read()
@@ -511,6 +649,11 @@ impl MooncakeClient {
     /// C++ 等价：`Client::TearDownAll()`。
     pub async fn tear_down_all(&mut self) -> StoreResult<()> {
         *self.tear_down.write() = true;
+
+        // Stop offload RPC server if running.
+        if let Some(handle) = self.offload_server_handle.write().take() {
+            handle.abort();
+        }
 
         // unregister local buffer / 取消注册本地缓冲区
         unsafe {

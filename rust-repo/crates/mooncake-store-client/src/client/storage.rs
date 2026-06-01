@@ -23,6 +23,7 @@
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::MooncakeClient;
 use crate::proto;
@@ -251,6 +252,245 @@ impl MooncakeClient {
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // High-level offload / promotion — full cycle with local disk I/O
+    // 高级 offload / promotion —— 含本地磁盘 I/O 的完整循环
+    // -----------------------------------------------------------------------
+
+    /// Execute a complete offload cycle:
+    /// 1. Heartbeat to get objects-to-offload from master.
+    /// 2. Read object data from memory.
+    /// 3. Write data to local disk.
+    /// 4. Notify master of success.
+    ///
+    /// Requires a [`LocalStorageBackend`] to be attached via
+    /// [`with_local_storage_backend`](Self::with_local_storage_backend).
+    ///
+    /// Returns the number of objects successfully offloaded.
+    ///
+    /// 执行完整的 offload 循环：
+    /// 1. 心跳获取待 offload 对象。
+    /// 2. 从内存读取对象数据。
+    /// 3. 将数据写入本地磁盘。
+    /// 4. 通知 master 成功。
+    ///
+    /// 需要先通过 with_local_storage_backend 挂载本地存储后端。
+    ///
+    /// 返回成功 offload 的对象数量。
+    pub async fn offload_objects(&mut self, enable_offloading: bool) -> StoreResult<usize> {
+        let objects = self.offload_object_heartbeat(enable_offloading).await?;
+        if objects.is_empty() {
+            return Ok(0);
+        }
+
+        let storage = self.local_storage.as_ref().ok_or_else(|| {
+            StoreError::Internal("no local storage backend configured".to_string())
+        })?;
+        let storage = Arc::clone(storage);
+
+        let mut offloaded = 0usize;
+        let mut success_keys = Vec::with_capacity(objects.len());
+        let mut metadatas = Vec::with_capacity(objects.len());
+
+        for (key, size) in &objects {
+            // Read object data from memory.
+            let data = match self.get(key).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(target: "storage_debug", %key, %e, "offload: failed to get object from memory, skipping");
+                    continue;
+                }
+            };
+
+            // Write to local disk (blocking I/O).
+            let key_owned = key.clone();
+            let s = Arc::clone(&storage);
+            let write_result =
+                tokio::task::spawn_blocking(move || s.write_object(&key_owned, &data))
+                    .await
+                    .map_err(|e| StoreError::Internal(e.to_string()))??;
+
+            // Log any evicted keys.
+            for evicted_key in &write_result {
+                tracing::info!(target: "storage_debug", %evicted_key, "offload: evicted old file");
+            }
+
+            offloaded += 1;
+            success_keys.push(key.clone());
+            metadatas.push(proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: key.len() as i64,
+                data_size: *size,
+                transport_endpoint: String::new(),
+            });
+        }
+
+        if !success_keys.is_empty() {
+            self.notify_offload_success(success_keys, metadatas).await?;
+        }
+
+        Ok(offloaded)
+    }
+
+    /// Execute a complete promotion cycle:
+    /// 1. Heartbeat to get objects-to-promote from master.
+    /// 2. Read data from local disk.
+    /// 3. Allocate a memory replica via `promotion_alloc_start`.
+    /// 4. Write data to the allocated replica via `write_to_replica`.
+    /// 5. Notify master of success or failure.
+    ///
+    /// Requires a [`LocalStorageBackend`] to be attached via
+    /// [`with_local_storage_backend`](Self::with_local_storage_backend).
+    ///
+    /// Returns the number of objects successfully promoted.
+    ///
+    /// 执行完整的 promotion 循环：
+    /// 1. 心跳获取待 promotion 对象。
+    /// 2. 从本地磁盘读取数据。
+    /// 3. 通过 promotion_alloc_start 分配内存副本。
+    /// 4. 通过 write_to_replica 将数据写入分配的副本。
+    /// 5. 通知 master 成功或失败。
+    ///
+    /// 需要先通过 with_local_storage_backend 挂载本地存储后端。
+    ///
+    /// 返回成功 promotion 的对象数量。
+    pub async fn promote_objects(&mut self) -> StoreResult<usize> {
+        let objects = self.promotion_object_heartbeat().await?;
+        if objects.is_empty() {
+            return Ok(0);
+        }
+
+        let storage = self.local_storage.as_ref().ok_or_else(|| {
+            StoreError::Internal("no local storage backend configured".to_string())
+        })?;
+        let storage = Arc::clone(storage);
+
+        let mut promoted = 0usize;
+
+        for (key, size) in &objects {
+            // Read from local disk (blocking I/O).
+            let key_owned = key.clone();
+            let data = {
+                let s = Arc::clone(&storage);
+                tokio::task::spawn_blocking(move || s.read_object(&key_owned))
+                    .await
+                    .map_err(|e| StoreError::Internal(e.to_string()))??
+            };
+
+            // Allocate a memory replica.
+            let replica = match self.promotion_alloc_start(key, *size as u64, vec![]).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(target: "storage_debug", %key, %e, "promotion: alloc failed");
+                    let _ = self.notify_promotion_failure(key).await;
+                    continue;
+                }
+            };
+
+            // Write data to the allocated memory replica.
+            match self.write_to_replica(&replica, &data).await {
+                Ok(()) => {
+                    self.notify_promotion_success(key).await?;
+                    promoted += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "storage_debug", %key, %e, "promotion: write_to_replica failed");
+                    let _ = self.notify_promotion_failure(key).await;
+                }
+            }
+        }
+
+        Ok(promoted)
+    }
+
+    // -----------------------------------------------------------------------
+    // Dynamic segment mount/unmount
+    // 动态 segment 挂载/卸载
+    //
+    // C++ equivalent: RealClient::mountSegment / unmountSegment /
+    // allocateAndMountSegment / unmountAndFreeSegment
+    // -----------------------------------------------------------------------
+
+    /// Mount a memory segment with the given name, size, and base address.
+    /// The memory must already be allocated and registered with the
+    /// TransferEngine before calling this (for externally-mapped segments).
+    /// After mounting, the segment is registered as a local endpoint for
+    /// locality-aware replica selection.
+    ///
+    /// 挂载指定名称、大小和基地址的内存 segment。
+    /// 调用前内存必须已分配并已向 TransferEngine 注册（用于外部映射的 segment）。
+    /// 挂载后，该 segment 被注册为本地端点，用于本地性感知副本选择。
+    ///
+    /// For internally-allocated segments (where this node allocates memory and
+    /// opens the segment on the TE), this is handled automatically in
+    /// [`create`](Self::create) when `global_segment_size > 0`.
+    ///
+    /// 对于内部分配的 segment（本节点分配内存并在 TE 上打开 segment），
+    /// 在 create() 中 global_segment_size > 0 时自动处理。
+    ///
+    /// C++ equivalent: `Client::MountSegment()`
+    pub async fn mount_segment(
+        &mut self,
+        segment_name: &str,
+        size: u64,
+        base_addr: u64,
+    ) -> StoreResult<()> {
+        self.master
+            .mount_segment(proto::MountSegmentRequest {
+                client_id: Some(self.client_id_proto()),
+                segment_name: segment_name.to_string(),
+                size,
+                base_addr,
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Register as a local endpoint for subsequent locality checks
+        self.register_local_endpoint(segment_name);
+        Ok(())
+    }
+
+    /// Unmount a previously mounted segment from the master.
+    ///
+    /// 从 master 卸载之前挂载的 segment。
+    ///
+    /// # Arguments
+    /// - `segment_name` — the name of the segment to unmount.
+    ///   要卸载的 segment 名称。
+    /// - `grace_period_ms` — if > 0, schedules a graceful unmount where the
+    ///   master waits for the grace period before actually removing the
+    ///   segment. If 0, unmounts immediately.
+    ///   如果 > 0，安排优雅卸载——master 在优雅期等待后再实际删除 segment。
+    ///   如果为 0，立即卸载。
+    ///
+    /// C++ equivalent: `Client::UnmountSegment()`
+    pub async fn unmount_segment(
+        &mut self,
+        segment_name: &str,
+        grace_period_ms: u64,
+    ) -> StoreResult<()> {
+        if grace_period_ms > 0 {
+            self.master
+                .graceful_unmount_segment(proto::GracefulUnmountSegmentRequest {
+                    segment_id: Some(proto::Uuid::default()), // identified by name via master
+                    client_id: Some(self.client_id_proto()),
+                    grace_period_ms,
+                })
+                .await
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+        } else {
+            self.master
+                .unmount_segment(proto::UnmountSegmentRequest {
+                    segment_id: Some(proto::Uuid::default()),
+                    client_id: Some(self.client_id_proto()),
+                })
+                .await
+                .map_err(|e| StoreError::Internal(e.to_string()))?;
+        };
+        self.unregister_local_endpoint(segment_name);
         Ok(())
     }
 }
