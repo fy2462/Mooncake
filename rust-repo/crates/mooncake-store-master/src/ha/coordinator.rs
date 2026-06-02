@@ -1,7 +1,8 @@
 use super::types::{AcquireLeadershipResult, HaError, LeaderRole, LeadershipHandle, MasterView};
+use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp};
 use std::time::Duration;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 // LeaderCoordinator — leader election and keepalive via Etcd/Redis/K8s/Manual.
 // LeaderCoordinator —— 核心选举基础设施（C++: ha_service.h）。
@@ -51,12 +52,15 @@ impl LeaderCoordinator {
     }
 
     /// Create an Etcd-backed coordinator. / 创建 Etcd 支持的协调器。
-    pub async fn new_etcd(endpoints: Vec<String>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new_etcd(
+        endpoints: Vec<String>,
+        cluster_namespace: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let client = etcd_client::Client::connect(endpoints, None).await?;
         Ok(Self::with_backend(
             CoordinatorBackend::Etcd {
                 client,
-                election_key: "/mooncake/master/leader".to_string(),
+                election_key: build_master_view_key(cluster_namespace),
             },
             LeaderRole::Standby,
         ))
@@ -105,8 +109,8 @@ impl LeaderCoordinator {
         )
     }
 
-    /// Read current leader view. Etcd uses election API, Redis GETs key, K8s/Manual return None.
-    /// 从后端读取当前 Leader 视图。Etcd 用 election API，Redis GET key，K8s/Manual 返回 None。
+    /// Read current leader view.
+    /// 从后端读取当前 Leader 视图。
     pub async fn read_current_view(&self) -> Result<Option<MasterView>, HaError> {
         match &self.backend {
             CoordinatorBackend::Etcd {
@@ -114,18 +118,20 @@ impl LeaderCoordinator {
                 election_key,
             } => {
                 let mut client = client.clone();
-                match client.leader(election_key.clone()).await {
-                    Ok(resp) => match resp.kv() {
+                match client.get(election_key.as_bytes(), None).await {
+                    Ok(resp) => match resp.kvs().first() {
                         Some(kv) => {
                             let addr = kv.value_str().unwrap_or("").to_string();
                             Ok(Some(MasterView {
                                 leader_address: addr,
-                                view_version: kv.version() as u64,
+                                view_version: kv.mod_revision() as u64,
                             }))
                         }
                         None => Ok(None),
                     },
-                    Err(_) => Ok(None),
+                    Err(e) => Err(HaError::InvalidBackend(format!(
+                        "etcd get master view: {e}"
+                    ))),
                 }
             }
             CoordinatorBackend::Redis {
@@ -183,46 +189,45 @@ impl LeaderCoordinator {
                     .map_err(|e| HaError::InvalidBackend(format!("etcd lease grant error: {e}")))?;
                 let lease_id = lease_resp.id();
 
-                // Step 2: Campaign for leadership. / 第 2 步：竞选 leadership。
-                let name = election_key.clone();
-                let value = leader_address.to_string();
-                match client.campaign(name, value, lease_id).await {
-                    Ok(resp) => {
-                        let acquired = resp
-                            .leader()
-                            .and_then(|l| l.name_str().ok())
-                            .map(|n| n == leader_address)
-                            .unwrap_or(false);
-                        if acquired {
-                            let _ = self.role_tx.send(LeaderRole::Leader);
-                            info!(
-                                "Leadership acquired: address={}, lease_id={}",
-                                leader_address, lease_id
-                            );
-                            Ok(AcquireLeadershipResult {
-                                acquired: true,
-                                view: Some(MasterView {
-                                    leader_address: leader_address.to_string(),
-                                    view_version: 1,
-                                }),
-                                lease_id: Some(lease_id),
-                            })
-                        } else {
-                            Ok(AcquireLeadershipResult {
-                                acquired: false,
-                                view: current,
-                                lease_id: None,
-                            })
-                        }
-                    }
-                    Err(e) => {
-                        warn!("etcd campaign failed: {}", e);
-                        Ok(AcquireLeadershipResult {
-                            acquired: false,
-                            view: current,
-                            lease_id: None,
-                        })
-                    }
+                // Step 2: create master view key with the lease, matching C++.
+                let put = TxnOp::put(
+                    election_key.clone().into_bytes(),
+                    leader_address.as_bytes().to_vec(),
+                    Some(PutOptions::new().with_lease(lease_id)),
+                );
+                let txn = Txn::new()
+                    .when([Compare::version(
+                        election_key.clone().into_bytes(),
+                        CompareOp::Equal,
+                        0,
+                    )])
+                    .and_then([put]);
+
+                let resp = client.txn(txn).await.map_err(|e| {
+                    HaError::InvalidBackend(format!("etcd create master view: {e}"))
+                })?;
+                if resp.succeeded() {
+                    let acquired_view = self.read_current_view().await?.unwrap_or(MasterView {
+                        leader_address: leader_address.to_string(),
+                        view_version: 1,
+                    });
+                    let _ = self.role_tx.send(LeaderRole::Leader);
+                    info!(
+                        "Leadership acquired: address={}, lease_id={}, view_version={}",
+                        leader_address, lease_id, acquired_view.view_version
+                    );
+                    Ok(AcquireLeadershipResult {
+                        acquired: true,
+                        view: Some(acquired_view),
+                        lease_id: Some(lease_id),
+                    })
+                } else {
+                    let _ = client.lease_revoke(lease_id).await;
+                    Ok(AcquireLeadershipResult {
+                        acquired: false,
+                        view: current.or(self.read_current_view().await?),
+                        lease_id: None,
+                    })
                 }
             }
             CoordinatorBackend::Redis {
@@ -376,20 +381,47 @@ impl LeaderCoordinator {
         Ok(LeadershipHandle::new(cancel_tx))
     }
 
+    /// Attempt a single lease renewal. Returns Ok(()) on success.
+    /// Used by the warmup loop and serve preflight check.
+    /// C++ equivalent: `LeaderCoordinator::RenewLeadership(session)`.
+    ///
+    /// 尝试单次租约续期。成功返回 Ok(())。
+    /// 用于预热循环和 serve 前飞行检查。
+    pub async fn try_renew_leadership(&self, lease_id: i64) -> Result<(), HaError> {
+        match &self.backend {
+            CoordinatorBackend::Etcd { client, .. } => {
+                let mut c = client.clone();
+                let (mut keeper, _stream) = c
+                    .lease_keep_alive(lease_id)
+                    .await
+                    .map_err(|e| HaError::InvalidBackend(format!("etcd keepalive: {e}")))?;
+                keeper
+                    .keep_alive()
+                    .await
+                    .map_err(|e| HaError::InvalidBackend(format!("etcd keepalive send: {e}")))?;
+                Ok(())
+            }
+            CoordinatorBackend::Redis { client: _, .. } => {
+                // Redis no-op: SET NX PX expires automatically.
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Release leadership gracefully. / 优雅释放 Leader 权。
     /// - Etcd: calls resign. / 调用 resign。
     /// - Redis: DEL the election key. / DEL 选举 key。
     /// - Manual: sends Standby via watch channel. / 通过 watch channel 发送 Standby。
-    pub async fn release_leadership(&self, _lease_id: i64) -> Result<(), HaError> {
+    pub async fn release_leadership(&self, lease_id: i64) -> Result<(), HaError> {
         match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
                 let mut client = client.clone();
-                client
-                    .resign(None)
-                    .await
-                    .map_err(|e| HaError::InvalidBackend(format!("etcd resign error: {e}")))?;
+                client.lease_revoke(lease_id).await.map_err(|e| {
+                    HaError::InvalidBackend(format!("etcd lease revoke error: {e}"))
+                })?;
                 let _ = self.role_tx.send(LeaderRole::Standby);
-                info!("Leadership released via resign");
+                info!("Leadership released via lease revoke");
                 Ok(())
             }
             CoordinatorBackend::Redis {
@@ -451,16 +483,10 @@ impl LeaderCoordinator {
                 info!("Etcd leader election initialized");
                 Ok(*self.role_rx.borrow())
             }
-            CoordinatorBackend::K8s {
-                namespace,
-                lease_name,
-            } => {
-                info!(
-                    "K8s Lease election initialized: namespace={}, lease={}",
-                    namespace, lease_name
-                );
-                Ok(*self.role_rx.borrow())
-            }
+            CoordinatorBackend::K8s { namespace, lease_name } => Err(format!(
+                "K8s Lease election is not implemented in Rust coordinator: namespace={namespace}, lease={lease_name}"
+            )
+            .into()),
             CoordinatorBackend::Redis { .. } => {
                 info!("Redis leader election initialized");
                 Ok(*self.role_rx.borrow())
@@ -496,4 +522,19 @@ impl LeaderCoordinator {
     pub fn set_role_for_test(&self, role: LeaderRole) {
         let _ = self.role_tx.send(role);
     }
+}
+
+fn build_master_view_key(cluster_namespace: &str) -> String {
+    let namespace = if cluster_namespace.trim().is_empty() {
+        std::env::var("MC_STORE_CLUSTER_ID")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "mooncake".to_string())
+    } else {
+        cluster_namespace.to_string()
+    };
+    format!(
+        "mooncake-store/{}/master_view",
+        namespace.trim_end_matches('/')
+    )
 }

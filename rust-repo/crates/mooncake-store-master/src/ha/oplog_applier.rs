@@ -1,0 +1,260 @@
+//! OpLog applier — replays OpLog entries onto a MasterState.
+//! C++ equivalent: `OpLogApplier` in oplog_applier.h/cpp.
+//!
+//! Parses JSON payloads from OpLogRecord entries and applies the
+//! corresponding mutations (put_end, remove, segment mount/unmount)
+//! to the shared MasterState.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use serde_json::Value;
+
+use crate::ha::types::OpLogRecord;
+use crate::oplog::OpLogStore;
+use crate::service::state::MasterState;
+
+/// Applies OpLog entries to a MasterState, tracking the expected sequence ID.
+pub(crate) struct OpLogApplier {
+    state: Arc<MasterState>,
+    expected_seq: AtomicU64,
+}
+
+impl OpLogApplier {
+    pub fn new(state: Arc<MasterState>) -> Self {
+        Self {
+            state,
+            expected_seq: AtomicU64::new(1),
+        }
+    }
+
+    /// Set the expected sequence ID after snapshot restore.
+    /// C++ equivalent: `OpLogApplier::Recover(base_seq)`
+    pub fn recover(&self, base_seq: u64) {
+        self.expected_seq.store(base_seq + 1, Ordering::Release);
+    }
+
+    /// Return the next expected sequence ID.
+    /// C++ equivalent: `OpLogApplier::GetExpectedSequenceId()`
+    pub fn get_expected_sequence_id(&self) -> u64 {
+        self.expected_seq.load(Ordering::Acquire)
+    }
+
+    /// Apply a batch of OpLog entries. Returns count of successfully applied entries.
+    /// Skips entries with seq < expected (already applied) and gaps (out-of-order).
+    ///
+    /// C++ equivalent: `OpLogApplier::ApplyOpLogEntries`
+    pub fn apply_op_log_entries(&self, entries: &[OpLogRecord]) -> usize {
+        let mut applied = 0usize;
+        for entry in entries {
+            let expected = self.expected_seq.load(Ordering::Acquire);
+            if entry.seq < expected {
+                continue; // already applied
+            }
+            if entry.seq > expected {
+                // Gap detected — skip until gap is resolved.
+                continue;
+            }
+            if Self::apply_one(&self.state, &entry.payload) {
+                self.expected_seq.store(expected + 1, Ordering::Release);
+                applied += 1;
+            }
+        }
+        applied
+    }
+
+    /// Try to fill gaps by reading from the OpLogStore.
+    /// Returns (attempted, fetched) — attempted = entries we needed, fetched = entries we got.
+    ///
+    /// C++ equivalent: `OpLogApplier::TryResolveGapsOnceForPromotion(max_ids)`
+    pub fn try_resolve_gaps_once(&self, store: &dyn OpLogStore, max_ids: usize) -> (usize, usize) {
+        let expected = self.expected_seq.load(Ordering::Acquire);
+        let latest = store.latest_sequence();
+        if latest <= expected {
+            return (0, 0);
+        }
+        let needed = (latest - expected).min(max_ids as u64) as usize;
+        if needed == 0 {
+            return (0, 0);
+        }
+
+        let entries = match store.read_since(expected, needed) {
+            Ok(e) => e,
+            Err(_) => return (needed, 0),
+        };
+
+        let fetched = entries.len();
+        self.apply_op_log_entries(&entries);
+        (needed, fetched)
+    }
+
+    /// Apply a single JSON payload to MasterState.
+    fn apply_one(state: &MasterState, payload: &str) -> bool {
+        let v: Value = match serde_json::from_str(payload) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+
+        let Some(op) = v["op"].as_str() else {
+            return false;
+        };
+
+        match op {
+            "put_end" => {
+                let Some(key) = v["key"].as_str() else {
+                    return false;
+                };
+                let size = v["size"].as_u64().unwrap_or(0);
+                // PutEnd: mark Allocating replicas as Complete.
+                // The actual size is recorded on the object entry.
+                if let Some(mut entry) = state.objects.get_mut(key) {
+                    for replica in &mut entry.replicas {
+                        if replica.status == mooncake_store_core::ReplicaStatus::Allocating {
+                            replica.status = mooncake_store_core::ReplicaStatus::Complete;
+                        }
+                    }
+                    entry.size = entry.size.max(size);
+                }
+                state.processing_keys.remove(key);
+                true
+            }
+            "remove" => {
+                let Some(key) = v["key"].as_str() else {
+                    return false;
+                };
+                state.objects.remove(key);
+                state.processing_keys.remove(key);
+                true
+            }
+            "mount_segment" => {
+                // Segment mount/unmount entries are informational for standby;
+                // the snapshot bootstrap already restores segments. Skip.
+                true
+            }
+            "unmount_segment" | "mount_nof_segment" | "unmount_nof_segment" => {
+                // Informational only for oplog replay on standby.
+                true
+            }
+            "put_start" => {
+                // PutStart is a transient state; the standby only needs put_end.
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ha::OpLogRecord;
+    use dashmap::DashMap;
+    use parking_lot::RwLock;
+    use std::sync::atomic::AtomicUsize;
+
+    fn make_state() -> Arc<MasterState> {
+        Arc::new(MasterState {
+            clients: DashMap::new(),
+            objects: DashMap::new(),
+            processing_keys: DashMap::new(),
+            client_objects: DashMap::new(),
+            segments: DashMap::new(),
+            nof_segments: DashMap::new(),
+            local_disk_segments: DashMap::new(),
+            tasks: DashMap::new(),
+            replication_tasks: DashMap::new(),
+            offloading_tasks: DashMap::new(),
+            promotion_tasks: DashMap::new(),
+            promotion_sketch: RwLock::new(crate::count_min_sketch::CountMinSketch::new()),
+            drain_jobs: DashMap::new(),
+            allocator: RwLock::new(crate::allocator::SegmentAllocator::new()),
+            nof_allocator: RwLock::new(crate::allocator::SegmentAllocator::new()),
+            storage_backend: RwLock::new(None),
+            promotion_in_flight: AtomicUsize::new(0),
+            view_version: std::sync::atomic::AtomicI64::new(0),
+            runtime_config: crate::service::state::MasterRuntimeConfig::default(),
+            pending_remote_pulls: DashMap::new(),
+            nof_heartbeat_states: DashMap::new(),
+        })
+    }
+
+    #[test]
+    fn test_apply_put_end_removes_processing_key() {
+        let state = make_state();
+        state.processing_keys.insert("k1".to_string(), ());
+        let applier = OpLogApplier::new(state.clone());
+
+        let payload = r#"{"op":"put_end","key":"k1","size":100}"#;
+        let entries = vec![OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload: payload.to_string(),
+        }];
+        let n = applier.apply_op_log_entries(&entries);
+        assert_eq!(n, 1);
+        assert!(!state.processing_keys.contains_key("k1"));
+    }
+
+    #[test]
+    fn test_apply_remove() {
+        let state = make_state();
+        state.objects.insert(
+            "k1".to_string(),
+            crate::service::state::ObjectEntry {
+                replicas: vec![],
+                size: 0,
+                last_access: std::time::SystemTime::now(),
+                hard_pinned: false,
+                data_type: mooncake_store_core::ObjectDataType::General,
+                client_id: uuid::Uuid::nil(),
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: "default".to_string(),
+                user_key: "k1".to_string(),
+            },
+        );
+        let applier = OpLogApplier::new(state.clone());
+
+        let payload = r#"{"op":"remove","key":"k1"}"#;
+        let entries = vec![OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload: payload.to_string(),
+        }];
+        let n = applier.apply_op_log_entries(&entries);
+        assert_eq!(n, 1);
+        assert!(!state.objects.contains_key("k1"));
+    }
+
+    #[test]
+    fn test_skip_already_applied() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state);
+        applier.recover(5); // expected = 6
+
+        let payload = r#"{"op":"remove","key":"old"}"#;
+        let entries = vec![OpLogRecord {
+            seq: 3, // seq < expected → skip
+            producer_view_version: 1,
+            payload: payload.to_string(),
+        }];
+        let n = applier.apply_op_log_entries(&entries);
+        assert_eq!(n, 0); // skipped, already applied
+    }
+
+    #[test]
+    fn test_skip_gap() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state);
+        // expected = 1, but entry has seq=5 → gap, skip
+        let payload = r#"{"op":"remove","key":"k1"}"#;
+        let entries = vec![OpLogRecord {
+            seq: 5,
+            producer_view_version: 1,
+            payload: payload.to_string(),
+        }];
+        let n = applier.apply_op_log_entries(&entries);
+        assert_eq!(n, 0); // gap, not applied
+    }
+}

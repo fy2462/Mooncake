@@ -38,8 +38,10 @@
 // ============================================================================
 
 pub mod coordinator;
+pub mod oplog_applier;
 pub mod snapshot;
 pub mod standby;
+pub mod state_machine;
 pub mod supervisor;
 pub mod types;
 
@@ -52,9 +54,10 @@ pub use standby::{
     CapabilityDrivenStandbyController, MasterServiceSupervisorConfig, NoopStandbyController,
     StandbyController, StandbyRuntimeCapabilities,
 };
-pub use supervisor::MasterServiceSupervisor;
+pub use state_machine::StandbyStateMachine;
+pub use supervisor::{LeadershipMonitorHandle, MasterServiceSupervisor};
 pub use types::{
     parse_ha_backend_type, AcquireLeadershipResult, HABackendSpec, HABackendType, HaError,
     LeaderRole, LeadershipHandle, MasterRuntimeState, MasterView, OpLogPollResult, OpLogRecord,
-    RuntimeStateCallback, StandbyState, StandbySyncStatus,
+    RuntimeStateCallback, StandbyEvent, StandbyState, StandbySyncStatus, StateTransitionResult,
 };

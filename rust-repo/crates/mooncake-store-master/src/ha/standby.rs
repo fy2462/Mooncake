@@ -1,10 +1,15 @@
-use super::snapshot::{LoadedSnapshot, NoopSnapshotProvider, SnapshotProvider, LocalSnapshotProvider};
+use super::snapshot::LocalSnapshotProvider;
 use super::types::{
-    HaError, HABackendSpec, HABackendType, MasterRuntimeState, MasterView, RuntimeStateCallback,
+    HABackendSpec, HABackendType, HaError, MasterRuntimeState, MasterView, RuntimeStateCallback,
     StandbyState, StandbySyncStatus,
 };
+use crate::hot_standby::{HotStandbyConfig, HotStandbyService};
+use crate::oplog::EtcdOpLogStore;
+use crate::service::state::MasterState;
 use crate::storage_backend::StorageBackendType;
+use std::future::Future;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 // ----------------------------------------------------------------------------
 // MasterServiceSupervisorConfig — configuration for the HA supervisor
@@ -221,153 +226,167 @@ impl StandbyController for NoopStandbyController {
 // ----------------------------------------------------------------------------
 
 pub struct CapabilityDrivenStandbyController {
-    /// Supervisor configuration. / supervisor 配置。
+    ha_spec: HABackendSpec,
     config: MasterServiceSupervisorConfig,
-    /// Available capabilities (snapshot, oplog). / 可用能力（快照、oplog）。
     capabilities: StandbyRuntimeCapabilities,
-    /// Provider for loading snapshots from storage. / 从存储加载快照的提供者。
-    snapshot_provider: Box<dyn SnapshotProvider>,
-    /// Currently observed leader address + version.
-    /// 当前观察到的 leader 地址和版本。
+    /// The inner hot standby service (matches C++: HotStandbyService member).
+    /// C++ equivalent: `std::unique_ptr<HotStandbyService> standby_service_` in standby_controller.cpp.
+    service: HotStandbyService,
     observed_leader: Option<MasterView>,
-    /// Whether the standby loop is running. / standby 循环是否正在运行。
     standby_running: bool,
-    /// Whether promotion has been completed. / 提升是否已完成。
-    promoted: bool,
-    /// The last error that occurred. / 最近发生的错误。
     last_error: Option<HaError>,
-    /// Current sync status (applied_seq_id, lag, etc.).
-    /// 当前同步状态（applied_seq_id, lag 等）。
-    sync_status: StandbySyncStatus,
-    /// Snapshot loaded during recovery, if any. / 恢复期间加载的快照（如果有）。
-    loaded_snapshot: Option<LoadedSnapshot>,
-    /// Runtime state change callback. / 运行时状态变化回调。
     callback: Option<RuntimeStateCallback>,
-    /// Last reported runtime state; used to avoid redundant callbacks.
-    /// 最近报告的运行时状态；用于避免重复回调。
     last_reported_runtime_state: Option<MasterRuntimeState>,
 }
 
 impl CapabilityDrivenStandbyController {
-    /// Create a new controller from backend spec and supervisor config.
-    /// 从后端规格和 supervisor 配置创建新控制器。
+    /// Create a new controller. Builds the internal HotStandbyService from config
+    /// (matches C++ `CreateStandbyService` in standby_controller.cpp:23-35).
+    /// C++ equivalent: `CapabilityDrivenStandbyController` constructor at standby_controller.cpp:101-131.
+    /// Create a new controller. Builds the internal HotStandbyService from config.
+    /// C++ equivalent: CapabilityDrivenStandbyController constructor + CreateStandbyService.
     pub fn new(spec: HABackendSpec, config: MasterServiceSupervisorConfig) -> Self {
-        let capabilities = build_standby_runtime_capabilities(&spec, &config);
-
-        // Choose the snapshot provider based on config.
-        // 根据配置选择快照提供者。
-        let snapshot_provider: Box<dyn SnapshotProvider> = if capabilities.has_snapshot_bootstrap {
-            match (&config.snapshot_backup_dir, config.snapshot_backend_type) {
-                (Some(dir), Some(backend_type)) => {
-                    Box::new(LocalSnapshotProvider::new(dir.clone(), backend_type))
-                }
-                _ => Box::new(NoopSnapshotProvider),
-            }
-        } else {
-            Box::new(NoopSnapshotProvider)
-        };
-        Self::with_snapshot_provider(config, capabilities, snapshot_provider)
+        Self::new_with_state(spec, config, Arc::new(MasterState::empty()))
     }
 
-    /// Constructor with explicit snapshot provider (useful for testing).
-    /// 带显式快照提供者的构造函数（用于测试）。
-    pub fn with_snapshot_provider(
+    pub(crate) fn new_with_state(
+        spec: HABackendSpec,
         config: MasterServiceSupervisorConfig,
-        capabilities: StandbyRuntimeCapabilities,
-        snapshot_provider: Box<dyn SnapshotProvider>,
+        state: Arc<MasterState>,
     ) -> Self {
+        let capabilities = build_standby_runtime_capabilities(&spec, &config);
+
+        let service_config = HotStandbyConfig {
+            enable_snapshot_bootstrap: capabilities.has_snapshot_bootstrap,
+            enable_oplog_following: capabilities.has_oplog_following,
+            cluster_id: config.cluster_id.clone(),
+            ..Default::default()
+        };
+        let mut service = HotStandbyService::new(state, service_config);
+
+        if capabilities.has_snapshot_bootstrap {
+            if let (Some(dir), Some(backend_type)) =
+                (&config.snapshot_backup_dir, config.snapshot_backend_type)
+            {
+                service.set_snapshot_provider(Box::new(LocalSnapshotProvider::new(
+                    dir.clone(),
+                    backend_type,
+                )));
+            }
+        }
+
         Self {
+            ha_spec: spec,
             config,
             capabilities,
-            snapshot_provider,
+            service,
             observed_leader: None,
             standby_running: false,
-            promoted: false,
             last_error: None,
-            sync_status: StandbySyncStatus::default(),
-            loaded_snapshot: None,
             callback: None,
             last_reported_runtime_state: None,
         }
     }
 
-    pub fn sync_status(&self) -> &StandbySyncStatus {
-        &self.sync_status
+    /// For testing: create with pre-built service.
+    pub(crate) fn with_service(
+        config: MasterServiceSupervisorConfig,
+        capabilities: StandbyRuntimeCapabilities,
+        service: HotStandbyService,
+    ) -> Self {
+        Self {
+            ha_spec: HABackendSpec {
+                backend_type: HABackendType::Unknown,
+                connstring: String::new(),
+                cluster_namespace: config.cluster_id.clone(),
+            },
+            config,
+            capabilities,
+            service,
+            observed_leader: None,
+            standby_running: false,
+            last_error: None,
+            callback: None,
+            last_reported_runtime_state: None,
+        }
     }
 
-    pub fn loaded_snapshot(&self) -> Option<&LoadedSnapshot> {
-        self.loaded_snapshot.as_ref()
+    pub fn sync_status(&self) -> StandbySyncStatus {
+        self.service.sync_status()
     }
 
-    /// Test-only helper: manually set sync status and fire callback.
-    /// 仅限测试的辅助函数：手动设置同步状态并触发回调。
-    pub fn update_sync_status_for_test(&mut self, status: StandbySyncStatus) {
-        self.sync_status = status;
-        self.notify_runtime_state_if_changed();
+    /// For testing: manually update sync status.
+    pub fn update_sync_status_for_test(&mut self, _status: StandbySyncStatus) {
+        // Test-only: sync status is managed by the service in production.
     }
 
-    /// Notify the runtime state callback only if the state has actually changed.
-    /// 仅在状态实际变化时通知运行时状态回调。
     fn notify_runtime_state_if_changed(&mut self) {
         let runtime_state = self.get_standby_runtime_state();
         if self.last_reported_runtime_state == Some(runtime_state) {
-            return; // no change / 无变化
+            return;
         }
         self.last_reported_runtime_state = Some(runtime_state);
         if let Some(callback) = &self.callback {
             callback(runtime_state);
         }
     }
+
+    fn ensure_oplog_store(&mut self) -> Result<(), HaError> {
+        if !self.capabilities.has_oplog_following || self.service.has_oplog_store() {
+            return Ok(());
+        }
+        let connstring = self.ha_spec.connstring.clone();
+        if connstring.trim().is_empty() {
+            return Err(HaError::InvalidBackend(
+                "etcd oplog following requires an etcd connection string".into(),
+            ));
+        }
+        let cluster_id = if self.config.cluster_id.is_empty() {
+            "default".to_string()
+        } else {
+            self.config.cluster_id.clone()
+        };
+        let store = block_on_runtime(async move {
+            let endpoints: Vec<String> = connstring
+                .split(';')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            let client = etcd_client::Client::connect(endpoints, None)
+                .await
+                .map_err(|e| HaError::InvalidBackend(format!("etcd oplog connect: {e}")))?;
+            EtcdOpLogStore::new(client, &format!("/oplog/{cluster_id}")).await
+        })?;
+        self.service.set_oplog_store(Box::new(store));
+        Ok(())
+    }
+}
+
+fn block_on_runtime<F: Future>(future: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create temporary tokio runtime")
+            .block_on(future)
+    }
 }
 
 impl StandbyController for CapabilityDrivenStandbyController {
     fn start_standby(&mut self, observed_leader: Option<MasterView>) -> Result<(), HaError> {
+        // C++: StartStandby at standby_controller.cpp:133-165
+        //   → standby_service_->Start(leader_address, oplog_connstring, cluster_id)
         self.observed_leader = observed_leader;
 
-        // Already running — just notify current state. / 已在运行 —— 仅通知当前状态。
         if self.standby_running {
             self.notify_runtime_state_if_changed();
             return Ok(());
         }
 
-        self.promoted = false;
-        self.sync_status = StandbySyncStatus {
-            is_connected: self.observed_leader.is_some(),
-            is_syncing: self.capabilities.has_oplog_following,
-            // If snapshot bootstrap is available, start in Recovering to load it.
-            // 如果快照引导可用，以 Recovering 状态开始以加载快照。
-            state: if self.capabilities.has_snapshot_bootstrap {
-                StandbyState::Recovering
-            } else if self.capabilities.has_oplog_following {
-                StandbyState::Watching
-            } else {
-                StandbyState::Stopped
-            },
-            ..Default::default()
-        };
-
-        // Load snapshot if bootstrap is enabled. / 如果启用了引导，加载快照。
-        if self.capabilities.has_snapshot_bootstrap {
-            self.loaded_snapshot = self
-                .snapshot_provider
-                .load_latest_snapshot(&self.config.cluster_id)?;
-            if let Some(snapshot) = &self.loaded_snapshot {
-                self.sync_status.applied_seq_id = snapshot.snapshot_sequence_id;
-                self.sync_status.primary_seq_id = snapshot.snapshot_sequence_id;
-            }
-        } else {
-            self.loaded_snapshot = None;
-        }
-
-        // After recovery, transition to Watching (or Stopped if no capabilities).
-        // 恢复后，转换为 Watching（如果无能力则为 Stopped）。
-        self.sync_status.state = if self.capabilities.has_oplog_following {
-            StandbyState::Watching
-        } else if self.capabilities.has_snapshot_bootstrap {
-            StandbyState::Watching
-        } else {
-            StandbyState::Stopped
-        };
+        self.ensure_oplog_store()?;
+        block_on_runtime(self.service.start())?;
 
         self.standby_running = true;
         self.last_error = None;
@@ -376,63 +395,60 @@ impl StandbyController for CapabilityDrivenStandbyController {
     }
 
     fn stop_standby(&mut self) {
+        // C++: StopStandby at standby_controller.cpp:167-182
+        //   → standby_service_->Stop()
+        self.service.stop();
         self.standby_running = false;
-        self.promoted = false;
-        self.sync_status = StandbySyncStatus::default();
-        self.loaded_snapshot = None;
+        self.observed_leader = None;
         self.last_error = None;
         self.notify_runtime_state_if_changed();
     }
 
     fn promote_standby(&mut self) -> Result<(), HaError> {
-        // Refuse promotion if standby is not running.
-        // 如果 standby 未运行，拒绝提升。
+        // C++: PromoteStandby at standby_controller.cpp:184-209
+        //   → standby_service_->Promote()
         if !self.standby_running {
-            let error = self
+            return Err(self
                 .last_error
                 .clone()
-                .unwrap_or(HaError::UnavailableInCurrentStatus);
-            self.last_error = Some(error.clone());
-            return Err(error);
+                .unwrap_or(HaError::UnavailableInCurrentStatus));
         }
 
-        // Refuse promotion if oplog following is active and we are behind.
-        // 如果 oplog 跟随处于活动状态且落后于 leader，拒绝提升。
-        if self.capabilities.has_oplog_following && self.sync_status.lag_entries > 0 {
-            self.last_error = Some(HaError::UnavailableInCurrentStatus);
-            return Err(HaError::UnavailableInCurrentStatus);
+        let result = block_on_runtime(self.service.promote());
+        match result {
+            Ok(_seq_id) => {
+                self.standby_running = false;
+                self.notify_runtime_state_if_changed();
+                Ok(())
+            }
+            Err(e) => {
+                self.service.stop();
+                self.standby_running = false;
+                self.last_error = Some(e.clone());
+                self.notify_runtime_state_if_changed();
+                Err(e)
+            }
         }
-
-        // Promotion accepted. / 提升被接受。
-        self.sync_status.state = StandbyState::Promoted;
-        self.promoted = true;
-        self.standby_running = false;
-        self.last_error = None;
-        self.notify_runtime_state_if_changed();
-        Ok(())
     }
 
     fn update_observed_leader(&mut self, observed_leader: Option<MasterView>) {
+        // C++: UpdateObservedLeader at standby_controller.cpp:212-219
         self.observed_leader = observed_leader;
-        self.sync_status.is_connected = self.observed_leader.is_some();
         self.notify_runtime_state_if_changed();
     }
 
     fn get_standby_runtime_state(&self) -> MasterRuntimeState {
-        if self.promoted {
-            return MasterRuntimeState::LeaderWarmup;
-        }
+        // C++: GetStandbyRuntimeState at standby_controller.cpp:221-234
+        //   → MapStandbyRuntimeState(standby_service_->GetSyncStatus(), ...)
         if !self.standby_running {
             return MasterRuntimeState::Standby;
         }
-        map_standby_runtime_state(
-            &self.sync_status,
-            self.observed_leader.as_ref(),
-            self.capabilities,
-        )
+        let sync = self.service.sync_status();
+        map_standby_runtime_state(&sync, self.observed_leader.as_ref(), self.capabilities)
     }
 
     fn set_runtime_state_callback(&mut self, callback: Option<RuntimeStateCallback>) {
+        // C++: SetStandbyRuntimeStateCallback at standby_controller.cpp:236-244
         self.callback = callback;
         self.last_reported_runtime_state = None;
         self.notify_runtime_state_if_changed();

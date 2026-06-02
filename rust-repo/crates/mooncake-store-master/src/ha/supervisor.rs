@@ -1,30 +1,42 @@
 use super::standby::StandbyController;
 use super::types::{HaError, MasterRuntimeState, MasterView};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ----------------------------------------------------------------------------
 // MasterServiceSupervisor — top-level HA coordinator
-// MasterServiceSupervisor —— 顶层 HA 协调器
-//
-// Coordinates leader election and hot standby switching. Manages the
-// `runtime_state` field used by gRPC handlers to decide whether to accept
-// client requests (only in Serving/LeaderWarmup states).
-//
-// 协调 Leader 选举和热备切换。管理 runtime_state 字段，gRPC 处理器
-// 使用该字段决定是否接受客户端请求（仅在 Serving/LeaderWarmup 状态接受）。
-//
-// C++ equivalent: MasterServiceSupervisor in ha_service.h
 // ----------------------------------------------------------------------------
 
 pub struct MasterServiceSupervisor {
-    /// Current runtime state, shared with gRPC handlers via Arc.
-    /// 当前运行时状态，通过 Arc 与 gRPC 处理器共享。
     runtime_state: Arc<Mutex<MasterRuntimeState>>,
-    /// Currently observed leader, if any. / 当前观察到的 leader（如果有）。
     observed_leader: Arc<Mutex<Option<MasterView>>>,
-    /// The underlying standby controller (Noop or CapabilityDriven).
-    /// 底层 standby 控制器（Noop 或 CapabilityDriven）。
     standby_controller: Box<dyn StandbyController>,
+    /// Gate for standby runtime state updates. Disabled when becoming leader.
+    /// C++ equivalent: `accept_standby_runtime_updates` atomic in master_service_supervisor.cpp.
+    pub(crate) accept_standby_runtime_updates: Arc<AtomicBool>,
+}
+
+/// Handle for the LeadershipMonitor background task.
+/// On drop, the monitor task is aborted.
+/// C++ equivalent: `LeadershipMonitorHandle` in master_service_supervisor.cpp.
+pub struct LeadershipMonitorHandle {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl LeadershipMonitorHandle {
+    pub fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for LeadershipMonitorHandle {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            h.abort();
+        }
+    }
 }
 
 impl MasterServiceSupervisor {
@@ -38,16 +50,21 @@ impl MasterServiceSupervisor {
     pub fn new(mut standby_controller: Box<dyn StandbyController>) -> Self {
         let runtime_state = Arc::new(Mutex::new(MasterRuntimeState::Starting));
         let runtime_state_for_callback = runtime_state.clone();
+        let accept_standby = Arc::new(AtomicBool::new(true));
+        let gate = accept_standby.clone();
         standby_controller.set_runtime_state_callback(Some(Arc::new(move |state| {
-            *runtime_state_for_callback
-                .lock()
-                .expect("supervisor runtime state mutex poisoned") = state;
+            if gate.load(Ordering::Acquire) {
+                *runtime_state_for_callback
+                    .lock()
+                    .expect("supervisor runtime state mutex poisoned") = state;
+            }
         })));
 
         Self {
             runtime_state,
             observed_leader: Arc::new(Mutex::new(None)),
             standby_controller,
+            accept_standby_runtime_updates: accept_standby,
         }
     }
 
@@ -86,6 +103,22 @@ impl MasterServiceSupervisor {
         Ok(())
     }
 
+    /// Disable standby runtime state updates (called when becoming leader).
+    /// C++ equivalent: `accept_standby_runtime_updates.store(false)` in master_service_supervisor.cpp.
+    ///
+    /// 禁用 standby 运行时状态更新（成为 leader 时调用）。
+    pub fn disable_standby_updates(&self) {
+        self.accept_standby_runtime_updates
+            .store(false, Ordering::Release);
+    }
+
+    /// Re-enable standby runtime state updates (called when returning to standby).
+    /// 重新启用 standby 运行时状态更新（回到 standby 时调用）。
+    pub fn enable_standby_updates(&self) {
+        self.accept_standby_runtime_updates
+            .store(true, Ordering::Release);
+    }
+
     /// Activate the Serving state: the master is now handling client traffic.
     /// 激活 Serving 状态：master 现在处理客户端流量。
     pub fn activate_serving_state(&self) {
@@ -93,6 +126,24 @@ impl MasterServiceSupervisor {
             .runtime_state
             .lock()
             .expect("supervisor runtime state mutex poisoned") = MasterRuntimeState::Serving;
+    }
+
+    /// Deactivate the serving state: clear service availability.
+    /// C++ equivalent: `DeactivateServingState` in master_service_supervisor.cpp.
+    ///
+    /// 停用 Serving 状态：清除服务可用性。
+    pub fn deactivate_serving_state(&self) {
+        *self
+            .runtime_state
+            .lock()
+            .expect("supervisor runtime state mutex poisoned") = MasterRuntimeState::Standby;
+    }
+
+    /// Update the observed leader view.
+    /// 更新观测到的 leader view。
+    pub fn update_observed_leader(&mut self, view: Option<MasterView>) {
+        *self.observed_leader.lock().expect("mutex poisoned") = view.clone();
+        self.standby_controller.update_observed_leader(view);
     }
 
     /// Read the current runtime state. / 读取当前运行时状态。

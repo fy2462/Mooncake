@@ -29,7 +29,11 @@
 // Both can be enabled independently or together for layered recovery.
 // 两者可独立启用或一起启用以实现分层恢复。
 
-use crate::ha::{HaError, SnapshotProvider, StandbyState, StandbySyncStatus};
+use crate::ha::oplog_applier::OpLogApplier;
+use crate::ha::{
+    HaError, SnapshotProvider, StandbyEvent, StandbyState, StandbyStateMachine, StandbySyncStatus,
+};
+use crate::oplog::OpLogStore;
 use crate::service::state::MasterState;
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -81,16 +85,60 @@ pub struct HotStandbyService {
     config: HotStandbyConfig,
     /// Standby synchronization status (state, lag, sequence IDs).
     /// 备用同步状态（状态、延迟、序列 ID）。
-    sync_status: parking_lot::RwLock<StandbySyncStatus>,
+    sync_status: Arc<parking_lot::RwLock<StandbySyncStatus>>,
     /// Shutdown signal sender — dropping or sending triggers graceful stop.
     /// 关闭信号发送器 —— drop 或发送触发优雅停止。
     shutdown_tx: Option<watch::Sender<()>>,
     /// Optional snapshot provider for bootstrap recovery.
     /// 可选的快照提供者，用于引导恢复。
     snapshot_provider: Option<Box<dyn SnapshotProvider>>,
+    /// Standby state machine (validated transitions).
+    state_machine: Arc<StandbyStateMachine>,
+    /// OpLog applier for replaying leader mutations.
+    oplog_applier: Option<Arc<OpLogApplier>>,
+    /// OpLog store for reading the leader's oplog (shared between start and promote).
+    oplog_store: Option<Arc<dyn OpLogStore>>,
+    /// Replication loop thread handle.
+    replication_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for HotStandbyService {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        self.state_machine.process_event(StandbyEvent::Stop);
+        if let Some(handle) = self.replication_thread.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl HotStandbyService {
+    /// Create a new HotStandbyService.
+    pub(crate) fn new(state: Arc<MasterState>, config: HotStandbyConfig) -> Self {
+        Self {
+            state,
+            config,
+            sync_status: Arc::new(parking_lot::RwLock::new(StandbySyncStatus::default())),
+            shutdown_tx: None,
+            snapshot_provider: None,
+            state_machine: Arc::new(StandbyStateMachine::new()),
+            oplog_applier: None,
+            oplog_store: None,
+            replication_thread: None,
+        }
+    }
+
+    /// Inject an OpLog store for oplog following.
+    pub fn set_oplog_store(&mut self, store: Box<dyn OpLogStore>) {
+        self.oplog_store = Some(Arc::from(store));
+    }
+
+    pub fn has_oplog_store(&self) -> bool {
+        self.oplog_store.is_some()
+    }
+
     /// Set the snapshot provider for bootstrap recovery.
     /// 设置快照提供者用于引导恢复。
     pub fn set_snapshot_provider(&mut self, provider: Box<dyn SnapshotProvider>) {
@@ -219,18 +267,57 @@ impl HotStandbyService {
         // Phase 2: Start oplog following (if enabled)
         // 阶段 2：启动 oplog 跟随（若启用）
         if self.config.enable_oplog_following {
-            let mut status = self.sync_status.write();
-            status.state = StandbyState::Watching;
-            status.is_syncing = true;
-            drop(status);
-            // NOTE: actual oplog following requires a shared OpLogStore.
-            // For now, mark as watching — the store should be injected externally.
-            // 注意：实际的 oplog 跟随需要共享的 OpLogStore。
-            // 目前标记为 watching —— store 应由外部注入。
-            info!("HotStandbyService: started oplog following mode");
+            let applier = Arc::new(OpLogApplier::new(self.state.clone()));
+            self.oplog_applier = Some(applier.clone());
+
+            self.state_machine.process_event(StandbyEvent::Connected);
+            self.state_machine.process_event(StandbyEvent::SyncComplete);
+
+            // Spawn ReplicationLoop.
+            let (shutdown_tx, shutdown_rx) = watch::channel(());
+            self.shutdown_tx = Some(shutdown_tx);
+            let oplog_store = self.oplog_store.clone();
+            let state_machine = self.state_machine.clone();
+            let applier_clone = applier.clone();
+            {
+                let mut status = self.sync_status.write();
+                status.state = StandbyState::Watching;
+                status.is_syncing = true;
+                status.is_connected = true;
+            }
+            let sync_status_ref = Arc::downgrade(&self.sync_status);
+
+            let handle = std::thread::spawn(move || {
+                let interval = std::time::Duration::from_secs(1);
+                loop {
+                    if shutdown_rx.has_changed().unwrap_or(true) {
+                        break;
+                    }
+                    if !state_machine.is_connected() {
+                        std::thread::sleep(interval);
+                        continue;
+                    }
+                    let expected = applier_clone.get_expected_sequence_id();
+                    let applied = if expected > 0 { expected - 1 } else { 0 };
+                    let primary = oplog_store
+                        .as_ref()
+                        .map(|s| s.latest_sequence())
+                        .unwrap_or(applied);
+
+                    if let Some(s) = sync_status_ref.upgrade() {
+                        let mut st = s.write();
+                        st.applied_seq_id = applied;
+                        st.primary_seq_id = primary;
+                        st.lag_entries = primary.saturating_sub(applied);
+                    }
+
+                    std::thread::sleep(interval);
+                }
+            });
+            self.replication_thread = Some(handle);
+
+            info!("HotStandbyService: started oplog following mode with ReplicationLoop");
         } else {
-            // No oplog → go straight to Watching (ready but not syncing)
-            // 无 oplog → 直接进入 Watching（就绪但不同步）
             let mut status = self.sync_status.write();
             status.state = StandbyState::Watching;
             drop(status);
@@ -247,6 +334,10 @@ impl HotStandbyService {
     pub fn stop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
+        }
+        self.state_machine.process_event(StandbyEvent::Stop);
+        if let Some(handle) = self.replication_thread.take() {
+            let _ = handle.join();
         }
         let mut status = self.sync_status.write();
         status.state = StandbyState::Stopped;
@@ -265,14 +356,67 @@ impl HotStandbyService {
     ///
     /// 提升为 Leader：状态转为 Promoting → Promoted，返回已应用的 oplog 序列号。
     pub async fn promote(&mut self) -> Result<u64, HaError> {
-        let mut status = self.sync_status.write();
-        status.state = StandbyState::Promoting;
-        drop(status);
+        let result = self.state_machine.process_event(StandbyEvent::Promote);
+        if !result.allowed {
+            return Err(HaError::UnavailableInCurrentStatus);
+        }
 
-        let applied = {
-            let s = self.sync_status.read();
-            s.applied_seq_id
-        };
+        // Stop oplog following.
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.replication_thread.take() {
+            let _ = handle.join();
+        }
+
+        // Gap resolution + final catch-up.
+        // C++: ResolvePromotionGapsLocked (3 retries, stops when all gaps filled).
+        if let Some(ref applier) = self.oplog_applier {
+            if let Some(ref store) = self.oplog_store {
+                for _ in 0..3 {
+                    let (needed, fetched) = applier.try_resolve_gaps_once(store.as_ref(), 1024);
+                    // Match C++: stop when all needed entries were fetched.
+                    if needed == 0 || fetched >= needed {
+                        break;
+                    }
+                }
+                // Final catch-up (C++: FinalCatchUpForPromotionLocked).
+                // Uses same store (shared Arc) — C++ creates a NEW store, but in
+                // Rust the Arc clone preserves the store reference.
+                let expected = applier.get_expected_sequence_id();
+                let latest = store.latest_sequence();
+                if latest > expected {
+                    let start = std::time::Instant::now();
+                    let timeout = std::time::Duration::from_secs(30);
+                    for _ in 0..100 {
+                        if start.elapsed() >= timeout {
+                            break;
+                        }
+                        let to_read = ((latest - expected) as usize).min(1000);
+                        if to_read == 0 {
+                            break;
+                        }
+                        if let Ok(entries) = store.read_since(expected, to_read) {
+                            if entries.is_empty() {
+                                break;
+                            }
+                            applier.apply_op_log_entries(&entries);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        self.state_machine
+            .process_event(StandbyEvent::PromotionSuccess);
+
+        let applied = self
+            .oplog_applier
+            .as_ref()
+            .map(|a| a.get_expected_sequence_id())
+            .unwrap_or(0);
 
         let mut status = self.sync_status.write();
         status.state = StandbyState::Promoted;

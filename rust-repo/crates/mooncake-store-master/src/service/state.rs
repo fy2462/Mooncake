@@ -99,6 +99,39 @@ pub(crate) struct MasterState {
     pub(crate) nof_heartbeat_states: DashMap<Uuid, NoFHeartbeatState>,
 }
 
+impl MasterState {
+    /// Create a completely empty MasterState (for standby bootstrap).
+    pub(crate) fn empty() -> Self {
+        use crate::allocator::SegmentAllocator;
+        use crate::count_min_sketch::CountMinSketch;
+        use parking_lot::RwLock;
+        use std::sync::atomic::{AtomicI64, AtomicUsize};
+        Self {
+            clients: DashMap::new(),
+            objects: DashMap::new(),
+            processing_keys: DashMap::new(),
+            client_objects: DashMap::new(),
+            segments: DashMap::new(),
+            nof_segments: DashMap::new(),
+            local_disk_segments: DashMap::new(),
+            tasks: DashMap::new(),
+            replication_tasks: DashMap::new(),
+            offloading_tasks: DashMap::new(),
+            promotion_tasks: DashMap::new(),
+            promotion_sketch: RwLock::new(CountMinSketch::new()),
+            drain_jobs: DashMap::new(),
+            allocator: RwLock::new(SegmentAllocator::new()),
+            nof_allocator: RwLock::new(SegmentAllocator::new()),
+            storage_backend: RwLock::new(None),
+            promotion_in_flight: AtomicUsize::new(0),
+            view_version: AtomicI64::new(0),
+            runtime_config: MasterRuntimeConfig::default(),
+            pending_remote_pulls: DashMap::new(),
+            nof_heartbeat_states: DashMap::new(),
+        }
+    }
+}
+
 /// Tracks the start time of a remote fetch for a key.
 /// 记录某个 key 的回源拉取开始时间。
 #[derive(Debug, Clone)]

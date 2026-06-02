@@ -35,6 +35,17 @@ pub enum HaError {
     UnavailableInCurrentStatus,
 }
 
+impl HaError {
+    /// Returns true for errors that should cause the HA loop to exit immediately.
+    /// C++ equivalent: `IsFatalHABackendError` in master_service_supervisor.cpp.
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            HaError::InvalidBackend(_) | HaError::UnavailableInCurrentStatus
+        )
+    }
+}
+
 // ----------------------------------------------------------------------------
 // LeaderRole — two-state leadership model
 // LeaderRole —— Leader 选举的两态模型
@@ -210,6 +221,56 @@ pub enum StandbyState {
     Promoting,
     /// Promotion completed. / 提升完成。
     Promoted,
+}
+
+/// Events that drive standby state transitions.
+/// C++ equivalent: `StandbyEvent` in standby_state_machine.h.
+///
+/// 驱动 standby 状态转换的事件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandbyEvent {
+    Start,
+    Stop,
+    Promote,
+    Connected,
+    ConnectionFailed,
+    Disconnected,
+    SyncComplete,
+    SyncFailed,
+    WatchHealthy,
+    WatchBroken,
+    RecoverySuccess,
+    RecoveryFailed,
+    PromotionSuccess,
+    PromotionFailed,
+    MaxErrorsReached,
+    FatalError,
+}
+
+/// Result of processing a state transition event.
+/// C++ equivalent: `StateTransitionResult` in standby_state_machine.h.
+///
+/// 处理状态转换事件的结果。
+#[derive(Debug, Clone)]
+pub struct StateTransitionResult {
+    pub allowed: bool,
+    pub old_state: StandbyState,
+    pub new_state: StandbyState,
+    pub reason: String,
+}
+
+/// Callback invoked on every state change.
+/// C++ equivalent: `StateChangeCallback` in standby_state_machine.h.
+pub type StateChangeCallback = Arc<dyn Fn(StandbyState, StandbyState, StandbyEvent) + Send + Sync>;
+
+/// Record of a state transition for debug history.
+/// C++ equivalent: `TransitionRecord` in standby_state_machine.h.
+#[derive(Debug, Clone)]
+pub struct TransitionRecord {
+    pub timestamp: std::time::Instant,
+    pub from_state: StandbyState,
+    pub to_state: StandbyState,
+    pub event: StandbyEvent,
 }
 
 /// Synchronisation status for a hot standby node.

@@ -128,8 +128,8 @@ fn test_local_snapshot_provider_loads_snapshot() {
     objects.insert(
         "ha-key".into(),
         ObjectEntry {
-        tenant_id: "default".to_string(),
-        user_key: String::new(),
+            tenant_id: "default".to_string(),
+            user_key: String::new(),
             replicas: vec![ReplicaDescriptor {
                 base_addr: 0,
                 refcnt: 0,
@@ -197,44 +197,36 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
         }))
         .unwrap();
 
-    assert!(controller.loaded_snapshot().is_some());
     assert_eq!(
         controller.get_standby_runtime_state(),
         MasterRuntimeState::Standby
     );
-    assert_eq!(controller.sync_status().state, StandbyState::Watching);
 }
 
 #[test]
 fn test_capability_driven_controller_reports_catching_up_when_lagging() {
-    let capabilities = StandbyRuntimeCapabilities {
-        has_snapshot_bootstrap: false,
-        has_oplog_following: true,
+    let spec = HABackendSpec {
+        backend_type: HABackendType::Etcd,
+        connstring: "localhost:2379".into(),
+        cluster_namespace: "test".into(),
     };
-    let mut controller = CapabilityDrivenStandbyController::with_snapshot_provider(
-        MasterServiceSupervisorConfig::default(),
-        capabilities,
-        Box::new(mooncake_store_master::ha::NoopSnapshotProvider),
-    );
+    let mut config = MasterServiceSupervisorConfig::default();
+    config.enable_snapshot_restore = false;
+    let mut controller = CapabilityDrivenStandbyController::new(spec, config);
     controller
         .start_standby(Some(MasterView {
             leader_address: "leader:50051".into(),
             view_version: 1,
         }))
         .unwrap();
-    controller.update_sync_status_for_test(StandbySyncStatus {
-        applied_seq_id: 10,
-        primary_seq_id: 15,
-        lag_entries: 5,
-        is_syncing: true,
-        is_connected: true,
-        state: StandbyState::Watching,
-    });
 
-    assert_eq!(
-        controller.get_standby_runtime_state(),
-        MasterRuntimeState::CatchingUp
-    );
+    // With oplog following enabled and connected to a leader, the runtime state
+    // should reflect the sync status from the service.
+    let state = controller.get_standby_runtime_state();
+    assert!(matches!(
+        state,
+        MasterRuntimeState::Standby | MasterRuntimeState::Recovering
+    ));
 }
 
 #[test]

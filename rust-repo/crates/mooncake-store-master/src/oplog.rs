@@ -41,6 +41,7 @@ use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use tracing::warn;
@@ -118,7 +119,8 @@ impl InMemoryOpLog {
             seq: 0,
             producer_view_version,
             payload: payload.into(),
-        }).unwrap_or_default()
+        })
+        .unwrap_or_default()
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -560,33 +562,28 @@ impl OpLogStore for EtcdOpLogStore {
             seq: self.last_seq,
             ..entry.clone()
         });
+        block_on_runtime(self.flush())?;
         Ok(self.last_seq)
     }
 
     fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
-        // Read from buffered entries first (fast path)
-        let mut entries: Vec<OpLogRecord> = self
-            .buffer
-            .iter()
-            .filter(|r| r.seq >= since_seq)
-            .take(max_count)
-            .cloned()
-            .collect();
-        if entries.len() >= max_count {
-            entries.truncate(max_count);
-            return Ok(entries);
-        }
-        let remaining = max_count - entries.len();
-
-        // We can't easily do async etcd reads from &self (sync context).
-        // For now, return buffered entries. Full async reads require an async
-        // read_since variant.
-        let _ = remaining;
-        Ok(entries)
+        block_on_runtime(self.read_since_async(since_seq, max_count))
     }
 
     fn latest_sequence(&self) -> u64 {
-        self.last_seq
+        let c = self.client.clone();
+        let latest_key = self.latest_key();
+        block_on_runtime(async move {
+            match c.kv_client().get(latest_key.as_bytes(), None).await {
+                Ok(resp) => resp
+                    .kvs()
+                    .first()
+                    .and_then(|kv| String::from_utf8(kv.value().to_vec()).ok())
+                    .and_then(|v| v.parse::<u64>().ok()),
+                Err(_) => None,
+            }
+        })
+        .unwrap_or(self.last_seq)
     }
 
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
@@ -597,6 +594,18 @@ impl OpLogStore for EtcdOpLogStore {
             next_seq,
             timed_out: false,
         }
+    }
+}
+
+fn block_on_runtime<F: Future>(future: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(future))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create temporary tokio runtime")
+            .block_on(future)
     }
 }
 
@@ -647,10 +656,12 @@ impl EtcdOpLogStore {
 
         // Supplement with buffered (not yet flushed) entries
         for entry in &self.buffer {
-            if entry.seq >= since_seq && entries.len() < max_count
-                && !entries.iter().any(|e| e.seq == entry.seq) {
-                    entries.push(entry.clone());
-                }
+            if entry.seq >= since_seq
+                && entries.len() < max_count
+                && !entries.iter().any(|e| e.seq == entry.seq)
+            {
+                entries.push(entry.clone());
+            }
         }
 
         entries.sort_by_key(|e| e.seq);

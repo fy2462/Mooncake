@@ -9,8 +9,8 @@
 use clap::Parser;
 use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{
-    CapabilityDrivenStandbyController, HABackendSpec, HABackendType, LeaderCoordinator,
-    MasterServiceSupervisor, MasterServiceSupervisorConfig,
+    HABackendSpec, HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle,
+    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
 };
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
@@ -152,14 +152,210 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //   2. If no leader → try acquire leadership → warmup → start gRPC server
 //   3. If leader exists → wait for view change and re-check
 // ---------------------------------------------------------------------------
-async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    // --- Create LeaderCoordinator ---
-    // 创建 Leader 协调器（etcd 或 k8s 实现）
-    let coordinator = create_coordinator(&args).await?;
 
-    // --- Parse snapshot / storage config ---
-    // 解析快照和存储配置
-    let snapshot_backend_type = args.snapshot_backend_type.as_deref().and_then(|s| {
+// Helper: enter standby and sleep before continuing the outer loop.
+async fn back_to_standby(supervisor: &mut MasterServiceSupervisor, sleep_secs: u64) {
+    let _ = supervisor.enter_standby_mode(None);
+    tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+}
+
+// Helper: release leadership, enter standby, and sleep.
+async fn release_and_retry(
+    coordinator: &LeaderCoordinator,
+    supervisor: &mut MasterServiceSupervisor,
+    lease_id: i64,
+) {
+    let _ = coordinator.release_leadership(lease_id).await;
+    back_to_standby(supervisor, 1).await;
+}
+
+async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    let (snapshot_backend_type, snapshot_dir) = parse_snapshot_config(&args);
+    let runtime_config = build_runtime_config(&args)?;
+    let leader_oplog_manager = build_leader_oplog_manager(&args, 0).await;
+    let service_arc = std::sync::Arc::new(MasterServiceImpl::new_with_runtime_config(
+        snapshot_backend_type,
+        snapshot_dir.clone(),
+        runtime_config,
+    ));
+    if let Some(manager) = leader_oplog_manager {
+        *service_arc.oplog_manager().lock() = manager;
+    }
+    let ha_spec = build_ha_spec(&args);
+    let supervisor_config = MasterServiceSupervisorConfig {
+        local_hostname: format!("{}:{}", args.rpc_address, args.rpc_port),
+        cluster_id: "default".to_string(),
+        enable_snapshot_restore: snapshot_dir.is_some(),
+        snapshot_backup_dir: snapshot_dir,
+        snapshot_backend_type,
+    };
+    let leader_addr = format!("{}:{}", args.rpc_address, args.rpc_port);
+    info!("HA loop started");
+
+    // --- Outer loop: re-create coordinator each iteration (matches C++) ---
+    loop {
+        let coordinator = match create_coordinator(&args).await {
+            Ok(c) => c,
+            Err(e) => {
+                if e.downcast_ref::<HaError>().map_or(false, |h| h.is_fatal()) {
+                    return Err(e);
+                }
+                warn!("Coordinator creation failed: {}, retrying in 1s", e);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let mut supervisor = new_supervisor(&ha_spec, &supervisor_config, service_arc.clone());
+        if let Err(e) = supervisor.enter_standby_mode(None) {
+            warn!("enter_standby_mode failed: {}, retrying in 1s", e);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+
+        // --- Inner loop: read view, try to acquire leadership ---
+        loop {
+            supervisor.begin_candidacy();
+
+            let current_view = match coordinator.read_current_view().await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("read_current_view failed: {}", e);
+                    if e.is_fatal() {
+                        return Err(Box::new(e));
+                    }
+                    back_to_standby(&mut supervisor, 1).await;
+                    break; // re-create coordinator
+                }
+            };
+
+            info!(
+                "Current view: {}",
+                current_view
+                    .as_ref()
+                    .map(|v| v.leader_address.as_str())
+                    .unwrap_or("none")
+            );
+            supervisor.update_observed_leader(current_view.clone());
+
+            // --- Path A: no leader → bid for it ---
+            if current_view.is_some() {
+                wait_and_continue(&coordinator, &current_view).await;
+                continue; // back to top of inner loop
+            }
+
+            info!("No leader — acquiring leadership");
+            let acquire = match coordinator
+                .try_acquire_leadership(&leader_addr, args.ha_lease_ttl_secs)
+                .await
+            {
+                Ok(r) if r.acquired => r,
+                Ok(_) => {
+                    info!("Not acquired, waiting");
+                    continue;
+                }
+                Err(e) => {
+                    warn!("Acquire error: {}", e);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    break; // re-create coordinator
+                }
+            };
+
+            let lease_id = acquire.lease_id.unwrap_or(0);
+            if service_arc.oplog_manager().lock().store().is_none() {
+                match build_leader_oplog_manager(&args, 0).await {
+                    Some(manager) => {
+                        *service_arc.oplog_manager().lock() = manager;
+                    }
+                    None => {
+                        warn!("Leader oplog store is unavailable, releasing leadership");
+                        release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                        break;
+                    }
+                }
+            }
+            if let Some(view) = &acquire.view {
+                service_arc
+                    .oplog_manager()
+                    .lock()
+                    .set_view_version(view.view_version);
+            }
+            info!("Leadership acquired, lease TTL={}s", args.ha_lease_ttl_secs);
+
+            // Promote standby.
+            if let Err(e) = supervisor.promote_to_leader_warmup() {
+                error!("Promotion failed: {}", e);
+                release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                break;
+            }
+
+            // Start keepalive (background tokio task renews lease every 3s).
+            let keepalive_handle = match coordinator.start_leadership_keepalive(lease_id).await {
+                Ok(handle) => handle,
+                Err(e) => {
+                    error!("Keepalive start failed: {}", e);
+                    release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                    break;
+                }
+            };
+
+            // Active warmup: renew lease every second.
+            if !warmup_with_renewal(&coordinator, lease_id, args.ha_lease_ttl_secs).await {
+                release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                break;
+            }
+
+            // Preflight: final renewal before serving.
+            if let Err(e) = coordinator.try_renew_leadership(lease_id).await {
+                warn!("Preflight renewal failed: {}", e);
+                release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                break;
+            }
+
+            supervisor.disable_standby_updates();
+            supervisor.activate_serving_state();
+
+            // LeadershipMonitor + server. Monitor MUST exist (fallback: dummy tx).
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let monitor = start_leadership_monitor(&args, lease_id, shutdown_tx).await;
+
+            let server_result = run_leader_server(service_arc.clone(), &args, shutdown_rx).await;
+
+            match &server_result {
+                Ok(()) => info!("gRPC server exited cleanly"),
+                Err(e) => error!("gRPC server error: {}", e),
+            }
+
+            // Cleanup.
+            drop(monitor);
+            drop(keepalive_handle);
+            supervisor.deactivate_serving_state();
+            supervisor.enable_standby_updates();
+            let _ = coordinator.release_leadership(lease_id).await;
+
+            // Re-read view before re-entering standby.
+            if let Ok(post_view) = coordinator.read_current_view().await {
+                supervisor.update_observed_leader(post_view.clone());
+                let _ = supervisor.enter_standby_mode(post_view);
+            } else {
+                let _ = supervisor.enter_standby_mode(None);
+            }
+
+            info!("Returning to standby loop");
+            break; // re-create coordinator
+        }
+    }
+}
+
+// --- Helpers ---
+
+fn parse_snapshot_config(
+    args: &Args,
+) -> (
+    Option<mooncake_store_master::storage_backend::StorageBackendType>,
+    Option<std::path::PathBuf>,
+) {
+    let backend = args.snapshot_backend_type.as_deref().and_then(|s| {
         if s == "local-disk" {
             Some(mooncake_store_master::storage_backend::StorageBackendType::LocalDisk)
         } else if s == "hf3fs" {
@@ -168,180 +364,84 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     });
-    let snapshot_dir = args
+    let dir = args
         .snapshot_backup_dir
         .clone()
         .map(std::path::PathBuf::from);
+    (backend, dir)
+}
 
-    // --- Build the gRPC service once (reusable via Arc clones) ---
-    // 一次性构建 gRPC 服务（通过 Arc 克隆复用）
-    let runtime_config = build_runtime_config(&args)?;
-    let service = MasterServiceImpl::new_with_runtime_config(
-        snapshot_backend_type,
-        snapshot_dir.clone(),
-        runtime_config,
-    );
-    let service_arc = std::sync::Arc::new(service);
+fn new_supervisor(
+    ha_spec: &HABackendSpec,
+    config: &MasterServiceSupervisorConfig,
+    service: Arc<MasterServiceImpl>,
+) -> MasterServiceSupervisor {
+    let controller = service.create_ha_standby_controller(ha_spec.clone(), config.clone());
+    MasterServiceSupervisor::new(Box::new(controller))
+}
 
-    // --- Identify HA backend spec ---
-    // 确定 HA 后端规格
-    let ha_spec = build_ha_spec(&args);
-
-    // --- Create standby controller + supervisor ---
-    // 创建 standby 控制器和 supervisor（热备状态管理）
-    let supervisor_config = MasterServiceSupervisorConfig {
-        local_hostname: format!("{}:{}", args.rpc_address, args.rpc_port),
-        cluster_id: "default".to_string(),
-        enable_snapshot_restore: snapshot_dir.is_some(),
-        snapshot_backup_dir: snapshot_dir.clone(),
-        snapshot_backend_type,
-    };
-    let standby_controller = CapabilityDrivenStandbyController::new(ha_spec, supervisor_config);
-    let mut supervisor = MasterServiceSupervisor::new(Box::new(standby_controller));
-
-    info!("HA loop started — entering standby mode");
-    // HA 循环已启动 — 进入 standby 模式
-
-    let leader_addr = format!("{}:{}", args.rpc_address, args.rpc_port);
-
-    // --- Perpetual retry loop ---
-    // 永久重试循环：持续监控 view 变更并在适当时机竞争 leader
-    loop {
-        // 1. Read current view and enter standby
-        // 读取当前 view 并进入 standby
-        let current_view = match coordinator.read_current_view().await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("Failed to read current view: {}, retrying in 5s", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        info!(
-            "Current view: {:?}",
-            current_view
-                .as_ref()
-                .map(|v| v.leader_address.as_str())
-                .unwrap_or("none")
-        );
-
-        if let Err(e) = supervisor.enter_standby_mode(current_view.clone()) {
-            warn!("Failed to enter standby mode: {}, retrying in 5s", e);
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        // 2. If no leader — try to acquire
-        // 若当前无 leader — 尝试获取 leadership
-        if current_view.is_none() {
-            info!("No leader detected, attempting to acquire leadership");
-            // 未检测到 leader，尝试获取 leadership
-            supervisor.begin_candidacy();
-
-            match coordinator
-                .try_acquire_leadership(&leader_addr, args.ha_lease_ttl_secs)
-                .await
-            {
-                Ok(result) if result.acquired => {
-                    info!("Leadership acquired. Lease TTL={}s", args.ha_lease_ttl_secs);
-                    // 成功获取 leadership
-                    let lease_id = result.lease_id.unwrap_or(0);
-
-                    // Promote standby → warmup
-                    // 从 standby 提升到 warmup 状态
-                    if let Err(e) = supervisor.promote_to_leader_warmup() {
-                        error!("Promotion failed: {}, releasing and retrying", e);
-                        let _ = coordinator.release_leadership(lease_id).await;
-                        continue;
-                    }
-
-                    // Start keepalive — 启动 lease 续约
-                    let keepalive_handle =
-                        match coordinator.start_leadership_keepalive(lease_id).await {
-                            Ok(h) => h,
-                            Err(e) => {
-                                error!("Failed to start keepalive: {}, releasing and retrying", e);
-                                let _ = coordinator.release_leadership(lease_id).await;
-                                continue;
-                            }
-                        };
-
-                    // Warmup: wait for lease_ttl to pass so state is stable
-                    // 预热阶段：等待 lease_ttl 时间让状态稳定
-                    let warmup_duration = Duration::from_secs(args.ha_lease_ttl_secs as u64);
-                    let warmup_deadline = tokio::time::Instant::now() + warmup_duration;
-                    info!(
-                        "Warmup phase started ({}s), renewing lease each second",
-                        args.ha_lease_ttl_secs
-                    );
-                    while tokio::time::Instant::now() < warmup_deadline {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    info!("Warmup complete");
-                    // 预热完成
-
-                    supervisor.activate_serving_state();
-
-                    // Start gRPC + metadata + metrics + snapshots
-                    // 启动 gRPC 服务、metadata HTTP、metrics 和定时快照
-                    let server_result =
-                        run_leader_server(service_arc.clone(), &args, keepalive_handle).await;
-
-                    match &server_result {
-                        Ok(()) => info!("gRPC server exited cleanly"),
-                        // gRPC 服务正常退出
-                        Err(e) => warn!("gRPC server exited with error: {}", e),
-                    }
-
-                    // Release leadership on exit
-                    // 退出时释放 leadership
-                    info!("Releasing leadership");
-                    if let Err(e) = coordinator.release_leadership(lease_id).await {
-                        error!("Failed to release leadership: {}", e);
-                    }
-
-                    info!("Returning to standby");
-                    // 回到 standby 状态
-                    continue;
-                }
-                Ok(_not_acquired) => {
-                    info!("Leadership not acquired — view will change, retrying");
-                    // 未获取到 leadership — view 会变更，重试
-                }
-                Err(e) => {
-                    warn!("Leadership acquisition error: {}, retrying", e);
-                }
-            }
-        }
-
-        // 3. Wait for view change before retrying
-        // 等待 view 变更后重试
-        let known_version = current_view.as_ref().map(|v| v.view_version).unwrap_or(0);
-        info!(
-            "Waiting for view change (version={}) for up to 30s",
-            known_version
-        );
-        match coordinator
-            .wait_for_view_change(known_version, Duration::from_secs(30))
-            .await
-        {
-            Ok(Some(new_view)) => {
-                info!(
-                    "View changed: new leader={}, version={}",
-                    new_view.leader_address, new_view.view_version
-                );
-            }
-            Ok(None) => {
-                info!("View change timed out, re-reading current view");
-                // View 变更等待超时，重新读取当前 view
-            }
-            Err(e) => {
-                warn!("Error waiting for view change: {}", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        }
+async fn wait_and_continue(coordinator: &LeaderCoordinator, current_view: &Option<MasterView>) {
+    let version = current_view.as_ref().map(|v| v.view_version).unwrap_or(0);
+    match coordinator
+        .wait_for_view_change(version, Duration::from_secs(1))
+        .await
+    {
+        Ok(Some(v)) => info!(
+            "View changed: leader={}, version={}",
+            v.leader_address, v.view_version
+        ),
+        Ok(None) => {}
+        Err(e) => warn!("View wait error: {}", e),
     }
+}
+
+async fn warmup_with_renewal(
+    coordinator: &LeaderCoordinator,
+    lease_id: i64,
+    ttl_secs: i64,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(ttl_secs as u64);
+    info!("Warmup {}s, renewing each second", ttl_secs);
+    while tokio::time::Instant::now() < deadline {
+        if coordinator.try_renew_leadership(lease_id).await.is_err() {
+            warn!("Warmup renewal failed");
+            return false;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    info!("Warmup complete");
+    true
+}
+
+async fn start_leadership_monitor(
+    args: &Args,
+    lease_id: i64,
+    tx: tokio::sync::watch::Sender<bool>,
+) -> Option<LeadershipMonitorHandle> {
+    // Fallback: if we can't create a monitor coordinator, send shutdown immediately
+    // so the server starts and immediately stops — don't serve without a monitor.
+    let c = match create_coordinator(args).await {
+        Ok(c) => c,
+        Err(e) => {
+            error!(
+                "Monitor coordinator creation failed: {}, sending immediate shutdown",
+                e
+            );
+            let _ = tx.send(true);
+            return None;
+        }
+    };
+    let h = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            if c.try_renew_leadership(lease_id).await.is_err() {
+                warn!("LeadershipMonitor: lease lost, shutting down");
+                let _ = tx.send(true);
+                break;
+            }
+        }
+    });
+    Some(LeadershipMonitorHandle::new(h))
 }
 
 // ---------------------------------------------------------------------------
@@ -453,19 +553,53 @@ async fn create_coordinator(args: &Args) -> Result<LeaderCoordinator, Box<dyn st
         .collect();
 
     if endpoints.is_empty() && args.k8s_namespace.is_some() {
-        // 使用 Kubernetes lease 进行 Leader 选举
-        Ok(LeaderCoordinator::new_k8s(
-            args.k8s_namespace.as_deref().unwrap(),
-            args.k8s_lease_name.as_deref().unwrap_or("mooncake-master"),
-        )
-        .await?)
+        Err(Box::new(HaError::InvalidBackend(
+            "K8s HA backend is not implemented in Rust coordinator".into(),
+        )))
     } else if !endpoints.is_empty() {
         // 使用 etcd 进行 Leader 选举
-        Ok(LeaderCoordinator::new_etcd(endpoints).await?)
+        Ok(LeaderCoordinator::new_etcd(endpoints, "default").await?)
     } else {
         error!("HA mode enabled but neither etcd_endpoints nor k8s_namespace provided");
         Err("HA requires etcd or K8s configuration".into())
     }
+}
+
+async fn build_leader_oplog_manager(
+    args: &Args,
+    view_version: u64,
+) -> Option<mooncake_store_master::oplog::OpLogManager> {
+    let endpoints: Vec<String> = args
+        .etcd_endpoints
+        .as_deref()
+        .unwrap_or("")
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if endpoints.is_empty() {
+        return None;
+    }
+
+    let client = match etcd_client::Client::connect(endpoints, None).await {
+        Ok(client) => client,
+        Err(e) => {
+            warn!("Failed to connect etcd for leader oplog: {}", e);
+            return None;
+        }
+    };
+    let store =
+        match mooncake_store_master::oplog::EtcdOpLogStore::new(client, "/oplog/default").await {
+            Ok(store) => store,
+            Err(e) => {
+                warn!("Failed to initialize leader oplog store: {}", e);
+                return None;
+            }
+        };
+    Some(mooncake_store_master::oplog::OpLogManager::new(
+        Some(Box::new(store)),
+        view_version,
+    ))
 }
 
 /// 构建 HA 后端规格，标识使用的协调后端类型。
@@ -487,7 +621,7 @@ fn build_ha_spec(args: &Args) -> HABackendSpec {
             HABackendType::Unknown
         },
         connstring: args.etcd_endpoints.clone().unwrap_or_default(),
-        cluster_namespace: args.k8s_namespace.clone().unwrap_or_default(),
+        cluster_namespace: "default".to_string(),
     }
 }
 
@@ -499,11 +633,13 @@ fn build_ha_spec(args: &Args) -> HABackendSpec {
 async fn run_leader_server(
     service_arc: Arc<MasterServiceImpl>,
     args: &Args,
-    _keepalive_handle: mooncake_store_master::ha::LeadershipHandle,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Metrics HTTP server
+    let mut background_tasks = Vec::new();
+
+    // Metrics HTTP server.
     let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
-    tokio::spawn(metrics::serve_metrics_http(metrics_addr));
+    background_tasks.push(tokio::spawn(metrics::serve_metrics_http(metrics_addr)));
 
     let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);
     let metadata_addr = SocketAddr::new(
@@ -516,31 +652,55 @@ async fn run_leader_server(
         .set_master_addr(format!("http://{}", rpc_addr))
         .await;
 
-    tokio::spawn(serve_metadata_http(
+    background_tasks.push(tokio::spawn(serve_metadata_http(
         metadata_addr,
         service_arc.metadata_state(),
-    ));
+    )));
 
-    // Periodic snapshot — 定时快照（每 30 秒）
+    // Periodic snapshot every 30s.
     {
         let svc = service_arc.clone();
-        tokio::spawn(async move {
+        let mut snapshot_shutdown_rx = shutdown_rx.clone();
+        background_tasks.push(tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                svc.save_snapshot();
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                        svc.save_snapshot();
+                    }
+                    changed = snapshot_shutdown_rx.changed() => {
+                        if changed.is_err() || *snapshot_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
             }
-        });
+        }));
     }
 
     info!("Mooncake Master (HA leader) starting on {}", rpc_addr);
-    tonic::transport::Server::builder()
+
+    // Serve with shutdown signal — LeadershipMonitor triggers graceful stop on lease loss.
+    // C++ equivalent: LeadershipMonitor callback calls server.stop().
+    let serve_future = tonic::transport::Server::builder()
         .add_service(
             mooncake_store_master::proto::master_service_server::MasterServiceServer::from_arc(
                 service_arc,
             ),
         )
-        .serve(rpc_addr)
-        .await?;
+        .serve_with_shutdown(rpc_addr, async move {
+            loop {
+                if shutdown_rx.changed().await.is_err() || *shutdown_rx.borrow() {
+                    info!("Shutdown signal received, stopping gRPC server");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
 
+    let result = serve_future.await;
+    for task in background_tasks {
+        task.abort();
+    }
+    result?;
     Ok(())
 }

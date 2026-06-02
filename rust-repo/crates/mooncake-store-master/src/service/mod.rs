@@ -24,8 +24,8 @@
 //! ```
 
 mod background_ops;
-mod grpc_batches;
 pub mod cluster;
+mod grpc_batches;
 mod grpc_objects;
 mod grpc_replication;
 mod grpc_tasks;
@@ -66,12 +66,12 @@ use self::background_ops::{
 use self::helpers::{
     addresses_for_client, allocate_nof_replicas, bump_view_version, cleanup_stale_handles,
     client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
-    get_alive_clients_snapshot, host_from_segment_name, is_lease_expired,
-    make_tenant_scoped_key, normalize_tenant_id, object_owner_client_id,
-    preferred_nof_segment_names, register_metadata_segments, release_object_replicas,
-    release_replicas, release_replicas_scheduled, validate_user_key,
-    split_scoped_key, sync_client_segments, sync_nof_segment_usage,
+    get_alive_clients_snapshot, host_from_segment_name, is_lease_expired, make_tenant_scoped_key,
+    normalize_tenant_id, object_owner_client_id, preferred_nof_segment_names,
+    register_metadata_segments, release_object_replicas, release_replicas,
+    release_replicas_scheduled, split_scoped_key, sync_client_segments, sync_nof_segment_usage,
     sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
+    validate_user_key,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
@@ -84,8 +84,8 @@ use self::state::{
 };
 pub use self::state::{MasterRuntimeConfig, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use self::workers::{
-    ClientMonitorWorker, DrainWorker, EvictionWorker, GracefulUnmountScheduler,
-    NofHeartbeatWorker, ProcessingReaper,
+    ClientMonitorWorker, DrainWorker, EvictionWorker, GracefulUnmountScheduler, NofHeartbeatWorker,
+    ProcessingReaper,
 };
 
 /// Master 服务的核心实现，持有所有共享状态和后台 worker。
@@ -373,6 +373,20 @@ impl MasterServiceImpl {
     /// 获取 oplog 管理器的可变引用 / Returns mutable reference to oplog manager.
     pub fn oplog_manager(&self) -> &parking_lot::Mutex<crate::oplog::OpLogManager> {
         &self.oplog_manager
+    }
+
+    /// Build a standby controller that syncs into this service's state.
+    /// 构建一个同步到当前 service 状态的 standby controller。
+    pub fn create_ha_standby_controller(
+        &self,
+        spec: crate::ha::HABackendSpec,
+        config: crate::ha::MasterServiceSupervisorConfig,
+    ) -> crate::ha::CapabilityDrivenStandbyController {
+        crate::ha::CapabilityDrivenStandbyController::new_with_state(
+            spec,
+            config,
+            self.state.clone(),
+        )
     }
 }
 
