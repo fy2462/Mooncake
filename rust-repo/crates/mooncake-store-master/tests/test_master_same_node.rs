@@ -227,7 +227,7 @@ async fn test_client_monitor_reaps_expired_clients() {
             client_id: Some(proto_uuid(client_id)),
             key: "ttl-key".into(),
             replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -260,7 +260,7 @@ async fn test_client_monitor_reaps_expired_clients() {
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "ttl-key".into(),
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await

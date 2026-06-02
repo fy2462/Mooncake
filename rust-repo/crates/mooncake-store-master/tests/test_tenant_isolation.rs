@@ -31,21 +31,19 @@ fn client_proto(id: Uuid) -> proto::Uuid {
 }
 
 fn mount_seg(service: &MasterServiceImpl, name: &str, cid: Uuid, size: u64) {
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(async {
-            MasterService::mount_segment(
-                service,
-                Request::new(proto::MountSegmentRequest {
-                    client_id: Some(client_proto(cid)),
-                    segment_name: name.into(),
-                    size,
-                    base_addr: 0,
-                }),
-            )
-            .await
-            .unwrap();
-        });
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(client_proto(cid)),
+                segment_name: name.into(),
+                size,
+                base_addr: 0,
+            }),
+        )
+        .await
+        .unwrap();
+    });
 }
 
 fn put_object(
@@ -55,47 +53,45 @@ fn put_object(
     cid: Uuid,
     size: u64,
 ) -> Vec<proto::ReplicaDescriptor> {
-    tokio::runtime::Runtime::new()
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let put = MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(client_proto(cid)),
+                key: key.into(),
+                slice_length: size,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    nof_replica_num: 0,
+                    with_soft_pin: false,
+                    with_hard_pin: false,
+                    preferred_segment: String::new(),
+                    prefer_alloc_in_same_node: false,
+                    preferred_segments: vec![],
+                    preferred_nof_segments: vec![],
+                    data_type: proto::ObjectDataType::Unknown as i32,
+                }),
+                tenant_id: tenant_id.into(),
+            }),
+        )
+        .await
         .unwrap()
-        .block_on(async {
-            let put = MasterService::put_start(
-                service,
-                Request::new(proto::PutStartRequest {
-                    client_id: Some(client_proto(cid)),
-                    key: key.into(),
-                    slice_length: size,
-                    config: Some(proto::ReplicateConfig {
-                        replica_num: 1,
-                        nof_replica_num: 0,
-                        with_soft_pin: false,
-                        with_hard_pin: false,
-                        preferred_segment: String::new(),
-                        prefer_alloc_in_same_node: false,
-                        preferred_segments: vec![],
-                        preferred_nof_segments: vec![],
-                        data_type: proto::ObjectDataType::Unknown as i32,
-                    }),
-                    tenant_id: tenant_id.into(),
-                }),
-            )
-            .await
-            .unwrap()
-            .into_inner();
+        .into_inner();
 
-            MasterService::put_end(
-                service,
-                Request::new(proto::PutEndRequest {
-                    client_id: Some(client_proto(cid)),
-                    key: key.into(),
-                    replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
-                    tenant_id: tenant_id.into(),
-                }),
-            )
-            .await
-            .unwrap();
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(client_proto(cid)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: tenant_id.into(),
+            }),
+        )
+        .await
+        .unwrap();
 
-            put.replicas
-        })
+        put.replicas
+    })
 }
 
 #[test]
@@ -318,7 +314,10 @@ fn test_get_all_keys_filters_by_tenant() {
         .await
         .unwrap()
         .into_inner();
-        assert!(z_keys.keys.len() >= 2, "tenant-Z should have at least 2 keys");
+        assert!(
+            z_keys.keys.len() >= 2,
+            "tenant-Z should have at least 2 keys"
+        );
         assert!(z_keys.keys.contains(&"obj-1".to_string()));
         assert!(z_keys.keys.contains(&"obj-2".to_string()));
     });
@@ -342,7 +341,11 @@ fn test_eviction_tenant_scoped() {
 
     // Run eviction — should evict from both tenants
     let evicted = service.run_eviction_cycle_for_test(10);
-    assert!(!evicted.is_empty(), "should evict at least one key, got: {:?}", evicted);
+    assert!(
+        !evicted.is_empty(),
+        "should evict at least one key, got: {:?}",
+        evicted
+    );
     assert!(
         evicted.iter().any(|k| k == "evict-me" || k == "keep-me"),
         "should contain expected keys, got: {:?}",
@@ -373,7 +376,10 @@ fn test_eviction_tenant_scoped() {
         .await
         .unwrap()
         .into_inner();
-        assert!(!exists.exists || !still_exists.exists, "at least one key should be evicted");
+        assert!(
+            !exists.exists || !still_exists.exists,
+            "at least one key should be evicted"
+        );
     });
 }
 
@@ -416,7 +422,10 @@ fn test_backward_compat_empty_tenant_defaults() {
         .await
         .unwrap()
         .into_inner();
-        assert!(exists_d.exists, "explicit default tenant should find the key");
+        assert!(
+            exists_d.exists,
+            "explicit default tenant should find the key"
+        );
     });
 }
 

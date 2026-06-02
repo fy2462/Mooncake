@@ -522,8 +522,7 @@ impl MasterServiceImpl {
                 if client_id_by_replica_segment_name(&self.state, &req.target).is_none() {
                     return Err(Status::invalid_argument("target segment not mounted"));
                 }
-                let replica =
-                    allocate_replica_on_segment(&self.state, &key, size, &req.target)?;
+                let replica = allocate_replica_on_segment(&self.state, &key, size, &req.target)?;
                 if let Some(mut object) = self.state.objects.get_mut(&key) {
                     object.replicas.push(replica.clone());
                 }

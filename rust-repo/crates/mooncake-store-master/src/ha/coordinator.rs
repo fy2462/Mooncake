@@ -281,9 +281,11 @@ impl LeaderCoordinator {
                     lease_id: None,
                 })
             }
-            _ => Err(HaError::InvalidBackend(
-                "backend does not support leadership acquisition".into(),
-            )),
+            CoordinatorBackend::K8s { namespace, lease_name } => {
+                Err(HaError::UnavailableInCurrentMode(format!(
+                    "K8s HA backend is not implemented in Rust coordinator: namespace={namespace}, lease={lease_name}"
+                )))
+            }
         }
     }
 
@@ -444,9 +446,11 @@ impl LeaderCoordinator {
                 let _ = self.role_tx.send(LeaderRole::Standby);
                 Ok(())
             }
-            _ => Err(HaError::InvalidBackend(
-                "backend does not support leadership release".into(),
-            )),
+            CoordinatorBackend::K8s { namespace, lease_name } => {
+                Err(HaError::UnavailableInCurrentMode(format!(
+                    "K8s HA backend is not implemented in Rust coordinator: namespace={namespace}, lease={lease_name}"
+                )))
+            }
         }
     }
 
@@ -462,17 +466,24 @@ impl LeaderCoordinator {
     ) -> Result<Option<MasterView>, HaError> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            match self.read_current_view().await? {
+                Some(view) if view.view_version != known_version => return Ok(Some(view)),
+                Some(_) => {}
+                None if known_version != 0 => return Ok(None),
+                None => {}
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Ok(None);
-            }
-            if let Some(view) = self.read_current_view().await? {
-                if view.view_version != known_version {
-                    return Ok(Some(view));
-                }
             }
             // 200ms poll interval / 200ms 轮询间隔
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+    }
+
+    /// Subscribe to leadership role changes produced by keepalive/election.
+    /// 订阅由续约/选举产生的角色变化。
+    pub fn subscribe_role(&self) -> watch::Receiver<LeaderRole> {
+        self.role_rx.clone()
     }
 
     /// Wait for a role assignment from the backend. Returns the current role.

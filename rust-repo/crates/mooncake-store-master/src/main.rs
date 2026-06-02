@@ -9,8 +9,8 @@
 use clap::Parser;
 use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{
-    HABackendSpec, HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle,
-    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    parse_ha_backend_type, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
+    LeadershipMonitorHandle, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
 };
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
@@ -95,6 +95,21 @@ struct Args {
     #[arg(long)]
     etcd_endpoints: Option<String>,
 
+    /// HA backend type: "etcd", "redis", or "k8s".
+    /// HA 后端类型："etcd"、"redis" 或 "k8s"。
+    #[arg(long, default_value = "etcd")]
+    ha_backend_type: String,
+
+    /// HA backend connection string. Etcd may fall back to --etcd-endpoints.
+    /// HA 后端连接串。etcd 可回退到 --etcd-endpoints。
+    #[arg(long)]
+    ha_backend_connstring: Option<String>,
+
+    /// Cluster id / namespace for HA keys and oplog paths.
+    /// HA key 和 oplog 路径使用的 cluster id / namespace。
+    #[arg(long)]
+    cluster_id: Option<String>,
+
     /// Kubernetes 命名空间（HA 模式 via K8s lease）
     /// Kubernetes namespace (HA mode via K8s lease)
     #[arg(long)]
@@ -155,6 +170,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // Helper: enter standby and sleep before continuing the outer loop.
 async fn back_to_standby(supervisor: &mut MasterServiceSupervisor, sleep_secs: u64) {
+    supervisor.enable_standby_updates();
     let _ = supervisor.enter_standby_mode(None);
     tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
 }
@@ -171,8 +187,10 @@ async fn release_and_retry(
 
 async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let (snapshot_backend_type, snapshot_dir) = parse_snapshot_config(&args);
+    let ha_spec = build_ha_spec(&args)?;
+    let cluster_id = ha_spec.cluster_namespace.clone();
     let runtime_config = build_runtime_config(&args)?;
-    let leader_oplog_manager = build_leader_oplog_manager(&args, 0).await;
+    let leader_oplog_manager = build_leader_oplog_manager(&ha_spec, 0).await;
     let service_arc = std::sync::Arc::new(MasterServiceImpl::new_with_runtime_config(
         snapshot_backend_type,
         snapshot_dir.clone(),
@@ -181,10 +199,9 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(manager) = leader_oplog_manager {
         *service_arc.oplog_manager().lock() = manager;
     }
-    let ha_spec = build_ha_spec(&args);
     let supervisor_config = MasterServiceSupervisorConfig {
         local_hostname: format!("{}:{}", args.rpc_address, args.rpc_port),
-        cluster_id: "default".to_string(),
+        cluster_id,
         enable_snapshot_restore: snapshot_dir.is_some(),
         snapshot_backup_dir: snapshot_dir,
         snapshot_backend_type,
@@ -194,7 +211,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Outer loop: re-create coordinator each iteration (matches C++) ---
     loop {
-        let coordinator = match create_coordinator(&args).await {
+        let coordinator = match create_coordinator(&ha_spec).await {
             Ok(c) => c,
             Err(e) => {
                 if e.downcast_ref::<HaError>().map_or(false, |h| h.is_fatal()) {
@@ -263,7 +280,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
             let lease_id = acquire.lease_id.unwrap_or(0);
             if service_arc.oplog_manager().lock().store().is_none() {
-                match build_leader_oplog_manager(&args, 0).await {
+                match build_leader_oplog_manager(&ha_spec, 0).await {
                     Some(manager) => {
                         *service_arc.oplog_manager().lock() = manager;
                     }
@@ -282,9 +299,12 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
             info!("Leadership acquired, lease TTL={}s", args.ha_lease_ttl_secs);
 
-            // Promote standby.
+            // Promote standby. Match C++: stop accepting standby runtime callbacks
+            // before promotion, so LeaderWarmup cannot be overwritten by standby.
+            supervisor.disable_standby_updates();
             if let Err(e) = supervisor.promote_to_leader_warmup() {
                 error!("Promotion failed: {}", e);
+                supervisor.enable_standby_updates();
                 release_and_retry(&coordinator, &mut supervisor, lease_id).await;
                 break;
             }
@@ -294,6 +314,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 Ok(handle) => handle,
                 Err(e) => {
                     error!("Keepalive start failed: {}", e);
+                    supervisor.enable_standby_updates();
                     release_and_retry(&coordinator, &mut supervisor, lease_id).await;
                     break;
                 }
@@ -301,6 +322,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
             // Active warmup: renew lease every second.
             if !warmup_with_renewal(&coordinator, lease_id, args.ha_lease_ttl_secs).await {
+                supervisor.enable_standby_updates();
                 release_and_retry(&coordinator, &mut supervisor, lease_id).await;
                 break;
             }
@@ -308,16 +330,16 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             // Preflight: final renewal before serving.
             if let Err(e) = coordinator.try_renew_leadership(lease_id).await {
                 warn!("Preflight renewal failed: {}", e);
+                supervisor.enable_standby_updates();
                 release_and_retry(&coordinator, &mut supervisor, lease_id).await;
                 break;
             }
 
-            supervisor.disable_standby_updates();
             supervisor.activate_serving_state();
 
             // LeadershipMonitor + server. Monitor MUST exist (fallback: dummy tx).
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-            let monitor = start_leadership_monitor(&args, lease_id, shutdown_tx).await;
+            let monitor = start_leadership_monitor(&coordinator, shutdown_tx).await;
 
             let server_result = run_leader_server(service_arc.clone(), &args, shutdown_rx).await;
 
@@ -414,28 +436,19 @@ async fn warmup_with_renewal(
 }
 
 async fn start_leadership_monitor(
-    args: &Args,
-    lease_id: i64,
+    coordinator: &LeaderCoordinator,
     tx: tokio::sync::watch::Sender<bool>,
 ) -> Option<LeadershipMonitorHandle> {
-    // Fallback: if we can't create a monitor coordinator, send shutdown immediately
-    // so the server starts and immediately stops — don't serve without a monitor.
-    let c = match create_coordinator(args).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!(
-                "Monitor coordinator creation failed: {}, sending immediate shutdown",
-                e
-            );
-            let _ = tx.send(true);
-            return None;
-        }
-    };
+    let mut role_rx = coordinator.subscribe_role();
     let h = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            if c.try_renew_leadership(lease_id).await.is_err() {
-                warn!("LeadershipMonitor: lease lost, shutting down");
+            if role_rx.changed().await.is_err() {
+                warn!("LeadershipMonitor: role channel closed, shutting down");
+                let _ = tx.send(true);
+                break;
+            }
+            if *role_rx.borrow() == mooncake_store_master::ha::LeaderRole::Standby {
+                warn!("LeadershipMonitor: leadership lost, shutting down");
                 let _ = tx.send(true);
                 break;
             }
@@ -519,6 +532,76 @@ async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_args() -> Args {
+        Args {
+            rpc_address: "127.0.0.1".to_string(),
+            rpc_port: 50051,
+            http_metadata_server_host: "127.0.0.1".to_string(),
+            http_metadata_server_port: 8080,
+            metrics_port: 9003,
+            rpc_thread_num: 4,
+            allocation_strategy: "random".to_string(),
+            memory_allocator: "offset".to_string(),
+            default_kv_lease_ttl_ms: 5000,
+            eviction_high_watermark_ratio: 0.95,
+            eviction_ratio: 0.05,
+            offload_on_evict: false,
+            offload_force_evict: false,
+            enable_ha: true,
+            etcd_endpoints: None,
+            ha_backend_type: "etcd".to_string(),
+            ha_backend_connstring: None,
+            cluster_id: Some("cluster-a".to_string()),
+            k8s_namespace: None,
+            k8s_lease_name: None,
+            snapshot_backend_type: None,
+            snapshot_backup_dir: None,
+            ha_lease_ttl_secs: 30,
+        }
+    }
+
+    #[test]
+    fn test_build_ha_spec_etcd_falls_back_to_etcd_endpoints() {
+        let mut args = base_args();
+        args.etcd_endpoints = Some("http://127.0.0.1:2379".to_string());
+
+        let spec = build_ha_spec(&args).unwrap();
+
+        assert_eq!(spec.backend_type, HABackendType::Etcd);
+        assert_eq!(spec.connstring, "http://127.0.0.1:2379");
+        assert_eq!(spec.cluster_namespace, "cluster-a");
+    }
+
+    #[test]
+    fn test_build_ha_spec_redis_uses_explicit_connstring() {
+        let mut args = base_args();
+        args.ha_backend_type = "redis".to_string();
+        args.ha_backend_connstring = Some("redis://127.0.0.1:6379".to_string());
+
+        let spec = build_ha_spec(&args).unwrap();
+
+        assert_eq!(spec.backend_type, HABackendType::Redis);
+        assert_eq!(spec.connstring, "redis://127.0.0.1:6379");
+    }
+
+    #[test]
+    fn test_build_ha_spec_k8s_builds_namespace_lease_connstring() {
+        let mut args = base_args();
+        args.ha_backend_type = "k8s".to_string();
+        args.k8s_namespace = Some("ns-a".to_string());
+        args.k8s_lease_name = Some("lease-a".to_string());
+
+        let spec = build_ha_spec(&args).unwrap();
+
+        assert_eq!(spec.backend_type, HABackendType::K8s);
+        assert_eq!(spec.connstring, "ns-a/lease-a");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers — 工具函数
 // ---------------------------------------------------------------------------
@@ -540,46 +623,49 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
     })
 }
 
-/// 创建 LeaderCoordinator：根据配置选择 etcd 或 k8s 后端。
-/// Create LeaderCoordinator: pick etcd or k8s backend based on config.
-async fn create_coordinator(args: &Args) -> Result<LeaderCoordinator, Box<dyn std::error::Error>> {
-    let endpoints: Vec<String> = args
-        .etcd_endpoints
-        .as_deref()
-        .unwrap_or("")
-        .split(';')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-
-    if endpoints.is_empty() && args.k8s_namespace.is_some() {
-        Err(Box::new(HaError::InvalidBackend(
+/// 创建 LeaderCoordinator：根据 HA backend spec 选择后端。
+/// Create LeaderCoordinator from the resolved HA backend spec.
+async fn create_coordinator(
+    spec: &HABackendSpec,
+) -> Result<LeaderCoordinator, Box<dyn std::error::Error>> {
+    match spec.backend_type {
+        HABackendType::Etcd => {
+            let endpoints: Vec<String> = spec
+                .connstring
+                .split(';')
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if endpoints.is_empty() {
+                return Err(Box::new(HaError::InvalidParams(
+                    "etcd HA backend requires a non-empty connection string".into(),
+                )));
+            }
+            Ok(LeaderCoordinator::new_etcd(endpoints, &spec.cluster_namespace).await?)
+        }
+        HABackendType::Redis => Ok(LeaderCoordinator::new_redis(&spec.connstring).await?),
+        HABackendType::K8s => Err(Box::new(HaError::UnavailableInCurrentMode(
             "K8s HA backend is not implemented in Rust coordinator".into(),
-        )))
-    } else if !endpoints.is_empty() {
-        // 使用 etcd 进行 Leader 选举
-        Ok(LeaderCoordinator::new_etcd(endpoints, "default").await?)
-    } else {
-        error!("HA mode enabled but neither etcd_endpoints nor k8s_namespace provided");
-        Err("HA requires etcd or K8s configuration".into())
+        ))),
+        HABackendType::Unknown => Err(Box::new(HaError::InvalidParams(
+            "unknown HA backend type".into(),
+        ))),
     }
 }
 
 async fn build_leader_oplog_manager(
-    args: &Args,
+    spec: &HABackendSpec,
     view_version: u64,
 ) -> Option<mooncake_store_master::oplog::OpLogManager> {
-    let endpoints: Vec<String> = args
-        .etcd_endpoints
-        .as_deref()
-        .unwrap_or("")
-        .split(';')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    if endpoints.is_empty() {
+    if spec.backend_type != HABackendType::Etcd || spec.connstring.trim().is_empty() {
         return None;
     }
+    let endpoints: Vec<String> = spec
+        .connstring
+        .split(';')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .collect();
 
     let client = match etcd_client::Client::connect(endpoints, None).await {
         Ok(client) => client,
@@ -588,14 +674,15 @@ async fn build_leader_oplog_manager(
             return None;
         }
     };
-    let store =
-        match mooncake_store_master::oplog::EtcdOpLogStore::new(client, "/oplog/default").await {
-            Ok(store) => store,
-            Err(e) => {
-                warn!("Failed to initialize leader oplog store: {}", e);
-                return None;
-            }
-        };
+    let oplog_prefix = format!("/oplog/{}", spec.cluster_namespace);
+    let store = match mooncake_store_master::oplog::EtcdOpLogStore::new(client, &oplog_prefix).await
+    {
+        Ok(store) => store,
+        Err(e) => {
+            warn!("Failed to initialize leader oplog store: {}", e);
+            return None;
+        }
+    };
     Some(mooncake_store_master::oplog::OpLogManager::new(
         Some(Box::new(store)),
         view_version,
@@ -604,25 +691,55 @@ async fn build_leader_oplog_manager(
 
 /// 构建 HA 后端规格，标识使用的协调后端类型。
 /// Build HA backend spec describing which coordination backend is used.
-fn build_ha_spec(args: &Args) -> HABackendSpec {
-    let has_etcd = args
-        .etcd_endpoints
-        .as_deref()
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    let has_k8s = args.k8s_namespace.is_some();
+fn build_ha_spec(args: &Args) -> Result<HABackendSpec, HaError> {
+    let backend_type = parse_ha_backend_type(&args.ha_backend_type).ok_or_else(|| {
+        HaError::InvalidParams(format!("unknown HA backend type: {}", args.ha_backend_type))
+    })?;
+    let cluster_namespace = resolve_cluster_id(args);
+    let connstring = match backend_type {
+        HABackendType::Etcd => args
+            .ha_backend_connstring
+            .clone()
+            .or_else(|| args.etcd_endpoints.clone())
+            .unwrap_or_default(),
+        HABackendType::Redis => args.ha_backend_connstring.clone().unwrap_or_default(),
+        HABackendType::K8s => args.ha_backend_connstring.clone().unwrap_or_else(|| {
+            let lease = args
+                .k8s_lease_name
+                .clone()
+                .unwrap_or_else(|| "mooncake-master".to_string());
+            match &args.k8s_namespace {
+                Some(namespace) if !namespace.trim().is_empty() => format!("{namespace}/{lease}"),
+                _ => lease,
+            }
+        }),
+        HABackendType::Unknown => String::new(),
+    };
 
-    HABackendSpec {
-        backend_type: if has_etcd {
-            HABackendType::Etcd
-        } else if has_k8s {
-            HABackendType::K8s
-        } else {
-            HABackendType::Unknown
-        },
-        connstring: args.etcd_endpoints.clone().unwrap_or_default(),
-        cluster_namespace: "default".to_string(),
+    if connstring.trim().is_empty() {
+        return Err(HaError::InvalidParams(format!(
+            "HA backend connection string must be set for backend_type={}",
+            backend_type.as_str()
+        )));
     }
+
+    Ok(HABackendSpec {
+        backend_type,
+        connstring,
+        cluster_namespace,
+    })
+}
+
+fn resolve_cluster_id(args: &Args) -> String {
+    args.cluster_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("MC_STORE_CLUSTER_ID")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| "mooncake".to_string())
 }
 
 /// Start the full gRPC server along with metrics, HTTP metadata, and snapshots.

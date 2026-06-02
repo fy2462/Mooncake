@@ -531,7 +531,9 @@ fn maybe_complete_drain_job(state: &MasterState, job_id: Uuid) -> bool {
                 break;
             }
         }
-        if remaining { break; }
+        if remaining {
+            break;
+        }
     }
     if !remaining {
         for seg_name in &job.segments {
@@ -600,7 +602,9 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
     let targets = job.target_segments.clone();
     let max_concurrency = job.max_concurrency as usize;
     let available = max_concurrency.saturating_sub(job.active_tasks.len());
-    if available == 0 { return; }
+    if available == 0 {
+        return;
+    }
     let mut units: Vec<(String, String, u64)> = Vec::new();
     for entry in state.objects.iter() {
         let key = entry.key().clone();
@@ -622,7 +626,9 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
     let num_targets = targets.len().max(1);
     let mut scheduled = 0;
     for (i, (key, source_seg, bytes)) in units.into_iter().enumerate() {
-        if scheduled >= available { break; }
+        if scheduled >= available {
+            break;
+        }
         let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
         let target_seg = targets[i % num_targets].clone();
         let task_id = Uuid::new_v4();
@@ -633,7 +639,9 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             targets: Vec<String>,
         }
         let payload = serde_json::to_string(&ReplicaCopyPayload {
-            key: key.clone(), source: source_seg.clone(), targets: vec![target_seg.clone()],
+            key: key.clone(),
+            source: source_seg.clone(),
+            targets: vec![target_seg.clone()],
         })
         .unwrap_or_default();
         let assigned_client = client_id_by_segment_name(state, &source_seg);
@@ -666,7 +674,8 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
         );
         scheduled += 1;
     }
-    job.status = if job.active_tasks.is_empty() && scheduled == 0
+    job.status = if job.active_tasks.is_empty()
+        && scheduled == 0
         && job.completed_unit_keys.len() + job.terminal_failed_unit_keys.len() > 0
     {
         proto::JobStatus::Succeeded

@@ -90,7 +90,11 @@ impl MasterServiceImpl {
         );
         upsert_client_addresses(&self.state, client_id, vec![host]);
         sync_client_segments(&self.state, client_id);
-        register_metadata_segments(&self.metadata_state, std::slice::from_ref(&req.segment_name)).await;
+        register_metadata_segments(
+            &self.metadata_state,
+            std::slice::from_ref(&req.segment_name),
+        )
+        .await;
 
         let mut allocator = self.state.allocator.write();
         allocator.add_segment(segment, 0, client_id);

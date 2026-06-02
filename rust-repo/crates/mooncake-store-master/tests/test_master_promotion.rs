@@ -61,7 +61,10 @@ async fn test_promotion_flow_success_and_failure() {
 
         MasterService::get_replica_list(
             &service,
-            Request::new(proto::GetReplicaListRequest { key: key.into() , tenant_id: String::new()}),
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
         )
         .await
         .unwrap();
@@ -108,7 +111,7 @@ async fn test_promotion_flow_success_and_failure() {
             key: first_key.clone(),
             size: 256,
             preferred_segments: vec!["dram-a".into()],
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -127,7 +130,7 @@ async fn test_promotion_flow_success_and_failure() {
                 low: holder_id.as_u64_pair().1,
             }),
             key: first_key.clone(),
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -135,7 +138,10 @@ async fn test_promotion_flow_success_and_failure() {
 
     let promoted = MasterService::get_replica_list(
         &service,
-        Request::new(proto::GetReplicaListRequest { key: first_key , tenant_id: String::new()}),
+        Request::new(proto::GetReplicaListRequest {
+            key: first_key,
+            tenant_id: String::new(),
+        }),
     )
     .await
     .unwrap()
@@ -154,7 +160,7 @@ async fn test_promotion_flow_success_and_failure() {
             key: second_key.clone(),
             size: 256,
             preferred_segments: vec!["dram-a".into()],
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -167,7 +173,7 @@ async fn test_promotion_flow_success_and_failure() {
                 low: holder_id.as_u64_pair().1,
             }),
             key: second_key.clone(),
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -175,7 +181,10 @@ async fn test_promotion_flow_success_and_failure() {
 
     let failed = MasterService::get_replica_list(
         &service,
-        Request::new(proto::GetReplicaListRequest { key: second_key , tenant_id: String::new()}),
+        Request::new(proto::GetReplicaListRequest {
+            key: second_key,
+            tenant_id: String::new(),
+        }),
     )
     .await
     .unwrap()
@@ -234,7 +243,8 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "threshold-key".into(), tenant_id: String::new(),
+            key: "threshold-key".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -256,7 +266,8 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "threshold-key".into(), tenant_id: String::new(),
+            key: "threshold-key".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -333,7 +344,10 @@ async fn test_promotion_queue_limit_released_after_success() {
         .unwrap();
         MasterService::get_replica_list(
             &service,
-            Request::new(proto::GetReplicaListRequest { key: key.into() , tenant_id: String::new()}),
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
         )
         .await
         .unwrap();
@@ -378,7 +392,7 @@ async fn test_promotion_queue_limit_released_after_success() {
             key: "limit-a".into(),
             size: 128,
             preferred_segments: vec!["limit-dram".into()],
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -391,7 +405,7 @@ async fn test_promotion_queue_limit_released_after_success() {
                 low: holder_id.as_u64_pair().1,
             }),
             key: "limit-a".into(),
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -400,7 +414,8 @@ async fn test_promotion_queue_limit_released_after_success() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "limit-b".into(), tenant_id: String::new(),
+            key: "limit-b".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -489,7 +504,8 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
     MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: "reaper-key".into(), tenant_id: String::new(),
+            key: "reaper-key".into(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -506,7 +522,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             key: "reaper-key".into(),
             size: 256,
             preferred_segments: vec!["reaper-dram".into()],
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -560,7 +576,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             key: "reaper-key".into(),
             size: 256,
             preferred_segments: vec!["reaper-dram".into()],
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }),
     )
     .await;

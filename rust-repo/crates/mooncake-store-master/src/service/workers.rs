@@ -528,8 +528,9 @@ impl NofHeartbeatWorker {
                     state.nof_heartbeat_states.entry(*id).or_insert_with(|| {
                         // Stagger initial probe time across the interval.
                         let spread = std::time::Duration::from_secs_f64(
-                            interval.as_secs_f64() * (state.nof_heartbeat_states.len() as f64
-                                / active_segments.len().max(1) as f64),
+                            interval.as_secs_f64()
+                                * (state.nof_heartbeat_states.len() as f64
+                                    / active_segments.len().max(1) as f64),
                         );
                         NoFHeartbeatState {
                             segment_id: *id,
@@ -578,10 +579,7 @@ impl NofHeartbeatWorker {
                             let failures = entry.consecutive_failures;
                             entry.next_probe_at = now + interval;
                             if failures >= threshold {
-                                entry_result = Some((
-                                    entry.segment_id,
-                                    entry.segment_name.clone(),
-                                ));
+                                entry_result = Some((entry.segment_id, entry.segment_name.clone()));
                             }
                         }
                     }
@@ -748,16 +746,17 @@ mod tests {
 
         // Simulate what the worker sync does: add heartbeat state for new active segment.
         let now = Instant::now();
-        state.nof_heartbeat_states.entry(seg_id).or_insert_with(|| {
-            NoFHeartbeatState {
+        state
+            .nof_heartbeat_states
+            .entry(seg_id)
+            .or_insert_with(|| NoFHeartbeatState {
                 segment_id: seg_id,
                 segment_name: "nof1:8000".to_string(),
                 te_endpoint: "10.0.0.1:8000".to_string(),
                 next_probe_at: now,
                 last_success_at: now,
                 consecutive_failures: 0,
-            }
-        });
+            });
 
         assert!(state.nof_heartbeat_states.contains_key(&seg_id));
         let entry = state.nof_heartbeat_states.get(&seg_id).unwrap();
@@ -881,5 +880,4 @@ mod tests {
         assert!(!state.nof_segments.contains_key(&seg_id));
         assert!(!state.nof_heartbeat_states.contains_key(&seg_id));
     }
-
 }

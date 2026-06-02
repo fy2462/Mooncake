@@ -38,9 +38,7 @@ async fn mount_segment(service: &MasterServiceImpl, name: &str, cid: Uuid) {
     .unwrap();
 }
 
-async fn put_object(
-    service: &MasterServiceImpl, key: &str, tenant: &str, cid: Uuid, size: u64,
-) {
+async fn put_object(service: &MasterServiceImpl, key: &str, tenant: &str, cid: Uuid, size: u64) {
     MasterService::put_start(
         service,
         Request::new(proto::PutStartRequest {
@@ -222,7 +220,10 @@ async fn test_multiple_masters_remove_all_independent() {
     .await
     .unwrap()
     .into_inner();
-    assert!(keys_a.keys.is_empty(), "master-A should be empty after RemoveAll");
+    assert!(
+        keys_a.keys.is_empty(),
+        "master-A should be empty after RemoveAll"
+    );
 }
 
 #[tokio::test]
@@ -265,7 +266,13 @@ async fn test_many_masters_concurrent_isolated_creates() {
         .await
         .unwrap()
         .into_inner();
-        assert_eq!(keys.keys.len(), 10, "master-{} tenant-{} should have 10 keys", i, tenant);
+        assert_eq!(
+            keys.keys.len(),
+            10,
+            "master-{} tenant-{} should have 10 keys",
+            i,
+            tenant
+        );
 
         // Other tenants: should have 0 keys
         for (j, (m2, _cid2)) in masters.iter().enumerate() {

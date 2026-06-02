@@ -71,6 +71,41 @@ impl Default for HotStandbyConfig {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oplog::InMemoryOpLog;
+
+    #[tokio::test]
+    async fn test_oplog_following_applies_entries() {
+        let state = Arc::new(MasterState::empty());
+        let mut store = InMemoryOpLog::new(16);
+        store.append_payload(9, r#"{"op":"put_start","key":"k1"}"#);
+        store.append_payload(9, r#"{"op":"remove","key":"k1"}"#);
+
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(store));
+
+        service.start().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, 2);
+        assert_eq!(status.primary_seq_id, 2);
+        assert_eq!(status.lag_entries, 0);
+
+        service.stop();
+    }
+}
+
 /// The hot standby service manages standby state and recovery.
 /// 热备服务管理备用状态和恢复。
 ///
@@ -185,10 +220,16 @@ impl HotStandbyService {
     /// 启动热备：(1) 可选加载快照引导（恢复 segments/objects/tasks）
     /// (2) 进入 Watching 状态等待 oplog 追平。快照加载时恢复 Memory 和 NoF segment 到 allocator。
     pub async fn start(&mut self) -> Result<(), HaError> {
+        let start_result = self.state_machine.process_event(StandbyEvent::Start);
+        if !start_result.allowed {
+            return Err(HaError::UnavailableInCurrentStatus);
+        }
         let mut status = self.sync_status.write();
         status.state = StandbyState::Connecting;
         status.is_connected = false;
         drop(status);
+
+        let mut baseline_seq_id = 0;
 
         // Phase 1: Snapshot bootstrap (if enabled)
         // 阶段 1：快照引导（若启用）
@@ -254,6 +295,7 @@ impl HotStandbyService {
 
                     let mut status = self.sync_status.write();
                     status.applied_seq_id = snapshot.snapshot_sequence_id;
+                    baseline_seq_id = snapshot.snapshot_sequence_id;
                     drop(status);
                     info!(
                         "Loaded snapshot with {} objects, {} segments",
@@ -268,6 +310,7 @@ impl HotStandbyService {
         // 阶段 2：启动 oplog 跟随（若启用）
         if self.config.enable_oplog_following {
             let applier = Arc::new(OpLogApplier::new(self.state.clone()));
+            applier.recover(baseline_seq_id);
             self.oplog_applier = Some(applier.clone());
 
             self.state_machine.process_event(StandbyEvent::Connected);
@@ -297,7 +340,19 @@ impl HotStandbyService {
                         std::thread::sleep(interval);
                         continue;
                     }
-                    let expected = applier_clone.get_expected_sequence_id();
+                    let mut expected = applier_clone.get_expected_sequence_id();
+                    if let Some(store) = oplog_store.as_ref() {
+                        match store.read_since(expected, 1024) {
+                            Ok(entries) if !entries.is_empty() => {
+                                applier_clone.apply_op_log_entries(&entries);
+                                expected = applier_clone.get_expected_sequence_id();
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                state_machine.process_event(StandbyEvent::WatchBroken);
+                            }
+                        }
+                    }
                     let applied = if expected > 0 { expected - 1 } else { 0 };
                     let primary = oplog_store
                         .as_ref()
@@ -318,8 +373,12 @@ impl HotStandbyService {
 
             info!("HotStandbyService: started oplog following mode with ReplicationLoop");
         } else {
+            self.state_machine.process_event(StandbyEvent::Connected);
+            self.state_machine.process_event(StandbyEvent::SyncComplete);
             let mut status = self.sync_status.write();
             status.state = StandbyState::Watching;
+            status.applied_seq_id = baseline_seq_id;
+            status.primary_seq_id = baseline_seq_id;
             drop(status);
         }
 
@@ -383,16 +442,20 @@ impl HotStandbyService {
                 // Final catch-up (C++: FinalCatchUpForPromotionLocked).
                 // Uses same store (shared Arc) — C++ creates a NEW store, but in
                 // Rust the Arc clone preserves the store reference.
-                let expected = applier.get_expected_sequence_id();
+                let mut expected = applier.get_expected_sequence_id();
                 let latest = store.latest_sequence();
-                if latest > expected {
+                if latest >= expected {
                     let start = std::time::Instant::now();
                     let timeout = std::time::Duration::from_secs(30);
                     for _ in 0..100 {
                         if start.elapsed() >= timeout {
                             break;
                         }
-                        let to_read = ((latest - expected) as usize).min(1000);
+                        expected = applier.get_expected_sequence_id();
+                        if latest < expected {
+                            break;
+                        }
+                        let to_read = ((latest - expected + 1) as usize).min(1000);
                         if to_read == 0 {
                             break;
                         }
@@ -415,7 +478,7 @@ impl HotStandbyService {
         let applied = self
             .oplog_applier
             .as_ref()
-            .map(|a| a.get_expected_sequence_id())
+            .map(|a| a.get_expected_sequence_id().saturating_sub(1))
             .unwrap_or(0);
 
         let mut status = self.sync_status.write();

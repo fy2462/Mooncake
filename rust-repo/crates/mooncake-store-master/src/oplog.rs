@@ -467,9 +467,9 @@ impl OpLogStore for LocalFsOpLogStore {
 /// Persistent oplog backed by etcd.
 /// 基于 etcd 的持久化 oplog。
 ///
-/// Each record is stored as `/oplog/<prefix>/seq_<seq:020>` with zero-padded
-/// sequence numbers to ensure lexicographic ordering.
-/// 每条记录存储为 `/oplog/<prefix>/seq_<seq:020>`，零填充序列号保证字典序。
+/// Each record is stored as `/oplog/<cluster>/<seq:020>` with zero-padded
+/// sequence numbers to match the C++ EtcdOpLogStore key format.
+/// 每条记录存储为 `/oplog/<cluster>/<seq:020>`，零填充序列号并匹配 C++ key 格式。
 ///
 /// A separate `/oplog/<prefix>/latest` key holds the latest sequence number
 /// for fast recovery without scanning all keys.
@@ -518,7 +518,11 @@ impl EtcdOpLogStore {
 
     /// Build the etcd key for a given sequence number.
     fn entry_key(&self, seq: u64) -> String {
-        format!("{}/seq_{:020}", self.key_prefix, seq)
+        Self::format_entry_key(&self.key_prefix, seq)
+    }
+
+    fn format_entry_key(key_prefix: &str, seq: u64) -> String {
+        format!("{}/{:020}", key_prefix.trim_end_matches('/'), seq)
     }
 
     /// Build the etcd key for the latest sequence pointer.
@@ -975,5 +979,12 @@ mod tests {
         assert_eq!(store.latest_sequence(), 3);
         let entries = store.read_since(1, 10).unwrap();
         assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn test_etcd_oplog_entry_key_matches_cpp_format() {
+        let key = EtcdOpLogStore::format_entry_key("/oplog/cluster-a", 42);
+        assert_eq!(key, "/oplog/cluster-a/00000000000000000042");
+        assert!(!key.contains("seq_"));
     }
 }

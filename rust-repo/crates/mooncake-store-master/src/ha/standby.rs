@@ -36,7 +36,7 @@ impl Default for MasterServiceSupervisorConfig {
     fn default() -> Self {
         Self {
             local_hostname: "localhost".to_string(),
-            cluster_id: "default".to_string(),
+            cluster_id: resolve_cluster_id(""),
             enable_snapshot_restore: false,
             snapshot_backup_dir: None,
             snapshot_backend_type: None,
@@ -289,6 +289,8 @@ impl CapabilityDrivenStandbyController {
     }
 
     /// For testing: create with pre-built service.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn with_service(
         config: MasterServiceSupervisorConfig,
         capabilities: StandbyRuntimeCapabilities,
@@ -342,7 +344,7 @@ impl CapabilityDrivenStandbyController {
             ));
         }
         let cluster_id = if self.config.cluster_id.is_empty() {
-            "default".to_string()
+            resolve_cluster_id("")
         } else {
             self.config.cluster_id.clone()
         };
@@ -360,6 +362,16 @@ impl CapabilityDrivenStandbyController {
         self.service.set_oplog_store(Box::new(store));
         Ok(())
     }
+}
+
+fn resolve_cluster_id(cluster_id: &str) -> String {
+    if !cluster_id.trim().is_empty() {
+        return cluster_id.to_string();
+    }
+    std::env::var("MC_STORE_CLUSTER_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "mooncake".to_string())
 }
 
 fn block_on_runtime<F: Future>(future: F) -> F::Output {

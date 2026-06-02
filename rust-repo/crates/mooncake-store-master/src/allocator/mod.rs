@@ -337,12 +337,8 @@ impl SegmentAllocator {
                     // Tier 2: preferred segment(s) — rank by position in preferred list
                     // 第二级：首选 segment —— 按在首选列表中的位置排序
                     if has_preferred {
-                        let a_pos = preferred_names
-                            .iter()
-                            .position(|&n| n == sa.segment.name);
-                        let b_pos = preferred_names
-                            .iter()
-                            .position(|&n| n == sb.segment.name);
+                        let a_pos = preferred_names.iter().position(|&n| n == sa.segment.name);
+                        let b_pos = preferred_names.iter().position(|&n| n == sb.segment.name);
                         // Lower position = higher priority; not-in-list = lowest priority
                         // 位置越小优先级越高，不在列表中的优先级最低
                         let a_rank = a_pos.map(|p| p as i64).unwrap_or(i64::MAX);

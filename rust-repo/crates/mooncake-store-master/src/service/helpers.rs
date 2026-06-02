@@ -540,12 +540,7 @@ pub fn make_tenant_scoped_key(tenant_id: &str, user_key: &str) -> String {
 pub fn split_scoped_key(scoped: &str) -> (String, String) {
     scoped
         .find(TENANT_SCOPE_DELIMITER)
-        .map(|pos| {
-            (
-                scoped[..pos].to_string(),
-                scoped[pos + 1..].to_string(),
-            )
-        })
+        .map(|pos| (scoped[..pos].to_string(), scoped[pos + 1..].to_string()))
         .unwrap_or_else(|| (DEFAULT_TENANT.to_string(), scoped.to_string()))
 }
 

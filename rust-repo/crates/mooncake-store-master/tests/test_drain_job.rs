@@ -55,7 +55,7 @@ async fn test_create_and_query_drain_job() {
             client_id: Some(proto_uuid(client_id)),
             key: "drain_key".into(),
             replica_type: mooncake_store_master::proto::replica_descriptor::ReplicaType::All as i32,
-        tenant_id: String::new(),
+            tenant_id: String::new(),
         }))
         .await
         .unwrap();

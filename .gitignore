@@ -2,6 +2,8 @@
 .vscode
 .claude-flow
 .claude
+.codex
+.agents
 .mcp.json
 .swarm
 ruvector.db

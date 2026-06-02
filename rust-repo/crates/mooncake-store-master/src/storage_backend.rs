@@ -307,8 +307,8 @@ impl StorageBackend {
         // fsync 保证数据落盘
         writer.get_ref().sync_all()?;
         drop(writer); // Close the file handle / 关闭文件句柄
-        // Phase 3: atomic rename
-        // 原子替换
+                      // Phase 3: atomic rename
+                      // 原子替换
         fs::rename(&tmp, &path)?;
 
         tracing::info!(

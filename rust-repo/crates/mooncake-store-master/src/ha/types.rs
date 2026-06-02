@@ -20,10 +20,20 @@ pub type RuntimeStateCallback = Arc<dyn Fn(MasterRuntimeState) + Send + Sync>;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum HaError {
+    /// HA configuration is invalid and should not be retried.
+    /// HA 配置无效，不应重试。
+    #[error("invalid ha params: {0}")]
+    InvalidParams(String),
+
     /// HA backend configuration is invalid (e.g. unknown backend type).
     /// HA 后端配置无效（如未知的后端类型）。
     #[error("invalid ha backend: {0}")]
     InvalidBackend(String),
+
+    /// HA backend is unavailable in this build/mode.
+    /// 当前构建/模式下 HA 后端不可用。
+    #[error("ha backend unavailable in current mode: {0}")]
+    UnavailableInCurrentMode(String),
 
     /// Snapshot load/restore failed. / 快照加载/恢复失败。
     #[error("snapshot error: {0}")]
@@ -41,7 +51,7 @@ impl HaError {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
-            HaError::InvalidBackend(_) | HaError::UnavailableInCurrentStatus
+            HaError::InvalidParams(_) | HaError::UnavailableInCurrentMode(_)
         )
     }
 }

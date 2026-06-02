@@ -4,11 +4,11 @@ mod common;
 use common::temp_dir;
 
 use mooncake_store_master::ha::{
-    build_standby_runtime_capabilities, parse_ha_backend_type, CapabilityDrivenStandbyController,
-    HABackendSpec, HABackendType, LeaderCoordinator, LeaderRole, LocalSnapshotProvider,
-    MasterRuntimeState, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
-    SnapshotProvider, StandbyController, StandbyRuntimeCapabilities, StandbyState,
-    StandbySyncStatus,
+    build_standby_runtime_capabilities, map_standby_runtime_state, parse_ha_backend_type,
+    CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
+    LeaderRole, LocalSnapshotProvider, MasterRuntimeState, MasterServiceSupervisor,
+    MasterServiceSupervisorConfig, MasterView, SnapshotProvider, StandbyController,
+    StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
@@ -58,6 +58,14 @@ fn test_parse_ha_backend_type() {
 }
 
 #[test]
+fn test_ha_error_fatal_matches_supervisor_policy() {
+    assert!(HaError::InvalidParams("bad config".into()).is_fatal());
+    assert!(HaError::UnavailableInCurrentMode("not built".into()).is_fatal());
+    assert!(!HaError::InvalidBackend("temporary etcd error".into()).is_fatal());
+    assert!(!HaError::UnavailableInCurrentStatus.is_fatal());
+}
+
+#[test]
 fn test_build_standby_runtime_capabilities() {
     let spec = HABackendSpec {
         backend_type: HABackendType::Etcd,
@@ -94,6 +102,19 @@ async fn test_manual_coordinator_waits_for_promotion() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_wait_for_view_change_returns_when_known_view_disappears() {
+    let (coordinator, _tx) = LeaderCoordinator::new_manual(LeaderRole::Standby);
+    let start = std::time::Instant::now();
+    let view = coordinator
+        .wait_for_view_change(7, std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    assert!(view.is_none());
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
 }
 
 #[test]
@@ -205,28 +226,27 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
 
 #[test]
 fn test_capability_driven_controller_reports_catching_up_when_lagging() {
-    let spec = HABackendSpec {
-        backend_type: HABackendType::Etcd,
-        connstring: "localhost:2379".into(),
-        cluster_namespace: "test".into(),
+    let capabilities = StandbyRuntimeCapabilities {
+        has_snapshot_bootstrap: false,
+        has_oplog_following: true,
     };
-    let mut config = MasterServiceSupervisorConfig::default();
-    config.enable_snapshot_restore = false;
-    let mut controller = CapabilityDrivenStandbyController::new(spec, config);
-    controller
-        .start_standby(Some(MasterView {
-            leader_address: "leader:50051".into(),
-            view_version: 1,
-        }))
-        .unwrap();
+    let status = StandbySyncStatus {
+        applied_seq_id: 10,
+        primary_seq_id: 15,
+        lag_entries: 5,
+        is_syncing: true,
+        is_connected: true,
+        state: StandbyState::Watching,
+    };
+    let leader = MasterView {
+        leader_address: "leader:50051".into(),
+        view_version: 1,
+    };
 
-    // With oplog following enabled and connected to a leader, the runtime state
-    // should reflect the sync status from the service.
-    let state = controller.get_standby_runtime_state();
-    assert!(matches!(
-        state,
-        MasterRuntimeState::Standby | MasterRuntimeState::Recovering
-    ));
+    assert_eq!(
+        map_standby_runtime_state(&status, Some(&leader), capabilities),
+        MasterRuntimeState::CatchingUp
+    );
 }
 
 #[test]

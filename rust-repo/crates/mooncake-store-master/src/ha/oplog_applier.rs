@@ -70,10 +70,10 @@ impl OpLogApplier {
     pub fn try_resolve_gaps_once(&self, store: &dyn OpLogStore, max_ids: usize) -> (usize, usize) {
         let expected = self.expected_seq.load(Ordering::Acquire);
         let latest = store.latest_sequence();
-        if latest <= expected {
+        if latest < expected {
             return (0, 0);
         }
-        let needed = (latest - expected).min(max_ids as u64) as usize;
+        let needed = (latest - expected + 1).min(max_ids as u64) as usize;
         if needed == 0 {
             return (0, 0);
         }

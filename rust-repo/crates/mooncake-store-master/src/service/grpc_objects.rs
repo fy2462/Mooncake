@@ -387,7 +387,10 @@ impl MasterServiceImpl {
                 }
             }
             // 更新 lease + soft_pin 超时：多次 PutEnd 取最晚超时 / Update lease + soft_pin timeout: latest wins
-            entry.grant_lease(self.state.runtime_config.lease_ttl, self.state.runtime_config.soft_pin_ttl);
+            entry.grant_lease(
+                self.state.runtime_config.lease_ttl,
+                self.state.runtime_config.soft_pin_ttl,
+            );
             let all_complete = entry
                 .replicas
                 .iter()
@@ -523,7 +526,10 @@ impl MasterServiceImpl {
         // 阶段 2：短暂写锁仅更新时间戳（微秒级）
         if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
             entry.last_access = SystemTime::now();
-            entry.grant_lease(self.state.runtime_config.lease_ttl, self.state.runtime_config.soft_pin_ttl);
+            entry.grant_lease(
+                self.state.runtime_config.lease_ttl,
+                self.state.runtime_config.soft_pin_ttl,
+            );
         }
 
         // Phase 3: promotion after all locks released.
@@ -658,9 +664,7 @@ impl MasterServiceImpl {
             .state
             .objects
             .iter()
-            .filter(|entry| {
-                entry.tenant_id == tenant_filter && pattern.is_match(&entry.user_key)
-            })
+            .filter(|entry| entry.tenant_id == tenant_filter && pattern.is_match(&entry.user_key))
             .map(|entry| entry.key().clone())
             .collect();
 
