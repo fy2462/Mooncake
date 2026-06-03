@@ -245,25 +245,14 @@ impl MooncakeClient {
     pub async fn batch_upsert_end(
         &mut self,
         entries: &[BatchUpsertEntry<'_>],
-    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+    ) -> StoreResult<Vec<i32>> {
         let request = proto::BatchUpsertEndRequest {
             entries: entries
                 .iter()
-                .map(|e| proto::UpsertEntry {
+                .map(|e| proto::PutEndEntry {
                     client_id: Some(self.client_id_proto()),
                     key: e.key.to_string(),
-                    slice_length: e.slice_length,
-                    config: Some(proto::ReplicateConfig {
-                        replica_num: e.config.replica_num,
-                        nof_replica_num: e.config.nof_replica_num,
-                        with_soft_pin: e.config.with_soft_pin,
-                        with_hard_pin: e.config.with_hard_pin,
-                        preferred_segment: e.config.preferred_segment.clone(),
-                        prefer_alloc_in_same_node: e.config.prefer_alloc_in_same_node,
-                        preferred_segments: e.config.preferred_segments.clone(),
-                        preferred_nof_segments: e.config.preferred_nof_segments.clone(),
-                        data_type: e.config.data_type as i32,
-                    }),
+                    replica_type: e.replica_type,
                     tenant_id: e.tenant_id.to_string(),
                 })
                 .collect(),
@@ -274,7 +263,7 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
-        Ok(self.replicas_from_proto(&response.replicas))
+        Ok(response.statuses)
     }
 
     // -----------------------------------------------------------------------
@@ -357,6 +346,8 @@ pub struct BatchUpsertEntry<'a> {
     pub slice_length: u64,
     /// Replication configuration for this key. / 此 key 的副本配置。
     pub config: ReplicateConfig,
+    /// Replica type (MEMORY=0, DISK=1, etc.). / 副本类型（MEMORY=0, DISK=1 等）。
+    pub replica_type: i32,
     /// Tenant ID for multi-tenancy. / 多租户的租户 ID。
     pub tenant_id: &'a str,
 }

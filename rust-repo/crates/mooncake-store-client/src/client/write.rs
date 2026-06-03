@@ -505,11 +505,28 @@ impl MooncakeClient {
 
         // Phase 3: BatchPutEnd / BatchPutRevoke.
         if !success_keys.is_empty() {
-            let _ = self
+            tracing::info!(
+                "batch_put: calling batch_put_end for {} success keys: {:?}",
+                success_keys.len(),
+                &success_keys[..success_keys.len().min(3)]
+            );
+            match self
                 .batch_put_end(&success_keys, 0 /* MEMORY */, "")
-                .await;
+                .await
+            {
+                Ok(statuses) => {
+                    tracing::info!(
+                        "batch_put: batch_put_end returned statuses: {:?}",
+                        statuses
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("batch_put: batch_put_end FAILED: {:?}", e);
+                }
+            }
         }
         if !failed_keys.is_empty() {
+            tracing::warn!("batch_put: {} keys failed writes, revoking", failed_keys.len());
             let _ = self.batch_put_revoke(&failed_keys, "", "").await;
         }
 

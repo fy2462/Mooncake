@@ -445,6 +445,8 @@ impl MooncakeClient {
                 segment_name: segment_name.to_string(),
                 size,
                 base_addr,
+                te_endpoint: self.local_hostname.clone(),
+                protocol: self.protocol.clone(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;

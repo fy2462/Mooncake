@@ -123,22 +123,11 @@ impl MooncakeClient {
         // 注意：Upsert 使用 BatchUpsertEnd（而非 PutEnd），因为协议支持在
         // 单次提交中批量处理多个 upsert 条目。
         let end_request = proto::BatchUpsertEndRequest {
-            entries: vec![proto::UpsertEntry {
+            entries: vec![proto::PutEndEntry {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
-                slice_length: value.len() as u64,
+                replica_type: 0, // MEMORY
                 tenant_id: String::new(),
-                config: Some(proto::ReplicateConfig {
-                    replica_num: cfg.replica_num,
-                    nof_replica_num: cfg.nof_replica_num,
-                    with_soft_pin: cfg.with_soft_pin,
-                    with_hard_pin: cfg.with_hard_pin,
-                    preferred_segment: cfg.preferred_segment.clone(),
-                    prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
-                    preferred_segments: cfg.preferred_segments.clone(),
-                    preferred_nof_segments: cfg.preferred_nof_segments.clone(),
-                    data_type: cfg.data_type as i32,
-                }),
             }],
         };
         self.master
@@ -220,22 +209,11 @@ impl MooncakeClient {
 
         // Phase 3: commit. / 阶段 3：提交。
         let end_request = proto::BatchUpsertEndRequest {
-            entries: vec![proto::UpsertEntry {
+            entries: vec![proto::PutEndEntry {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
-                slice_length: size as u64,
+                replica_type: 0, // MEMORY
                 tenant_id: String::new(),
-                config: Some(proto::ReplicateConfig {
-                    replica_num: cfg.replica_num,
-                    nof_replica_num: cfg.nof_replica_num,
-                    with_soft_pin: cfg.with_soft_pin,
-                    with_hard_pin: cfg.with_hard_pin,
-                    preferred_segment: cfg.preferred_segment.clone(),
-                    prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
-                    preferred_segments: cfg.preferred_segments.clone(),
-                    preferred_nof_segments: cfg.preferred_nof_segments.clone(),
-                    data_type: cfg.data_type as i32,
-                }),
             }],
         };
         self.master

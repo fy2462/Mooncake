@@ -101,6 +101,11 @@ pub struct MooncakeClient {
     /// 用作 segment 解析的传输端点名称。
     pub(crate) local_hostname: String,
 
+    /// Transport protocol used for data-plane transfers ("tcp", "rdma", etc.).
+    /// Stored so MountSegment / ReMountSegment can include it in gRPC requests.
+    /// 数据面传输使用的协议（"tcp"、"rdma" 等）。存储以供 MountSegment/ReMountSegment 在 gRPC 请求中包含。
+    pub(crate) protocol: String,
+
     /// Scratch buffer for staging data before/after TransferEngine operations.
     /// In `write_to_replica`: data is first memcpy'd here, then TE transfers it.
     /// In `read_from_replica`: TE reads into this buffer, then we copy out.
@@ -353,6 +358,8 @@ impl MooncakeClient {
                 segment_name: segment_name.clone(),
                 size: global_segment_size,
                 base_addr,
+                te_endpoint: local_host.to_string(),
+                protocol: protocol.to_string(),
             };
             master
                 .mount_segment(request)
@@ -374,6 +381,7 @@ impl MooncakeClient {
             engine,
             client_id,
             local_hostname: local_host.to_string(),
+            protocol: protocol.to_string(),
             local_buffer,
             segment_buffer,
             registered_buffers: RwLock::new(HashMap::new()),
@@ -453,6 +461,15 @@ impl MooncakeClient {
         let client_id = self.client_id_proto();
         let segment_name = self.segment_name.clone();
         let segment_size = self.segment_size;
+        let te_endpoint = self.local_hostname.clone();
+        let protocol = self.protocol.clone();
+        // SAFETY: segment_buffer is allocated in create() and never moved/reallocated
+        // during the client's lifetime, so its pointer remains valid.
+        let base_addr = self
+            .segment_buffer
+            .as_ref()
+            .map(|buf| buf.as_ptr() as u64)
+            .unwrap_or(0);
         let remount_flag = self.remount_in_progress.clone();
 
         // Spawn a background task so we don't block the caller.
@@ -462,6 +479,9 @@ impl MooncakeClient {
                 client_id: Some(client_id),
                 segment_names: vec![segment_name],
                 segment_sizes: vec![segment_size],
+                base_addrs: vec![base_addr],
+                te_endpoints: vec![te_endpoint],
+                protocols: vec![protocol],
             };
             match master.re_mount_segment(request).await {
                 Ok(_) => {
