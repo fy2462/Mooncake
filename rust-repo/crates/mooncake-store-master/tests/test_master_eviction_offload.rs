@@ -28,7 +28,9 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 client_id: Some(uuid_proto(client_id)),
                 segment_name: segment_name.into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             }),
         )
         .await
@@ -132,7 +134,9 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
             client_id: Some(uuid_proto(client_id)),
             segment_name: "evict-localdisk".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -250,7 +254,9 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 client_id: Some(uuid_proto(client_id)),
                 segment_name: segment_name.into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             }),
         )
         .await
@@ -350,7 +356,9 @@ async fn test_processing_keys_excluded_from_eviction() {
             client_id: Some(uuid_proto(client_id)),
             segment_name: "proc-key-seg".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await

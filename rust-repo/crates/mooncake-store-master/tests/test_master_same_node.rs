@@ -19,7 +19,7 @@ fn proto_nof_segment(id: Uuid, client_id: Uuid, name: &str) -> proto::NoFSegment
 }
 
 #[tokio::test]
-async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
+async fn test_put_start_rejects_same_node_preference_with_nof_replicas() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();
     let remote_client_id = Uuid::new_v4();
@@ -32,7 +32,9 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "same-host:1001".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -43,7 +45,9 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
             client_id: Some(proto_uuid(remote_client_id)),
             segment_name: "remote-host:1001".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -75,7 +79,7 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
     .await
     .unwrap();
 
-    let response = MasterService::put_start(
+    let err = MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
             client_id: Some(proto_uuid(client_id)),
@@ -96,26 +100,12 @@ async fn test_put_start_prefers_same_host_for_memory_and_nof_replicas() {
         }),
     )
     .await
-    .unwrap()
-    .into_inner();
+    .unwrap_err();
 
-    assert_eq!(response.replicas.len(), 2);
-    let memory = response
-        .replicas
-        .iter()
-        .find(|replica| {
-            replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32
-        })
-        .unwrap();
-    let nof = response
-        .replicas
-        .iter()
-        .find(|replica| {
-            replica.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32
-        })
-        .unwrap();
-    assert_eq!(memory.segment_name, "same-host:1001");
-    assert_eq!(nof.segment_name, "same-host:nof-1");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err
+        .message()
+        .contains("prefer_alloc_in_same_node is not supported with NoF replicas"));
 }
 
 #[tokio::test]
@@ -130,7 +120,9 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "same-host:1001".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -175,7 +167,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert!(err
         .message()
-        .contains("prefer_alloc_in_same_node requires matching NoF segment"));
+        .contains("prefer_alloc_in_same_node is not supported with NoF replicas"));
 }
 
 #[tokio::test]
@@ -193,7 +185,9 @@ async fn test_client_monitor_reaps_expired_clients() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "ttl:1".into(),
             size: 2048,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await

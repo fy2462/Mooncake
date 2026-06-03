@@ -64,6 +64,7 @@ service MasterService {
 
   // Upsert
   rpc Upsert(UpsertRequest) returns (UpsertResponse);
+  rpc BatchUpsertStart(BatchUpsertStartRequest) returns (BatchUpsertStartResponse);
   rpc CopyStart(CopyStartRequest) returns (CopyStartResponse);
   rpc CopyEnd(CopyEndRequest) returns (CopyEndResponse);
   rpc CopyRevoke(CopyRevokeRequest) returns (CopyRevokeResponse);
@@ -107,4 +108,5 @@ service MasterService {
   rpc BatchPutRevoke(BatchPutRevokeRequest) returns (BatchPutRevokeResponse);
   rpc BatchRemove(BatchRemoveRequest) returns (BatchRemoveResponse);
   rpc BatchUpsertEnd(BatchUpsertEndRequest) returns (BatchUpsertEndResponse);
+  rpc BatchUpsertRevoke(BatchUpsertRevokeRequest) returns (BatchUpsertRevokeResponse);
 }

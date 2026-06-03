@@ -1,3 +1,4 @@
+use mooncake_store_core::ReplicaType;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::MasterServiceImpl;
@@ -18,7 +19,9 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
             }),
             segment_name: "mem-a".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -76,6 +79,10 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        service.replica_refcnts_for_test("offload-key", ReplicaType::Memory, ""),
+        vec![1]
+    );
 
     let heartbeat = MasterService::offload_object_heartbeat(
         &service,
@@ -99,18 +106,31 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
                 high: client_id.as_u64_pair().0,
                 low: client_id.as_u64_pair().1,
             }),
-            keys: vec!["disk-only-key".into()],
-            metadatas: vec![proto::StorageObjectMetadata {
-                bucket_id: 0,
-                offset: 0,
-                key_size: "disk-only-key".len() as i64,
-                data_size: 512,
-                transport_endpoint: "holder-a".into(),
-            }],
+            keys: vec!["offload-key".into(), "disk-only-key".into()],
+            metadatas: vec![
+                proto::StorageObjectMetadata {
+                    bucket_id: 0,
+                    offset: 0,
+                    key_size: "offload-key".len() as i64,
+                    data_size: 256,
+                    transport_endpoint: "holder-a".into(),
+                },
+                proto::StorageObjectMetadata {
+                    bucket_id: 0,
+                    offset: 0,
+                    key_size: "disk-only-key".len() as i64,
+                    data_size: 512,
+                    transport_endpoint: "holder-a".into(),
+                },
+            ],
         }),
     )
     .await
     .unwrap();
+    assert_eq!(
+        service.replica_refcnts_for_test("offload-key", ReplicaType::Memory, ""),
+        vec![0]
+    );
 
     let replicas = MasterService::get_replica_list(
         &service,

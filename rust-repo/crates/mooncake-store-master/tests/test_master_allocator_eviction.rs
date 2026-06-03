@@ -140,7 +140,9 @@ async fn test_runtime_config_applies_allocator_strategy() {
             }),
             segment_name: "fuller:1".into(),
             size: 1000,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -154,7 +156,9 @@ async fn test_runtime_config_applies_allocator_strategy() {
             }),
             segment_name: "emptier:1".into(),
             size: 1000,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await

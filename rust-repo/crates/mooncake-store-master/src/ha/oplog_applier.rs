@@ -189,6 +189,7 @@ mod tests {
     fn make_state() -> Arc<MasterState> {
         Arc::new(MasterState {
             clients: DashMap::new(),
+            ok_clients: DashMap::new(),
             objects: DashMap::new(),
             processing_keys: DashMap::new(),
             client_objects: DashMap::new(),

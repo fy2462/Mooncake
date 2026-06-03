@@ -19,7 +19,9 @@ async fn test_create_and_query_task_returns_real_state() {
             }),
             segment_name: "host-b:2222".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -34,7 +36,9 @@ async fn test_create_and_query_task_returns_real_state() {
             }),
             segment_name: "target-a".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -116,7 +120,9 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
                 }),
                 segment_name: segment_name.into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             }),
         )
         .await
@@ -277,7 +283,9 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
                 }),
                 segment_name: segment_name.into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             }),
         )
         .await

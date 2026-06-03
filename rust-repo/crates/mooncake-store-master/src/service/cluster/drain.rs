@@ -17,8 +17,24 @@ impl MasterServiceImpl {
         if req.segments.is_empty() {
             return Err(Status::invalid_argument("segments cannot be empty"));
         }
+        if req.max_concurrency == 0 {
+            return Err(Status::invalid_argument("max_concurrency must be non-zero"));
+        }
         if req.target_segments.is_empty() {
             return Err(Status::invalid_argument("target_segments cannot be empty"));
+        }
+        let unique_sources: HashSet<String> = req.segments.iter().cloned().collect();
+        if unique_sources.len() != req.segments.len() {
+            return Err(Status::invalid_argument("segments must be unique"));
+        }
+        if req
+            .target_segments
+            .iter()
+            .any(|target| unique_sources.contains(target))
+        {
+            return Err(Status::invalid_argument(
+                "target_segments cannot include draining segments",
+            ));
         }
         // Validate that all source segments exist and are in ACTIVE state
         // 校验所有源 segment 存在且处于 Active 状态
@@ -297,7 +313,7 @@ impl MasterServiceImpl {
         &self,
         _request: Request<proto::GetFsdirRequest>,
     ) -> Result<Response<proto::GetFsdirResponse>, Status> {
-        let fs_dir = self.state.runtime_config.storage_fs_dir.clone();
+        let fs_dir = storage_fs_dir_for_client(&self.state.runtime_config);
         Ok(Response::new(proto::GetFsdirResponse { fs_dir }))
     }
 }

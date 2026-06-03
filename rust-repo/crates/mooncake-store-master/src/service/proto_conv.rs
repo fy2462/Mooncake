@@ -91,9 +91,9 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
     }
 }
 
-/// 将 proto ReplicateConfig 转换为内部类型，preferred_segment 向后兼容并合并到 preferred_segments。
+/// 将 proto ReplicateConfig 转换为内部类型，保留 preferred_segment 的 C++ 优先级语义。
 /// Convert proto ReplicateConfig to internal type.
-/// `preferred_segment` is merged into `preferred_segments` for backward compatibility.
+/// `preferred_segment` is preserved so allocation can prefer it over `preferred_segments`.
 pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
     let preferred_segment = c.preferred_segment.clone();
     let preferred_segments = if !c.preferred_segments.is_empty() {

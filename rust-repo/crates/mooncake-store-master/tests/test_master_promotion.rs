@@ -1,3 +1,4 @@
+use mooncake_store_core::ReplicaType;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
@@ -32,7 +33,9 @@ async fn test_promotion_flow_success_and_failure() {
             }),
             segment_name: "dram-a".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -68,6 +71,10 @@ async fn test_promotion_flow_success_and_failure() {
         )
         .await
         .unwrap();
+        assert_eq!(
+            service.replica_refcnts_for_test(key, ReplicaType::LocalDisk, ""),
+            vec![1]
+        );
     }
 
     let first_heartbeat = MasterService::promotion_object_heartbeat(
@@ -139,7 +146,7 @@ async fn test_promotion_flow_success_and_failure() {
     let promoted = MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: first_key,
+            key: first_key.clone(),
             tenant_id: String::new(),
         }),
     )
@@ -149,6 +156,10 @@ async fn test_promotion_flow_success_and_failure() {
     assert!(promoted.replicas.iter().any(|replica| replica.replica_type
         == proto::replica_descriptor::ReplicaType::Memory as i32
         && replica.status == proto::replica_descriptor::ReplicaStatus::Complete as i32));
+    assert_eq!(
+        service.replica_refcnts_for_test(&first_key, ReplicaType::LocalDisk, ""),
+        vec![0]
+    );
 
     MasterService::promotion_alloc_start(
         &service,
@@ -178,11 +189,15 @@ async fn test_promotion_flow_success_and_failure() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        service.replica_refcnts_for_test(&second_key, ReplicaType::LocalDisk, ""),
+        vec![0]
+    );
 
     let failed = MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
-            key: second_key,
+            key: second_key.clone(),
             tenant_id: String::new(),
         }),
     )
@@ -316,7 +331,9 @@ async fn test_promotion_queue_limit_released_after_success() {
             }),
             segment_name: "limit-dram".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -465,7 +482,9 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             }),
             segment_name: "reaper-dram".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await

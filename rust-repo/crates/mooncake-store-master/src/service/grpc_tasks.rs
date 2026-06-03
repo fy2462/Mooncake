@@ -65,9 +65,17 @@ impl MasterServiceImpl {
         // Verify all target segments are mounted (known to the master).
         // 验证所有目标 segment 已挂载（master 已知）。
         for target in &req.targets {
-            if client_id_by_segment_name(&self.state, target).is_none() {
+            let Some(_) = client_id_by_segment_name(&self.state, target) else {
                 return Err(Status::invalid_argument(format!(
                     "target segment not mounted: {target}"
+                )));
+            };
+            let allocatable = self.state.segments.iter().any(|entry| {
+                entry.segment.name == *target && entry.status == proto::SegmentStatus::Active
+            });
+            if !allocatable {
+                return Err(Status::failed_precondition(format!(
+                    "target segment not allocatable: {target}"
                 )));
             }
         }
@@ -170,6 +178,14 @@ impl MasterServiceImpl {
             .ok_or(Status::failed_precondition("source segment missing"))?;
         if client_id_by_segment_name(&self.state, &req.target).is_none() {
             return Err(Status::invalid_argument("target segment not mounted"));
+        }
+        let target_allocatable = self.state.segments.iter().any(|entry| {
+            entry.segment.name == req.target && entry.status == proto::SegmentStatus::Active
+        });
+        if !target_allocatable {
+            return Err(Status::failed_precondition(
+                "target segment not allocatable",
+            ));
         }
 
         // Serialise the move payload. / 序列化移动负载。

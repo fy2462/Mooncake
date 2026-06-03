@@ -31,7 +31,9 @@ async fn mount_segment(service: &MasterServiceImpl, name: &str, cid: Uuid) {
             client_id: Some(client_proto(cid)),
             segment_name: name.into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await

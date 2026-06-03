@@ -192,7 +192,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
             tenant_id: "default".to_string(),
             user_key: String::new(),
             replicas: vec![ReplicaDescriptor {
-                base_addr: 0,
+                base_addr: 0x100000000,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id,

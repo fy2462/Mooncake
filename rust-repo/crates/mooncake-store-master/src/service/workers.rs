@@ -623,6 +623,7 @@ mod tests {
     fn make_state(config: MasterRuntimeConfig) -> Arc<MasterState> {
         Arc::new(MasterState {
             clients: DashMap::new(),
+            ok_clients: DashMap::new(),
             objects: DashMap::new(),
             processing_keys: DashMap::new(),
             client_objects: DashMap::new(),
@@ -857,7 +858,7 @@ mod tests {
                     status: ReplicaStatus::Complete,
                     replica_type: ReplicaType::NoFSsd,
                     holder_client_id: Some(owner),
-                    base_addr: 0,
+                    base_addr: 0x100000000,
                     refcnt: 0,
                 }],
                 size: 128,

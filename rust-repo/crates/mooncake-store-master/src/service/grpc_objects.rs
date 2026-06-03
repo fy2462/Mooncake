@@ -313,10 +313,15 @@ impl MasterServiceImpl {
                 "replica_num and nof_replica_num cannot both be zero",
             ));
         }
-        let replica_count = config.replica_num.max(1) as usize;
+        if config.prefer_alloc_in_same_node && config.nof_replica_num > 0 {
+            return Err(Status::invalid_argument(
+                "prefer_alloc_in_same_node is not supported with NoF replicas",
+            ));
+        }
+        let replica_count = config.replica_num as usize;
 
         // 分配 Memory 副本 / Allocate Memory replicas
-        let mut replicas = {
+        let mut replicas = if replica_count > 0 {
             let mut allocator = self.state.allocator.write();
             allocator.allocate_for_client(
                 &scoped_key,
@@ -325,34 +330,32 @@ impl MasterServiceImpl {
                 replica_count,
                 &config,
             )
+        } else {
+            Vec::new()
         };
-        if replicas.is_empty() && replica_count > 0 {
+        if replicas.len() != replica_count {
+            release_replicas(&self.state, &replicas);
             return Err(Status::resource_exhausted(format!(
                 "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                 PUT_NO_SPACE_HELPER_STR,
             )));
         }
-        // NoF 副本分配：优先分配在与 Memory 副本相同节点上的 NoF segment，降低跨节点访问延迟
-        // NoF replica allocation: prefer NoF segments on same node as Memory replicas for lower latency
+        // NoF 副本分配：使用显式 preferred_nof_segments；same-node NoF 组合按 C++ 拒绝。
+        // NoF replica allocation: use explicit preferred_nof_segments; same-node NoF is rejected like C++.
         if config.nof_replica_num > 0 {
-            let preferred_nof = if config.prefer_alloc_in_same_node {
-                preferred_nof_segment_names(&self.state, &replicas)
-            } else {
-                Vec::new()
-            };
-            if config.prefer_alloc_in_same_node && preferred_nof.is_empty() {
-                release_replicas(&self.state, &replicas);
-                return Err(Status::invalid_argument(
-                    "prefer_alloc_in_same_node requires matching NoF segment",
-                ));
-            }
-            let nof_replicas = allocate_nof_replicas(
+            let nof_replicas = match allocate_nof_replicas(
                 &self.state,
                 &scoped_key,
                 req.slice_length,
                 config.nof_replica_num as usize,
-                &preferred_nof,
-            )?;
+                &config.preferred_nof_segments,
+            ) {
+                Ok(replicas) => replicas,
+                Err(status) => {
+                    release_replicas(&self.state, &replicas);
+                    return Err(status);
+                }
+            };
             replicas.extend(nof_replicas);
         }
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
@@ -779,130 +782,23 @@ impl MasterServiceImpl {
         }
     }
 
-    // ---- Upsert ----
-    // 原子 Upsert：若 key 已存在则检查 refcnt（busy 检查）并复用/替换副本，否则新建。
-    // 与 PutStart 相比不写入 processing_keys，适合管理端直接注入对象。
-    // 已有的 soft_pin/hard_pin 状态会保留（OR 语义），防止意外丢失 pin 保护。
-    //
-    // Atomic Upsert: if key exists, check refcnt (busy check) and reuse/replace replicas; otherwise create new.
-    // Unlike PutStart, does not write to processing_keys — suitable for admin-side object injection.
-    // Existing soft_pin/hard_pin state is retained (OR semantics) to prevent accidental loss of pin protection.
-    pub(super) async fn upsert_impl(
-        &self,
-        request: Request<proto::UpsertRequest>,
-    ) -> Result<Response<proto::UpsertResponse>, Status> {
-        let req = request.into_inner();
-        let user_key = req.key.clone();
-        let tenant_id = normalize_tenant_id(&req.tenant_id);
-        let scoped_key = make_tenant_scoped_key(&tenant_id, &user_key);
-        let client_id = uuid_from_proto(
-            req.client_id
-                .as_ref()
-                .ok_or(Status::invalid_argument("missing client_id"))?,
-        );
-        let config = req
-            .config
-            .as_ref()
-            .map(config_from_proto)
-            .unwrap_or_default();
-        if config.replica_num == 0 && config.nof_replica_num == 0 {
-            return Err(Status::invalid_argument(
-                "replica_num and nof_replica_num cannot both be zero",
-            ));
+    fn schedule_delayed_release(&self, replicas: Vec<ReplicaDescriptor>) {
+        if replicas.is_empty() {
+            return;
         }
-        let replica_count = config.replica_num.max(1) as usize;
+        let state = self.state.clone();
+        let delay = self.state.runtime_config.put_start_release_timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            release_replicas(&state, &replicas);
+        });
+    }
 
-        // C++ 检查是否有进行中的 replication/offloading 任务，以及 replica 是否 busy
-        // C++ checks if replication_tasks or offloading_tasks exist for the key.
-        if self.state.replication_tasks.contains_key(&scoped_key) {
-            return Err(Status::failed_precondition("object has replication task"));
-        }
-        if self.state.offloading_tasks.contains_key(&scoped_key) {
-            return Err(Status::failed_precondition("object has offloading task"));
-        }
-
-        let (replicas, previous_soft_pin_timeout, previous_hard_pinned) =
-            if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
-                // C++ 先调用 CleanupStaleHandles 清理无效副本
-                // First call CleanupStaleHandles to clean invalid replicas
-                let alive_clients = get_alive_clients_snapshot(&self.state);
-                let _ = cleanup_stale_handles(&mut existing, &alive_clients);
-
-                // C++ checks HasReplica(&Replica::fn_is_busy)
-                if existing.replicas.iter().any(|r| r.refcnt > 0) {
-                    return Err(Status::failed_precondition("object replica busy"));
-                }
-                if existing.size == req.slice_length {
-                    // 大小匹配，复用现有副本 / Size matches; reuse existing replicas
-                    (
-                        existing.replicas.clone(),
-                        existing.soft_pin_timeout,
-                        existing.hard_pinned,
-                    )
-                } else {
-                    // 大小不匹配，释放旧副本后重新分配 / Size mismatch; release old and reallocate
-                    let previous_soft_pin_timeout = existing.soft_pin_timeout;
-                    let previous_hard_pinned = existing.hard_pinned;
-                    let old_replicas = existing.replicas.clone();
-                    drop(existing);
-                    release_replicas(&self.state, &old_replicas);
-                    let mut allocator = self.state.allocator.write();
-                    (
-                        allocator.allocate_for_client(
-                            &req.key,
-                            Some(client_id),
-                            req.slice_length,
-                            replica_count,
-                            &config,
-                        ),
-                        previous_soft_pin_timeout,
-                        previous_hard_pinned,
-                    )
-                }
-            } else {
-                let mut allocator = self.state.allocator.write();
-                (
-                    allocator.allocate_for_client(
-                        &scoped_key,
-                        Some(client_id),
-                        req.slice_length,
-                        replica_count,
-                        &config,
-                    ),
-                    None,
-                    false,
-                )
-            };
-        let mut replicas = replicas;
-        if config.nof_replica_num > 0 {
-            let preferred_nof = if config.prefer_alloc_in_same_node {
-                preferred_nof_segment_names(&self.state, &replicas)
-            } else {
-                Vec::new()
-            };
-            if config.prefer_alloc_in_same_node && preferred_nof.is_empty() {
-                release_replicas(&self.state, &replicas);
-                return Err(Status::invalid_argument(
-                    "prefer_alloc_in_same_node requires matching NoF segment",
-                ));
-            }
-            let nof_replicas = allocate_nof_replicas(
-                &self.state,
-                &scoped_key,
-                req.slice_length,
-                config.nof_replica_num as usize,
-                &preferred_nof,
-            )?;
-            replicas.extend(nof_replicas);
-        }
-        sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
-
-        let proto_replicas: Vec<proto::ReplicaDescriptor> =
-            replicas.iter().map(replica_to_proto).collect();
-
-        // Reconcile soft_pin state with incoming config (C++ master_service.cpp:2044-2057)
-        // 与 C++ 一致的软固定调和逻辑：enable 时仅在尚未设置时设置，disable 时显式清除。
-        let soft_pin_timeout = match (config.with_soft_pin, previous_soft_pin_timeout) {
+    fn reconcile_soft_pin(
+        enable_soft_pin: bool,
+        previous: Option<SystemTime>,
+    ) -> Option<SystemTime> {
+        match (enable_soft_pin, previous) {
             (true, None) => {
                 crate::metrics::SOFT_PIN_KEY_COUNT.inc();
                 Some(SystemTime::UNIX_EPOCH)
@@ -913,27 +809,218 @@ impl MasterServiceImpl {
                 None
             }
             (false, None) => None,
-        };
+        }
+    }
 
-        self.state.objects.insert(
-            scoped_key.clone(),
-            ObjectEntry {
-                replicas,
-                size: req.slice_length,
-                last_access: SystemTime::now(),
-                hard_pinned: config.with_hard_pin || previous_hard_pinned,
-                data_type: config.data_type,
-                client_id,
-                put_start_time: Some(SystemTime::now()),
-                lease_timeout: None,
-                soft_pin_timeout,
-                tenant_id,
-                user_key,
-            },
+    pub(crate) fn upsert_start_for_entry(
+        &self,
+        client_id: Uuid,
+        user_key: &str,
+        tenant_id: &str,
+        slice_length: u64,
+        config: ReplicateConfig,
+    ) -> Result<Vec<ReplicaDescriptor>, Status> {
+        if user_key.is_empty() {
+            return Err(Status::invalid_argument("empty key"));
+        }
+        if slice_length == 0 {
+            return Err(Status::invalid_argument("zero slice_length"));
+        }
+        validate_user_key(user_key)?;
+        if config.replica_num == 0 && config.nof_replica_num == 0 {
+            return Err(Status::invalid_argument(
+                "replica_num and nof_replica_num cannot both be zero",
+            ));
+        }
+        if config.prefer_alloc_in_same_node && config.nof_replica_num > 0 {
+            return Err(Status::invalid_argument(
+                "prefer_alloc_in_same_node is not supported with NoF replicas",
+            ));
+        }
+
+        let tenant_id = normalize_tenant_id(tenant_id);
+        let scoped_key = make_tenant_scoped_key(&tenant_id, user_key);
+        if self.state.replication_tasks.contains_key(&scoped_key) {
+            return Err(Status::failed_precondition("object has replication task"));
+        }
+        if self.state.offloading_tasks.contains_key(&scoped_key) {
+            return Err(Status::failed_precondition("object has offloading task"));
+        }
+
+        let replica_count = config.replica_num as usize;
+        let now = SystemTime::now();
+        if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
+            let alive_clients = get_alive_clients_snapshot(&self.state);
+            let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
+            if should_remove {
+                drop(existing);
+                self.state.objects.remove(&scoped_key);
+            } else {
+                if existing.replicas.iter().any(|r| r.refcnt > 0) {
+                    return Err(Status::failed_precondition("object replica busy"));
+                }
+                if existing.size == slice_length {
+                    existing.client_id = client_id;
+                    existing.put_start_time = Some(now);
+                    existing.last_access = now;
+                    existing.soft_pin_timeout =
+                        Self::reconcile_soft_pin(config.with_soft_pin, existing.soft_pin_timeout);
+                    existing.data_type = config.data_type;
+                    for replica in &mut existing.replicas {
+                        if replica.status == ReplicaStatus::Complete {
+                            replica.status = ReplicaStatus::Allocating;
+                        }
+                    }
+                    let replicas = existing.replicas.clone();
+                    drop(existing);
+                    self.state.processing_keys.insert(scoped_key, ());
+                    return Ok(replicas);
+                }
+
+                let previous_soft_pin = existing.soft_pin_timeout;
+                let previous_hard_pin = existing.hard_pinned;
+                let old_replicas = existing.replicas.clone();
+                drop(existing);
+                self.state.objects.remove(&scoped_key);
+                self.schedule_delayed_release(old_replicas);
+
+                let mut merged_config = config.clone();
+                merged_config.with_hard_pin = merged_config.with_hard_pin || previous_hard_pin;
+                merged_config.with_soft_pin =
+                    merged_config.with_soft_pin || previous_soft_pin.is_some();
+                let hard_pinned = merged_config.with_hard_pin;
+                return self.allocate_and_insert_upsert(
+                    client_id,
+                    user_key,
+                    &tenant_id,
+                    &scoped_key,
+                    slice_length,
+                    replica_count,
+                    merged_config,
+                    None,
+                    hard_pinned,
+                );
+            }
+        }
+
+        self.allocate_and_insert_upsert(
+            client_id,
+            user_key,
+            &tenant_id,
+            &scoped_key,
+            slice_length,
+            replica_count,
+            config.clone(),
+            None,
+            config.with_hard_pin,
+        )
+    }
+
+    fn allocate_and_insert_upsert(
+        &self,
+        client_id: Uuid,
+        user_key: &str,
+        tenant_id: &str,
+        scoped_key: &str,
+        slice_length: u64,
+        replica_count: usize,
+        config: ReplicateConfig,
+        previous_soft_pin: Option<SystemTime>,
+        hard_pinned: bool,
+    ) -> Result<Vec<ReplicaDescriptor>, Status> {
+        let mut replicas = if replica_count > 0 {
+            self.state.allocator.write().allocate_for_client(
+                scoped_key,
+                Some(client_id),
+                slice_length,
+                replica_count,
+                &config,
+            )
+        } else {
+            Vec::new()
+        };
+        if replicas.len() != replica_count {
+            release_replicas(&self.state, &replicas);
+            return Err(Status::resource_exhausted(format!(
+                "failed to allocate {replica_count} replica(s) for key {user_key}{}",
+                PUT_NO_SPACE_HELPER_STR,
+            )));
+        }
+        if config.nof_replica_num > 0 {
+            let nof_replicas = match allocate_nof_replicas(
+                &self.state,
+                scoped_key,
+                slice_length,
+                config.nof_replica_num as usize,
+                &config.preferred_nof_segments,
+            ) {
+                Ok(replicas) => replicas,
+                Err(status) => {
+                    release_replicas(&self.state, &replicas);
+                    return Err(status);
+                }
+            };
+            replicas.extend(nof_replicas);
+        }
+        sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
+        sync_nof_segment_usage(
+            &self.state,
+            replicas
+                .iter()
+                .filter(|r| r.replica_type == ReplicaType::NoFSsd)
+                .map(|r| r.segment_id),
         );
 
+        let soft_pin_timeout = Self::reconcile_soft_pin(config.with_soft_pin, previous_soft_pin);
+        let now = SystemTime::now();
+        self.state.objects.insert(
+            scoped_key.to_string(),
+            ObjectEntry {
+                replicas: replicas.clone(),
+                size: slice_length,
+                last_access: now,
+                hard_pinned,
+                data_type: config.data_type,
+                client_id,
+                put_start_time: Some(now),
+                lease_timeout: None,
+                soft_pin_timeout,
+                tenant_id: tenant_id.to_string(),
+                user_key: user_key.to_string(),
+            },
+        );
+        self.state
+            .processing_keys
+            .insert(scoped_key.to_string(), ());
+        Ok(replicas)
+    }
+
+    // ---- Upsert ----
+    // C++ UpsertStart 语义：返回可写 descriptor，直到 PutEnd/BatchUpsertEnd 前对象不可读。
+    pub(super) async fn upsert_impl(
+        &self,
+        request: Request<proto::UpsertRequest>,
+    ) -> Result<Response<proto::UpsertResponse>, Status> {
+        let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or(Status::invalid_argument("missing client_id"))?,
+        );
+        let config = req
+            .config
+            .as_ref()
+            .map(config_from_proto)
+            .unwrap_or_default();
+        let replicas = self.upsert_start_for_entry(
+            client_id,
+            &req.key,
+            &req.tenant_id,
+            req.slice_length,
+            config,
+        )?;
         Ok(Response::new(proto::UpsertResponse {
-            replicas: proto_replicas,
+            replicas: replicas.iter().map(replica_to_proto).collect(),
         }))
     }
 }

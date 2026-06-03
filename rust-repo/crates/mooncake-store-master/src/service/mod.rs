@@ -35,7 +35,7 @@ mod proto_conv;
 pub(crate) mod state;
 mod workers;
 
-use crate::allocator::SegmentAllocator;
+use crate::allocator::{MemoryAllocatorKind, SegmentAllocator, CACHELIB_SLAB_SIZE};
 use crate::count_min_sketch::CountMinSketch;
 use crate::http_metadata::MetadataState;
 use crate::metrics;
@@ -67,11 +67,10 @@ use self::helpers::{
     addresses_for_client, allocate_nof_replicas, bump_view_version, cleanup_stale_handles,
     client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
     get_alive_clients_snapshot, host_from_segment_name, is_lease_expired, make_tenant_scoped_key,
-    normalize_tenant_id, object_owner_client_id, preferred_nof_segment_names,
-    register_metadata_segments, release_object_replicas, release_replicas,
-    release_replicas_scheduled, split_scoped_key, sync_client_segments, sync_nof_segment_usage,
-    sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
-    validate_user_key,
+    normalize_tenant_id, object_owner_client_id, register_metadata_segments,
+    release_object_replicas, release_replicas, release_replicas_scheduled, split_scoped_key,
+    storage_fs_dir_for_client, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
+    unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses, validate_user_key,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
@@ -171,6 +170,7 @@ impl MasterServiceImpl {
         // Initialize all DashMap stores — each table handles one category of concurrent read/write
         let state = Arc::new(MasterState {
             clients: DashMap::new(),
+            ok_clients: DashMap::new(),
             objects: DashMap::new(),
             processing_keys: DashMap::new(),
             client_objects: DashMap::new(),
@@ -356,6 +356,28 @@ impl MasterServiceImpl {
             .iter()
             .find(|entry| entry.segment.name == segment_name)
             .map(|entry| entry.segment.id)
+    }
+
+    #[doc(hidden)]
+    pub fn replica_refcnts_for_test(
+        &self,
+        key: &str,
+        replica_type: ReplicaType,
+        tenant_id: &str,
+    ) -> Vec<u32> {
+        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        self.state
+            .objects
+            .get(&scoped_key)
+            .map(|object| {
+                object
+                    .replicas
+                    .iter()
+                    .filter(|replica| replica.replica_type == replica_type)
+                    .map(|replica| replica.refcnt)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// 测试用：执行一轮指定目标数量的驱逐循环。

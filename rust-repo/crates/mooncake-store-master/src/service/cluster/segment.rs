@@ -17,7 +17,7 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        let existed = self.state.clients.contains_key(&client_id);
+        let remounted = self.state.ok_clients.contains_key(&client_id);
         // 从 segment 名称中提取 host 地址 / Derive addresses from segment names
         let derived_addresses = req
             .mounted_segments
@@ -32,15 +32,11 @@ impl MasterServiceImpl {
         }
         register_metadata_segments(&self.metadata_state, &req.mounted_segments).await;
         metrics::PING_REQUESTS.inc();
-        let view_version_id = if existed {
-            self.state
-                .view_version
-                .load(std::sync::atomic::Ordering::Relaxed)
-        } else {
-            // 新客户端：递增 view_version 通知所有客户端 / New client: bump view_version to notify all
-            bump_view_version(&self.state)
-        };
-        let client_status = if existed {
+        let view_version_id = self
+            .state
+            .view_version
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let client_status = if remounted {
             proto::ClientStatus::Ok as i32
         } else {
             proto::ClientStatus::NeedRemount as i32
@@ -69,14 +65,26 @@ impl MasterServiceImpl {
         );
         let segment_id = Uuid::new_v4();
         let host = host_from_segment_name(&req.segment_name);
+        if req.base_addr == 0 || req.size == 0 {
+            return Err(Status::invalid_argument(
+                "base_addr and size must be non-zero",
+            ));
+        }
+        if self.state.runtime_config.memory_allocator_kind == MemoryAllocatorKind::CachelibLike
+            && (req.base_addr % CACHELIB_SLAB_SIZE != 0 || req.size % CACHELIB_SLAB_SIZE != 0)
+        {
+            return Err(Status::invalid_argument(format!(
+                "base_addr and size must be aligned to {CACHELIB_SLAB_SIZE} for cachelib"
+            )));
+        }
 
         let segment = mooncake_store_core::Segment {
             id: segment_id,
             name: req.segment_name.clone(),
             base: req.base_addr,
             size: req.size,
-            te_endpoint: String::new(),
-            protocol: String::new(),
+            te_endpoint: req.te_endpoint.clone(),
+            protocol: req.protocol.clone(),
         };
 
         self.state.segments.insert(
@@ -275,6 +283,21 @@ impl MasterServiceImpl {
                 "segment_names and segment_sizes must have same length",
             ));
         }
+        if !req.base_addrs.is_empty() && req.base_addrs.len() != req.segment_names.len() {
+            return Err(Status::invalid_argument(
+                "base_addrs must be empty or have same length as segment_names",
+            ));
+        }
+        if !req.te_endpoints.is_empty() && req.te_endpoints.len() != req.segment_names.len() {
+            return Err(Status::invalid_argument(
+                "te_endpoints must be empty or have same length as segment_names",
+            ));
+        }
+        if !req.protocols.is_empty() && req.protocols.len() != req.segment_names.len() {
+            return Err(Status::invalid_argument(
+                "protocols must be empty or have same length as segment_names",
+            ));
+        }
 
         let addresses = req
             .segment_names
@@ -284,7 +307,12 @@ impl MasterServiceImpl {
         upsert_client_addresses(&self.state, client_id, addresses);
         register_metadata_segments(&self.metadata_state, &req.segment_names).await;
 
-        for (segment_name, size) in req.segment_names.iter().zip(req.segment_sizes.iter()) {
+        for (idx, (segment_name, size)) in req
+            .segment_names
+            .iter()
+            .zip(req.segment_sizes.iter())
+            .enumerate()
+        {
             let exists =
                 self.state.segments.iter().any(|entry| {
                     entry.client_id == client_id && entry.segment.name == *segment_name
@@ -293,13 +321,25 @@ impl MasterServiceImpl {
                 continue; // 已存在，跳过 / Already exists, skip
             }
 
+            if *size == 0 {
+                return Err(Status::invalid_argument("segment size must be non-zero"));
+            }
+            let base = req.base_addrs.get(idx).copied().unwrap_or(0x100000000);
+            if self.state.runtime_config.memory_allocator_kind == MemoryAllocatorKind::CachelibLike
+                && (base % CACHELIB_SLAB_SIZE != 0 || *size % CACHELIB_SLAB_SIZE != 0)
+            {
+                return Err(Status::invalid_argument(format!(
+                    "base_addr and size must be aligned to {CACHELIB_SLAB_SIZE} for cachelib"
+                )));
+            }
+
             let segment = mooncake_store_core::Segment {
                 id: Uuid::new_v4(),
                 name: segment_name.clone(),
-                base: 0,
+                base,
                 size: *size,
-                te_endpoint: String::new(),
-                protocol: String::new(),
+                te_endpoint: req.te_endpoints.get(idx).cloned().unwrap_or_default(),
+                protocol: req.protocols.get(idx).cloned().unwrap_or_default(),
             };
             self.state.segments.insert(
                 segment.id,
@@ -315,6 +355,7 @@ impl MasterServiceImpl {
                 .write()
                 .add_segment(segment, 0, client_id);
         }
+        self.state.ok_clients.insert(client_id, ());
         sync_client_segments(&self.state, client_id);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
         Ok(Response::new(proto::ReMountSegmentResponse {}))

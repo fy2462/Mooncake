@@ -34,8 +34,9 @@ use mooncake_store_core::{
 };
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use rand::Rng;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use self::cachelib::{
@@ -48,6 +49,9 @@ pub use self::types::{
     AllocationStrategy, CachelibAllocInfo, CachelibAllocationVisit, ClassId, MemoryAllocatorKind,
     PoolId, SlabReleaseContext, SlabReleaseMode, CACHELIB_MIN_ALLOC_SIZE, CACHELIB_SLAB_SIZE,
 };
+
+const RANDOM_MAX_RETRY_LIMIT: usize = 100;
+const FREE_RATIO_CANDIDATE_MULTIPLIER: usize = 6;
 
 // =============================================================================
 // Internal State Structures / 内部状态结构
@@ -81,13 +85,12 @@ enum SegmentLayout {
 /// Runtime state for a single memory segment.
 /// 单个内存 segment 的运行时状态。
 ///
-/// Tracks the segment handle, bytes used, owner client, and allocator layout.
-/// 跟踪 segment 句柄、已用字节、所属客户端和分配器布局。
+/// Tracks the segment handle, bytes used, and allocator layout.
+/// 跟踪 segment 句柄、已用字节和分配器布局。
 #[derive(Debug, Clone)]
 struct SegmentState {
     segment: Segment,
     used: u64,
-    client_id: Uuid,
     layout: SegmentLayout,
 }
 
@@ -164,7 +167,7 @@ impl SegmentAllocator {
     ///   CachelibLike：按 slab 粒度分片，预留已用空间对应的 slab，
     ///   创建剩余未预留 slab，并分配默认 "main" 池。
     ///   剩余归入默认池。
-    pub fn add_segment(&mut self, segment: Segment, used: u64, client_id: Uuid) {
+    pub fn add_segment(&mut self, segment: Segment, used: u64, _client_id: Uuid) {
         let (layout, effective_used) = match self.memory_allocator_kind {
             MemoryAllocatorKind::Offset => {
                 let tail_free = segment.size.saturating_sub(used);
@@ -220,7 +223,6 @@ impl SegmentAllocator {
             SegmentState {
                 segment,
                 used: effective_used,
-                client_id,
                 layout,
             },
         );
@@ -267,7 +269,7 @@ impl SegmentAllocator {
     pub fn allocate_for_client(
         &mut self,
         _key: &str,
-        client_id: Option<Uuid>,
+        _client_id: Option<Uuid>,
         slice_size: u64,
         replica_count: usize,
         config: &ReplicateConfig,
@@ -276,138 +278,184 @@ impl SegmentAllocator {
             return vec![];
         }
 
-        // Step 1: filter eligible segments
-        let mut candidates: Vec<Uuid> = self
-            .segments
-            .iter()
-            .filter(|(_, state)| state.can_allocate(slice_size))
-            .map(|(id, _)| *id)
-            .collect();
+        let preferred_names = preferred_segment_names(config);
+        let mut replicas = Vec::with_capacity(replica_count);
+        let mut used_segment_names = HashSet::new();
 
-        // Step 2: determine affinity preferences
-        // Pre-compute preferred hostname and preferred names list.
-        // Merge singular preferred_segment into the plural list for unified lookup.
-        // 预先计算首选主机名和首选 segment 名称列表。
-        // 将单数 preferred_segment 合并到复数列表中以便统一处理。
-        let mut preferred_names: Vec<&str> = Vec::new();
-        if !config.preferred_segment.is_empty() {
-            preferred_names.push(&config.preferred_segment);
-        }
-        for name in &config.preferred_segments {
-            if !name.is_empty() && name != &config.preferred_segment {
-                preferred_names.push(name);
+        // C++ tries preferred_segment(s) first. If preferred_segment is set, it
+        // wins over preferred_segments; the plural list is used only as fallback
+        // when the singular field is empty.
+        for preferred_name in preferred_names {
+            if replicas.len() >= replica_count || used_segment_names.contains(preferred_name) {
+                continue;
+            }
+            if let Some(replica) = self.allocate_from_segment_name(preferred_name, slice_size) {
+                used_segment_names.insert(replica.segment_name.clone());
+                replicas.push(replica);
             }
         }
-        let has_preferred = !preferred_names.is_empty();
-        let preferred_host = if config.prefer_alloc_in_same_node {
-            client_id.and_then(|cid| {
-                self.segments
-                    .values()
-                    .find(|state| state.client_id == cid)
-                    .map(|state| segment_host(&state.segment.name).to_string())
-            })
-        } else {
-            None
-        };
+
+        if replicas.len() >= replica_count {
+            return replicas;
+        }
 
         match self.strategy {
             AllocationStrategy::Random => {
-                // Random shuffle first, then stable-sort by affinity
-                // 先随机打乱，再用稳定排序提升同节点和首选 segment 的优先级
-                candidates.shuffle(&mut thread_rng());
+                self.allocate_random_remaining(
+                    slice_size,
+                    replica_count,
+                    &mut replicas,
+                    &mut used_segment_names,
+                );
             }
             AllocationStrategy::FreeRatioFirst => {
-                // Three-tier composite sort: same node > preferred segment > free ratio
-                // 三级复合排序：同节点 > 首选 segment > 空闲率从高到低
-                candidates.sort_by(|a, b| {
-                    let sa = &self.segments[a];
-                    let sb = &self.segments[b];
-
-                    // Tier 1: same node (matches original C++ priority ordering)
-                    // 第一级：同节点（与原 C++ 优先级顺序一致）
-                    if let Some(ref host) = preferred_host {
-                        let a_same = segment_host(&sa.segment.name) == host.as_str();
-                        let b_same = segment_host(&sb.segment.name) == host.as_str();
-                        let cmp = a_same.cmp(&b_same).reverse();
-                        if cmp != Ordering::Equal {
-                            return cmp;
-                        }
-                    }
-
-                    // Tier 2: preferred segment(s) — rank by position in preferred list
-                    // 第二级：首选 segment —— 按在首选列表中的位置排序
-                    if has_preferred {
-                        let a_pos = preferred_names.iter().position(|&n| n == sa.segment.name);
-                        let b_pos = preferred_names.iter().position(|&n| n == sb.segment.name);
-                        // Lower position = higher priority; not-in-list = lowest priority
-                        // 位置越小优先级越高，不在列表中的优先级最低
-                        let a_rank = a_pos.map(|p| p as i64).unwrap_or(i64::MAX);
-                        let b_rank = b_pos.map(|p| p as i64).unwrap_or(i64::MAX);
-                        let cmp = a_rank.cmp(&b_rank);
-                        if cmp != Ordering::Equal {
-                            return cmp;
-                        }
-                    }
-
-                    // Tier 3: free ratio (descending)
-                    // 第三级：空闲率从高到低
-                    let ratio_a = free_ratio(sa.segment.size, sa.used);
-                    let ratio_b = free_ratio(sb.segment.size, sb.used);
-                    ratio_b.partial_cmp(&ratio_a).unwrap_or(Ordering::Equal)
-                });
+                self.allocate_free_ratio_remaining(
+                    slice_size,
+                    replica_count,
+                    &mut replicas,
+                    &mut used_segment_names,
+                );
             }
-        }
-
-        // For Random strategy: boost same-node and preferred-segment affinity
-        // via stable sort (preserves random order within same tier)
-        // Random 策略下：先 shuffle 随机化，再用稳定排序提升同节点和首选 segment 的优先级
-        if matches!(self.strategy, AllocationStrategy::Random) {
-            if let Some(ref host) = preferred_host {
-                candidates.sort_by_key(|segment_id| {
-                    if segment_host(&self.segments[segment_id].segment.name) == host.as_str() {
-                        0
-                    } else {
-                        1
-                    }
-                });
-            }
-            if has_preferred {
-                let pref_names = &preferred_names;
-                candidates.sort_by_key(|segment_id| {
-                    pref_names
-                        .iter()
-                        .position(|&n| n == self.segments[segment_id].segment.name)
-                        .map(|p| p as i64)
-                        .unwrap_or(i64::MAX)
-                });
-            }
-        }
-
-        // Step 3: allocate from top-N candidates
-        let count = replica_count.min(candidates.len());
-        let mut replicas = Vec::with_capacity(count);
-        for segment_id in candidates.into_iter().take(count) {
-            let Some(state) = self.segments.get_mut(&segment_id) else {
-                continue;
-            };
-            let Some((offset, accounted_size)) = state.allocate(slice_size) else {
-                continue;
-            };
-            state.used = state.used.saturating_add(accounted_size);
-            replicas.push(ReplicaDescriptor {
-                refcnt: 0,
-                handle_valid: true,
-                segment_id: state.segment.id,
-                segment_name: state.segment.name.clone(),
-                offset,
-                size: slice_size,
-                status: ReplicaStatus::Allocating,
-                replica_type: ReplicaType::Memory,
-                holder_client_id: None,
-                base_addr: state.segment.base,
-            });
         }
         replicas
+    }
+
+    fn allocate_random_remaining(
+        &mut self,
+        slice_size: u64,
+        replica_count: usize,
+        replicas: &mut Vec<ReplicaDescriptor>,
+        used_segment_names: &mut HashSet<String>,
+    ) {
+        let ids = self.segments.keys().copied().collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+
+        let max_retry = RANDOM_MAX_RETRY_LIMIT.min(ids.len());
+        let mut rng = thread_rng();
+        let mut start_idx = rng.gen_range(0..ids.len());
+
+        for _ in 0..max_retry {
+            if replicas.len() >= replica_count {
+                return;
+            }
+            let segment_id = ids[start_idx % ids.len()];
+            start_idx += 1;
+
+            let Some(segment_name) = self
+                .segments
+                .get(&segment_id)
+                .map(|state| state.segment.name.clone())
+            else {
+                continue;
+            };
+            if used_segment_names.contains(&segment_name) {
+                continue;
+            }
+            if let Some(replica) = self.allocate_from_segment_id(segment_id, slice_size) {
+                used_segment_names.insert(replica.segment_name.clone());
+                replicas.push(replica);
+            }
+        }
+    }
+
+    fn allocate_free_ratio_remaining(
+        &mut self,
+        slice_size: u64,
+        replica_count: usize,
+        replicas: &mut Vec<ReplicaDescriptor>,
+        used_segment_names: &mut HashSet<String>,
+    ) {
+        let ids = self.segments.keys().copied().collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+
+        let remaining = replica_count.saturating_sub(replicas.len());
+        let sample_count = (FREE_RATIO_CANDIDATE_MULTIPLIER * remaining).min(ids.len());
+        let mut rng = thread_rng();
+        let mut start_idx = rng.gen_range(0..ids.len());
+        let mut candidates = Vec::with_capacity(sample_count);
+
+        for _ in 0..sample_count {
+            let segment_id = ids[start_idx % ids.len()];
+            start_idx += 1;
+            let Some(state) = self.segments.get(&segment_id) else {
+                continue;
+            };
+            candidates.push((segment_id, free_ratio(state.segment.size, state.used)));
+        }
+
+        candidates.sort_by(|(_, ratio_a), (_, ratio_b)| {
+            ratio_b.partial_cmp(ratio_a).unwrap_or(Ordering::Equal)
+        });
+
+        for (segment_id, _) in candidates {
+            if replicas.len() >= replica_count {
+                return;
+            }
+            let Some(segment_name) = self
+                .segments
+                .get(&segment_id)
+                .map(|state| state.segment.name.clone())
+            else {
+                continue;
+            };
+            if used_segment_names.contains(&segment_name) {
+                continue;
+            }
+            if let Some(replica) = self.allocate_from_segment_id(segment_id, slice_size) {
+                used_segment_names.insert(replica.segment_name.clone());
+                replicas.push(replica);
+            }
+        }
+
+        if replicas.len() < replica_count {
+            self.allocate_random_remaining(slice_size, replica_count, replicas, used_segment_names);
+        }
+    }
+
+    fn allocate_from_segment_name(
+        &mut self,
+        segment_name: &str,
+        slice_size: u64,
+    ) -> Option<ReplicaDescriptor> {
+        let mut ids = self
+            .segments
+            .iter()
+            .filter(|(_, state)| state.segment.name == segment_name)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        ids.shuffle(&mut thread_rng());
+        for segment_id in ids {
+            if let Some(replica) = self.allocate_from_segment_id(segment_id, slice_size) {
+                return Some(replica);
+            }
+        }
+        None
+    }
+
+    fn allocate_from_segment_id(
+        &mut self,
+        segment_id: Uuid,
+        slice_size: u64,
+    ) -> Option<ReplicaDescriptor> {
+        let state = self.segments.get_mut(&segment_id)?;
+        let (offset, accounted_size) = state.allocate(slice_size)?;
+        state.used = state.used.saturating_add(accounted_size);
+        Some(ReplicaDescriptor {
+            refcnt: 0,
+            handle_valid: true,
+            segment_id: state.segment.id,
+            segment_name: state.segment.name.clone(),
+            offset,
+            size: slice_size,
+            status: ReplicaStatus::Allocating,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: None,
+            base_addr: state.segment.base,
+        })
     }
 
     /// Release a set of replicas, returning their space to the respective segments.
@@ -955,10 +1003,18 @@ impl SegmentAllocator {
 // Free-standing Helpers / 独立辅助函数
 // =============================================================================
 
-/// Extract the hostname part from a segment name (format "host:port").
-/// 从 segment name（格式 "host:port"）中提取主机名部分。
-fn segment_host(name: &str) -> &str {
-    name.split(':').next().unwrap_or(name)
+/// Resolve C++-compatible preferred segment precedence.
+/// 解析与 C++ 一致的 preferred segment 优先级。
+fn preferred_segment_names(config: &ReplicateConfig) -> Vec<&str> {
+    if !config.preferred_segment.is_empty() {
+        return vec![config.preferred_segment.as_str()];
+    }
+    config
+        .preferred_segments
+        .iter()
+        .filter(|name| !name.is_empty())
+        .map(String::as_str)
+        .collect()
 }
 
 // =============================================================================
@@ -966,21 +1022,6 @@ fn segment_host(name: &str) -> &str {
 // =============================================================================
 
 impl SegmentState {
-    /// Check if this segment can allocate `size` bytes.
-    /// 检查此 segment 能否分配 `size` 字节。
-    fn can_allocate(&self, size: u64) -> bool {
-        match &self.layout {
-            SegmentLayout::Offset(offset) => offset.free_ranges.iter().any(|(_, len)| *len >= size),
-            SegmentLayout::Cachelib(cachelib) => {
-                let Some(class_size) = cachelib::cachelib_class_size(&cachelib.class_sizes, size)
-                else {
-                    return false;
-                };
-                cachelib.pool_can_allocate(cachelib.default_pool_id, class_size)
-            }
-        }
-    }
-
     /// Attempt to allocate `size` bytes from this segment.
     /// 尝试从此 segment 分配 `size` 字节。
     ///

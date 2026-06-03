@@ -210,7 +210,7 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::GetStorageConfigResponse>, Status> {
         let cfg = &self.state.runtime_config;
         Ok(Response::new(proto::GetStorageConfigResponse {
-            fs_dir: cfg.storage_fs_dir.clone(),
+            fs_dir: storage_fs_dir_for_client(cfg),
             enable_disk_eviction: cfg.enable_disk_eviction,
             quota_bytes: cfg.quota_bytes,
         }))

@@ -34,6 +34,33 @@ fn same_replica_location(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
     a.segment_id == b.segment_id && a.offset == b.offset && a.replica_type == b.replica_type
 }
 
+fn dec_refcnt_for_replica(state: &MasterState, key: &str, source: &ReplicaDescriptor) {
+    if let Some(mut object) = state.objects.get_mut(key) {
+        if let Some(replica) = object
+            .replicas
+            .iter_mut()
+            .find(|replica| same_replica_location(replica, source))
+        {
+            replica.dec_refcnt();
+        }
+    }
+}
+
+fn inc_refcnt_for_replica(state: &MasterState, key: &str, source: &ReplicaDescriptor) -> bool {
+    let Some(mut object) = state.objects.get_mut(key) else {
+        return false;
+    };
+    let Some(replica) = object
+        .replicas
+        .iter_mut()
+        .find(|replica| same_replica_location(replica, source))
+    else {
+        return false;
+    };
+    replica.inc_refcnt();
+    true
+}
+
 /// 释放晋升过程中暂存的副本占位（Allocating 状态，尚未写入数据）。
 /// 晋升失败或放弃时调用，将占用的 segment 空间归还给分配器。
 ///
@@ -225,20 +252,62 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
 /// Push an object into the offload queue, triggering memory→local-disk data offload.
 /// Only enqueues when the client has offload enabled and the object is not already being processed.
 pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &str, size: u64) {
-    let mut local_disk = match state.local_disk_segments.get_mut(&client_id) {
-        Some(entry) => entry,
-        None => return,
-    };
-    if !local_disk.enable_offloading {
+    if state.offloading_tasks.contains_key(key) {
         return;
     }
-    local_disk
-        .offloading_objects
-        .insert(key.to_string(), size as i64);
+    let source = {
+        let Some(object) = state.objects.get(key) else {
+            return;
+        };
+        if object.tenant_id != "default" {
+            return;
+        }
+        let Some(source) = object
+            .replicas
+            .iter()
+            .find(|replica| {
+                replica.replica_type == ReplicaType::Memory
+                    && replica.status == ReplicaStatus::Complete
+                    && replica.handle_valid
+                    && client_id_by_segment_name(state, &replica.segment_name) == Some(client_id)
+            })
+            .cloned()
+        else {
+            return;
+        };
+        source
+    };
+    let offloading_enabled = state
+        .local_disk_segments
+        .get(&client_id)
+        .is_some_and(|entry| entry.enable_offloading);
+    if !offloading_enabled {
+        return;
+    }
+    if !inc_refcnt_for_replica(state, key, &source) {
+        return;
+    }
+    let queued = if let Some(mut local_disk) = state.local_disk_segments.get_mut(&client_id) {
+        if local_disk.enable_offloading {
+            local_disk
+                .offloading_objects
+                .insert(key.to_string(), size as i64);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !queued {
+        dec_refcnt_for_replica(state, key, &source);
+        return;
+    }
     state.offloading_tasks.insert(
         key.to_string(),
         OffloadingTaskEntry {
             client_id,
+            source,
             start_time: Instant::now(),
         },
     );
@@ -248,6 +317,7 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
 /// Clean up the offload task for a given key, also removing it from the client's offloading_objects.
 pub(crate) fn clear_offloading_task(state: &MasterState, key: &str) {
     if let Some((_, task)) = state.offloading_tasks.remove(key) {
+        dec_refcnt_for_replica(state, key, &task.source);
         if let Some(mut local_disk) = state.local_disk_segments.get_mut(&task.client_id) {
             local_disk.offloading_objects.remove(key);
         }
@@ -261,7 +331,8 @@ pub(crate) fn clear_offloading_task(state: &MasterState, key: &str) {
 /// Returns the removed task entry so callers can further clean up staged replicas.
 pub(crate) fn clear_promotion_task(state: &MasterState, key: &str) -> Option<PromotionTaskEntry> {
     let removed = state.promotion_tasks.remove(key).map(|(_, task)| task);
-    if removed.is_some() {
+    if let Some(task) = &removed {
+        dec_refcnt_for_replica(state, key, &task.source);
         state
             .promotion_in_flight
             .fetch_sub(1, AtomicOrdering::Relaxed);
@@ -298,16 +369,14 @@ fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescr
         .replicas
         .iter()
         .filter(|replica| {
-            replica.replica_type == ReplicaType::Memory
-                && replica.status == ReplicaStatus::Complete
-                && !replica.is_busy()
+            replica.replica_type == ReplicaType::Memory && replica.status == ReplicaStatus::Complete
         })
         .count();
     if total_memory <= 1 {
         return Vec::new();
     }
 
-    let mut kept_one = false;
+    let mut remaining_memory = total_memory;
     let mut removed = Vec::new();
     object.replicas.retain(|replica| {
         let is_memory_complete = replica.replica_type == ReplicaType::Memory
@@ -316,10 +385,10 @@ fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescr
         if !is_memory_complete {
             return true;
         }
-        if !kept_one {
-            kept_one = true;
-            return true; // 保留第一份 / Keep the first one
+        if remaining_memory <= 1 {
+            return true; // 保留最后一份完整内存副本 / Keep the last complete memory copy
         }
+        remaining_memory -= 1;
         removed.push(replica.clone());
         false
     });
@@ -373,36 +442,46 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
 
     let mut evicted = Vec::new();
     for key in selected {
-        if let Some(mut object) = state.objects.get_mut(&key) {
-            let user_key = object.user_key.clone();
-            let has_local_disk = object
-                .replicas
-                .iter()
-                .any(|replica| replica.replica_type == ReplicaType::LocalDisk);
-            let owner_client = object
-                .replicas
-                .iter()
-                .find(|replica| replica.replica_type == ReplicaType::Memory)
-                .and_then(|replica| client_id_by_segment_name(state, &replica.segment_name));
-
-            // 如果开启了 offload_on_evict 且对象没有本地磁盘副本，
-            // 则先触发下沉（offload），等数据安全写入磁盘后再驱逐内存。
-            //
-            // If offload_on_evict is enabled and the object has no local disk replica,
-            // trigger offload first; evict memory only after data is safely written to disk.
-            let should_offload =
-                state.runtime_config.offload_on_evict && !has_local_disk && owner_client.is_some();
-            if should_offload {
-                push_offloading_queue(state, owner_client.unwrap(), &key, object.size);
-                // 下沉任务未创建成功且非强制驱逐模式，则跳过本次驱逐
-                // If offload task was not created and force eviction is not enabled, skip
-                if !state.offloading_tasks.contains_key(&key)
-                    && !state.runtime_config.offload_force_evict
-                {
-                    continue;
-                }
+        let (user_key, has_local_disk, owner_client, size) = match state.objects.get(&key) {
+            Some(object) => {
+                let has_local_disk = object
+                    .replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::LocalDisk);
+                let owner_client = object
+                    .replicas
+                    .iter()
+                    .find(|replica| replica.replica_type == ReplicaType::Memory)
+                    .and_then(|replica| client_id_by_segment_name(state, &replica.segment_name));
+                (
+                    object.user_key.clone(),
+                    has_local_disk,
+                    owner_client,
+                    object.size,
+                )
             }
+            None => continue,
+        };
 
+        // 如果开启了 offload_on_evict 且对象没有本地磁盘副本，
+        // 则先触发下沉（offload），等数据安全写入磁盘后再驱逐内存。
+        //
+        // If offload_on_evict is enabled and the object has no local disk replica,
+        // trigger offload first; evict memory only after data is safely written to disk.
+        let should_offload =
+            state.runtime_config.offload_on_evict && !has_local_disk && owner_client.is_some();
+        if should_offload {
+            push_offloading_queue(state, owner_client.unwrap(), &key, size);
+            // 下沉任务未创建成功且非强制驱逐模式，则跳过本次驱逐
+            // If offload task was not created and force eviction is not enabled, skip
+            if !state.offloading_tasks.contains_key(&key)
+                && !state.runtime_config.offload_force_evict
+            {
+                continue;
+            }
+        }
+
+        if let Some(mut object) = state.objects.get_mut(&key) {
             // 下沉成功后仅移除冗余副本（保留一份），其他情况则清空所有 Memory 副本
             // After offload: remove redundant replicas only (keep one). Otherwise: remove all Memory replicas.
             let removed =
@@ -493,7 +572,7 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
 
     // 检查对象状态：必须有完整 LocalDisk 副本且无 Memory 副本才有晋升价值
     // Check object state: must have a complete LocalDisk replica and no Memory replica to be worth promoting
-    let (holder_id, object_size) = match state.objects.get(key) {
+    let (holder_id, object_size, source) = match state.objects.get(key) {
         Some(object) => {
             let any_memory = object.replicas.iter().any(|replica| {
                 replica.replica_type == ReplicaType::Memory
@@ -509,7 +588,11 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
             }) else {
                 return; // 无可用的磁盘副本来源 / No usable disk replica source
             };
-            (local_disk.holder_client_id.unwrap(), local_disk.size)
+            (
+                local_disk.holder_client_id.unwrap(),
+                local_disk.size,
+                local_disk.clone(),
+            )
         }
         None => return,
     };
@@ -538,11 +621,21 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
             .entry(key.to_string())
             .or_insert(object_size as i64);
     }
+    if !inc_refcnt_for_replica(state, key, &source) {
+        if let Some(mut local_disk) = state.local_disk_segments.get_mut(&holder_id) {
+            local_disk.promotion_objects.remove(key);
+        }
+        state
+            .promotion_in_flight
+            .fetch_sub(1, AtomicOrdering::Relaxed);
+        return;
+    }
     state.promotion_tasks.insert(
         key.to_string(),
         PromotionTaskEntry {
             holder_id,
             object_size,
+            source,
             staged_segment_id: None,
             staged_offset: None,
             start_time: Instant::now(),

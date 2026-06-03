@@ -13,7 +13,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 struct ObjectEntry {
     replicas: Vec<ReplicaDescriptor>,
-    size: u64,
 }
 
 fn replicate_config() -> proto::ReplicateConfig {
@@ -37,7 +36,9 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
             client_id: Some(proto_uuid(client_id)),
             segment_name: name.into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -77,13 +78,7 @@ async fn put_end_one(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
 fn test_batch_remove_logic() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
     for i in 0..5 {
-        objects.insert(
-            format!("batch_key_{}", i),
-            ObjectEntry {
-                replicas: vec![],
-                size: 0,
-            },
-        );
+        objects.insert(format!("batch_key_{}", i), ObjectEntry { replicas: vec![] });
     }
     assert_eq!(objects.len(), 5);
 
@@ -104,20 +99,8 @@ fn test_batch_remove_empty() {
 #[test]
 fn test_batch_put_revoke_logic() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    objects.insert(
-        "k1".into(),
-        ObjectEntry {
-            replicas: vec![],
-            size: 0,
-        },
-    );
-    objects.insert(
-        "k2".into(),
-        ObjectEntry {
-            replicas: vec![],
-            size: 0,
-        },
-    );
+    objects.insert("k1".into(), ObjectEntry { replicas: vec![] });
+    objects.insert("k2".into(), ObjectEntry { replicas: vec![] });
 
     let keys: Vec<String> = vec!["k1".into(), "k2".into(), "k3".into()];
     let statuses: Vec<i32> = keys
@@ -137,7 +120,7 @@ fn test_batch_put_end_status_transition() {
         "pending_key".into(),
         ObjectEntry {
             replicas: vec![ReplicaDescriptor {
-                base_addr: 0,
+                base_addr: 0x100000000,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id: sid,
@@ -148,7 +131,6 @@ fn test_batch_put_end_status_transition() {
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
             }],
-            size: 128,
         },
     );
 
@@ -167,63 +149,135 @@ fn test_batch_put_end_status_transition() {
     assert_eq!(obj.replicas[0].status, ReplicaStatus::Complete);
 }
 
-#[test]
-fn test_batch_upsert_end_allocates_new() {
-    let objects: DashMap<String, ObjectEntry> = DashMap::new();
-    let sid = Uuid::new_v4();
+#[tokio::test]
+async fn test_upsert_and_batch_upsert_follow_two_phase_semantics() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "upsert-two-phase:1").await;
 
-    // Upsert: if key doesn't exist, insert new replica
-    let entries = vec![("new_key_1", 100u64), ("new_key_2", 200u64)];
+    let config = proto::ReplicateConfig {
+        preferred_segment: "upsert-two-phase:1".into(),
+        ..replicate_config()
+    };
+    let upsert = MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "upsert-key".into(),
+            slice_length: 128,
+            config: Some(config.clone()),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(upsert.replicas.len(), 1);
+    assert!(MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "upsert-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .is_err());
 
-    for (key, size) in &entries {
-        objects.insert(
-            key.to_string(),
-            ObjectEntry {
-                replicas: vec![ReplicaDescriptor {
-                    base_addr: 0,
-                    refcnt: 0,
-                    handle_valid: true,
-                    segment_id: sid,
-                    segment_name: "s1".into(),
-                    offset: *size,
-                    size: *size,
-                    status: ReplicaStatus::Allocating,
-                    replica_type: ReplicaType::Memory,
-                    holder_client_id: None,
-                }],
-                size: *size,
-            },
-        );
-    }
-
-    assert_eq!(objects.len(), 2);
-    assert!(objects.contains_key("new_key_1"));
-    assert!(objects.contains_key("new_key_2"));
-
-    // Re-upsert existing key should keep old replicas
-    objects.insert(
-        "new_key_1".into(),
-        ObjectEntry {
-            replicas: vec![ReplicaDescriptor {
-                base_addr: 0,
-                refcnt: 0,
-                handle_valid: true,
-                segment_id: sid,
-                segment_name: "s1".into(),
-                offset: 999,
-                size: 200,
-                status: ReplicaStatus::Complete,
-                replica_type: ReplicaType::Memory,
-                holder_client_id: None,
+    let end = MasterService::batch_upsert_end(
+        &service,
+        Request::new(proto::BatchUpsertEndRequest {
+            entries: vec![proto::PutEndEntry {
+                client_id: Some(proto_uuid(client_id)),
+                key: "upsert-key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
             }],
-            size: 200,
-        },
-    );
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(end.statuses, vec![0]);
+    assert!(MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "upsert-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .is_ok());
 
-    let obj = objects.get("new_key_1").unwrap();
-    assert_eq!(obj.replicas[0].offset, 999);
-    assert_eq!(obj.size, 200);
-    assert_eq!(obj.replicas[0].status, ReplicaStatus::Complete);
+    MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "upsert-key".into(),
+            slice_length: 128,
+            config: Some(config.clone()),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "upsert-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .is_err());
+    let same_size_end = MasterService::batch_upsert_end(
+        &service,
+        Request::new(proto::BatchUpsertEndRequest {
+            entries: vec![proto::PutEndEntry {
+                client_id: Some(proto_uuid(client_id)),
+                key: "upsert-key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(same_size_end.statuses, vec![0]);
+
+    let batch_start = MasterService::batch_upsert_start(
+        &service,
+        Request::new(proto::BatchUpsertStartRequest {
+            entries: vec![proto::UpsertEntry {
+                client_id: Some(proto_uuid(client_id)),
+                key: "batch-upsert-key".into(),
+                slice_length: 128,
+                config: Some(config),
+                tenant_id: String::new(),
+            }],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(batch_start.statuses, vec![0]);
+    assert_eq!(batch_start.replicas.len(), 1);
+
+    let batch_end = MasterService::batch_upsert_end(
+        &service,
+        Request::new(proto::BatchUpsertEndRequest {
+            entries: vec![proto::PutEndEntry {
+                client_id: Some(proto_uuid(client_id)),
+                key: "batch-upsert-key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }],
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(batch_end.statuses, vec![0]);
 }
 
 #[tokio::test]

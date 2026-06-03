@@ -23,7 +23,9 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 client_id: Some(proto_uuid(cid)),
                 segment_name: name.into(),
                 size: 1024,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             }),
         )
         .await
@@ -73,7 +75,9 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             client_id: Some(proto_uuid(other_client_id)),
             segment_name: "node-c:1".into(),
             size: 1024,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -150,7 +154,9 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "hardpin:1".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -230,7 +236,9 @@ async fn test_copy_move_and_revoke_workflow() {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: name.into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             }),
         )
         .await
@@ -403,7 +411,8 @@ async fn test_copy_move_and_revoke_workflow() {
 #[tokio::test]
 async fn test_put_revoke_remove_all_and_storage_config() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        storage_fs_dir: "/tmp/mooncake".into(),
+        storage_fs_dir: "/tmp/mooncake-root".into(),
+        cluster_id: "cluster-a".into(),
         enable_disk_eviction: true,
         quota_bytes: 4096,
         ..Default::default()
@@ -416,7 +425,9 @@ async fn test_put_revoke_remove_all_and_storage_config() {
             client_id: Some(proto_uuid(client_id)),
             segment_name: "revoke:1".into(),
             size: 4096,
-            base_addr: 0,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
         }),
     )
     .await
@@ -522,7 +533,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .await
     .unwrap()
     .into_inner();
-    assert_eq!(storage.fs_dir, "/tmp/mooncake");
+    assert_eq!(storage.fs_dir, "/tmp/mooncake-root/cluster-a");
     assert!(storage.enable_disk_eviction);
     assert_eq!(storage.quota_bytes, 4096);
 }

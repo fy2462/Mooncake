@@ -112,6 +112,8 @@ message MountSegmentRequest {
   string segment_name = 2;
   uint64 size = 3;
   uint64 base_addr = 4;  // physical base address of segment buffer on storage node
+  string te_endpoint = 5;
+  string protocol = 6;
 }
 
 message MountSegmentResponse {}
@@ -149,6 +151,9 @@ message ReMountSegmentRequest {
   Uuid client_id = 1;
   repeated string segment_names = 2;
   repeated uint64 segment_sizes = 3;
+  repeated uint64 base_addrs = 4;
+  repeated string te_endpoints = 5;
+  repeated string protocols = 6;
 }
 
 message ReMountSegmentResponse {}
@@ -358,7 +363,7 @@ message BatchRemoveResponse {
   repeated int32 statuses = 1;
 }
 
-message BatchUpsertEndRequest {
+message BatchUpsertStartRequest {
   repeated UpsertEntry entries = 1;
 }
 
@@ -370,8 +375,25 @@ message UpsertEntry {
   string tenant_id = 5;
 }
 
-message BatchUpsertEndResponse {
+message BatchUpsertStartResponse {
   repeated ReplicaDescriptor replicas = 1;
+  repeated int32 statuses = 2;
+}
+
+message BatchUpsertEndRequest {
+  repeated PutEndEntry entries = 1;
+}
+
+message BatchUpsertEndResponse {
+  repeated int32 statuses = 1;
+}
+
+message BatchUpsertRevokeRequest {
+  repeated PutEndEntry entries = 1;
+}
+
+message BatchUpsertRevokeResponse {
+  repeated int32 statuses = 1;
 }
 
 message AddReplicaRequest {

@@ -821,29 +821,6 @@ impl CachelibSegmentState {
         ids
     }
 
-    /// Check if a pool can allocate a slot of the given class size.
-    /// 检查池能否分配给定 class size 的 slot。
-    ///
-    /// A pool can allocate if any of:
-    /// - An existing slab has free slots.
-    ///   现有 slab 有空闲 slot。
-    /// - There are unassigned reserved slabs that can be assigned to the class.
-    ///   有未分配的已预留 slab 可分配给该 class。
-    /// - There is room to provision a new slab within pool limits.
-    ///   在池限制内有空间分配新 slab。
-    pub(super) fn pool_can_allocate(&self, pool_id: PoolId, class_size: u64) -> bool {
-        let Some(pool) = self.pools.get(&pool_id) else {
-            return false;
-        };
-        pool.class_slabs
-            .get(&class_size)
-            .map(|slabs| slabs.iter().any(|slab| !slab.free_slots.is_empty()))
-            .unwrap_or(false)
-            || count_unassigned_reserved_slabs(pool) > 0
-            || (pool.current_used_size() + CACHELIB_SLAB_SIZE <= pool.configured_size_bytes
-                && !self.unreserved_slab_indices.is_empty())
-    }
-
     /// Grow a pool's configured size.
     /// 增加池的配置大小。
     pub(super) fn grow_pool(&mut self, pool_id: PoolId, size_bytes: u64) -> Result<bool, String> {
@@ -1161,19 +1138,4 @@ impl CachelibPoolState {
             .filter(|slab| !active_slabs.contains(slab))
             .collect::<Vec<_>>()
     }
-}
-
-// =============================================================================
-// Free-standing Helpers / 独立辅助函数
-// =============================================================================
-
-/// Count reserved slabs that are not yet assigned to a class.
-/// 计算已预留但尚未分配给 class 的 slab 数量。
-pub(super) fn count_unassigned_reserved_slabs(pool: &CachelibPoolState) -> usize {
-    let active = pool
-        .class_slabs
-        .values()
-        .map(|slabs| slabs.len())
-        .sum::<usize>();
-    pool.reserved_slabs.len().saturating_sub(active)
 }

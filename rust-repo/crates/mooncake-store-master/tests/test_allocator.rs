@@ -542,121 +542,19 @@ fn test_cachelib_like_for_each_allocation_reports_slots_and_skips_releasing_slab
 }
 
 #[test]
-fn test_composite_sort_same_node_before_preferred_then_free_ratio() {
-    let client = Uuid::new_v4();
+fn test_preferred_segment_takes_precedence_over_preferred_segments() {
     let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
+    a.add_segment(make_seg("singular:1", 10000), 9000, Uuid::new_v4());
+    a.add_segment(make_seg("plural:1", 10000), 0, Uuid::new_v4());
+    a.add_segment(make_seg("fallback:1", 10000), 0, Uuid::new_v4());
 
-    // Layout (priority: same_node > free_ratio):
-    //   seg-B-90:  host "B" (other), 90% free  → 2nd (same host, highest free)
-    //   seg-B-50:  host "B" (other), 50% free  → 3rd (same host, less free)
-    //   seg-A-90:  host "A" (different), 90% free → 1st (because "B" is same host, not "A"
-    //              wait... client is `other`, so "B" is same host. "A" is different host.
-    //              Let me re-think.)
-    //
-    // Actually: client_id determines preferred host. The segment's "host" is derived
-    // from segment_name via `segment_host()` which splits on ':'. So "A:10001" → host "A".
-    //
-    // Scenario: client has host "A", preferred_segment="pref-seg"(host "B").
-    // Priority from original C++: same_node > preferred > free_ratio.
-    // After same_node sort: "A:*" segments first, "B:*" second.
-    // Within each group: preferred first, then by free_ratio.
-    // Result: "A:*" come first (same host), then "pref-seg" (different host, preferred),
-    // then remaining "B:*" by free_ratio.
-    let sid_same_90 = Uuid::new_v4();
-    a.add_segment(
-        Segment {
-            id: sid_same_90,
-            name: "A:10001".into(),
-            size: 10000,
-            base: 0,
-            te_endpoint: String::new(),
-            protocol: "tcp".into(),
-        },
-        1000,
-        Uuid::new_v4(),
-    );
-
-    let sid_same_10 = Uuid::new_v4();
-    a.add_segment(
-        Segment {
-            id: sid_same_10,
-            name: "A:10002".into(),
-            size: 10000,
-            base: 0,
-            te_endpoint: String::new(),
-            protocol: "tcp".into(),
-        },
-        9000,
-        Uuid::new_v4(),
-    );
-
-    let sid_pref = Uuid::new_v4();
-    a.add_segment(
-        Segment {
-            id: sid_pref,
-            name: "pref-seg".into(),
-            size: 10000,
-            base: 0,
-            te_endpoint: String::new(),
-            protocol: "tcp".into(),
-        },
-        1000,
-        Uuid::new_v4(),
-    ); // host "pref-seg" → different from "A"
-
-    let sid_other = Uuid::new_v4();
-    a.add_segment(
-        Segment {
-            id: sid_other,
-            name: "B:10003".into(),
-            size: 10000,
-            base: 0,
-            te_endpoint: String::new(),
-            protocol: "tcp".into(),
-        },
-        5000,
-        Uuid::new_v4(),
-    ); // host "B" → different
-
-    // Client is on "A" (segments A:10001 and A:10002 are linked to any client on "A")
-    // Set client_id to match the host "A" behavior by linking it to a segment on "A".
     let config = ReplicateConfig {
-        preferred_segment: "pref-seg".into(),
-        prefer_alloc_in_same_node: true,
+        preferred_segment: "singular:1".into(),
+        preferred_segments: vec!["plural:1".into()],
         ..Default::default()
     };
-    // allocate_for_client uses client_id to find a segment with matching client_id to
-    // determine preferred_host. We need client to match a segment on host "A".
-    // The original code: `self.segments.values().find(|state| state.client_id == client_id)`
-    // → finds segment with matching client_id → gets its host → that's preferred_host.
-    //
-    // So we need a segment owned by `client` that is on host "A".
-    let sid_owned_by_client = Uuid::new_v4();
-    a.add_segment(
-        Segment {
-            id: sid_owned_by_client,
-            name: "A:own".into(),
-            size: 100,
-            base: 0,
-            te_endpoint: String::new(),
-            protocol: "tcp".into(),
-        },
-        100,
-        client,
-    ); // ← this segment maps client → host "A"
-       // But this segment can't allocate (100 used out of 100), so it won't be in candidates.
 
-    let repls = a.allocate_for_client("k", Some(client), 500, 4, &config);
-    assert_eq!(repls.len(), 4);
-    // Priority (C++ behaviour): same_node > preferred > free_ratio
-    assert_eq!(repls[0].segment_name, "A:10001", "same host, most free");
-    assert_eq!(repls[1].segment_name, "A:10002", "same host, less free");
-    assert_eq!(
-        repls[2].segment_name, "pref-seg",
-        "preferred, different host"
-    );
-    assert_eq!(
-        repls[3].segment_name, "B:10003",
-        "different host, non-preferred"
-    );
+    let repls = a.allocate_for_client("k", Some(Uuid::new_v4()), 500, 2, &config);
+    assert_eq!(repls.len(), 2);
+    assert_eq!(repls[0].segment_name, "singular:1");
 }

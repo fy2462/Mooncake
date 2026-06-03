@@ -55,6 +55,8 @@ use uuid::Uuid;
 pub(crate) struct MasterState {
     /// 客户端注册表 / Client registry: client_id → address, last_ping, etc.
     pub(crate) clients: DashMap<Uuid, ClientEntry>,
+    /// 已完成 remount 的客户端 / Clients that completed remount and may receive OK on Ping.
+    pub(crate) ok_clients: DashMap<Uuid, ()>,
     /// 对象元数据表 / Object metadata store: key → replicas, size, lease, pin status.
     pub(crate) objects: DashMap<String, ObjectEntry>,
     /// 进行中的 key 集合 / In-flight key set: keys currently in PutStart (not yet PutEnd).
@@ -108,6 +110,7 @@ impl MasterState {
         use std::sync::atomic::{AtomicI64, AtomicUsize};
         Self {
             clients: DashMap::new(),
+            ok_clients: DashMap::new(),
             objects: DashMap::new(),
             processing_keys: DashMap::new(),
             client_objects: DashMap::new(),
@@ -336,6 +339,8 @@ pub(crate) struct ReplicationTaskEntry {
 pub(crate) struct OffloadingTaskEntry {
     /// 下沉目标客户端 / Client where the offload is happening.
     pub(crate) client_id: Uuid,
+    /// 被 offload 固定的源 Memory 副本 / Source memory replica pinned during offload.
+    pub(crate) source: ReplicaDescriptor,
     /// 任务开始时间 / Task start time (for TTL expiry).
     pub(crate) start_time: Instant,
 }
@@ -348,6 +353,8 @@ pub(crate) struct PromotionTaskEntry {
     pub(crate) holder_id: Uuid,
     /// 对象大小 / Object size in bytes.
     pub(crate) object_size: u64,
+    /// 被 promotion 固定的源 LocalDisk 副本 / Source LocalDisk replica pinned during promotion.
+    pub(crate) source: ReplicaDescriptor,
     /// 暂存的 segment ID（分配后）/ Staged segment ID (after allocation).
     pub(crate) staged_segment_id: Option<Uuid>,
     /// 暂存的偏移量（分配后）/ Staged offset (after allocation).
@@ -417,6 +424,9 @@ pub struct MasterRuntimeConfig {
     /// HA 快照存储目录路径。
     /// HA snapshot storage directory path.
     pub storage_fs_dir: String,
+    /// Cluster ID appended to storage_fs_dir for client-visible fsdir.
+    /// 客户端可见 fsdir 使用的 cluster ID。
+    pub cluster_id: String,
     /// 透传给客户端的磁盘淘汰开关，master 端淘汰逻辑暂未消费此字段。
     /// Disk eviction flag forwarded to clients; Master eviction logic does not currently consume this.
     pub enable_disk_eviction: bool,
@@ -460,6 +470,7 @@ impl Default for MasterRuntimeConfig {
             client_live_ttl: Duration::from_secs(30),
             client_monitor_interval: Duration::from_secs(1),
             storage_fs_dir: String::new(),
+            cluster_id: "mooncake".to_string(),
             enable_disk_eviction: false,
             quota_bytes: 0,
             remote_source_enabled: false,

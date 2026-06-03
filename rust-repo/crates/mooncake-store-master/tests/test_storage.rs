@@ -61,7 +61,7 @@ impl Hf3fsApi for MockHf3fsApi {
 
 fn make_mem_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDescriptor {
     ReplicaDescriptor {
-        base_addr: 0,
+        base_addr: 0x100000000,
         refcnt: 0,
         handle_valid: true,
         segment_id: sid,
@@ -76,7 +76,7 @@ fn make_mem_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDesc
 
 fn make_disk_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDescriptor {
     ReplicaDescriptor {
-        base_addr: 0,
+        base_addr: 0x100000000,
         refcnt: 0,
         handle_valid: true,
         segment_id: sid,
@@ -264,7 +264,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
 #[test]
 fn test_serialize_replica_status_roundtrip() {
     let rd = ReplicaDescriptor {
-        base_addr: 0,
+        base_addr: 0x100000000,
         refcnt: 0,
         handle_valid: true,
         segment_id: Uuid::new_v4(),

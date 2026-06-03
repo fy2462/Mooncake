@@ -54,8 +54,8 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     rpc_thread_num: usize,
 
-    /// Segment 分配策略: "random" 或 "free_ratio_first"
-    /// Segment allocation strategy: "random" or "free_ratio_first"
+    /// Segment 分配策略: "random" 或 "free_ratio_first"；"cxl" 当前会明确拒绝
+    /// Segment allocation strategy: "random" or "free_ratio_first"; "cxl" is explicitly unsupported
     #[arg(long, default_value = "random")]
     allocation_strategy: String,
 
@@ -676,6 +676,16 @@ mod tests {
     }
 
     #[test]
+    fn test_build_runtime_config_rejects_cxl_strategy_explicitly() {
+        let mut args = base_args();
+        args.allocation_strategy = "cxl".to_string();
+
+        let err = build_runtime_config(&args).unwrap_err();
+
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    #[test]
     fn test_snapshot_dir_for_cluster_scopes_ha_snapshots() {
         let root = std::path::PathBuf::from("/tmp/mooncake-snapshots");
 
@@ -708,6 +718,9 @@ mod tests {
 /// 从 CLI 参数构建 MasterRuntimeConfig。
 /// Build MasterRuntimeConfig from CLI args.
 fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std::error::Error>> {
+    if args.allocation_strategy == "cxl" {
+        return Err("allocation_strategy 'cxl' is not supported by the Rust master yet".into());
+    }
     Ok(MasterRuntimeConfig {
         allocation_strategy: AllocationStrategy::parse(&args.allocation_strategy)
             .ok_or("allocation_strategy must be 'random' or 'free_ratio_first'")?,
@@ -718,6 +731,7 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
         eviction_ratio: args.eviction_ratio,
         offload_on_evict: args.offload_on_evict,
         offload_force_evict: args.offload_force_evict,
+        cluster_id: resolve_cluster_id(args),
         ..Default::default()
     })
 }

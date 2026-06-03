@@ -27,7 +27,7 @@ use tonic::Status;
 use uuid::Uuid;
 
 use super::background_ops::{clear_offloading_task, clear_promotion_task};
-use super::state::{ClientEntry, MasterState, ObjectEntry};
+use super::state::{ClientEntry, MasterRuntimeConfig, MasterState, ObjectEntry};
 
 /// 递增全局 view_version，触发所有客户端感知拓扑变更并重新拉取最新视图。
 /// Increment global view_version, triggering all clients to detect topology changes and re-fetch.
@@ -39,6 +39,16 @@ pub(crate) fn bump_view_version(state: &MasterState) -> i64 {
 /// Extract host part from segment name (format: host:port).
 pub(crate) fn host_from_segment_name(name: &str) -> String {
     name.split(':').next().unwrap_or(name).to_string()
+}
+
+pub(crate) fn storage_fs_dir_for_client(config: &MasterRuntimeConfig) -> String {
+    if config.storage_fs_dir.trim().is_empty() || config.cluster_id.trim().is_empty() {
+        return String::new();
+    }
+    std::path::Path::new(&config.storage_fs_dir)
+        .join(config.cluster_id.trim())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 从 segment 名称中提取端口号，解析失败返回 0。
@@ -151,32 +161,6 @@ pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) 
             .holder_client_id
             .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name))
     })
-}
-
-/// 根据已分配的 Memory 副本所在 host，查找同 host 上的 NoF segment 名作为优选目标。
-/// 用于 prefer_alloc_in_same_node 策略，降低 Memory↔NoF 跨节点数据传输延迟。
-///
-/// Find NoF segment names on the same host as already-allocated Memory replicas.
-/// Used by prefer_alloc_in_same_node strategy to reduce cross-node data transfer latency.
-pub(crate) fn preferred_nof_segment_names(
-    state: &MasterState,
-    replicas: &[ReplicaDescriptor],
-) -> Vec<String> {
-    let mut names = Vec::new();
-    for replica in replicas {
-        if replica.replica_type != ReplicaType::Memory {
-            continue;
-        }
-        let host = host_from_segment_name(&replica.segment_name);
-        for segment in state.nof_segments.iter() {
-            if host_from_segment_name(&segment.segment.name) == host
-                && !names.iter().any(|name| name == &segment.segment.name)
-            {
-                names.push(segment.segment.name.clone());
-            }
-        }
-    }
-    names
 }
 
 /// 按 NoF segment 名称查找所属客户端 UUID。
@@ -356,36 +340,26 @@ pub(crate) fn allocate_nof_replicas(
         return Err(Status::failed_precondition("no NoF segments mounted"));
     }
 
-    let mut replicas = Vec::with_capacity(count);
-    let mut used_names = Vec::new();
-    for idx in 0..count {
-        let preferred_segment = preferred_segment_names
-            .iter()
-            .find(|name| !used_names.iter().any(|used| used == *name))
-            .cloned()
-            .unwrap_or_default();
-        let config = ReplicateConfig {
-            preferred_segment,
-            preferred_segments: preferred_segment_names.to_vec(),
-            replica_num: 1,
-            ..Default::default()
-        };
-        let allocated = state
-            .nof_allocator
-            .write()
-            .allocate(key, size, 1, &config)
-            .into_iter()
-            .next()
-            .ok_or(Status::resource_exhausted("no available NoF segment"))?;
-        used_names.push(allocated.segment_name.clone());
-        let mut replica = allocated;
+    let config = ReplicateConfig {
+        preferred_segments: preferred_segment_names.to_vec(),
+        replica_num: count as u32,
+        ..Default::default()
+    };
+    let mut replicas = state
+        .nof_allocator
+        .write()
+        .allocate(key, size, count, &config);
+    if replicas.len() != count {
+        let allocated = replicas.len();
+        let segment_ids = replicas.iter().map(|r| r.segment_id).collect::<Vec<_>>();
+        state.nof_allocator.write().release(&replicas);
+        sync_nof_segment_usage(state, segment_ids);
+        return Err(Status::resource_exhausted(format!(
+            "failed to allocate {count} NoF replica(s), allocated {allocated}"
+        )));
+    }
+    for replica in &mut replicas {
         replica.replica_type = ReplicaType::NoFSsd;
-        replicas.push(replica);
-        // 不超过已挂载的 NoF segment 总数
-        // Cap at total mounted NoF segments
-        if idx + 1 >= state.nof_segments.len() {
-            break;
-        }
     }
     sync_nof_segment_usage(state, replicas.iter().map(|r| r.segment_id));
     Ok(replicas)

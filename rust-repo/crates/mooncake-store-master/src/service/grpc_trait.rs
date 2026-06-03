@@ -300,6 +300,13 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::upsert_impl(self, request).await
     }
 
+    async fn batch_upsert_start(
+        &self,
+        request: Request<proto::BatchUpsertStartRequest>,
+    ) -> Result<Response<proto::BatchUpsertStartResponse>, Status> {
+        MasterServiceImpl::batch_upsert_start_impl(self, request).await
+    }
+
     // ===== Replica Replication (grpc_replication.rs) =====
     // ===== 副本复制/迁移 =====
 
@@ -412,6 +419,13 @@ impl MasterService for MasterServiceImpl {
         request: Request<proto::BatchUpsertEndRequest>,
     ) -> Result<Response<proto::BatchUpsertEndResponse>, Status> {
         MasterServiceImpl::batch_upsert_end_impl(self, request).await
+    }
+
+    async fn batch_upsert_revoke(
+        &self,
+        request: Request<proto::BatchUpsertRevokeRequest>,
+    ) -> Result<Response<proto::BatchUpsertRevokeResponse>, Status> {
+        MasterServiceImpl::batch_upsert_revoke_impl(self, request).await
     }
 
     async fn batch_put_start(

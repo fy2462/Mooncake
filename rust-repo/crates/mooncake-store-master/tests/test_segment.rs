@@ -121,7 +121,7 @@ fn test_replica_type_serde_roundtrip() {
 fn test_replica_descriptor_full() {
     let sid = Uuid::new_v4();
     let rd = ReplicaDescriptor {
-        base_addr: 0,
+        base_addr: 0x100000000,
         refcnt: 0,
         handle_valid: true,
         segment_id: sid,
@@ -143,7 +143,7 @@ fn test_replica_descriptor_full() {
 #[test]
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {
-        base_addr: 0,
+        base_addr: 0x100000000,
         refcnt: 0,
         handle_valid: true,
         segment_id: Uuid::new_v4(),
@@ -188,7 +188,7 @@ fn test_object_entry_creation() {
     let entry = ObjectEntry {
         replicas: vec![
             ReplicaDescriptor {
-                base_addr: 0,
+                base_addr: 0x100000000,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id: sid,
@@ -200,7 +200,7 @@ fn test_object_entry_creation() {
                 holder_client_id: None,
             },
             ReplicaDescriptor {
-                base_addr: 0,
+                base_addr: 0x100000000,
                 refcnt: 0,
                 handle_valid: true,
                 segment_id: sid,
@@ -229,12 +229,16 @@ fn test_object_entry_creation() {
 }
 
 #[test]
-fn test_allocator_prefers_same_node() {
-    let mut allocator = SegmentAllocator::new();
+fn test_allocator_ignores_same_node_preference_for_memory_only() {
+    let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
     let cid_same = Uuid::new_v4();
     let cid_other = Uuid::new_v4();
     let cid_third = Uuid::new_v4();
-    allocator.add_segment(make_test_seg(Uuid::new_v4(), "same:1", 10000), 0, cid_same);
+    allocator.add_segment(
+        make_test_seg(Uuid::new_v4(), "same:1", 10000),
+        9000,
+        cid_same,
+    );
     allocator.add_segment(
         make_test_seg(Uuid::new_v4(), "other:1", 10000),
         0,
@@ -253,7 +257,7 @@ fn test_allocator_prefers_same_node() {
     };
     let replicas = allocator.allocate_for_client("k", Some(cid_same), 100, 1, &config);
     assert_eq!(replicas.len(), 1);
-    assert_eq!(replicas[0].segment_name, "same:1");
+    assert_ne!(replicas[0].segment_name, "same:1");
 }
 
 #[test]

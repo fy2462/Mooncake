@@ -15,7 +15,9 @@ async fn test_create_and_query_drain_job() {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: "host1:12345".into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             },
         ))
         .await
@@ -26,7 +28,9 @@ async fn test_create_and_query_drain_job() {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: "host2:12345".into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             },
         ))
         .await
@@ -154,6 +158,63 @@ async fn test_drain_job_rejects_empty_segments() {
 }
 
 #[tokio::test]
+async fn test_drain_job_rejects_invalid_concurrency_duplicates_and_overlap() {
+    let service = MasterServiceImpl::default();
+    let client_id = uuid::Uuid::new_v4();
+    for name in ["source-a:1", "target-a:1"] {
+        service
+            .mount_segment(Request::new(
+                mooncake_store_master::proto::MountSegmentRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    segment_name: name.into(),
+                    size: 4096,
+                    base_addr: 0x100000000,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+
+    let zero_concurrency = service
+        .create_drain_job(Request::new(
+            mooncake_store_master::proto::CreateDrainJobRequest {
+                segments: vec!["source-a:1".into()],
+                target_segments: vec!["target-a:1".into()],
+                max_concurrency: 0,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(zero_concurrency.code(), tonic::Code::InvalidArgument);
+
+    let duplicate_source = service
+        .create_drain_job(Request::new(
+            mooncake_store_master::proto::CreateDrainJobRequest {
+                segments: vec!["source-a:1".into(), "source-a:1".into()],
+                target_segments: vec!["target-a:1".into()],
+                max_concurrency: 1,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate_source.code(), tonic::Code::InvalidArgument);
+
+    let overlap = service
+        .create_drain_job(Request::new(
+            mooncake_store_master::proto::CreateDrainJobRequest {
+                segments: vec!["source-a:1".into()],
+                target_segments: vec!["source-a:1".into()],
+                max_concurrency: 1,
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(overlap.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
 async fn test_drain_job_rejects_unknown_segment() {
     let service = MasterServiceImpl::default();
     let err = service
@@ -194,7 +255,9 @@ async fn test_segment_status_returns_active_after_mount() {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: "mynode:9999".into(),
                 size: 4096,
-                base_addr: 0,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
             },
         ))
         .await
