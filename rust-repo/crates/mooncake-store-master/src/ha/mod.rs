@@ -4,8 +4,8 @@
 //
 // This module implements the master service's HA subsystem, which includes:
 //
-//   1. Leader election — via Etcd campaign, Redis SET NX, or K8s Lease.
-//      Leader 选举 —— 通过 etcd campaign、Redis SET NX 或 K8s Lease。
+//   1. Leader election — via Etcd campaign or Redis SET NX.
+//      Leader 选举 —— 通过 etcd campaign 或 Redis SET NX。
 //
 //   2. Runtime state machine — master transitions through lifecycle states:
 //      Starting → Standby → Candidate → Recovering → CatchingUp →

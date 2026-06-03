@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{error, info};
 
-// LeaderCoordinator — leader election and keepalive via Etcd/Redis/K8s/Manual.
+// LeaderCoordinator — leader election and keepalive via Etcd/Redis/Manual.
 // LeaderCoordinator —— 核心选举基础设施（C++: ha_service.h）。
 
 pub struct LeaderCoordinator {
@@ -28,12 +28,6 @@ enum CoordinatorBackend {
         client: redis::Client,
         /// Key used for SET NX PX. / 用于 SET NX PX 的 key。
         election_key: String,
-    },
-    K8s {
-        /// Kubernetes namespace. / Kubernetes 命名空间。
-        namespace: String,
-        /// Kubernetes Lease resource name. / Kubernetes Lease 资源名称。
-        lease_name: String,
     },
     /// Manual mode: leadership is externally controlled via the watch channel.
     /// 手动模式：leadership 通过 watch channel 外部控制。
@@ -73,20 +67,6 @@ impl LeaderCoordinator {
             CoordinatorBackend::Redis {
                 client,
                 election_key: "mooncake:master:leader".to_string(),
-            },
-            LeaderRole::Standby,
-        ))
-    }
-
-    /// Create a K8s Lease-backed coordinator. / 创建 K8s Lease 支持的协调器。
-    pub async fn new_k8s(
-        namespace: &str,
-        lease_name: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self::with_backend(
-            CoordinatorBackend::K8s {
-                namespace: namespace.to_string(),
-                lease_name: lease_name.to_string(),
             },
             LeaderRole::Standby,
         ))
@@ -157,7 +137,7 @@ impl LeaderCoordinator {
                 }
                 Ok(None)
             }
-            _ => Ok(None),
+            CoordinatorBackend::Manual => Ok(None),
         }
     }
 
@@ -168,7 +148,6 @@ impl LeaderCoordinator {
     /// - Redis: SET NX PX (atomic compare-and-set with TTL).
     ///   SET NX PX（带 TTL 的原子比较并设置）。
     /// - Manual: always succeeds. / 始终成功。
-    /// - K8s: not yet implemented. / 尚未实现。
     pub async fn try_acquire_leadership(
         &self,
         leader_address: &str,
@@ -281,11 +260,6 @@ impl LeaderCoordinator {
                     lease_id: None,
                 })
             }
-            CoordinatorBackend::K8s { namespace, lease_name } => {
-                Err(HaError::UnavailableInCurrentMode(format!(
-                    "K8s HA backend is not implemented in Rust coordinator: namespace={namespace}, lease={lease_name}"
-                )))
-            }
         }
     }
 
@@ -376,9 +350,7 @@ impl LeaderCoordinator {
                     }
                 });
             }
-            // No keepalive needed for K8s (Lease handles it) or Manual.
-            // K8s（Lease 自行处理）或 Manual 无需续约。
-            _ => {}
+            CoordinatorBackend::Manual => {}
         }
         Ok(LeadershipHandle::new(cancel_tx))
     }
@@ -446,11 +418,6 @@ impl LeaderCoordinator {
                 let _ = self.role_tx.send(LeaderRole::Standby);
                 Ok(())
             }
-            CoordinatorBackend::K8s { namespace, lease_name } => {
-                Err(HaError::UnavailableInCurrentMode(format!(
-                    "K8s HA backend is not implemented in Rust coordinator: namespace={namespace}, lease={lease_name}"
-                )))
-            }
         }
     }
 
@@ -494,10 +461,6 @@ impl LeaderCoordinator {
                 info!("Etcd leader election initialized");
                 Ok(*self.role_rx.borrow())
             }
-            CoordinatorBackend::K8s { namespace, lease_name } => Err(format!(
-                "K8s Lease election is not implemented in Rust coordinator: namespace={namespace}, lease={lease_name}"
-            )
-            .into()),
             CoordinatorBackend::Redis { .. } => {
                 info!("Redis leader election initialized");
                 Ok(*self.role_rx.borrow())

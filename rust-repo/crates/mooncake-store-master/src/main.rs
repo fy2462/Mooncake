@@ -101,7 +101,9 @@ struct Args {
     ha_backend_type: String,
 
     /// HA backend connection string. Etcd may fall back to --etcd-endpoints.
+    /// For k8s, use "namespace/lease" (or "lease" for the default namespace).
     /// HA 后端连接串。etcd 可回退到 --etcd-endpoints。
+    /// k8s 使用 "namespace/lease"（或 "lease" 表示默认 namespace）。
     #[arg(long)]
     ha_backend_connstring: Option<String>,
 
@@ -109,15 +111,6 @@ struct Args {
     /// HA key 和 oplog 路径使用的 cluster id / namespace。
     #[arg(long)]
     cluster_id: Option<String>,
-
-    /// Kubernetes 命名空间（HA 模式 via K8s lease）
-    /// Kubernetes namespace (HA mode via K8s lease)
-    #[arg(long)]
-    k8s_namespace: Option<String>,
-
-    /// Kubernetes lease 名称 / Kubernetes lease name
-    #[arg(long)]
-    k8s_lease_name: Option<String>,
 
     /// 快照后端类型: "local-disk" 或 "hf3fs"
     /// Snapshot backend type: "local-disk" or "hf3fs"
@@ -556,8 +549,6 @@ mod tests {
             ha_backend_type: "etcd".to_string(),
             ha_backend_connstring: None,
             cluster_id: Some("cluster-a".to_string()),
-            k8s_namespace: None,
-            k8s_lease_name: None,
             snapshot_backend_type: None,
             snapshot_backup_dir: None,
             ha_lease_ttl_secs: 30,
@@ -589,16 +580,47 @@ mod tests {
     }
 
     #[test]
-    fn test_build_ha_spec_k8s_builds_namespace_lease_connstring() {
+    fn test_build_ha_spec_k8s_uses_explicit_connstring() {
         let mut args = base_args();
         args.ha_backend_type = "k8s".to_string();
-        args.k8s_namespace = Some("ns-a".to_string());
-        args.k8s_lease_name = Some("lease-a".to_string());
+        args.ha_backend_connstring = Some("ns-a/lease-a".to_string());
 
         let spec = build_ha_spec(&args).unwrap();
 
         assert_eq!(spec.backend_type, HABackendType::K8s);
         assert_eq!(spec.connstring, "ns-a/lease-a");
+    }
+
+    #[test]
+    fn test_build_ha_spec_k8s_requires_connstring() {
+        let mut args = base_args();
+        args.ha_backend_type = "k8s".to_string();
+
+        let err = build_ha_spec(&args).unwrap_err();
+
+        assert!(matches!(err, HaError::InvalidParams(_)));
+    }
+
+    #[tokio::test]
+    async fn test_create_coordinator_k8s_reports_unavailable() {
+        let spec = HABackendSpec {
+            backend_type: HABackendType::K8s,
+            connstring: "ns-a/lease-a".to_string(),
+            cluster_namespace: "cluster-a".to_string(),
+        };
+
+        let err = match create_coordinator(&spec).await {
+            Ok(_) => panic!("k8s coordinator should be unavailable in the current Rust build"),
+            Err(err) => err,
+        };
+        let ha_error = err.downcast_ref::<HaError>().unwrap();
+
+        assert_eq!(
+            ha_error,
+            &HaError::UnavailableInCurrentMode(
+                "K8s HA backend is not implemented in Rust coordinator".into()
+            )
+        );
     }
 }
 
@@ -703,16 +725,7 @@ fn build_ha_spec(args: &Args) -> Result<HABackendSpec, HaError> {
             .or_else(|| args.etcd_endpoints.clone())
             .unwrap_or_default(),
         HABackendType::Redis => args.ha_backend_connstring.clone().unwrap_or_default(),
-        HABackendType::K8s => args.ha_backend_connstring.clone().unwrap_or_else(|| {
-            let lease = args
-                .k8s_lease_name
-                .clone()
-                .unwrap_or_else(|| "mooncake-master".to_string());
-            match &args.k8s_namespace {
-                Some(namespace) if !namespace.trim().is_empty() => format!("{namespace}/{lease}"),
-                _ => lease,
-            }
-        }),
+        HABackendType::K8s => args.ha_backend_connstring.clone().unwrap_or_default(),
         HABackendType::Unknown => String::new(),
     };
 

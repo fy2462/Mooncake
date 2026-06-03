@@ -17,7 +17,7 @@
 //! | `allocator`   | Segment 内存分配器，支持 Random / FreeRatioFirst 策略 |
 //! | `count_min_sketch` | Count-Min Sketch 频率统计，用于 promotion 准入控制 |
 //! | `eviction`    | LRU 驱逐管理器，按 last_access + soft_pin + lease 选择驱逐候选 |
-//! | `ha`          | 高可用 (HA) 支持：Leader 选举、热备、etcd/k8s 协调 |
+//! | `ha`          | 高可用 (HA) 支持：Leader 选举、热备、etcd/redis 协调 |
 //! | `hf3fs`       | HF3FS 文件系统后端集成 |
 //! | `hot_standby` | 热备支持模块 |
 //! | `http_metadata` | HTTP metadata server，将元数据通过 REST API 暴露 |

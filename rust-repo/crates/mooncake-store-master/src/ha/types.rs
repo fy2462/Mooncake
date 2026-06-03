@@ -71,11 +71,12 @@ pub enum LeaderRole {
 }
 
 // ----------------------------------------------------------------------------
-// HABackendType — supported HA backends / 支持的 HA 后端
+// HABackendType — configurable HA backends / 可配置的 HA 后端
 //
 // Etcd: distributed lease + campaign / 分布式租约 + campaign
 // Redis: SET NX PX for leader key / SET NX PX 抢 leader key
-// K8s: Kubernetes Lease resource / Kubernetes Lease 资源
+// K8s: recognized for config parity; current Rust coordinator reports unavailable.
+// K8s: 为保持配置面一致而识别；当前 Rust coordinator 会返回不可用。
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +113,7 @@ pub fn parse_ha_backend_type(value: &str) -> Option<HABackendType> {
 /// HA 后端连接的规格说明。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HABackendSpec {
-    /// The backend type (Etcd, Redis, K8s). / 后端类型。
+    /// The configured backend type (Etcd, Redis, K8s). / 配置的后端类型。
     pub backend_type: HABackendType,
     /// Connection string (e.g. "http://etcd:2379" or "redis://localhost:6379").
     /// 连接字符串。
