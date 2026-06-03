@@ -224,6 +224,47 @@ fn test_local_snapshot_provider_loads_snapshot() {
 }
 
 #[test]
+fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
+    let root = temp_dir();
+    let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
+
+    let root_objects: DashMap<String, ObjectEntry> = DashMap::new();
+    StorageBackend::new(StorageBackendType::LocalDisk, &root)
+        .save(&segments, &nof_segments, &root_objects, &tasks)
+        .unwrap();
+
+    let cluster_objects: DashMap<String, ObjectEntry> = DashMap::new();
+    cluster_objects.insert(
+        "cluster-key".into(),
+        ObjectEntry {
+            tenant_id: "default".to_string(),
+            user_key: "cluster-key".to_string(),
+            replicas: vec![],
+            size: 0,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+        },
+    );
+    StorageBackend::new(StorageBackendType::LocalDisk, &root.join("cluster-a"))
+        .save(&segments, &nof_segments, &cluster_objects, &tasks)
+        .unwrap();
+
+    let provider = LocalSnapshotProvider::new(root, StorageBackendType::LocalDisk);
+    let cluster_snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+    assert_eq!(cluster_snapshot.objects[0].0, "cluster-key");
+
+    let fallback_snapshot = provider.load_latest_snapshot("missing").unwrap().unwrap();
+    assert!(fallback_snapshot.objects.is_empty());
+}
+
+#[test]
 fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
     let root = temp_dir();
     let cluster_id = "cluster-b";

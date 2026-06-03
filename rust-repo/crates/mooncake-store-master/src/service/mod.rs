@@ -52,7 +52,7 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicUsize};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
@@ -373,6 +373,11 @@ impl MasterServiceImpl {
     /// 获取 oplog 管理器的可变引用 / Returns mutable reference to oplog manager.
     pub fn oplog_manager(&self) -> &parking_lot::Mutex<crate::oplog::OpLogManager> {
         &self.oplog_manager
+    }
+
+    /// Initialize the service view version for a leadership term.
+    pub fn set_view_version(&self, version: i64) {
+        self.state.view_version.store(version, Ordering::Relaxed);
     }
 
     /// Build a standby controller that syncs into this service's state.

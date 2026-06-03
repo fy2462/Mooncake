@@ -49,6 +49,7 @@ use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
+use xxhash_rust::xxh32::xxh32;
 
 const CPP_OP_PUT_END: u8 = 1;
 const CPP_OP_PUT_REVOKE: u8 = 2;
@@ -506,49 +507,63 @@ fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, HaError> {
 fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> {
     let payload_json: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
     let op = payload_json.get("op")?.as_str()?;
-    let (op_type, object_key, payload) = match op {
+    let (op_type, object_key, payload_bytes) = match op {
         "put_end" => (
             CPP_OP_PUT_END,
             payload_json.get("key")?.as_str()?.to_string(),
-            BASE64_STANDARD.encode(entry.payload.as_bytes()),
+            entry.payload.as_bytes().to_vec(),
         ),
         "put_revoke" => (
             CPP_OP_PUT_REVOKE,
             payload_json.get("key")?.as_str()?.to_string(),
-            String::new(),
+            Vec::new(),
         ),
         "remove" => (
             CPP_OP_REMOVE,
             payload_json.get("key")?.as_str()?.to_string(),
-            String::new(),
+            Vec::new(),
         ),
         _ => return None,
     };
 
+    let checksum = compute_cpp_checksum(&payload_bytes);
+    let prefix_hash = compute_cpp_prefix_hash(&object_key);
     Some(CppOpLogWireEntry {
         sequence_id: entry.seq,
         timestamp_ms: unix_timestamp_ms(),
         op_type,
         object_key,
-        payload,
-        checksum: 0,
-        prefix_hash: 0,
+        payload: BASE64_STANDARD.encode(payload_bytes),
+        checksum,
+        prefix_hash,
     })
 }
 
 fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, HaError> {
+    let decoded_payload = if wire.payload.is_empty() {
+        Vec::new()
+    } else {
+        BASE64_STANDARD
+            .decode(&wire.payload)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog payload base64 decode: {e}")))?
+    };
+    if wire.checksum != 0 && compute_cpp_checksum(&decoded_payload) != wire.checksum {
+        return Err(HaError::InvalidBackend(format!(
+            "oplog checksum mismatch for seq={}",
+            wire.sequence_id
+        )));
+    }
+
     match wire.op_type {
         CPP_OP_PUT_END => {
-            if let Ok(decoded) = BASE64_STANDARD.decode(&wire.payload) {
-                if let Ok(payload) = String::from_utf8(decoded) {
-                    if serde_json::from_str::<serde_json::Value>(&payload)
-                        .ok()
-                        .and_then(|v| v.get("op").and_then(|op| op.as_str()).map(str::to_string))
-                        .as_deref()
-                        == Some("put_end")
-                    {
-                        return Ok(payload);
-                    }
+            if let Ok(payload) = String::from_utf8(decoded_payload) {
+                if serde_json::from_str::<serde_json::Value>(&payload)
+                    .ok()
+                    .and_then(|v| v.get("op").and_then(|op| op.as_str()).map(str::to_string))
+                    .as_deref()
+                    == Some("put_end")
+                {
+                    return Ok(payload);
                 }
             }
             Ok(json!({"op": "put_end", "key": wire.object_key}).to_string())
@@ -558,6 +573,18 @@ fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, 
         other => Err(HaError::InvalidBackend(format!(
             "unsupported C++ oplog op_type: {other}"
         ))),
+    }
+}
+
+fn compute_cpp_checksum(payload: &[u8]) -> u32 {
+    xxh32(payload, 0)
+}
+
+fn compute_cpp_prefix_hash(key: &str) -> u32 {
+    if key.is_empty() {
+        0
+    } else {
+        xxh32(key.as_bytes(), 0)
     }
 }
 
@@ -1136,6 +1163,11 @@ mod tests {
         assert_eq!(wire.sequence_id, 12);
         assert_eq!(wire.op_type, CPP_OP_PUT_END);
         assert_eq!(wire.object_key, "k1");
+        assert_eq!(
+            wire.checksum,
+            compute_cpp_checksum(entry.payload.as_bytes())
+        );
+        assert_eq!(wire.prefix_hash, compute_cpp_prefix_hash("k1"));
 
         let decoded = String::from_utf8(BASE64_STANDARD.decode(wire.payload).unwrap()).unwrap();
         assert_eq!(
@@ -1149,6 +1181,25 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&parsed.payload).unwrap(),
             serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap()
         );
+    }
+
+    #[test]
+    fn test_etcd_oplog_value_rejects_cpp_checksum_mismatch() {
+        let wire = CppOpLogWireEntry {
+            sequence_id: 8,
+            timestamp_ms: 1,
+            op_type: CPP_OP_REMOVE,
+            object_key: "k-bad".to_string(),
+            payload: String::new(),
+            checksum: compute_cpp_checksum(b"not-empty"),
+            prefix_hash: compute_cpp_prefix_hash("k-bad"),
+        };
+        let value = serde_json::to_string(&wire).unwrap();
+
+        assert!(matches!(
+            deserialize_etcd_oplog_value(&value),
+            Err(HaError::InvalidBackend(_))
+        ));
     }
 
     #[test]

@@ -210,7 +210,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
         let service_arc = build_master_service(
             snapshot_backend_type,
-            snapshot_dir.clone(),
+            snapshot_dir_for_cluster(snapshot_dir.clone(), &ha_spec.cluster_namespace),
             runtime_config.clone(),
         );
         let mut supervisor = new_supervisor(&ha_spec, &supervisor_config, service_arc.clone());
@@ -289,6 +289,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if let Some(view) = &acquire.view {
+                service_arc.set_view_version(view.view_version as i64);
                 service_arc
                     .oplog_manager()
                     .lock()
@@ -418,6 +419,20 @@ fn build_master_service(
         snapshot_dir,
         runtime_config,
     ))
+}
+
+fn snapshot_dir_for_cluster(
+    snapshot_dir: Option<std::path::PathBuf>,
+    cluster_id: &str,
+) -> Option<std::path::PathBuf> {
+    snapshot_dir.map(|dir| {
+        let cluster_id = cluster_id.trim();
+        if cluster_id.is_empty() {
+            dir
+        } else {
+            dir.join(cluster_id)
+        }
+    })
 }
 
 async fn wait_and_continue(coordinator: &LeaderCoordinator, current_view: &Option<MasterView>) {
@@ -657,6 +672,21 @@ mod tests {
         let second = build_master_service(None, None, runtime_config);
 
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn test_snapshot_dir_for_cluster_scopes_ha_snapshots() {
+        let root = std::path::PathBuf::from("/tmp/mooncake-snapshots");
+
+        assert_eq!(
+            snapshot_dir_for_cluster(Some(root.clone()), "cluster-a").unwrap(),
+            root.join("cluster-a")
+        );
+        assert_eq!(
+            snapshot_dir_for_cluster(Some(root.clone()), "").unwrap(),
+            root
+        );
+        assert!(snapshot_dir_for_cluster(None, "cluster-a").is_none());
     }
 }
 

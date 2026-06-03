@@ -5,9 +5,11 @@
 //! corresponding mutations (put_end, remove, segment mount/unmount)
 //! to the shared MasterState.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use serde_json::Value;
 
 use crate::ha::types::OpLogRecord;
@@ -18,6 +20,8 @@ use crate::service::state::MasterState;
 pub(crate) struct OpLogApplier {
     state: Arc<MasterState>,
     expected_seq: AtomicU64,
+    pending_entries: Mutex<BTreeMap<u64, OpLogRecord>>,
+    max_pending_entries: usize,
 }
 
 impl OpLogApplier {
@@ -25,6 +29,8 @@ impl OpLogApplier {
         Self {
             state,
             expected_seq: AtomicU64::new(1),
+            pending_entries: Mutex::new(BTreeMap::new()),
+            max_pending_entries: 100_000,
         }
     }
 
@@ -32,6 +38,7 @@ impl OpLogApplier {
     /// C++ equivalent: `OpLogApplier::Recover(base_seq)`
     pub fn recover(&self, base_seq: u64) {
         self.expected_seq.store(base_seq + 1, Ordering::Release);
+        self.pending_entries.lock().clear();
     }
 
     /// Return the next expected sequence ID.
@@ -52,15 +59,42 @@ impl OpLogApplier {
                 continue; // already applied
             }
             if entry.seq > expected {
-                // Gap detected — skip until gap is resolved.
+                self.buffer_pending_entry(entry.clone());
                 continue;
             }
-            if Self::apply_one(&self.state, &entry.payload) {
-                self.expected_seq.store(expected + 1, Ordering::Release);
-                applied += 1;
-            }
+            applied += self.apply_contiguous_entry(entry.clone());
         }
         applied
+    }
+
+    fn apply_contiguous_entry(&self, entry: OpLogRecord) -> usize {
+        let expected = self.expected_seq.load(Ordering::Acquire);
+        if entry.seq != expected || !Self::apply_one(&self.state, &entry.payload) {
+            return 0;
+        }
+        self.expected_seq.store(expected + 1, Ordering::Release);
+        let mut applied = 1;
+
+        loop {
+            let next = self.expected_seq.load(Ordering::Acquire);
+            let Some(pending) = self.pending_entries.lock().remove(&next) else {
+                break;
+            };
+            if !Self::apply_one(&self.state, &pending.payload) {
+                break;
+            }
+            self.expected_seq.store(next + 1, Ordering::Release);
+            applied += 1;
+        }
+        applied
+    }
+
+    fn buffer_pending_entry(&self, entry: OpLogRecord) {
+        let mut pending = self.pending_entries.lock();
+        if pending.len() >= self.max_pending_entries {
+            return;
+        }
+        pending.entry(entry.seq).or_insert(entry);
     }
 
     /// Try to fill gaps by reading from the OpLogStore.
@@ -290,5 +324,35 @@ mod tests {
         }];
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 0); // gap, not applied
+    }
+
+    #[test]
+    fn test_pending_gap_applies_when_missing_entries_arrive() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state);
+
+        let future = vec![OpLogRecord {
+            seq: 3,
+            producer_view_version: 1,
+            payload: r#"{"op":"put_start","key":"k3"}"#.to_string(),
+        }];
+        assert_eq!(applier.apply_op_log_entries(&future), 0);
+        assert_eq!(applier.get_expected_sequence_id(), 1);
+
+        let contiguous = vec![
+            OpLogRecord {
+                seq: 1,
+                producer_view_version: 1,
+                payload: r#"{"op":"put_start","key":"k1"}"#.to_string(),
+            },
+            OpLogRecord {
+                seq: 2,
+                producer_view_version: 1,
+                payload: r#"{"op":"put_start","key":"k2"}"#.to_string(),
+            },
+        ];
+
+        assert_eq!(applier.apply_op_log_entries(&contiguous), 3);
+        assert_eq!(applier.get_expected_sequence_id(), 4);
     }
 }

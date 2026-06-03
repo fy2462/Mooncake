@@ -5,6 +5,43 @@ use tonic::Request;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn test_ping_returns_leadership_term_view_version_for_existing_client() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let client_proto = proto::Uuid {
+        high: client_id.as_u64_pair().0,
+        low: client_id.as_u64_pair().1,
+    };
+
+    MasterService::ping(
+        &service,
+        Request::new(proto::PingRequest {
+            client_id: Some(client_proto.clone()),
+            mounted_segments: vec![],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    service.set_view_version(77);
+
+    let resp = MasterService::ping(
+        &service,
+        Request::new(proto::PingRequest {
+            client_id: Some(client_proto),
+            mounted_segments: vec![],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(resp.view_version_id, 77);
+}
+
+#[tokio::test]
 async fn test_query_ip_derives_address_from_mounted_segment() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();

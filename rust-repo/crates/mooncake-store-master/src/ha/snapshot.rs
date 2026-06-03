@@ -82,46 +82,54 @@ impl LocalSnapshotProvider {
 
 impl SnapshotProvider for LocalSnapshotProvider {
     fn load_latest_snapshot(&self, cluster_id: &str) -> Result<Option<LoadedSnapshot>, HaError> {
-        // If cluster_id is specified, use a cluster-specific subdirectory.
-        // 如果指定了 cluster_id，使用集群特定的子目录。
-        let dir = if cluster_id.is_empty() {
-            self.root_dir.clone()
+        let mut dirs = Vec::new();
+        if cluster_id.is_empty() {
+            dirs.push(self.root_dir.clone());
         } else {
-            self.root_dir.join(cluster_id)
-        };
+            dirs.push(self.root_dir.join(cluster_id));
+            dirs.push(self.root_dir.clone());
+        }
 
-        // Load segments, NOF segments, objects, and tasks from the backend.
-        // 从后端加载 segments、NOF segments、objects 和 tasks。
-        let backend = StorageBackend::new(self.backend_type, &dir);
-        let Some((segments, nof_segments, objects, tasks)) = backend
-            .load()
-            .map_err(|error| HaError::Snapshot(error.to_string()))?
-        else {
-            return Ok(None);
-        };
+        for dir in dirs {
+            // Load segments, NOF segments, objects, and tasks from the backend.
+            // 从后端加载 segments、NOF segments、objects 和 tasks。
+            let backend = StorageBackend::new(self.backend_type, &dir);
+            let Some((segments, nof_segments, objects, tasks)) = backend
+                .load()
+                .map_err(|error| HaError::Snapshot(error.to_string()))?
+            else {
+                continue;
+            };
 
-        // Derive snapshot_id from the file modification time if available.
-        // 如果可用，从文件修改时间推导 snapshot_id。
-        let snapshot_path = dir.join("master_snapshot.json");
-        let snapshot_id = std::fs::metadata(&snapshot_path)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
-            .map(|ts| format!("snapshot-{}", ts.as_millis()))
-            .unwrap_or_else(|| "snapshot-latest".to_string());
+            // Derive snapshot_id from the file modification time if available.
+            // 如果可用，从文件修改时间推导 snapshot_id。
+            let snapshot_path = ["master_snapshot.msgpack", "master_snapshot.json"]
+                .iter()
+                .map(|name| dir.join(name))
+                .find(|path| path.exists());
+            let snapshot_id = snapshot_path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
+                .map(|ts| format!("snapshot-{}", ts.as_millis()))
+                .unwrap_or_else(|| "snapshot-latest".to_string());
 
-        Ok(Some(LoadedSnapshot {
-            snapshot_id,
-            snapshot_sequence_id: 0,
-            // Extract the Segment domain object from each SegmentEntry wrapper.
-            // 从每个 SegmentEntry 封装中提取 Segment 领域对象。
-            segments: segments
-                .into_iter()
-                .map(|s: crate::service::SegmentEntry| s.segment)
-                .collect(),
-            nof_segments,
-            objects,
-            tasks,
-        }))
+            return Ok(Some(LoadedSnapshot {
+                snapshot_id,
+                snapshot_sequence_id: 0,
+                // Extract the Segment domain object from each SegmentEntry wrapper.
+                // 从每个 SegmentEntry 封装中提取 Segment 领域对象。
+                segments: segments
+                    .into_iter()
+                    .map(|s: crate::service::SegmentEntry| s.segment)
+                    .collect(),
+                nof_segments,
+                objects,
+                tasks,
+            }));
+        }
+
+        Ok(None)
     }
 }
