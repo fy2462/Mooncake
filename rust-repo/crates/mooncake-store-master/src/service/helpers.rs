@@ -221,8 +221,12 @@ pub(crate) fn unmount_segment_owned(
         return false;
     }
 
+    let invalidated = HashSet::from([segment_id]);
+    invalidate_replicas_on_segments(state, &invalidated);
     state.segments.remove(&segment_id);
     state.allocator.write().remove_segment(&segment_id);
+    let alive_clients = get_alive_clients_snapshot(state);
+    clear_invalid_handles(state, &alive_clients);
     sync_client_segments(state, client_id);
     metrics::SEGMENT_COUNT.set(state.segments.len() as i64);
     true
@@ -244,8 +248,13 @@ pub(crate) fn unmount_nof_segment_owned(
         return false;
     }
 
+    let invalidated = HashSet::from([segment_id]);
+    invalidate_replicas_on_segments(state, &invalidated);
     state.nof_segments.remove(&segment_id);
     state.nof_allocator.write().remove_segment(&segment_id);
+    state.nof_heartbeat_states.remove(&segment_id);
+    let alive_clients = get_alive_clients_snapshot(state);
+    clear_invalid_handles(state, &alive_clients);
     true
 }
 
@@ -491,6 +500,48 @@ pub(crate) fn cleanup_stale_handles(
     // 如果清理掉了一些副本，且没有有效的 Complete 副本残留，对象应该被移除
     // If some replicas were cleaned and no valid Complete replicas remain, the object should be removed
     entry.replicas.len() != original_len && !has_completed
+}
+
+/// Mark complete Memory/NoF replicas on the provided segments invalid.
+/// This mirrors the C++ prepare-unmount phase, after which ClearInvalidHandles
+/// removes the invalid metadata.
+pub(crate) fn invalidate_replicas_on_segments(state: &MasterState, segment_ids: &HashSet<Uuid>) {
+    if segment_ids.is_empty() {
+        return;
+    }
+    for mut object in state.objects.iter_mut() {
+        for replica in &mut object.replicas {
+            if matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) && segment_ids.contains(&replica.segment_id)
+            {
+                replica.handle_valid = false;
+            }
+        }
+    }
+}
+
+/// Sweep all metadata and drop stale handles, cleaning per-key task state when
+/// no valid complete replica remains.
+pub(crate) fn clear_invalid_handles(state: &MasterState, alive_clients: &HashSet<Uuid>) {
+    let mut remove_keys = Vec::new();
+    for mut object in state.objects.iter_mut() {
+        if cleanup_stale_handles(&mut object, alive_clients) {
+            remove_keys.push(object.key().clone());
+        }
+    }
+
+    for key in remove_keys {
+        state.objects.remove(&key);
+        state.processing_keys.remove(&key);
+        state.replication_tasks.remove(&key);
+        clear_offloading_task(state, &key);
+        clear_promotion_task(state, &key);
+        for mut entry in state.client_objects.iter_mut() {
+            entry.value_mut().remove(&key);
+        }
+    }
 }
 
 // =============================================================================

@@ -30,6 +30,10 @@ use uuid::Uuid;
 use super::helpers::{client_id_by_segment_name, memory_usage_ratio, release_replicas};
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
+fn same_replica_location(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
+    a.segment_id == b.segment_id && a.offset == b.offset && a.replica_type == b.replica_type
+}
+
 /// 释放晋升过程中暂存的副本占位（Allocating 状态，尚未写入数据）。
 /// 晋升失败或放弃时调用，将占用的 segment 空间归还给分配器。
 ///
@@ -69,6 +73,106 @@ pub(crate) fn release_staged_promotion_replica(
 /// Tasks exceeding their TTL are considered failed; their held resources and locks are released to prevent leaks.
 pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
     let ttl = state.runtime_config.put_start_release_timeout;
+    let system_now = SystemTime::now();
+
+    // Reap expired PutStart objects. This mirrors C++ DiscardExpiredProcessingReplicas:
+    // processing markers for complete/invalid objects are dropped, and timed-out
+    // Allocating replicas are released.
+    let mut expired_processing = Vec::new();
+    let mut stale_processing_markers = Vec::new();
+    for entry in state.processing_keys.iter() {
+        let key = entry.key().clone();
+        let Some(object) = state.objects.get(&key) else {
+            stale_processing_markers.push(key);
+            continue;
+        };
+        if object.replicas.is_empty()
+            || object
+                .replicas
+                .iter()
+                .all(|r| r.status == ReplicaStatus::Complete)
+        {
+            stale_processing_markers.push(key);
+            continue;
+        }
+        if object
+            .put_start_time
+            .is_some_and(|start| system_now.duration_since(start).unwrap_or_default() >= ttl)
+        {
+            expired_processing.push(key);
+        }
+    }
+    for key in stale_processing_markers {
+        state.processing_keys.remove(&key);
+    }
+    for key in expired_processing {
+        let mut removed = Vec::new();
+        let mut remove_object = false;
+        if let Some(mut object) = state.objects.get_mut(&key) {
+            object.replicas.retain(|replica| {
+                let should_remove = replica.status == ReplicaStatus::Allocating;
+                if should_remove {
+                    removed.push(replica.clone());
+                }
+                !should_remove
+            });
+            remove_object = object.replicas.is_empty();
+        }
+        state.processing_keys.remove(&key);
+        if !removed.is_empty() {
+            release_replicas(state, &removed);
+        }
+        if remove_object {
+            state.objects.remove(&key);
+            clear_offloading_task(state, &key);
+            clear_promotion_task(state, &key);
+        }
+    }
+
+    // Reap expired copy/move tasks. C++ unpins the source and discards the
+    // allocated targets when replication has exceeded put_start_release_timeout.
+    let expired_replications = state
+        .replication_tasks
+        .iter()
+        .filter(|entry| now.saturating_duration_since(entry.start_time) >= ttl)
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in expired_replications {
+        let Some((_, task)) = state.replication_tasks.remove(&key) else {
+            continue;
+        };
+        let mut removed_targets = Vec::new();
+        let mut remove_object = false;
+        if let Some(mut object) = state.objects.get_mut(&key) {
+            if let Some(source) = object
+                .replicas
+                .iter_mut()
+                .find(|replica| same_replica_location(replica, &task.source))
+            {
+                source.dec_refcnt();
+            }
+            object.replicas.retain(|replica| {
+                let should_remove = task
+                    .targets
+                    .iter()
+                    .any(|target| same_replica_location(replica, target));
+                if should_remove {
+                    removed_targets.push(replica.clone());
+                }
+                !should_remove
+            });
+            remove_object = object.replicas.is_empty();
+        }
+        if !removed_targets.is_empty() {
+            release_replicas(state, &removed_targets);
+        }
+        if remove_object {
+            state.objects.remove(&key);
+            state.processing_keys.remove(&key);
+            clear_offloading_task(state, &key);
+            clear_promotion_task(state, &key);
+        }
+    }
 
     // 回收过期 offload 任务 / Reap expired offload tasks
     let expired_offloads = state
@@ -236,7 +340,13 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
     );
     // 收集驱逐候选：排除正在复制或正在 PutStart 的对象
     // Collect eviction candidates: exclude objects being replicated or in PutStart
-    let mut candidates: Vec<(String, Option<SystemTime>, bool, SystemTime)> = state
+    let mut candidates: Vec<(
+        String,
+        Option<SystemTime>,
+        bool,
+        Option<SystemTime>,
+        SystemTime,
+    )> = state
         .objects
         .iter()
         .filter(|entry| {
@@ -248,13 +358,18 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
                 entry.key().clone(),
                 entry.soft_pin_timeout,
                 entry.hard_pinned,
+                entry.lease_timeout,
                 entry.last_access,
             )
         })
         .collect();
     // EvictionManager::select_for_eviction_with_hard_pin 永远不会选择 hard_pinned 对象
     // 按 last_access LRU 排序，soft_pinned 对象在 TTL 过期前不会被选中
-    let selected = manager.select_for_eviction_with_hard_pin(&mut candidates, target_count);
+    let selected = manager.select_for_eviction_with_lease_timeout_policy(
+        &mut candidates,
+        target_count,
+        state.runtime_config.offload_force_evict,
+    );
 
     let mut evicted = Vec::new();
     for key in selected {

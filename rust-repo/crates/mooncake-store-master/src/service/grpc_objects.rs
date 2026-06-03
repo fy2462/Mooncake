@@ -41,6 +41,53 @@
 use super::*;
 
 impl MasterServiceImpl {
+    pub(crate) fn apply_put_end_for_key(
+        &self,
+        scoped_key: &str,
+        client_id: Uuid,
+        target: ReplicaType,
+    ) -> Result<(), Status> {
+        if let Some(mut entry) = self.state.objects.get_mut(scoped_key) {
+            if entry.client_id != client_id {
+                return Err(Status::permission_denied("illegal client"));
+            }
+            for r in &mut entry.replicas {
+                let matches_type = target == ReplicaType::All || r.replica_type == target;
+                if matches_type && r.status == ReplicaStatus::Allocating && r.handle_valid {
+                    r.status = ReplicaStatus::Complete;
+                }
+            }
+            // C++ PutEnd grants ttl=0: the object starts without a hard read lease,
+            // while soft pin is extended when enabled.
+            entry.grant_lease(Duration::ZERO, self.state.runtime_config.soft_pin_ttl);
+            let all_complete = entry
+                .replicas
+                .iter()
+                .all(|r| r.status == ReplicaStatus::Complete);
+            let size = entry.size;
+            let offload_enabled = !self.state.runtime_config.offload_on_evict;
+            drop(entry);
+
+            if offload_enabled {
+                push_offloading_queue(&self.state, client_id, scoped_key, size);
+            }
+            if all_complete && self.state.processing_keys.contains_key(scoped_key) {
+                self.state.processing_keys.remove(scoped_key);
+            }
+            if all_complete {
+                self.state
+                    .client_objects
+                    .entry(client_id)
+                    .or_default()
+                    .insert(scoped_key.to_string());
+            }
+            self.oplog_manager.lock().record_put_end(scoped_key, size);
+            Ok(())
+        } else {
+            Err(Status::not_found("key not found"))
+        }
+    }
+
     // ---- ExistKey ----
     // 检查指定 key 是否存在于 master 的对象表中，O(1) 哈希查找。
     // Check if a key exists in the master's object table, O(1) hash lookup.
@@ -365,59 +412,11 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
-            // C++ master_service.cpp:1368-1372 校验调用者身份，防止其他 client 越权 PutEnd
-            // Validate caller identity to prevent unauthorized PutEnd from other clients
-            if entry.client_id != client_id {
-                return Err(Status::permission_denied("illegal client"));
-            }
-            // C++ master_service.cpp:1368-1372 校验 handle 有效性，若 handle 已失效则保留 Allocating 状态
-            // C++ checks !replica.has_invalid_mem_handle() and !replica.has_invalid_nof_handle()
-            // before marking replicas Complete. If handle became invalid, replica stays in Allocating.
-            for r in &mut entry.replicas {
-                let target = replica_type_from_i32(req.replica_type);
-                let matches_type = target == ReplicaType::All || r.replica_type == target;
-                if matches_type && r.status == ReplicaStatus::Allocating {
-                    // C++ master_service.cpp:1368-1372 检查 !replica.has_invalid_mem_handle()
-                    // 和 !replica.has_invalid_nof_handle()。handle 失效时 replica 保持在 Allocating 状态。
-                    // If handle is still valid, mark as Complete; otherwise stays Allocating.
-                    if r.handle_valid {
-                        r.status = ReplicaStatus::Complete;
-                    }
-                }
-            }
-            // 更新 lease + soft_pin 超时：多次 PutEnd 取最晚超时 / Update lease + soft_pin timeout: latest wins
-            entry.grant_lease(
-                self.state.runtime_config.lease_ttl,
-                self.state.runtime_config.soft_pin_ttl,
-            );
-            let all_complete = entry
-                .replicas
-                .iter()
-                .all(|r| r.status == ReplicaStatus::Complete);
-            let size = entry.size;
-            let offload_enabled = !self.state.runtime_config.offload_on_evict;
-            drop(entry);
-            if offload_enabled {
-                push_offloading_queue(&self.state, client_id, &scoped_key, size);
-            }
-            // C++ 只在所有 replica 都 Complete 时才从 processing_keys 中移除，防止并发冲突
-            // C++ only removes from processing_keys when ALL replicas are complete
-            // AND the object is in the processing set.
-            if all_complete && self.state.processing_keys.contains_key(&scoped_key) {
-                self.state.processing_keys.remove(&scoped_key);
-            }
-            // Maintain per-client object index for fast client cleanup.
-            // 维护每个客户端的对象索引，用于快速客户端清理
-            if all_complete {
-                self.state
-                    .client_objects
-                    .entry(client_id)
-                    .or_default()
-                    .insert(scoped_key.clone());
-            }
-            self.oplog_manager.lock().record_put_end(&scoped_key, size);
-        }
+        self.apply_put_end_for_key(
+            &scoped_key,
+            client_id,
+            replica_type_from_i32(req.replica_type),
+        )?;
         metrics::PUT_END_REQUESTS.inc();
         Ok(Response::new(proto::PutEndResponse {}))
     }
@@ -558,6 +557,7 @@ impl MasterServiceImpl {
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
         let mut entries = vec![];
+        let mut lease_keys = vec![];
         // 遍历所有 key，按租户过滤后，对 user_key 进行正则匹配
         // Iterate all keys, filter by tenant, match regex against user_key
         for entry in self.state.objects.iter() {
@@ -591,6 +591,17 @@ impl MasterServiceImpl {
                 tenant_id: entry.tenant_id.clone(),
                 user_key: entry.user_key.clone(),
             });
+            lease_keys.push(entry.key().clone());
+        }
+
+        for key in lease_keys {
+            if let Some(mut entry) = self.state.objects.get_mut(&key) {
+                entry.last_access = SystemTime::now();
+                entry.grant_lease(
+                    self.state.runtime_config.lease_ttl,
+                    self.state.runtime_config.soft_pin_ttl,
+                );
+            }
         }
 
         metrics::GET_REQUESTS.inc();
@@ -611,27 +622,22 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
         let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
-        if !req.force && self.state.replication_tasks.contains_key(&scoped_key) {
+        if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
             ));
         }
-        if !req.force {
-            if let Some(entry) = self.state.objects.get(&scoped_key) {
-                // C++ master_service.cpp:2314 只有 lease 过期或 force=true 才允许删除
-                // Only allow delete when lease is expired or force=true
-                if !is_lease_expired(&entry) {
-                    return Err(Status::failed_precondition("object has lease"));
-                }
-                // C++ 只有所有 replica 都 Complete 才允许删除
-                // Only allow delete when all replicas are Complete
-                if !entry
-                    .replicas
-                    .iter()
-                    .all(|r| r.status == ReplicaStatus::Complete)
-                {
-                    return Err(Status::failed_precondition("replica is not ready"));
-                }
+        if let Some(entry) = self.state.objects.get(&scoped_key) {
+            // C++ force only bypasses lease; complete replica and replication-task checks still apply.
+            if !req.force && !is_lease_expired(&entry) {
+                return Err(Status::failed_precondition("object has lease"));
+            }
+            if !entry
+                .replicas
+                .iter()
+                .all(|r| r.status == ReplicaStatus::Complete)
+            {
+                return Err(Status::failed_precondition("replica is not ready"));
             }
         }
         if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
@@ -669,21 +675,19 @@ impl MasterServiceImpl {
             .collect();
 
         for key in keys_to_remove {
-            if !req.force && self.state.replication_tasks.contains_key(&key) {
+            if self.state.replication_tasks.contains_key(&key) {
                 continue;
             }
-            if !req.force {
-                if let Some(entry) = self.state.objects.get(&key) {
-                    if !is_lease_expired(&entry) {
-                        continue;
-                    }
-                    if !entry
-                        .replicas
-                        .iter()
-                        .all(|r| r.status == ReplicaStatus::Complete)
-                    {
-                        continue;
-                    }
+            if let Some(entry) = self.state.objects.get(&key) {
+                if !req.force && !is_lease_expired(&entry) {
+                    continue;
+                }
+                if !entry
+                    .replicas
+                    .iter()
+                    .all(|r| r.status == ReplicaStatus::Complete)
+                {
+                    continue;
                 }
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {

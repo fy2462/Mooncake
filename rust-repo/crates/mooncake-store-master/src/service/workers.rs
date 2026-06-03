@@ -22,12 +22,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-use super::background_ops::{
-    clear_offloading_task, clear_promotion_task, reap_expired_background_tasks,
-    run_automatic_eviction_once,
-};
+use super::background_ops::{reap_expired_background_tasks, run_automatic_eviction_once};
 use super::helpers::{
-    client_id_by_replica_segment_name, release_replicas, sync_client_segments,
+    clear_invalid_handles, get_alive_clients_snapshot, sync_client_segments,
     unmount_nof_segment_owned, unmount_segment_owned,
 };
 use super::state::{MasterState, NoFHeartbeatState};
@@ -305,74 +302,7 @@ impl EvictionWorker {
 /// Prefers O(N_keys) index lookup via client_objects;
 /// falls back to full scan only when the index is missing (legacy client compatibility).
 fn purge_expired_client(state: &MasterState, client_id: Uuid) {
-    let mut released_replicas = Vec::new();
-    let mut emptied_keys = Vec::new();
-
-    // 优先使用 per-client 索引进行 O(N_keys) 的高效查找
-    // Prefer per-client index for O(N_keys) efficient lookup
-    let client_keys: Vec<String> = state
-        .client_objects
-        .remove(&client_id)
-        .map(|(_, keys)| keys.into_iter().collect())
-        .unwrap_or_default();
-
-    if !client_keys.is_empty() {
-        // 有索引：快速清理 / Has index: fast cleanup
-        for key in &client_keys {
-            if let Some(mut object) = state.objects.get_mut(key) {
-                let mut removed_any = false;
-                object.replicas.retain(|replica| {
-                    let owner = replica.holder_client_id.or_else(|| {
-                        client_id_by_replica_segment_name(state, &replica.segment_name)
-                    });
-                    let keep = owner != Some(client_id);
-                    if !keep {
-                        removed_any = true;
-                        released_replicas.push(replica.clone());
-                    }
-                    keep
-                });
-                if removed_any && object.replicas.is_empty() {
-                    emptied_keys.push(key.clone());
-                }
-            }
-        }
-    } else {
-        // Fallback: full scan for clients without an index entry (legacy or
-        // clients that never completed a PutEnd).
-        // 无索引：全表扫描（旧版客户端或从未 PutEnd 的客户端）
-        for mut object in state.objects.iter_mut() {
-            let key = object.key().clone();
-            let mut removed_any = false;
-            object.replicas.retain(|replica| {
-                let owner = replica
-                    .holder_client_id
-                    .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name));
-                let keep = owner != Some(client_id);
-                if !keep {
-                    removed_any = true;
-                    released_replicas.push(replica.clone());
-                }
-                keep
-            });
-            if removed_any && object.replicas.is_empty() {
-                emptied_keys.push(key);
-            }
-        }
-    }
-
-    if !released_replicas.is_empty() {
-        release_replicas(state, &released_replicas);
-    }
-
-    // 清理已变空的对象及其关联的后台任务
-    // Clean up emptied objects and their associated background tasks
-    for key in emptied_keys {
-        state.objects.remove(&key);
-        clear_offloading_task(state, &key);
-        clear_promotion_task(state, &key);
-        state.replication_tasks.remove(&key);
-    }
+    state.client_objects.remove(&client_id);
 
     // 移除该 client 的所有待处理任务 / Remove all pending tasks assigned to this client
     let task_ids = state
@@ -408,8 +338,10 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
     for segment_id in segment_ids {
         unmount_segment_owned(state, segment_id, client_id);
     }
+    state.clients.remove(&client_id);
+    let alive_clients = get_alive_clients_snapshot(state);
+    clear_invalid_handles(state, &alive_clients);
     sync_client_segments(state, client_id);
-    state.clients.remove(&client_id); // 最终从在线客户端列表中移除 / Finally remove from online client list
 }
 
 impl ClientMonitorWorker {
@@ -508,13 +440,14 @@ impl NofHeartbeatWorker {
                 let now = Instant::now();
 
                 // Snapshot active NoF segments.
-                let active_segments: Vec<(Uuid, String, String)> = state
+                let active_segments: Vec<(Uuid, Uuid, String, String)> = state
                     .nof_segments
                     .iter()
                     .filter(|entry| entry.status == crate::proto::SegmentStatus::Active)
                     .map(|entry| {
                         (
                             entry.segment.id,
+                            entry.segment.client_id,
                             entry.segment.name.clone(),
                             entry.segment.te_endpoint.clone(),
                         )
@@ -523,8 +456,8 @@ impl NofHeartbeatWorker {
 
                 // Sync heartbeat states: add new, remove stale.
                 let active_ids: std::collections::HashSet<Uuid> =
-                    active_segments.iter().map(|(id, _, _)| *id).collect();
-                for (id, name, te) in &active_segments {
+                    active_segments.iter().map(|(id, _, _, _)| *id).collect();
+                for (id, _client_id, name, te) in &active_segments {
                     state.nof_heartbeat_states.entry(*id).or_insert_with(|| {
                         // Stagger initial probe time across the interval.
                         let spread = std::time::Duration::from_secs_f64(
@@ -536,7 +469,7 @@ impl NofHeartbeatWorker {
                             segment_id: *id,
                             segment_name: name.clone(),
                             te_endpoint: te.clone(),
-                            next_probe_at: now + spread,
+                            next_probe_at: now + interval + spread,
                             last_success_at: now,
                             consecutive_failures: 0,
                         }
@@ -576,9 +509,12 @@ impl NofHeartbeatWorker {
                         }
                         Err(_reason) => {
                             entry.consecutive_failures += 1;
-                            let failures = entry.consecutive_failures;
                             entry.next_probe_at = now + interval;
-                            if failures >= threshold {
+                            let alive_timeout = Duration::from_secs_f64(
+                                interval.as_secs_f64() * threshold.max(1) as f64,
+                            );
+                            if now.saturating_duration_since(entry.last_success_at) >= alive_timeout
+                            {
                                 entry_result = Some((entry.segment_id, entry.segment_name.clone()));
                             }
                         }
@@ -592,9 +528,15 @@ impl NofHeartbeatWorker {
                         seg_name,
                         threshold
                     );
-                    state.nof_heartbeat_states.remove(&seg_id);
-                    state.nof_segments.remove(&seg_id);
-                    state.nof_allocator.write().remove_segment(&seg_id);
+                    let owner = state
+                        .nof_segments
+                        .get(&seg_id)
+                        .map(|entry| entry.segment.client_id);
+                    if let Some(owner) = owner {
+                        unmount_nof_segment_owned(&state, seg_id, owner);
+                    } else {
+                        state.nof_heartbeat_states.remove(&seg_id);
+                    }
                 }
             }
         });
@@ -664,15 +606,18 @@ mod tests {
     use crate::allocator::SegmentAllocator;
     use crate::count_min_sketch::CountMinSketch;
     use crate::proto;
+    use crate::service::helpers::unmount_nof_segment_owned;
     use crate::service::state::{
-        MasterRuntimeConfig, MasterState, NoFHeartbeatState, NoFSegmentEntry,
+        MasterRuntimeConfig, MasterState, NoFHeartbeatState, NoFSegmentEntry, ObjectEntry,
     };
     use dashmap::DashMap;
-    use mooncake_store_core::{NoFSegment, Segment};
+    use mooncake_store_core::{
+        NoFSegment, ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment,
+    };
     use parking_lot::RwLock;
     use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
     use uuid::Uuid;
 
     fn make_state(config: MasterRuntimeConfig) -> Arc<MasterState> {
@@ -845,9 +790,10 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_exceeded_triggers_unmount() {
+    fn test_alive_timeout_triggers_unmount_only_after_last_success_window() {
         let mut config = MasterRuntimeConfig::default();
         config.nof_heartbeat_failures_threshold = 3;
+        config.nof_heartbeat_interval = Duration::from_secs(10);
 
         let state = make_state(config);
         let seg_id = add_nof_segment(&state, "fail_seg:8000", "10.0.0.5:8000", 1024 * 1024);
@@ -860,24 +806,76 @@ mod tests {
                 segment_name: "fail_seg:8000".to_string(),
                 te_endpoint: "10.0.0.5:8000".to_string(),
                 next_probe_at: now,
-                last_success_at: now - Duration::from_secs(10),
+                last_success_at: now,
                 consecutive_failures: 3,
             },
         );
 
-        // Simulate what worker does: if failures >= threshold, unmount.
-        let should_unmount = state.nof_heartbeat_states.get(&seg_id).is_some_and(|e| {
-            e.consecutive_failures >= state.runtime_config.nof_heartbeat_failures_threshold
-        });
-        assert!(should_unmount);
+        let alive_timeout = state.runtime_config.nof_heartbeat_interval
+            * state.runtime_config.nof_heartbeat_failures_threshold;
+        let should_unmount = state
+            .nof_heartbeat_states
+            .get(&seg_id)
+            .is_some_and(|e| now.saturating_duration_since(e.last_success_at) >= alive_timeout);
+        assert!(!should_unmount);
 
-        if should_unmount {
-            state.nof_heartbeat_states.remove(&seg_id);
-            state.nof_segments.remove(&seg_id);
-            state.nof_allocator.write().remove_segment(&seg_id);
+        if let Some(mut entry) = state.nof_heartbeat_states.get_mut(&seg_id) {
+            entry.last_success_at = now - Duration::from_secs(31);
         }
+        let should_unmount = state
+            .nof_heartbeat_states
+            .get(&seg_id)
+            .is_some_and(|e| now.saturating_duration_since(e.last_success_at) >= alive_timeout);
+        assert!(should_unmount);
+    }
 
+    #[test]
+    fn test_nof_unmount_clears_invalid_object_handles() {
+        let state = make_state(MasterRuntimeConfig::default());
+        let seg_id = add_nof_segment(&state, "nof-cleanup:8000", "10.0.0.9:8000", 1024 * 1024);
+        let owner = state.nof_segments.get(&seg_id).unwrap().segment.client_id;
+        state.nof_heartbeat_states.insert(
+            seg_id,
+            NoFHeartbeatState {
+                segment_id: seg_id,
+                segment_name: "nof-cleanup:8000".to_string(),
+                te_endpoint: "10.0.0.9:8000".to_string(),
+                next_probe_at: Instant::now(),
+                last_success_at: Instant::now(),
+                consecutive_failures: 0,
+            },
+        );
+        state.objects.insert(
+            "nof-only".to_string(),
+            ObjectEntry {
+                replicas: vec![ReplicaDescriptor {
+                    handle_valid: true,
+                    segment_id: seg_id,
+                    segment_name: "nof-cleanup:8000".to_string(),
+                    offset: 0,
+                    size: 128,
+                    status: ReplicaStatus::Complete,
+                    replica_type: ReplicaType::NoFSsd,
+                    holder_client_id: Some(owner),
+                    base_addr: 0,
+                    refcnt: 0,
+                }],
+                size: 128,
+                last_access: SystemTime::now(),
+                hard_pinned: false,
+                data_type: ObjectDataType::Unknown,
+                client_id: owner,
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: "default".to_string(),
+                user_key: "nof-only".to_string(),
+            },
+        );
+
+        assert!(unmount_nof_segment_owned(&state, seg_id, owner));
         assert!(!state.nof_segments.contains_key(&seg_id));
         assert!(!state.nof_heartbeat_states.contains_key(&seg_id));
+        assert!(!state.objects.contains_key("nof-only"));
     }
 }

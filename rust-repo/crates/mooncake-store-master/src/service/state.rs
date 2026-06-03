@@ -320,6 +320,8 @@ pub(crate) enum ReplicationTaskKind {
 pub(crate) struct ReplicationTaskEntry {
     /// 发起任务的客户端 / Client that initiated the replication.
     pub(crate) client_id: Uuid,
+    /// 任务开始时间 / Task start time (for TTL expiry).
+    pub(crate) start_time: Instant,
     /// 复制类型 / Replication kind: Copy or Move.
     pub(crate) kind: ReplicationTaskKind,
     /// 源副本描述符 / Source replica descriptor.

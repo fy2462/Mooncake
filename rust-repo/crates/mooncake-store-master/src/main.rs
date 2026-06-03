@@ -553,6 +553,7 @@ async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("Mooncake Master starting on {}", rpc_addr);
+    ensure_supported_rpc_protocol()?;
     // 启动 gRPC server，阻塞直到服务停止
     tonic::transport::Server::builder()
         .add_service(
@@ -687,6 +688,16 @@ mod tests {
             root
         );
         assert!(snapshot_dir_for_cluster(None, "cluster-a").is_none());
+    }
+
+    #[test]
+    fn test_validate_rpc_protocol_rejects_unsupported_rdma() {
+        assert!(validate_rpc_protocol(None).is_ok());
+        assert!(validate_rpc_protocol(Some("tcp")).is_ok());
+
+        let err = validate_rpc_protocol(Some("rdma")).unwrap_err();
+        let ha_error = err.downcast_ref::<HaError>().unwrap();
+        assert!(matches!(ha_error, HaError::UnavailableInCurrentMode(_)));
     }
 }
 
@@ -876,6 +887,7 @@ async fn run_leader_server(
     }
 
     info!("Mooncake Master (HA leader) starting on {}", rpc_addr);
+    ensure_supported_rpc_protocol()?;
 
     // Serve with shutdown signal — LeadershipMonitor triggers graceful stop on lease loss.
     // C++ equivalent: LeadershipMonitor callback calls server.stop().
@@ -901,4 +913,17 @@ async fn run_leader_server(
     }
     result?;
     Ok(())
+}
+
+fn ensure_supported_rpc_protocol() -> Result<(), Box<dyn std::error::Error>> {
+    validate_rpc_protocol(std::env::var("MC_RPC_PROTOCOL").ok().as_deref())
+}
+
+fn validate_rpc_protocol(protocol: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    match protocol {
+        Some("rdma") => Err(Box::new(HaError::UnavailableInCurrentMode(
+            "Rust tonic master server does not support coro_rpc RDMA init_ibv".into(),
+        ))),
+        _ => Ok(()),
+    }
 }

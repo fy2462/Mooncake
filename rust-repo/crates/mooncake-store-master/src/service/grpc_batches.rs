@@ -41,6 +41,12 @@ enum BatchStatus {
     HasReplicationTask = -2,
     /// 权限拒绝（非法客户端）/ Permission denied (illegal client).
     IllegalClient = -3,
+    /// 对象仍持有有效 lease / Object still has an active lease.
+    ObjectHasLease = -4,
+    /// 副本尚未全部完成 / Replicas are not all complete.
+    ReplicaNotReady = -5,
+    /// 参数或状态不满足操作要求 / Invalid state for the requested operation.
+    InvalidState = -6,
 }
 
 impl From<BatchStatus> for i32 {
@@ -150,9 +156,18 @@ impl MasterServiceImpl {
         }))
     }
 
+    fn batch_status_from_status(status: &Status) -> BatchStatus {
+        match status.code() {
+            tonic::Code::NotFound => BatchStatus::KeyNotFound,
+            tonic::Code::PermissionDenied => BatchStatus::IllegalClient,
+            tonic::Code::FailedPrecondition => BatchStatus::InvalidState,
+            _ => BatchStatus::InvalidState,
+        }
+    }
+
     // ---- BatchPutEnd ----
-    // 批量 PutEnd：将各 key 的 Allocating 副本标记为 Complete，触发 offload 队列攒批。
-    // 每个 entry 返回 0（成功）或 -1（key 不存在）。
+    // 批量 PutEnd：逐项复用单 key PutEnd 语义，保持 lease/soft-pin/processing_keys 行为一致。
+    // 每个 entry 返回 0（成功）或负数错误码。
     pub(super) async fn batch_put_end_impl(
         &self,
         request: Request<proto::BatchPutEndRequest>,
@@ -162,22 +177,17 @@ impl MasterServiceImpl {
             .entries
             .iter()
             .map(|entry| {
-                if let Some(mut obj) = self.state.objects.get_mut(&entry.key) {
-                    let size = obj.size;
-                    for r in &mut obj.replicas {
-                        let target = replica_type_from_i32(entry.replica_type);
-                        let matches_type = target == ReplicaType::All || r.replica_type == target;
-                        if matches_type && r.status == ReplicaStatus::Allocating {
-                            r.status = ReplicaStatus::Complete;
-                        }
-                    }
-                    drop(obj);
-                    if let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) {
-                        push_offloading_queue(&self.state, client_id, &entry.key, size);
-                    }
-                    BatchStatus::Success.into()
-                } else {
-                    BatchStatus::KeyNotFound.into()
+                let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
+                    return BatchStatus::IllegalClient.into();
+                };
+                let scoped_key = make_tenant_scoped_key(&entry.tenant_id, &entry.key);
+                match self.apply_put_end_for_key(
+                    &scoped_key,
+                    client_id,
+                    replica_type_from_i32(entry.replica_type),
+                ) {
+                    Ok(()) => BatchStatus::Success.into(),
+                    Err(status) => Self::batch_status_from_status(&status).into(),
                 }
             })
             .collect();
@@ -249,17 +259,34 @@ impl MasterServiceImpl {
         let statuses: Vec<i32> = req
             .keys
             .iter()
-            .map(|key| {
-                if !req.force && self.state.replication_tasks.contains_key(key) {
+            .map(|raw_key| {
+                let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+                if self.state.replication_tasks.contains_key(&key) {
                     return BatchStatus::HasReplicationTask.into();
                 }
-                if let Some((_, object)) = self.state.objects.remove(key) {
-                    clear_offloading_task(&self.state, key);
-                    clear_promotion_task(&self.state, key);
-                    release_replicas(&self.state, &object.replicas);
-                    self.oplog_manager.lock().record_remove(key);
+                let Some(object) = self.state.objects.get(&key) else {
+                    return BatchStatus::KeyNotFound.into();
+                };
+                if !req.force && !is_lease_expired(&object) {
+                    return BatchStatus::ObjectHasLease.into();
                 }
-                BatchStatus::Success.into()
+                if !object
+                    .replicas
+                    .iter()
+                    .all(|r| r.status == ReplicaStatus::Complete)
+                {
+                    return BatchStatus::ReplicaNotReady.into();
+                }
+                drop(object);
+                if let Some((_, object)) = self.state.objects.remove(&key) {
+                    clear_offloading_task(&self.state, &key);
+                    clear_promotion_task(&self.state, &key);
+                    release_replicas(&self.state, &object.replicas);
+                    self.oplog_manager.lock().record_remove(&key);
+                    BatchStatus::Success.into()
+                } else {
+                    BatchStatus::KeyNotFound.into()
+                }
             })
             .collect();
         metrics::BATCH_REMOVE_REQUESTS.inc_by(req.keys.len() as u64);

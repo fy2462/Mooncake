@@ -5,7 +5,12 @@ use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use mooncake_store_core::Segment;
 use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const SNAPSHOT_CATALOG_ROOT: &str = "mooncake_master_snapshot";
+const SNAPSHOT_LATEST_FILE: &str = "latest.txt";
+const SNAPSHOT_DESCRIPTOR_FILE: &str = "descriptor.txt";
+const SNAPSHOT_MANIFEST_FILE: &str = "manifest.txt";
 
 // ----------------------------------------------------------------------------
 // LoadedSnapshot — snapshot data loaded during standby recovery
@@ -29,6 +34,238 @@ pub struct LoadedSnapshot {
     pub objects: Vec<(String, ObjectEntry)>,
     /// Pending tasks at snapshot time. / 快照时的待处理任务。
     pub tasks: Vec<TaskEntry>,
+}
+
+/// Catalog descriptor for a published snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDescriptor {
+    pub snapshot_id: String,
+    pub last_included_seq: u64,
+    pub producer_view_version: u64,
+    pub manifest_key: String,
+    pub object_prefix: String,
+    pub created_at_ms: i64,
+}
+
+impl SnapshotDescriptor {
+    pub fn new(snapshot_id: impl Into<String>) -> Self {
+        let snapshot_id = snapshot_id.into();
+        let object_prefix = build_snapshot_prefix(&snapshot_id);
+        Self {
+            manifest_key: format!("{object_prefix}{SNAPSHOT_MANIFEST_FILE}"),
+            object_prefix,
+            snapshot_id,
+            last_included_seq: 0,
+            producer_view_version: 0,
+            created_at_ms: current_time_ms(),
+        }
+    }
+}
+
+/// C++-compatible snapshot catalog operations.
+pub trait SnapshotCatalogStore: Send + Sync {
+    fn publish(&self, snapshot: &SnapshotDescriptor) -> Result<(), HaError>;
+    fn get_latest(&self) -> Result<Option<SnapshotDescriptor>, HaError>;
+    fn list(&self, limit: usize) -> Result<Vec<SnapshotDescriptor>, HaError>;
+    fn delete(&self, snapshot_id: &str) -> Result<(), HaError>;
+}
+
+/// Embedded catalog store backed by files under the snapshot root.
+pub struct EmbeddedSnapshotCatalogStore {
+    root_dir: PathBuf,
+}
+
+impl EmbeddedSnapshotCatalogStore {
+    pub fn new(root_dir: PathBuf) -> Self {
+        Self { root_dir }
+    }
+
+    fn catalog_path(&self, key: impl AsRef<str>) -> PathBuf {
+        self.root_dir.join(key.as_ref())
+    }
+
+    fn descriptor_path(&self, snapshot_id: &str) -> PathBuf {
+        self.catalog_path(build_descriptor_key(snapshot_id))
+    }
+
+    fn latest_path(&self) -> PathBuf {
+        self.catalog_path(build_latest_key())
+    }
+}
+
+impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
+    fn publish(&self, snapshot: &SnapshotDescriptor) -> Result<(), HaError> {
+        validate_snapshot_id(&snapshot.snapshot_id)?;
+        let descriptor_path = self.descriptor_path(&snapshot.snapshot_id);
+        if let Some(parent) = descriptor_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| HaError::Snapshot(e.to_string()))?;
+        }
+        std::fs::write(&descriptor_path, serialize_snapshot_descriptor(snapshot))
+            .map_err(|e| HaError::Snapshot(e.to_string()))?;
+        if let Some(parent) = self.latest_path().parent() {
+            std::fs::create_dir_all(parent).map_err(|e| HaError::Snapshot(e.to_string()))?;
+        }
+        std::fs::write(self.latest_path(), &snapshot.snapshot_id)
+            .map_err(|e| HaError::Snapshot(e.to_string()))?;
+        Ok(())
+    }
+
+    fn get_latest(&self) -> Result<Option<SnapshotDescriptor>, HaError> {
+        let latest_path = self.latest_path();
+        if !latest_path.exists() {
+            return Ok(None);
+        }
+        let snapshot_id = std::fs::read_to_string(latest_path)
+            .map_err(|e| HaError::Snapshot(e.to_string()))?
+            .trim()
+            .to_string();
+        if snapshot_id.is_empty() {
+            return Ok(None);
+        }
+        validate_snapshot_id(&snapshot_id)?;
+        let payload = std::fs::read_to_string(self.descriptor_path(&snapshot_id))
+            .map_err(|e| HaError::Snapshot(e.to_string()))?;
+        deserialize_snapshot_descriptor(&snapshot_id, &payload).map(Some)
+    }
+
+    fn list(&self, limit: usize) -> Result<Vec<SnapshotDescriptor>, HaError> {
+        let root = self.catalog_path(SNAPSHOT_CATALOG_ROOT);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        for entry in std::fs::read_dir(root).map_err(|e| HaError::Snapshot(e.to_string()))? {
+            let entry = entry.map_err(|e| HaError::Snapshot(e.to_string()))?;
+            if !entry
+                .file_type()
+                .map_err(|e| HaError::Snapshot(e.to_string()))?
+                .is_dir()
+            {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            if is_valid_snapshot_id(&id) {
+                ids.push(id);
+            }
+        }
+        ids.sort_by(|a, b| b.cmp(a));
+        if limit != 0 {
+            ids.truncate(limit);
+        }
+
+        let mut snapshots = Vec::new();
+        for id in ids {
+            if let Ok(payload) = std::fs::read_to_string(self.descriptor_path(&id)) {
+                if let Ok(descriptor) = deserialize_snapshot_descriptor(&id, &payload) {
+                    snapshots.push(descriptor);
+                }
+            }
+        }
+        Ok(snapshots)
+    }
+
+    fn delete(&self, snapshot_id: &str) -> Result<(), HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        let deletes_latest = self
+            .get_latest()?
+            .as_ref()
+            .map(|latest| latest.snapshot_id.as_str() == snapshot_id)
+            .unwrap_or(false);
+        let prefix = self.catalog_path(build_snapshot_prefix(snapshot_id));
+        if prefix.exists() {
+            std::fs::remove_dir_all(prefix).map_err(|e| HaError::Snapshot(e.to_string()))?;
+        }
+        if deletes_latest {
+            let _ = std::fs::remove_file(self.latest_path());
+        }
+        Ok(())
+    }
+}
+
+fn build_snapshot_prefix(snapshot_id: &str) -> String {
+    format!("{SNAPSHOT_CATALOG_ROOT}/{snapshot_id}/")
+}
+
+fn build_descriptor_key(snapshot_id: &str) -> String {
+    format!(
+        "{}{SNAPSHOT_DESCRIPTOR_FILE}",
+        build_snapshot_prefix(snapshot_id)
+    )
+}
+
+fn build_latest_key() -> String {
+    format!("{SNAPSHOT_CATALOG_ROOT}/{SNAPSHOT_LATEST_FILE}")
+}
+
+fn serialize_snapshot_descriptor(descriptor: &SnapshotDescriptor) -> String {
+    format!(
+        "{}|{}|{}",
+        descriptor.last_included_seq, descriptor.producer_view_version, descriptor.created_at_ms
+    )
+}
+
+fn deserialize_snapshot_descriptor(
+    snapshot_id: &str,
+    payload: &str,
+) -> Result<SnapshotDescriptor, HaError> {
+    let mut parts = payload.trim().split('|');
+    let last_included_seq = parts
+        .next()
+        .ok_or_else(|| HaError::Snapshot("snapshot descriptor missing sequence".into()))?
+        .parse::<u64>()
+        .map_err(|e| HaError::Snapshot(format!("invalid snapshot sequence: {e}")))?;
+    let producer_view_version = parts
+        .next()
+        .ok_or_else(|| HaError::Snapshot("snapshot descriptor missing view version".into()))?
+        .parse::<u64>()
+        .map_err(|e| HaError::Snapshot(format!("invalid snapshot view version: {e}")))?;
+    let created_at_ms = parts
+        .next()
+        .ok_or_else(|| HaError::Snapshot("snapshot descriptor missing creation time".into()))?
+        .parse::<i64>()
+        .map_err(|e| HaError::Snapshot(format!("invalid snapshot creation time: {e}")))?;
+    if parts.next().is_some() {
+        return Err(HaError::Snapshot(
+            "snapshot descriptor has too many fields".into(),
+        ));
+    }
+
+    let mut descriptor = SnapshotDescriptor::new(snapshot_id);
+    descriptor.last_included_seq = last_included_seq;
+    descriptor.producer_view_version = producer_view_version;
+    descriptor.created_at_ms = created_at_ms;
+    Ok(descriptor)
+}
+
+fn validate_snapshot_id(snapshot_id: &str) -> Result<(), HaError> {
+    if is_valid_snapshot_id(snapshot_id) {
+        Ok(())
+    } else {
+        Err(HaError::InvalidParams(format!(
+            "invalid snapshot id: {snapshot_id}"
+        )))
+    }
+}
+
+fn is_valid_snapshot_id(snapshot_id: &str) -> bool {
+    let bytes = snapshot_id.as_bytes();
+    if bytes.len() != 19 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(i, ch)| {
+        if i == 8 || i == 15 {
+            *ch == b'_'
+        } else {
+            ch.is_ascii_digit()
+        }
+    })
+}
+
+fn current_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 // ----------------------------------------------------------------------------
@@ -114,10 +351,21 @@ impl SnapshotProvider for LocalSnapshotProvider {
                 .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
                 .map(|ts| format!("snapshot-{}", ts.as_millis()))
                 .unwrap_or_else(|| "snapshot-latest".to_string());
+            let descriptor = EmbeddedSnapshotCatalogStore::new(dir.clone())
+                .get_latest()
+                .ok()
+                .flatten();
+            let snapshot_sequence_id = descriptor
+                .as_ref()
+                .map(|descriptor| descriptor.last_included_seq)
+                .unwrap_or(0);
+            let snapshot_id = descriptor
+                .map(|descriptor| descriptor.snapshot_id)
+                .unwrap_or(snapshot_id);
 
             return Ok(Some(LoadedSnapshot {
                 snapshot_id,
-                snapshot_sequence_id: 0,
+                snapshot_sequence_id,
                 // Extract the Segment domain object from each SegmentEntry wrapper.
                 // 从每个 SegmentEntry 封装中提取 Segment 领域对象。
                 segments: segments

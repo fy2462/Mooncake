@@ -32,6 +32,41 @@
 
 use std::time::{Duration, SystemTime};
 
+pub type LeaseCandidate = (
+    String,
+    Option<SystemTime>,
+    bool,
+    Option<SystemTime>,
+    SystemTime,
+);
+
+fn take_sorted_lease_candidates(
+    candidates: &mut [LeaseCandidate],
+    indexes: &mut Vec<usize>,
+    count: usize,
+) -> Vec<String> {
+    if count == 0 || indexes.is_empty() {
+        return vec![];
+    }
+    let sort_key =
+        |candidate: &LeaseCandidate| (candidate.3.unwrap_or(SystemTime::UNIX_EPOCH), candidate.4);
+    if indexes.len() <= count {
+        indexes.sort_by_key(|&i| sort_key(&candidates[i]));
+        return indexes
+            .drain(..)
+            .map(|i| std::mem::take(&mut candidates[i].0))
+            .collect();
+    }
+
+    let nth = count - 1;
+    indexes.select_nth_unstable_by_key(nth, |&i| sort_key(&candidates[i]));
+    indexes[..count].sort_by_key(|&i| sort_key(&candidates[i]));
+    indexes
+        .drain(..count)
+        .map(|i| std::mem::take(&mut candidates[i].0))
+        .collect()
+}
+
 /// The eviction manager selects eviction candidates based on LRU strategy.
 /// 驱逐管理器：基于 LRU（最近最少使用）策略选择驱逐候选对象。
 ///
@@ -172,6 +207,74 @@ impl EvictionManager {
             .take(target_count)
             .map(|i| std::mem::take(&mut candidates[i].0))
             .collect()
+    }
+
+    /// Select eviction candidates using explicit lease timeout timestamps.
+    /// Production master metadata stores C++-style absolute `lease_timeout`
+    /// values; `None` is treated like the default C++ epoch and is evictable.
+    pub fn select_for_eviction_with_lease_timeout(
+        &self,
+        candidates: &mut [LeaseCandidate],
+        target_count: usize,
+    ) -> Vec<String> {
+        self.select_for_eviction_with_lease_timeout_policy(candidates, target_count, false)
+    }
+
+    /// Select eviction candidates with C++-style two-pass soft-pin handling.
+    /// First pass always prefers non-soft-pinned, lease-expired objects. When
+    /// `allow_soft_pinned` is true and the first pass cannot fill `target_count`,
+    /// a second pass may choose soft-pinned objects ordered by lease timeout.
+    pub fn select_for_eviction_with_lease_timeout_policy(
+        &self,
+        candidates: &mut [LeaseCandidate],
+        target_count: usize,
+        allow_soft_pinned: bool,
+    ) -> Vec<String> {
+        if target_count == 0 {
+            return vec![];
+        }
+
+        let now = SystemTime::now();
+        let mut normal: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, (_, soft_pin_timeout, hard_pinned, lease_timeout, _last_access))| {
+                    let is_soft_pinned = soft_pin_timeout.map_or(false, |t| now < t);
+                    let lease_expired = lease_timeout.is_none_or(|timeout| now >= timeout);
+                    !*hard_pinned && lease_expired && !is_soft_pinned
+                },
+            )
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut selected = take_sorted_lease_candidates(candidates, &mut normal, target_count);
+        if selected.len() >= target_count || !allow_soft_pinned {
+            return selected;
+        }
+
+        let mut soft_pinned: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, (key, soft_pin_timeout, hard_pinned, lease_timeout, _last_access))| {
+                    if key.is_empty() {
+                        return false;
+                    }
+                    let is_soft_pinned = soft_pin_timeout.map_or(false, |t| now < t);
+                    let lease_expired = lease_timeout.is_none_or(|timeout| now >= timeout);
+                    !*hard_pinned && lease_expired && is_soft_pinned
+                },
+            )
+            .map(|(i, _)| i)
+            .collect();
+
+        selected.extend(take_sorted_lease_candidates(
+            candidates,
+            &mut soft_pinned,
+            target_count.saturating_sub(selected.len()),
+        ));
+        selected
     }
 
     /// Check if a soft pin has expired.

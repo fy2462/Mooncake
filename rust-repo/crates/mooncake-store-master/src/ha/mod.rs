@@ -48,7 +48,10 @@ pub mod types;
 // Re-export all public items to preserve the original `pub mod ha` API surface.
 // 重新导出所有 public 项，以保持原始 `pub mod ha` 的 API 表面。
 pub use coordinator::LeaderCoordinator;
-pub use snapshot::{LoadedSnapshot, LocalSnapshotProvider, NoopSnapshotProvider, SnapshotProvider};
+pub use snapshot::{
+    EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalSnapshotProvider, NoopSnapshotProvider,
+    SnapshotCatalogStore, SnapshotDescriptor, SnapshotProvider,
+};
 pub use standby::{
     build_standby_runtime_capabilities, map_standby_runtime_state,
     CapabilityDrivenStandbyController, MasterServiceSupervisorConfig, NoopStandbyController,

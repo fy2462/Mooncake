@@ -183,12 +183,12 @@ impl MasterServiceImpl {
                 if entry.tenant_id != tenant_filter {
                     return false;
                 }
-                if req.force {
-                    return true;
-                }
-                // C++ 只有 lease 过期或 force=true 才删除
                 !self.state.replication_tasks.contains_key(entry.key())
-                    && is_lease_expired(entry.value())
+                    && entry
+                        .replicas
+                        .iter()
+                        .all(|r| r.status == ReplicaStatus::Complete)
+                    && (req.force || is_lease_expired(entry.value()))
             })
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
@@ -307,6 +307,7 @@ impl MasterServiceImpl {
             key.clone(),
             ReplicationTaskEntry {
                 client_id,
+                start_time: std::time::Instant::now(),
                 kind: ReplicationTaskKind::Copy,
                 source: source.clone(),
                 targets: allocated.clone(),
@@ -551,6 +552,7 @@ impl MasterServiceImpl {
             key.clone(),
             ReplicationTaskEntry {
                 client_id,
+                start_time: std::time::Instant::now(),
                 kind: ReplicationTaskKind::Move,
                 source: source.clone(),
                 targets,

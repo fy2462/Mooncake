@@ -3,12 +3,14 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment
 mod common;
 use common::temp_dir;
 
+use mooncake_store_master::ha::EmbeddedSnapshotCatalogStore;
 use mooncake_store_master::ha::{
     build_standby_runtime_capabilities, map_standby_runtime_state, parse_ha_backend_type,
     CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
     LeaderRole, LeadershipSession, LocalSnapshotProvider, MasterRuntimeState,
-    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView, SnapshotProvider,
-    StandbyController, StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
+    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView, SnapshotCatalogStore,
+    SnapshotDescriptor, SnapshotProvider, StandbyController, StandbyRuntimeCapabilities,
+    StandbyState, StandbySyncStatus,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
@@ -262,6 +264,56 @@ fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
 
     let fallback_snapshot = provider.load_latest_snapshot("missing").unwrap().unwrap();
     assert!(fallback_snapshot.objects.is_empty());
+}
+
+#[test]
+fn test_embedded_snapshot_catalog_round_trip() {
+    let root = temp_dir();
+    let catalog = EmbeddedSnapshotCatalogStore::new(root);
+    let mut descriptor = SnapshotDescriptor::new("20260603_120000_001");
+    descriptor.last_included_seq = 42;
+    descriptor.producer_view_version = 7;
+    descriptor.created_at_ms = 1234;
+
+    catalog.publish(&descriptor).unwrap();
+
+    let latest = catalog.get_latest().unwrap().unwrap();
+    assert_eq!(latest.snapshot_id, descriptor.snapshot_id);
+    assert_eq!(latest.last_included_seq, 42);
+    assert_eq!(latest.producer_view_version, 7);
+
+    let listed = catalog.list(10).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].snapshot_id, "20260603_120000_001");
+
+    catalog.delete("20260603_120000_001").unwrap();
+    assert!(catalog.get_latest().unwrap().is_none());
+}
+
+#[test]
+fn test_local_snapshot_provider_uses_catalog_sequence_id() {
+    let root = temp_dir();
+    let cluster_dir = root.join("cluster-c");
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &cluster_dir);
+    let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let objects: DashMap<String, ObjectEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
+
+    let catalog = EmbeddedSnapshotCatalogStore::new(cluster_dir);
+    let mut descriptor = SnapshotDescriptor::new("20260603_120001_001");
+    descriptor.last_included_seq = 99;
+    descriptor.producer_view_version = 11;
+    catalog.publish(&descriptor).unwrap();
+
+    let provider = LocalSnapshotProvider::new(root, StorageBackendType::LocalDisk);
+    let snapshot = provider.load_latest_snapshot("cluster-c").unwrap().unwrap();
+
+    assert_eq!(snapshot.snapshot_id, "20260603_120001_001");
+    assert_eq!(snapshot.snapshot_sequence_id, 99);
 }
 
 #[test]

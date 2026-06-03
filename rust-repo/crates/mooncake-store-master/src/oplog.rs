@@ -556,6 +556,7 @@ fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, 
 
     match wire.op_type {
         CPP_OP_PUT_END => {
+            let metadata_payload_base64 = BASE64_STANDARD.encode(&decoded_payload);
             if let Ok(payload) = String::from_utf8(decoded_payload) {
                 if serde_json::from_str::<serde_json::Value>(&payload)
                     .ok()
@@ -566,7 +567,13 @@ fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, 
                     return Ok(payload);
                 }
             }
-            Ok(json!({"op": "put_end", "key": wire.object_key}).to_string())
+            Ok(json!({
+                "op": "put_end",
+                "key": wire.object_key,
+                "size": 0,
+                "metadata_payload_base64": metadata_payload_base64
+            })
+            .to_string())
         }
         CPP_OP_PUT_REVOKE => Ok(json!({"op": "put_revoke", "key": wire.object_key}).to_string()),
         CPP_OP_REMOVE => Ok(json!({"op": "remove", "key": wire.object_key}).to_string()),
@@ -1200,6 +1207,28 @@ mod tests {
             deserialize_etcd_oplog_value(&value),
             Err(HaError::InvalidBackend(_))
         ));
+    }
+
+    #[test]
+    fn test_etcd_oplog_value_reads_cpp_binary_put_end_payload() {
+        let binary_payload = vec![0, 159, 146, 1, 2, 3, 255];
+        let wire = CppOpLogWireEntry {
+            sequence_id: 9,
+            timestamp_ms: 1,
+            op_type: CPP_OP_PUT_END,
+            object_key: "k-binary".to_string(),
+            payload: BASE64_STANDARD.encode(&binary_payload),
+            checksum: compute_cpp_checksum(&binary_payload),
+            prefix_hash: compute_cpp_prefix_hash("k-binary"),
+        };
+        let value = serde_json::to_string(&wire).unwrap();
+
+        let parsed = deserialize_etcd_oplog_value(&value).unwrap();
+        assert_eq!(parsed.seq, 9);
+        let payload: serde_json::Value = serde_json::from_str(&parsed.payload).unwrap();
+        assert_eq!(payload["op"], "put_end");
+        assert_eq!(payload["key"], "k-binary");
+        assert_eq!(payload["metadata_payload_base64"], wire.payload);
     }
 
     #[test]
