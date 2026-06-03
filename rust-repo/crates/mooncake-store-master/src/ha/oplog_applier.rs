@@ -118,7 +118,7 @@ impl OpLogApplier {
                 state.processing_keys.remove(key);
                 true
             }
-            "remove" => {
+            "remove" | "put_revoke" => {
                 let Some(key) = v["key"].as_str() else {
                     return false;
                 };
@@ -225,6 +225,40 @@ mod tests {
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 1);
         assert!(!state.objects.contains_key("k1"));
+    }
+
+    #[test]
+    fn test_apply_put_revoke_removes_object_and_processing_key() {
+        let state = make_state();
+        state.objects.insert(
+            "k1".to_string(),
+            crate::service::state::ObjectEntry {
+                replicas: vec![],
+                size: 0,
+                last_access: std::time::SystemTime::now(),
+                hard_pinned: false,
+                data_type: mooncake_store_core::ObjectDataType::General,
+                client_id: uuid::Uuid::nil(),
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: "default".to_string(),
+                user_key: "k1".to_string(),
+            },
+        );
+        state.processing_keys.insert("k1".to_string(), ());
+        let applier = OpLogApplier::new(state.clone());
+
+        let payload = r#"{"op":"put_revoke","key":"k1"}"#;
+        let entries = vec![OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload: payload.to_string(),
+        }];
+        let n = applier.apply_op_log_entries(&entries);
+        assert_eq!(n, 1);
+        assert!(!state.objects.contains_key("k1"));
+        assert!(!state.processing_keys.contains_key("k1"));
     }
 
     #[test]

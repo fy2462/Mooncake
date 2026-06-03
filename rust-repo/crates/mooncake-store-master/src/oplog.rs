@@ -38,14 +38,32 @@
 //   EtcdOpLogStore: etcd 键值存储，适合分布式部署。
 
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
+
+const CPP_OP_PUT_END: u8 = 1;
+const CPP_OP_PUT_REVOKE: u8 = 2;
+const CPP_OP_REMOVE: u8 = 3;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CppOpLogWireEntry {
+    sequence_id: u64,
+    timestamp_ms: u64,
+    op_type: u8,
+    object_key: String,
+    payload: String,
+    checksum: u32,
+    prefix_hash: u32,
+}
 
 // =============================================================================
 // OpLogStore Trait — unified abstraction for oplog backends
@@ -460,6 +478,96 @@ impl OpLogStore for LocalFsOpLogStore {
     }
 }
 
+fn serialize_etcd_oplog_value(entry: &OpLogRecord) -> Result<String, HaError> {
+    if let Some(wire) = cpp_wire_entry_from_record(entry) {
+        serde_json::to_string(&wire)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog wire serialize: {e}")))
+    } else {
+        serde_json::to_string(entry)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog serialize: {e}")))
+    }
+}
+
+fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, HaError> {
+    if let Ok(entry) = serde_json::from_str::<OpLogRecord>(value) {
+        return Ok(entry);
+    }
+
+    let wire: CppOpLogWireEntry = serde_json::from_str(value)
+        .map_err(|e| HaError::InvalidBackend(format!("oplog wire deserialize: {e}")))?;
+    let payload = rust_payload_from_cpp_wire_entry(&wire)?;
+    Ok(OpLogRecord {
+        seq: wire.sequence_id,
+        producer_view_version: 0,
+        payload,
+    })
+}
+
+fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> {
+    let payload_json: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+    let op = payload_json.get("op")?.as_str()?;
+    let (op_type, object_key, payload) = match op {
+        "put_end" => (
+            CPP_OP_PUT_END,
+            payload_json.get("key")?.as_str()?.to_string(),
+            BASE64_STANDARD.encode(entry.payload.as_bytes()),
+        ),
+        "put_revoke" => (
+            CPP_OP_PUT_REVOKE,
+            payload_json.get("key")?.as_str()?.to_string(),
+            String::new(),
+        ),
+        "remove" => (
+            CPP_OP_REMOVE,
+            payload_json.get("key")?.as_str()?.to_string(),
+            String::new(),
+        ),
+        _ => return None,
+    };
+
+    Some(CppOpLogWireEntry {
+        sequence_id: entry.seq,
+        timestamp_ms: unix_timestamp_ms(),
+        op_type,
+        object_key,
+        payload,
+        checksum: 0,
+        prefix_hash: 0,
+    })
+}
+
+fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, HaError> {
+    match wire.op_type {
+        CPP_OP_PUT_END => {
+            if let Ok(decoded) = BASE64_STANDARD.decode(&wire.payload) {
+                if let Ok(payload) = String::from_utf8(decoded) {
+                    if serde_json::from_str::<serde_json::Value>(&payload)
+                        .ok()
+                        .and_then(|v| v.get("op").and_then(|op| op.as_str()).map(str::to_string))
+                        .as_deref()
+                        == Some("put_end")
+                    {
+                        return Ok(payload);
+                    }
+                }
+            }
+            Ok(json!({"op": "put_end", "key": wire.object_key}).to_string())
+        }
+        CPP_OP_PUT_REVOKE => Ok(json!({"op": "put_revoke", "key": wire.object_key}).to_string()),
+        CPP_OP_REMOVE => Ok(json!({"op": "remove", "key": wire.object_key}).to_string()),
+        other => Err(HaError::InvalidBackend(format!(
+            "unsupported C++ oplog op_type: {other}"
+        ))),
+    }
+}
+
+fn unix_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // =============================================================================
 // Etcd-backed OpLog Store / 基于 etcd 的 OpLog 存储
 // =============================================================================
@@ -539,8 +647,7 @@ impl EtcdOpLogStore {
         let c = self.client.clone();
         for entry in &self.buffer {
             let key = self.entry_key(entry.seq);
-            let value = serde_json::to_string(entry)
-                .map_err(|e| HaError::InvalidBackend(format!("oplog serialize: {e}")))?;
+            let value = serialize_etcd_oplog_value(entry)?;
             c.kv_client()
                 .put(key.as_bytes(), value.as_bytes(), None)
                 .await
@@ -644,7 +751,7 @@ impl EtcdOpLogStore {
             Ok(resp) => {
                 for kv in resp.kvs().iter().take(max_count) {
                     if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
-                        if let Ok(entry) = serde_json::from_str::<OpLogRecord>(&val) {
+                        if let Ok(entry) = deserialize_etcd_oplog_value(&val) {
                             entries.push(entry);
                             if entries.len() >= max_count {
                                 break;
@@ -749,6 +856,20 @@ impl OpLogManager {
                 payload,
             }) {
                 warn!("OpLogManager: failed to record remove for key={key}: {e}");
+            }
+        }
+    }
+
+    /// Record a put_revoke mutation that fully removes an unfinished object.
+    pub fn record_put_revoke(&mut self, key: &str) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({"op": "put_revoke", "key": key}).to_string();
+            if let Err(e) = store.append(&OpLogRecord {
+                seq: 0,
+                producer_view_version: self.view_version,
+                payload,
+            }) {
+                warn!("OpLogManager: failed to record put_revoke for key={key}: {e}");
             }
         }
     }
@@ -885,6 +1006,20 @@ mod tests {
     }
 
     #[test]
+    fn test_oplog_manager_records_put_revoke() {
+        let store = InMemoryOpLog::new(1000);
+        let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
+
+        manager.record_put_revoke("k1");
+
+        let store = manager.into_store().unwrap();
+        let entries = store.read_since(1, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].producer_view_version, 7);
+        assert_eq!(entries[0].payload, r#"{"key":"k1","op":"put_revoke"}"#);
+    }
+
+    #[test]
     fn test_local_fs_append_and_read() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
@@ -986,5 +1121,67 @@ mod tests {
         let key = EtcdOpLogStore::format_entry_key("/oplog/cluster-a", 42);
         assert_eq!(key, "/oplog/cluster-a/00000000000000000042");
         assert!(!key.contains("seq_"));
+    }
+
+    #[test]
+    fn test_etcd_oplog_value_writes_cpp_outer_json_for_put_end() {
+        let entry = OpLogRecord {
+            seq: 12,
+            producer_view_version: 7,
+            payload: r#"{"op":"put_end","key":"k1","size":100}"#.to_string(),
+        };
+
+        let value = serialize_etcd_oplog_value(&entry).unwrap();
+        let wire: CppOpLogWireEntry = serde_json::from_str(&value).unwrap();
+        assert_eq!(wire.sequence_id, 12);
+        assert_eq!(wire.op_type, CPP_OP_PUT_END);
+        assert_eq!(wire.object_key, "k1");
+
+        let decoded = String::from_utf8(BASE64_STANDARD.decode(wire.payload).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&decoded).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap()
+        );
+
+        let parsed = deserialize_etcd_oplog_value(&value).unwrap();
+        assert_eq!(parsed.seq, 12);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&parsed.payload).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_etcd_oplog_value_reads_cpp_remove_and_put_revoke() {
+        let remove_wire = CppOpLogWireEntry {
+            sequence_id: 3,
+            timestamp_ms: 1,
+            op_type: CPP_OP_REMOVE,
+            object_key: "k-remove".to_string(),
+            payload: String::new(),
+            checksum: 0,
+            prefix_hash: 0,
+        };
+        let remove_value = serde_json::to_string(&remove_wire).unwrap();
+        let remove = deserialize_etcd_oplog_value(&remove_value).unwrap();
+        assert_eq!(remove.seq, 3);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&remove.payload).unwrap(),
+            json!({"op": "remove", "key": "k-remove"})
+        );
+
+        let revoke_wire = CppOpLogWireEntry {
+            sequence_id: 4,
+            op_type: CPP_OP_PUT_REVOKE,
+            object_key: "k-revoke".to_string(),
+            ..remove_wire
+        };
+        let revoke_value = serde_json::to_string(&revoke_wire).unwrap();
+        let revoke = deserialize_etcd_oplog_value(&revoke_value).unwrap();
+        assert_eq!(revoke.seq, 4);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&revoke.payload).unwrap(),
+            json!({"op": "put_revoke", "key": "k-revoke"})
+        );
     }
 }

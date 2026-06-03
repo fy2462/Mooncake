@@ -6,9 +6,9 @@ use common::temp_dir;
 use mooncake_store_master::ha::{
     build_standby_runtime_capabilities, map_standby_runtime_state, parse_ha_backend_type,
     CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
-    LeaderRole, LocalSnapshotProvider, MasterRuntimeState, MasterServiceSupervisor,
-    MasterServiceSupervisorConfig, MasterView, SnapshotProvider, StandbyController,
-    StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
+    LeaderRole, LeadershipSession, LocalSnapshotProvider, MasterRuntimeState,
+    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView, SnapshotProvider,
+    StandbyController, StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
@@ -102,6 +102,44 @@ async fn test_manual_coordinator_waits_for_promotion() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_manual_acquire_returns_session_and_session_apis_work() {
+    let (coordinator, _tx) = LeaderCoordinator::new_manual(LeaderRole::Standby);
+
+    let acquired = coordinator
+        .try_acquire_leadership("127.0.0.1:50051", 30)
+        .await
+        .unwrap();
+
+    assert!(acquired.acquired);
+    let session = acquired.session.as_ref().expect("leadership session");
+    assert_eq!(session.view.leader_address, "127.0.0.1:50051");
+    assert_eq!(session.owner_token, "manual");
+
+    let keepalive = coordinator
+        .start_leadership_keepalive(session)
+        .await
+        .unwrap();
+    assert!(coordinator.subscribe_role_for_session(session).is_ok());
+
+    let wrong_session = LeadershipSession {
+        owner_token: "wrong-owner".into(),
+        ..session.clone()
+    };
+    assert!(matches!(
+        coordinator.subscribe_role_for_session(&wrong_session),
+        Err(HaError::UnavailableInCurrentStatus)
+    ));
+
+    coordinator.try_renew_leadership(session).await.unwrap();
+    coordinator.release_leadership(session).await.unwrap();
+    drop(keepalive);
+    assert_eq!(
+        coordinator.wait_for_role().await.unwrap(),
+        LeaderRole::Standby
+    );
 }
 
 #[tokio::test]

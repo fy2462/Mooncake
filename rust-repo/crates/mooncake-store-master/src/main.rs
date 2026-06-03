@@ -10,7 +10,8 @@ use clap::Parser;
 use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{
     parse_ha_backend_type, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
-    LeadershipMonitorHandle, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    LeadershipMonitorHandle, LeadershipSession, MasterServiceSupervisor,
+    MasterServiceSupervisorConfig, MasterView,
 };
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
@@ -172,9 +173,9 @@ async fn back_to_standby(supervisor: &mut MasterServiceSupervisor, sleep_secs: u
 async fn release_and_retry(
     coordinator: &LeaderCoordinator,
     supervisor: &mut MasterServiceSupervisor,
-    lease_id: i64,
+    session: &LeadershipSession,
 ) {
-    let _ = coordinator.release_leadership(lease_id).await;
+    let _ = coordinator.release_leadership(session).await;
     back_to_standby(supervisor, 1).await;
 }
 
@@ -183,20 +184,11 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let ha_spec = build_ha_spec(&args)?;
     let cluster_id = ha_spec.cluster_namespace.clone();
     let runtime_config = build_runtime_config(&args)?;
-    let leader_oplog_manager = build_leader_oplog_manager(&ha_spec, 0).await;
-    let service_arc = std::sync::Arc::new(MasterServiceImpl::new_with_runtime_config(
-        snapshot_backend_type,
-        snapshot_dir.clone(),
-        runtime_config,
-    ));
-    if let Some(manager) = leader_oplog_manager {
-        *service_arc.oplog_manager().lock() = manager;
-    }
     let supervisor_config = MasterServiceSupervisorConfig {
         local_hostname: format!("{}:{}", args.rpc_address, args.rpc_port),
         cluster_id,
         enable_snapshot_restore: snapshot_dir.is_some(),
-        snapshot_backup_dir: snapshot_dir,
+        snapshot_backup_dir: snapshot_dir.clone(),
         snapshot_backend_type,
     };
     let leader_addr = format!("{}:{}", args.rpc_address, args.rpc_port);
@@ -216,6 +208,11 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        let service_arc = build_master_service(
+            snapshot_backend_type,
+            snapshot_dir.clone(),
+            runtime_config.clone(),
+        );
         let mut supervisor = new_supervisor(&ha_spec, &supervisor_config, service_arc.clone());
         if let Err(e) = supervisor.enter_standby_mode(None) {
             warn!("enter_standby_mode failed: {}, retrying in 1s", e);
@@ -271,7 +268,14 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let lease_id = acquire.lease_id.unwrap_or(0);
+            let session = match acquire.session {
+                Some(session) => session,
+                None => {
+                    warn!("Leadership acquired without a session, retrying");
+                    back_to_standby(&mut supervisor, 1).await;
+                    break;
+                }
+            };
             if service_arc.oplog_manager().lock().store().is_none() {
                 match build_leader_oplog_manager(&ha_spec, 0).await {
                     Some(manager) => {
@@ -279,7 +283,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => {
                         warn!("Leader oplog store is unavailable, releasing leadership");
-                        release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                        release_and_retry(&coordinator, &mut supervisor, &session).await;
                         break;
                     }
                 }
@@ -298,33 +302,33 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             if let Err(e) = supervisor.promote_to_leader_warmup() {
                 error!("Promotion failed: {}", e);
                 supervisor.enable_standby_updates();
-                release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                release_and_retry(&coordinator, &mut supervisor, &session).await;
                 break;
             }
 
             // Start keepalive (background tokio task renews lease every 3s).
-            let keepalive_handle = match coordinator.start_leadership_keepalive(lease_id).await {
+            let keepalive_handle = match coordinator.start_leadership_keepalive(&session).await {
                 Ok(handle) => handle,
                 Err(e) => {
                     error!("Keepalive start failed: {}", e);
                     supervisor.enable_standby_updates();
-                    release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                    release_and_retry(&coordinator, &mut supervisor, &session).await;
                     break;
                 }
             };
 
             // Active warmup: renew lease every second.
-            if !warmup_with_renewal(&coordinator, lease_id, args.ha_lease_ttl_secs).await {
+            if !warmup_with_renewal(&coordinator, &session, args.ha_lease_ttl_secs).await {
                 supervisor.enable_standby_updates();
-                release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                release_and_retry(&coordinator, &mut supervisor, &session).await;
                 break;
             }
 
             // Preflight: final renewal before serving.
-            if let Err(e) = coordinator.try_renew_leadership(lease_id).await {
+            if let Err(e) = coordinator.try_renew_leadership(&session).await {
                 warn!("Preflight renewal failed: {}", e);
                 supervisor.enable_standby_updates();
-                release_and_retry(&coordinator, &mut supervisor, lease_id).await;
+                release_and_retry(&coordinator, &mut supervisor, &session).await;
                 break;
             }
 
@@ -332,7 +336,16 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
             // LeadershipMonitor + server. Monitor MUST exist (fallback: dummy tx).
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-            let monitor = start_leadership_monitor(&coordinator, shutdown_tx).await;
+            let monitor = match start_leadership_monitor(&coordinator, &session, shutdown_tx).await
+            {
+                Ok(handle) => handle,
+                Err(e) => {
+                    warn!("Leadership monitor start failed: {}", e);
+                    supervisor.enable_standby_updates();
+                    release_and_retry(&coordinator, &mut supervisor, &session).await;
+                    break;
+                }
+            };
 
             let server_result = run_leader_server(service_arc.clone(), &args, shutdown_rx).await;
 
@@ -346,7 +359,7 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             drop(keepalive_handle);
             supervisor.deactivate_serving_state();
             supervisor.enable_standby_updates();
-            let _ = coordinator.release_leadership(lease_id).await;
+            let _ = coordinator.release_leadership(&session).await;
 
             // Re-read view before re-entering standby.
             if let Ok(post_view) = coordinator.read_current_view().await {
@@ -395,6 +408,18 @@ fn new_supervisor(
     MasterServiceSupervisor::new(Box::new(controller))
 }
 
+fn build_master_service(
+    snapshot_backend_type: Option<mooncake_store_master::storage_backend::StorageBackendType>,
+    snapshot_dir: Option<std::path::PathBuf>,
+    runtime_config: MasterRuntimeConfig,
+) -> Arc<MasterServiceImpl> {
+    Arc::new(MasterServiceImpl::new_with_runtime_config(
+        snapshot_backend_type,
+        snapshot_dir,
+        runtime_config,
+    ))
+}
+
 async fn wait_and_continue(coordinator: &LeaderCoordinator, current_view: &Option<MasterView>) {
     let version = current_view.as_ref().map(|v| v.view_version).unwrap_or(0);
     match coordinator
@@ -412,13 +437,13 @@ async fn wait_and_continue(coordinator: &LeaderCoordinator, current_view: &Optio
 
 async fn warmup_with_renewal(
     coordinator: &LeaderCoordinator,
-    lease_id: i64,
+    session: &LeadershipSession,
     ttl_secs: i64,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(ttl_secs as u64);
     info!("Warmup {}s, renewing each second", ttl_secs);
     while tokio::time::Instant::now() < deadline {
-        if coordinator.try_renew_leadership(lease_id).await.is_err() {
+        if coordinator.try_renew_leadership(session).await.is_err() {
             warn!("Warmup renewal failed");
             return false;
         }
@@ -430,9 +455,10 @@ async fn warmup_with_renewal(
 
 async fn start_leadership_monitor(
     coordinator: &LeaderCoordinator,
+    session: &LeadershipSession,
     tx: tokio::sync::watch::Sender<bool>,
-) -> Option<LeadershipMonitorHandle> {
-    let mut role_rx = coordinator.subscribe_role();
+) -> Result<LeadershipMonitorHandle, HaError> {
+    let mut role_rx = coordinator.subscribe_role_for_session(session)?;
     let h = tokio::spawn(async move {
         loop {
             if role_rx.changed().await.is_err() {
@@ -447,7 +473,7 @@ async fn start_leadership_monitor(
             }
         }
     });
-    Some(LeadershipMonitorHandle::new(h))
+    Ok(LeadershipMonitorHandle::new(h))
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +648,16 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn test_build_master_service_returns_fresh_instance_per_call() {
+        let runtime_config = build_runtime_config(&base_args()).unwrap();
+
+        let first = build_master_service(None, None, runtime_config.clone());
+        let second = build_master_service(None, None, runtime_config);
+
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -665,7 +701,9 @@ async fn create_coordinator(
             }
             Ok(LeaderCoordinator::new_etcd(endpoints, &spec.cluster_namespace).await?)
         }
-        HABackendType::Redis => Ok(LeaderCoordinator::new_redis(&spec.connstring).await?),
+        HABackendType::Redis => {
+            Ok(LeaderCoordinator::new_redis(&spec.connstring, &spec.cluster_namespace).await?)
+        }
         HABackendType::K8s => Err(Box::new(HaError::UnavailableInCurrentMode(
             "K8s HA backend is not implemented in Rust coordinator".into(),
         ))),

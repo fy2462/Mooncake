@@ -228,6 +228,7 @@ impl MasterServiceImpl {
                     release_replicas(&self.state, &removed);
                     if remove_object {
                         self.state.objects.remove(key);
+                        self.oplog_manager.lock().record_put_revoke(key);
                     }
                     BatchStatus::Success.into()
                 } else {

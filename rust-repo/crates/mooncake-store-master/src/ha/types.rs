@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 // ----------------------------------------------------------------------------
@@ -131,6 +132,22 @@ pub struct MasterView {
     /// Monotonic version counter incremented on each leadership change.
     /// 每次 leader 变更时递增的单调版本计数器。
     pub view_version: u64,
+}
+
+/// Backend-issued leadership ownership session.
+///
+/// C++ equivalent: `LeadershipSession { view, owner_token, lease_ttl }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadershipSession {
+    /// The leader view acquired with this session.
+    pub view: MasterView,
+    /// Backend-issued opaque ownership token.
+    ///
+    /// Etcd uses the lease id encoded as a string; Redis uses a random token
+    /// stored in the leader hash and checked by renew/release scripts.
+    pub owner_token: String,
+    /// Lease TTL associated with this session.
+    pub lease_ttl: Duration,
 }
 
 // ----------------------------------------------------------------------------
@@ -356,9 +373,9 @@ pub struct AcquireLeadershipResult {
     pub acquired: bool,
     /// The current master view after the attempt. / 尝试后的当前 master 视图。
     pub view: Option<MasterView>,
-    /// The lease ID if acquired (etcd: lease ID, Redis: TTL in seconds).
-    /// 如果获取成功，租约 ID（etcd: lease ID, Redis: TTL 秒数）。
-    pub lease_id: Option<i64>,
+    /// The leadership session if acquired.
+    /// 如果获取成功，对应的 leadership session。
+    pub session: Option<LeadershipSession>,
 }
 
 // ----------------------------------------------------------------------------

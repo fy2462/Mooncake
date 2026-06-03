@@ -161,6 +161,7 @@ impl MasterServiceImpl {
             release_object_replicas(&self.state, &scoped_key, &removed);
             if remove_object {
                 self.state.objects.remove(&scoped_key);
+                self.oplog_manager.lock().record_put_revoke(&scoped_key);
             }
         }
         metrics::PUT_REVOKE_REQUESTS.inc();

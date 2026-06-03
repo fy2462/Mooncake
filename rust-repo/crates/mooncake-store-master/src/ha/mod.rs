@@ -58,6 +58,7 @@ pub use state_machine::StandbyStateMachine;
 pub use supervisor::{LeadershipMonitorHandle, MasterServiceSupervisor};
 pub use types::{
     parse_ha_backend_type, AcquireLeadershipResult, HABackendSpec, HABackendType, HaError,
-    LeaderRole, LeadershipHandle, MasterRuntimeState, MasterView, OpLogPollResult, OpLogRecord,
-    RuntimeStateCallback, StandbyEvent, StandbyState, StandbySyncStatus, StateTransitionResult,
+    LeaderRole, LeadershipHandle, LeadershipSession, MasterRuntimeState, MasterView,
+    OpLogPollResult, OpLogRecord, RuntimeStateCallback, StandbyEvent, StandbyState,
+    StandbySyncStatus, StateTransitionResult,
 };
