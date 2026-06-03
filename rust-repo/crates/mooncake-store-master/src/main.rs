@@ -578,6 +578,7 @@ mod tests {
 
     fn base_args() -> Args {
         Args {
+            enable_offload: true,
             rpc_address: "127.0.0.1".to_string(),
             rpc_port: 50051,
             http_metadata_server_host: "127.0.0.1".to_string(),
