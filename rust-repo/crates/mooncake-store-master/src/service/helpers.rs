@@ -19,7 +19,7 @@
 use crate::http_metadata::MetadataState;
 use crate::metrics;
 use chrono::Utc;
-use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -184,6 +184,54 @@ pub(crate) fn client_id_by_replica_segment_name(
 ) -> Option<Uuid> {
     client_id_by_segment_name(state, segment_name)
         .or_else(|| client_id_by_nof_segment_name(state, segment_name))
+}
+
+pub(crate) fn default_drain_target_segments(
+    state: &MasterState,
+    draining_segments: &HashSet<String>,
+) -> Vec<String> {
+    let mut targets = state
+        .segments
+        .iter()
+        .filter(|entry| {
+            entry.status == crate::proto::SegmentStatus::Active
+                && !draining_segments.contains(&entry.segment.name)
+        })
+        .map(|entry| entry.segment.name.clone())
+        .collect::<Vec<_>>();
+    targets.sort();
+    targets
+}
+
+pub(crate) fn choose_drain_target_segment(
+    state: &MasterState,
+    object: &ObjectEntry,
+    source_segment: &str,
+    candidates: &[String],
+) -> Option<String> {
+    candidates
+        .iter()
+        .filter(|target| target.as_str() != source_segment)
+        .filter(|target| {
+            !object
+                .replicas
+                .iter()
+                .any(|replica| replica.segment_name == **target)
+        })
+        .filter_map(|target| {
+            state
+                .segments
+                .iter()
+                .find(|entry| {
+                    entry.segment.name == *target
+                        && entry.status == crate::proto::SegmentStatus::Active
+                })
+                .map(|entry| (target.clone(), entry.used, entry.segment.size))
+        })
+        .min_by(|(_, used_a, size_a), (_, used_b, size_b)| {
+            ((*used_a as u128) * (*size_b as u128)).cmp(&((*used_b as u128) * (*size_a as u128)))
+        })
+        .map(|(target, _, _)| target)
 }
 
 /// 卸载客户端拥有的 Memory segment，校验所有权后从 segments 表和 allocator 移除。
@@ -469,7 +517,7 @@ pub(crate) fn cleanup_stale_handles(
     let has_completed = entry
         .replicas
         .iter()
-        .any(|r| r.status == mooncake_store_core::ReplicaStatus::Complete);
+        .any(|r| r.status == ReplicaStatus::Complete);
 
     // 如果清理掉了一些副本，且没有有效的 Complete 副本残留，对象应该被移除
     // If some replicas were cleaned and no valid Complete replicas remain, the object should be removed

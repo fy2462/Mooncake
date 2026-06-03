@@ -106,6 +106,7 @@ impl MooncakeClient {
     pub async fn batch_is_exist(&mut self, keys: &[String]) -> StoreResult<Vec<bool>> {
         let request = proto::BatchExistKeyRequest {
             keys: keys.to_vec(),
+            tenant_id: String::new(),
         };
         let response = self
             .master

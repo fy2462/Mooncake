@@ -15,6 +15,7 @@ fn uuid_proto(id: Uuid) -> proto::Uuid {
 #[tokio::test]
 async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_work() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         offload_on_evict: true,
         lease_ttl: Duration::from_millis(1),
         ..Default::default()
@@ -122,6 +123,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
 #[tokio::test]
 async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         offload_on_evict: true,
         lease_ttl: Duration::from_millis(1),
         ..Default::default()
@@ -238,6 +240,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
 #[tokio::test]
 async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         offload_on_evict: true,
         lease_ttl: Duration::from_millis(1),
         eviction_interval: Duration::from_millis(10),
@@ -344,6 +347,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
 #[tokio::test]
 async fn test_processing_keys_excluded_from_eviction() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         offload_on_evict: false,
         lease_ttl: Duration::from_millis(1),
         ..Default::default()

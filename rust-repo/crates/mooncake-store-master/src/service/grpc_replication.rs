@@ -97,6 +97,19 @@ fn same_replica(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
 }
 
 impl MasterServiceImpl {
+    pub(crate) fn put_revoke_matches_target(
+        replica: &ReplicaDescriptor,
+        target: ReplicaType,
+    ) -> bool {
+        if target == ReplicaType::All {
+            return matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            );
+        }
+        replica.replica_type == target
+    }
+
     // PutRevoke: 撤销 PutStart 分配的副本。仅允许撤销非 Complete 状态的副本
     // （已完成写入的副本不能撤销防止数据丢失）。若所有副本被移除则删除对象。
     pub(super) async fn put_revoke_impl(
@@ -115,54 +128,56 @@ impl MasterServiceImpl {
                 "object has an ongoing replication task",
             ));
         }
-        if let Some(mut object) = self.state.objects.get_mut(&scoped_key) {
-            if object_owner_client_id(&self.state, &object) != Some(client_id) {
-                return Err(Status::permission_denied(
-                    "object owned by different client",
-                ));
-            }
-            let mut removed = Vec::new();
-            // C++ master_service.cpp:1492-1504 只允许撤销 PROCESSING 状态的 replica，已完成的不能撤销
-            let mut all_completed = true;
-            let mut has_matching = false;
+        let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
+            return Err(Status::not_found("key not found"));
+        };
+        if object_owner_client_id(&self.state, &object) != Some(client_id) {
+            return Err(Status::permission_denied(
+                "object owned by different client",
+            ));
+        }
+        let mut removed = Vec::new();
+        // C++ master_service.cpp:1492-1504 只允许撤销 PROCESSING 状态的 replica，已完成的不能撤销
+        let mut all_completed = true;
+        let mut has_matching = false;
 
-            // Check if all matching replicas are already complete
-            for replica in &object.replicas {
-                let target = replica_type_from_i32(req.replica_type);
-                let matches = target == ReplicaType::All || replica.replica_type == target;
-                if matches {
-                    has_matching = true;
-                    if replica.status != ReplicaStatus::Complete {
-                        all_completed = false;
-                    }
+        // Check if all matching replicas are already complete
+        for replica in &object.replicas {
+            let target = replica_type_from_i32(req.replica_type);
+            let matches = Self::put_revoke_matches_target(replica, target);
+            if matches {
+                has_matching = true;
+                if replica.status != ReplicaStatus::Complete {
+                    all_completed = false;
                 }
             }
+        }
 
-            if has_matching && all_completed {
-                return Err(Status::failed_precondition(
-                    "invalid write: replica already completed",
-                ));
-            }
+        if has_matching && all_completed {
+            return Err(Status::failed_precondition(
+                "invalid write: replica already completed",
+            ));
+        }
 
-            // 仅移除 Allocating 等非 Complete 状态的 replica
-            // Remove only non-complete matching replicas
-            object.replicas.retain(|replica| {
-                let target = replica_type_from_i32(req.replica_type);
-                let matches = target == ReplicaType::All || replica.replica_type == target;
-                if matches && replica.status != ReplicaStatus::Complete {
-                    removed.push(replica.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            let remove_object = object.replicas.is_empty();
-            drop(object);
-            release_object_replicas(&self.state, &scoped_key, &removed);
-            if remove_object {
-                self.state.objects.remove(&scoped_key);
-                self.oplog_manager.lock().record_put_revoke(&scoped_key);
+        // 仅移除 Allocating 等非 Complete 状态的 replica
+        // Remove only non-complete matching replicas
+        object.replicas.retain(|replica| {
+            let target = replica_type_from_i32(req.replica_type);
+            let matches = Self::put_revoke_matches_target(replica, target);
+            if matches && replica.status != ReplicaStatus::Complete {
+                removed.push(replica.clone());
+                false
+            } else {
+                true
             }
+        });
+        let remove_object = object.replicas.is_empty();
+        drop(object);
+        release_object_replicas(&self.state, &scoped_key, &removed);
+        if remove_object {
+            self.state.objects.remove(&scoped_key);
+            self.state.processing_keys.remove(&scoped_key);
+            self.oplog_manager.lock().record_put_revoke(&scoped_key);
         }
         metrics::PUT_REVOKE_REQUESTS.inc();
         Ok(Response::new(proto::PutRevokeResponse {}))
@@ -195,8 +210,7 @@ impl MasterServiceImpl {
         let mut removed_count = 0i64;
         for key in keys {
             if let Some((_, object)) = self.state.objects.remove(&key) {
-                release_object_replicas(&self.state, &key, &object.replicas);
-                self.state.replication_tasks.remove(&key);
+                self.cleanup_removed_object(&key, &object);
                 removed_count += 1;
             }
         }

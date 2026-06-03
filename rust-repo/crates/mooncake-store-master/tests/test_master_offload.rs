@@ -1,13 +1,16 @@
 use mooncake_store_core::ReplicaType;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
-use mooncake_store_master::MasterServiceImpl;
+use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use tonic::Request;
 use uuid::Uuid;
 
 #[tokio::test]
 async fn test_offload_object_heartbeat_and_notify_offload_success() {
-    let service = MasterServiceImpl::default();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        ..Default::default()
+    });
     let client_id = Uuid::new_v4();
 
     MasterService::mount_segment(

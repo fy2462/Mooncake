@@ -8,7 +8,10 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn test_promotion_flow_success_and_failure() {
-    let service = MasterServiceImpl::default();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        ..Default::default()
+    });
     let holder_id = Uuid::new_v4();
     let dram_client = Uuid::new_v4();
 
@@ -218,6 +221,7 @@ async fn test_promotion_flow_success_and_failure() {
 #[tokio::test]
 async fn test_promotion_admission_threshold_requires_multiple_reads() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         promotion_admission_threshold: 2,
         ..Default::default()
     });
@@ -305,6 +309,7 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
 #[tokio::test]
 async fn test_promotion_queue_limit_released_after_success() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         promotion_queue_limit: 1,
         ..Default::default()
     });
@@ -455,6 +460,7 @@ async fn test_promotion_queue_limit_released_after_success() {
 #[tokio::test]
 async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
         put_start_release_timeout: Duration::from_millis(120),
         reaper_interval: Duration::from_millis(20),
         ..Default::default()

@@ -416,6 +416,9 @@ impl MasterServiceImpl {
         request: Request<proto::MountLocalDiskSegmentRequest>,
     ) -> Result<Response<proto::MountLocalDiskSegmentResponse>, Status> {
         let req = request.into_inner();
+        if !self.state.runtime_config.enable_offload {
+            return Err(Status::failed_precondition("offload is not enabled"));
+        }
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -434,6 +437,7 @@ impl MasterServiceImpl {
                 },
             );
         }
+        upsert_client_addresses(&self.state, client_id, Vec::new());
         Ok(Response::new(proto::MountLocalDiskSegmentResponse {}))
     }
 

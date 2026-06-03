@@ -20,9 +20,6 @@ impl MasterServiceImpl {
         if req.max_concurrency == 0 {
             return Err(Status::invalid_argument("max_concurrency must be non-zero"));
         }
-        if req.target_segments.is_empty() {
-            return Err(Status::invalid_argument("target_segments cannot be empty"));
-        }
         let unique_sources: HashSet<String> = req.segments.iter().cloned().collect();
         if unique_sources.len() != req.segments.len() {
             return Err(Status::invalid_argument("segments must be unique"));
@@ -221,14 +218,38 @@ impl MasterServiceImpl {
             None => return,
         };
         let draining_segments: HashSet<String> = job.segments.iter().cloned().collect();
-        let targets = job.target_segments.clone();
+        let targets = if job.target_segments.is_empty() {
+            default_drain_target_segments(&self.state, &draining_segments)
+        } else {
+            job.target_segments.clone()
+        };
         let max_concurrency = job.max_concurrency as usize;
 
         // Find objects with replicas on draining segments
         // 查找在 draining segment 上有副本的对象
         let mut units: Vec<(String, String, u64)> = Vec::new(); // (key, source_seg, bytes)
+        let mut blocked_unit_keys = HashSet::new();
         for entry in self.state.objects.iter() {
             let key = entry.key().clone();
+            if entry.tenant_id != "default"
+                || entry.hard_pinned
+                || !is_lease_expired(entry.value())
+                || !entry
+                    .replicas
+                    .iter()
+                    .all(|replica| replica.status == ReplicaStatus::Complete)
+                || self.state.replication_tasks.contains_key(entry.key())
+            {
+                for replica in &entry.replicas {
+                    if draining_segments.contains(&replica.segment_name) {
+                        blocked_unit_keys.insert(ActiveDrainTask::unit_key_for(
+                            entry.key(),
+                            &replica.segment_name,
+                        ));
+                    }
+                }
+                continue;
+            }
             for replica in &entry.replicas {
                 if draining_segments.contains(&replica.segment_name)
                     && replica.status == ReplicaStatus::Complete
@@ -239,10 +260,7 @@ impl MasterServiceImpl {
             }
         }
 
-        // Pick a target for each unit (round-robin)
-        // 为每个单元选择目标（round-robin 轮询）
-        let num_targets = targets.len().max(1);
-        for (i, (key, source_seg, _bytes)) in units.into_iter().enumerate() {
+        for (key, source_seg, _bytes) in units {
             if job.active_tasks.len() >= max_concurrency {
                 break;
             }
@@ -252,7 +270,16 @@ impl MasterServiceImpl {
             {
                 continue;
             }
-            let target_seg = targets[i % num_targets].clone();
+            let Some(object) = self.state.objects.get(&key) else {
+                continue;
+            };
+            let Some(target_seg) =
+                choose_drain_target_segment(&self.state, &object, &source_seg, &targets)
+            else {
+                blocked_unit_keys.insert(unit_key.clone());
+                continue;
+            };
+            drop(object);
             let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
             let task_id = Uuid::new_v4();
             job.active_tasks.insert(
@@ -266,12 +293,11 @@ impl MasterServiceImpl {
             );
             let task = job.active_tasks.get(&task_id).unwrap();
 
-            // 为此 drain unit 创建 Copy 任务
-            // Create a copy task for this drain unit
-            let payload = serde_json::to_string(&ReplicaCopyPayload {
+            // Create a move task for this drain unit.
+            let payload = serde_json::to_string(&ReplicaMovePayload {
                 key: &key,
                 source: &task.source_segment,
-                targets: &[task.target_segment.clone()],
+                target: &task.target_segment,
             })
             .unwrap_or_default();
             let now = Utc::now();
@@ -281,7 +307,7 @@ impl MasterServiceImpl {
                 TaskEntry {
                     info: TaskInfo {
                         id: task_id,
-                        task_type: TaskType::ReplicaCopy,
+                        task_type: TaskType::ReplicaMove,
                         status: TaskStatus::Pending,
                         created_at: now,
                         last_updated_at: now,
@@ -297,6 +323,7 @@ impl MasterServiceImpl {
                 },
             );
         }
+        job.blocked_units = blocked_unit_keys.len() as u64;
 
         job.status = if job.active_tasks.is_empty() {
             proto::JobStatus::Succeeded

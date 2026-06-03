@@ -196,23 +196,23 @@ impl MooncakeClient {
     // C++ equivalent: MasterClient::BatchPutRevoke(keys, replica_type)
     // -----------------------------------------------------------------------
 
-    /// Revoke a batch of put operations: remove all replicas for the given keys
-    /// on the specified segment (or all segments if segment_name is empty).
+    /// Revoke a batch of put operations: remove non-complete replicas for the given keys
+    /// matching the requested replica type.
     /// Returns per-key status codes: `0` = success, `-1` = key not found,
     /// `-2` = has replication task, `-3` = permission denied.
     ///
-    /// 批量撤销 put 操作：移除指定 keys 在指定 segment（或所有 segment）上的副本。
+    /// 批量撤销 put 操作：移除指定 keys 中匹配副本类型的未完成副本。
     /// 返回每个 key 的状态码：0=成功, -1=key不存在, -2=有复制任务, -3=权限拒绝。
     pub async fn batch_put_revoke(
         &mut self,
         keys: &[String],
-        segment_name: &str,
+        replica_type: i32,
         tenant_id: &str,
     ) -> StoreResult<Vec<i32>> {
         let request = proto::BatchPutRevokeRequest {
             keys: keys.to_vec(),
             client_id: Some(self.client_id_proto()),
-            segment_name: segment_name.to_string(),
+            replica_type,
             tenant_id: tenant_id.to_string(),
         };
         let response = self

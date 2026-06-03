@@ -527,7 +527,7 @@ impl MooncakeClient {
         }
         if !failed_keys.is_empty() {
             tracing::warn!("batch_put: {} keys failed writes, revoking", failed_keys.len());
-            let _ = self.batch_put_revoke(&failed_keys, "", "").await;
+            let _ = self.batch_put_revoke(&failed_keys, 0 /* MEMORY */, "").await;
         }
 
         Ok(statuses)

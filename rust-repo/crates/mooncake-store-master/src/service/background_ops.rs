@@ -27,7 +27,10 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::{Instant, SystemTime};
 use uuid::Uuid;
 
-use super::helpers::{client_id_by_segment_name, memory_usage_ratio, release_replicas};
+use super::helpers::{
+    choose_drain_target_segment, client_id_by_segment_name, default_drain_target_segments,
+    is_lease_expired, memory_usage_ratio, release_replicas,
+};
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
 fn same_replica_location(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
@@ -252,6 +255,9 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
 /// Push an object into the offload queue, triggering memory→local-disk data offload.
 /// Only enqueues when the client has offload enabled and the object is not already being processed.
 pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &str, size: u64) {
+    if !state.runtime_config.enable_offload {
+        return;
+    }
     if state.offloading_tasks.contains_key(key) {
         return;
     }
@@ -558,7 +564,7 @@ pub(crate) fn run_automatic_eviction_once(state: &MasterState) -> Vec<String> {
 /// the admission_threshold, preventing transient hotspots from causing unnecessary overhead.
 /// Also limits global in-flight promotions to prevent memory exhaustion.
 pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
-    if !state.runtime_config.promotion_on_hit {
+    if !state.runtime_config.enable_offload || !state.runtime_config.promotion_on_hit {
         return;
     }
 
@@ -567,6 +573,9 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
     let current_freq = state.promotion_sketch.write().increment(key);
     let threshold = state.runtime_config.promotion_admission_threshold.max(1);
     if current_freq < threshold {
+        return;
+    }
+    if memory_usage_ratio(state) >= state.runtime_config.eviction_high_watermark_ratio {
         return;
     }
 
@@ -807,15 +816,39 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
         return;
     };
     let draining_segments: HashSet<String> = job.segments.iter().cloned().collect();
-    let targets = job.target_segments.clone();
+    let targets = if job.target_segments.is_empty() {
+        default_drain_target_segments(state, &draining_segments)
+    } else {
+        job.target_segments.clone()
+    };
     let max_concurrency = job.max_concurrency as usize;
     let available = max_concurrency.saturating_sub(job.active_tasks.len());
     if available == 0 {
         return;
     }
     let mut units: Vec<(String, String, u64)> = Vec::new();
+    let mut blocked_unit_keys = HashSet::new();
     for entry in state.objects.iter() {
         let key = entry.key().clone();
+        if entry.tenant_id != "default"
+            || entry.hard_pinned
+            || !is_lease_expired(entry.value())
+            || !entry
+                .replicas
+                .iter()
+                .all(|replica| replica.status == ReplicaStatus::Complete)
+            || state.replication_tasks.contains_key(entry.key())
+        {
+            for replica in &entry.replicas {
+                if draining_segments.contains(&replica.segment_name) {
+                    blocked_unit_keys.insert(ActiveDrainTask::unit_key_for(
+                        entry.key(),
+                        &replica.segment_name,
+                    ));
+                }
+            }
+            continue;
+        }
         for replica in &entry.replicas {
             if draining_segments.contains(&replica.segment_name)
                 && replica.status == ReplicaStatus::Complete
@@ -831,25 +864,32 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             }
         }
     }
-    let num_targets = targets.len().max(1);
     let mut scheduled = 0;
-    for (i, (key, source_seg, bytes)) in units.into_iter().enumerate() {
+    for (key, source_seg, bytes) in units {
         if scheduled >= available {
             break;
         }
         let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
-        let target_seg = targets[i % num_targets].clone();
+        let Some(object) = state.objects.get(&key) else {
+            continue;
+        };
+        let Some(target_seg) = choose_drain_target_segment(state, &object, &source_seg, &targets)
+        else {
+            blocked_unit_keys.insert(unit_key.clone());
+            continue;
+        };
+        drop(object);
         let task_id = Uuid::new_v4();
         #[derive(Serialize)]
-        struct ReplicaCopyPayload {
+        struct ReplicaMovePayload {
             key: String,
             source: String,
-            targets: Vec<String>,
+            target: String,
         }
-        let payload = serde_json::to_string(&ReplicaCopyPayload {
+        let payload = serde_json::to_string(&ReplicaMovePayload {
             key: key.clone(),
             source: source_seg.clone(),
-            targets: vec![target_seg.clone()],
+            target: target_seg.clone(),
         })
         .unwrap_or_default();
         let assigned_client = client_id_by_segment_name(state, &source_seg);
@@ -859,7 +899,7 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             crate::service::state::TaskEntry {
                 info: TaskInfo {
                     id: task_id,
-                    task_type: TaskType::ReplicaCopy,
+                    task_type: TaskType::ReplicaMove,
                     status: TaskStatus::Pending,
                     created_at: now,
                     last_updated_at: now,
@@ -882,6 +922,7 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
         );
         scheduled += 1;
     }
+    job.blocked_units = blocked_unit_keys.len() as u64;
     job.status = if job.active_tasks.is_empty()
         && scheduled == 0
         && job.completed_unit_keys.len() + job.terminal_failed_unit_keys.len() > 0

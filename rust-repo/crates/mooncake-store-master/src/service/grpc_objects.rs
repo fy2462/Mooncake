@@ -41,6 +41,36 @@
 use super::*;
 
 impl MasterServiceImpl {
+    pub(crate) fn cleanup_removed_object(&self, scoped_key: &str, object: &ObjectEntry) {
+        for mut entry in self.state.client_objects.iter_mut() {
+            entry.value_mut().remove(scoped_key);
+        }
+        self.state.processing_keys.remove(scoped_key);
+        self.state.replication_tasks.remove(scoped_key);
+        clear_offloading_task(&self.state, scoped_key);
+        clear_promotion_task(&self.state, scoped_key);
+        release_object_replicas(&self.state, scoped_key, &object.replicas);
+        self.oplog_manager.lock().record_remove(scoped_key);
+    }
+
+    pub(crate) fn completed_object_exists_and_grant_lease(&self, scoped_key: &str) -> bool {
+        let Some(mut entry) = self.state.objects.get_mut(scoped_key) else {
+            return false;
+        };
+        let exists = entry
+            .replicas
+            .iter()
+            .any(|replica| replica.status == ReplicaStatus::Complete);
+        if exists {
+            entry.last_access = SystemTime::now();
+            entry.grant_lease(
+                self.state.runtime_config.lease_ttl,
+                self.state.runtime_config.soft_pin_ttl,
+            );
+        }
+        exists
+    }
+
     pub(crate) fn apply_put_end_for_key(
         &self,
         scoped_key: &str,
@@ -97,7 +127,7 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::ExistKeyResponse>, Status> {
         let req = request.into_inner();
         let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
-        let exists = self.state.objects.contains_key(&scoped_key);
+        let exists = self.completed_object_exists_and_grant_lease(&scoped_key);
         metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::ExistKeyResponse { exists }))
     }
@@ -110,18 +140,12 @@ impl MasterServiceImpl {
         request: Request<proto::GetAllKeysRequest>,
     ) -> Result<Response<proto::GetAllKeysResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = req.tenant_id.clone();
+        let tenant_filter = normalize_tenant_id(&req.tenant_id);
         let keys: Vec<String> = self
             .state
             .objects
             .iter()
-            .filter(|entry| {
-                if !tenant_filter.is_empty() {
-                    entry.tenant_id == normalize_tenant_id(&tenant_filter)
-                } else {
-                    true
-                }
-            })
+            .filter(|entry| entry.tenant_id == tenant_filter)
             .map(|entry| {
                 // Return user_key — C++ equivalent: item.second.user_key
                 // C++: item.second.user_key.empty() ? item.first : item.second.user_key
@@ -643,15 +667,10 @@ impl MasterServiceImpl {
                 return Err(Status::failed_precondition("replica is not ready"));
             }
         }
-        if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
-            for mut entry in self.state.client_objects.iter_mut() {
-                entry.value_mut().remove(&scoped_key);
-            }
-            clear_offloading_task(&self.state, &scoped_key);
-            clear_promotion_task(&self.state, &scoped_key);
-            release_replicas(&self.state, &object.replicas);
-            self.oplog_manager.lock().record_remove(&scoped_key);
-        }
+        let Some((_, object)) = self.state.objects.remove(&scoped_key) else {
+            return Err(Status::not_found("key not found"));
+        };
+        self.cleanup_removed_object(&scoped_key, &object);
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
     }
@@ -694,12 +713,7 @@ impl MasterServiceImpl {
                 }
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
-                for mut entry in self.state.client_objects.iter_mut() {
-                    entry.value_mut().remove(&key);
-                }
-                clear_offloading_task(&self.state, &key);
-                clear_promotion_task(&self.state, &key);
-                release_replicas(&self.state, &object.replicas);
+                self.cleanup_removed_object(&key, &object);
                 removed += 1;
             }
         }

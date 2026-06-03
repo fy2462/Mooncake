@@ -66,7 +66,10 @@ impl MasterServiceImpl {
         let results: Vec<bool> = req
             .keys
             .iter()
-            .map(|k| self.state.objects.contains_key(k))
+            .map(|k| {
+                let key = make_tenant_scoped_key(&req.tenant_id, k);
+                self.completed_object_exists_and_grant_lease(&key)
+            })
             .collect();
         Ok(Response::new(proto::BatchExistKeyResponse { results }))
     }
@@ -203,11 +206,7 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::BatchPutRevokeResponse>, Status> {
         let req = request.into_inner();
         let client_id = req.client_id.as_ref().map(uuid_from_proto);
-        let segment_name = if req.segment_name.is_empty() {
-            None
-        } else {
-            Some(req.segment_name.clone())
-        };
+        let target = replica_type_from_i32(req.replica_type);
         let statuses: Vec<i32> = req
             .keys
             .iter()
@@ -222,15 +221,12 @@ impl MasterServiceImpl {
                             return BatchStatus::IllegalClient.into();
                         }
                     }
-                    let has_matching = object.replicas.iter().any(|replica| {
-                        segment_name
-                            .as_ref()
-                            .is_none_or(|seg| replica.segment_name == *seg)
-                    });
+                    let has_matching = object
+                        .replicas
+                        .iter()
+                        .any(|replica| Self::put_revoke_matches_target(replica, target));
                     let has_non_complete_matching = object.replicas.iter().any(|replica| {
-                        segment_name
-                            .as_ref()
-                            .is_none_or(|seg| replica.segment_name == *seg)
+                        Self::put_revoke_matches_target(replica, target)
                             && replica.status != ReplicaStatus::Complete
                     });
                     if has_matching && !has_non_complete_matching {
@@ -238,9 +234,7 @@ impl MasterServiceImpl {
                     }
                     let mut removed = Vec::new();
                     object.replicas.retain(|replica| {
-                        let matched = segment_name
-                            .as_ref()
-                            .is_none_or(|seg| replica.segment_name == *seg)
+                        let matched = Self::put_revoke_matches_target(replica, target)
                             && replica.status != ReplicaStatus::Complete;
                         if matched {
                             removed.push(replica.clone());
@@ -252,6 +246,7 @@ impl MasterServiceImpl {
                     release_object_replicas(&self.state, &key, &removed);
                     if remove_object {
                         self.state.objects.remove(&key);
+                        self.state.processing_keys.remove(&key);
                         self.oplog_manager.lock().record_put_revoke(&key);
                     }
                     BatchStatus::Success.into()
@@ -316,6 +311,7 @@ impl MasterServiceImpl {
         let req = request.into_inner();
         let mut all_replicas = Vec::new();
         let mut statuses = Vec::with_capacity(req.entries.len());
+        let mut results = Vec::with_capacity(req.entries.len());
 
         for entry in &req.entries {
             let config = entry
@@ -324,7 +320,14 @@ impl MasterServiceImpl {
                 .map(config_from_proto)
                 .unwrap_or_default();
             let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
-                statuses.push(BatchStatus::IllegalClient.into());
+                let status = BatchStatus::IllegalClient.into();
+                statuses.push(status);
+                results.push(proto::BatchStartEntryResult {
+                    key: entry.key.clone(),
+                    replicas: vec![],
+                    status,
+                    tenant_id: normalize_tenant_id(&entry.tenant_id),
+                });
                 continue;
             };
             match self.upsert_start_for_entry(
@@ -335,16 +338,34 @@ impl MasterServiceImpl {
                 config,
             ) {
                 Ok(replicas) => {
-                    statuses.push(BatchStatus::Success.into());
-                    all_replicas.extend(replicas.iter().map(replica_to_proto));
+                    let proto_replicas = replicas.iter().map(replica_to_proto).collect::<Vec<_>>();
+                    let status = BatchStatus::Success.into();
+                    statuses.push(status);
+                    all_replicas.extend(proto_replicas.iter().cloned());
+                    results.push(proto::BatchStartEntryResult {
+                        key: entry.key.clone(),
+                        replicas: proto_replicas,
+                        status,
+                        tenant_id: normalize_tenant_id(&entry.tenant_id),
+                    });
                 }
-                Err(status) => statuses.push(Self::batch_status_from_status(&status).into()),
+                Err(status) => {
+                    let status = Self::batch_status_from_status(&status).into();
+                    statuses.push(status);
+                    results.push(proto::BatchStartEntryResult {
+                        key: entry.key.clone(),
+                        replicas: vec![],
+                        status,
+                        tenant_id: normalize_tenant_id(&entry.tenant_id),
+                    });
+                }
             }
         }
 
         Ok(Response::new(proto::BatchUpsertStartResponse {
             replicas: all_replicas,
             statuses,
+            results,
         }))
     }
 
@@ -404,9 +425,9 @@ impl MasterServiceImpl {
                 let has_matching = object
                     .replicas
                     .iter()
-                    .any(|replica| target == ReplicaType::All || replica.replica_type == target);
+                    .any(|replica| Self::put_revoke_matches_target(replica, target));
                 let has_non_complete_matching = object.replicas.iter().any(|replica| {
-                    (target == ReplicaType::All || replica.replica_type == target)
+                    Self::put_revoke_matches_target(replica, target)
                         && replica.status != ReplicaStatus::Complete
                 });
                 if has_matching && !has_non_complete_matching {
@@ -414,7 +435,7 @@ impl MasterServiceImpl {
                 }
                 let mut removed = Vec::new();
                 object.replicas.retain(|replica| {
-                    let matched = (target == ReplicaType::All || replica.replica_type == target)
+                    let matched = Self::put_revoke_matches_target(replica, target)
                         && replica.status != ReplicaStatus::Complete;
                     if matched {
                         removed.push(replica.clone());
@@ -426,6 +447,7 @@ impl MasterServiceImpl {
                 release_object_replicas(&self.state, &scoped_key, &removed);
                 if remove_object {
                     self.state.objects.remove(&scoped_key);
+                    self.state.processing_keys.remove(&scoped_key);
                     self.oplog_manager.lock().record_put_revoke(&scoped_key);
                 }
                 BatchStatus::Success.into()
@@ -469,12 +491,25 @@ impl MasterServiceImpl {
         }
         let replica_count = config.replica_num as usize;
         let mut all_replicas = Vec::new();
+        let mut results = Vec::with_capacity(req.keys.len());
         for (raw_key, slice_len) in req.keys.iter().zip(req.slice_lengths.iter()) {
             if *slice_len == 0 {
-                return Err(Status::invalid_argument("zero slice_length"));
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
+                continue;
             }
             let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
             if self.state.objects.contains_key(&key) {
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
                 continue;
             }
             let replicas = {
@@ -500,7 +535,7 @@ impl MasterServiceImpl {
                         last_access: now,
                         hard_pinned: config.with_hard_pin,
                         data_type: config.data_type,
-                        client_id: Uuid::nil(),
+                        client_id,
                         put_start_time: Some(now),
                         lease_timeout: None,
                         soft_pin_timeout: if config.with_soft_pin {
@@ -514,14 +549,27 @@ impl MasterServiceImpl {
                     },
                 );
                 self.state.processing_keys.insert(key.clone(), ());
-                all_replicas.extend(proto_r);
+                all_replicas.extend(proto_r.iter().cloned());
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: proto_r,
+                    status: BatchStatus::Success.into(),
+                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
             } else {
                 release_replicas(&self.state, &replicas);
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
             }
         }
         metrics::PUT_START_REQUESTS.inc_by(req.keys.len() as u64);
         Ok(Response::new(proto::BatchPutStartResponse {
             replicas: all_replicas,
+            results,
         }))
     }
 

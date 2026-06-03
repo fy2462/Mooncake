@@ -9,9 +9,9 @@
 use clap::Parser;
 use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{
-    parse_ha_backend_type, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
-    LeadershipMonitorHandle, LeadershipSession, MasterServiceSupervisor,
-    MasterServiceSupervisorConfig, MasterView,
+    HABackendSpec, HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle,
+    LeadershipSession, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    parse_ha_backend_type,
 };
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;
@@ -77,6 +77,11 @@ struct Args {
     /// Fraction of memory to free per eviction cycle
     #[arg(long, default_value_t = 0.05)]
     eviction_ratio: f64,
+
+    /// 是否启用全局 offload/promotion 功能
+    /// Whether to enable global offload/promotion workflows
+    #[arg(long)]
+    enable_offload: bool,
 
     /// 驱逐时是否触发 offload（下沉到本地磁盘）
     /// Whether to offload to local disk on eviction
@@ -729,6 +734,7 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
         lease_ttl: Duration::from_millis(args.default_kv_lease_ttl_ms),
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
         eviction_ratio: args.eviction_ratio,
+        enable_offload: args.enable_offload,
         offload_on_evict: args.offload_on_evict,
         offload_force_evict: args.offload_force_evict,
         cluster_id: resolve_cluster_id(args),

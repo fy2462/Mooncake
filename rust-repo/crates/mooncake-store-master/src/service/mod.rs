@@ -64,13 +64,14 @@ use self::background_ops::{
     try_push_promotion_queue,
 };
 use self::helpers::{
-    addresses_for_client, allocate_nof_replicas, bump_view_version, cleanup_stale_handles,
-    client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
-    get_alive_clients_snapshot, host_from_segment_name, is_lease_expired, make_tenant_scoped_key,
-    normalize_tenant_id, object_owner_client_id, register_metadata_segments,
-    release_object_replicas, release_replicas, release_replicas_scheduled, split_scoped_key,
-    storage_fs_dir_for_client, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
-    unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses, validate_user_key,
+    addresses_for_client, allocate_nof_replicas, bump_view_version, choose_drain_target_segment,
+    cleanup_stale_handles, client_id_by_nof_segment_name, client_id_by_replica_segment_name,
+    client_id_by_segment_name, default_drain_target_segments, get_alive_clients_snapshot,
+    host_from_segment_name, is_lease_expired, make_tenant_scoped_key, normalize_tenant_id,
+    object_owner_client_id, register_metadata_segments, release_object_replicas, release_replicas,
+    release_replicas_scheduled, split_scoped_key, storage_fs_dir_for_client, sync_client_segments,
+    sync_nof_segment_usage, sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned,
+    upsert_client_addresses, validate_user_key,
 };
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
@@ -378,6 +379,13 @@ impl MasterServiceImpl {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[doc(hidden)]
+    pub fn drain_task_for_test(&self, job_id: Uuid) -> Option<TaskEntry> {
+        let job = self.state.drain_jobs.get(&job_id)?;
+        let task_id = *job.active_tasks.keys().next()?;
+        self.state.tasks.get(&task_id).map(|task| task.clone())
     }
 
     /// 测试用：执行一轮指定目标数量的驱逐循环。

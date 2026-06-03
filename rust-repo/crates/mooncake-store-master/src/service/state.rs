@@ -409,6 +409,9 @@ pub struct MasterRuntimeConfig {
     /// KV 对象默认租约时长：PutEnd / GetReplicaList 授时，淘汰时超过此 TTL 的对象允许驱逐。
     /// Default KV lease TTL: granted at PutEnd/GetReplicaList; objects exceeding this are evictable.
     pub lease_ttl: Duration,
+    /// 全局 offload 开关；关闭时拒绝注册本地磁盘 offload segment。
+    /// Global offload gate; local disk offload segments cannot register when disabled.
+    pub enable_offload: bool,
     /// 淘汰时是否触发 offload（将内存副本写入本地磁盘）。
     /// Whether to trigger offload (write memory replicas to local disk) on eviction.
     pub offload_on_evict: bool,
@@ -465,6 +468,7 @@ impl Default for MasterRuntimeConfig {
             eviction_ratio: 0.05,
             soft_pin_ttl: Duration::from_secs(1800),
             lease_ttl: Duration::from_secs(3600),
+            enable_offload: false,
             offload_on_evict: false,
             offload_force_evict: false,
             client_live_ttl: Duration::from_secs(30),
