@@ -145,9 +145,7 @@ async fn query_handler(
         let result = state
             .indexer
             .cache_hit_compute(&model_ctx, &req.token_ids, instance_id);
-        let tenant_map = response
-            .entry(tenant_id)
-            .or_insert_with(|| json!({}));
+        let tenant_map = response.entry(tenant_id).or_insert_with(|| json!({}));
         if let serde_json::Value::Object(ref mut map) = tenant_map {
             map.insert(
                 instance_id.clone(),
@@ -159,9 +157,10 @@ async fn query_handler(
         let instance_map = state.tenant_instance_map.read();
         if let Some(instances) = instance_map.get(&tenant_id) {
             for instance_id in instances.keys() {
-                let result = state
-                    .indexer
-                    .cache_hit_compute(&model_ctx, &req.token_ids, instance_id);
+                let result =
+                    state
+                        .indexer
+                        .cache_hit_compute(&model_ctx, &req.token_ids, instance_id);
                 let tenant_map = response
                     .entry(tenant_id.clone())
                     .or_insert_with(|| json!({}));
@@ -288,9 +287,7 @@ async fn unregister_handler(
 
 /// GET /global_view — diagnostic snapshot of all contexts.
 /// GET /global_view —— 所有上下文的诊断快照。
-async fn global_view_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn global_view_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let view = state.indexer.get_global_view();
     Json(serde_json::to_value(&view).unwrap_or_default())
 }

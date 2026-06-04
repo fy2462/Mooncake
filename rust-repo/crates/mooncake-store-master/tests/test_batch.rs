@@ -46,6 +46,29 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
     .unwrap();
 }
 
+fn proto_nof_segment(id: Uuid, client_id: Uuid, name: &str) -> proto::NoFSegment {
+    proto::NoFSegment {
+        id: Some(proto_uuid(id)),
+        name: name.into(),
+        base: 0,
+        size: 4096,
+        te_endpoint: format!("transport://{name}"),
+        client_id: Some(proto_uuid(client_id)),
+    }
+}
+
+async fn mount_nof_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str) {
+    MasterService::mount_no_f_segment(
+        service,
+        Request::new(proto::MountNoFSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment: Some(proto_nof_segment(Uuid::new_v4(), client_id, name)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
 async fn put_start_one(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
     MasterService::put_start(
         service,
@@ -73,6 +96,47 @@ async fn put_end_one(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_batch_put_start_supports_nof_replicas() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "batch-nof-memory:1").await;
+    mount_nof_segment(&service, client_id, "batch-nof-ssd:1").await;
+
+    let response = MasterService::batch_put_start(
+        &service,
+        Request::new(proto::BatchPutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["batch-nof-key".into()],
+            slice_lengths: vec![128],
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 1,
+                preferred_segment: "batch-nof-memory:1".into(),
+                preferred_nof_segments: vec!["batch-nof-ssd:1".into()],
+                ..replicate_config()
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].status, 0);
+    assert_eq!(response.replicas.len(), 2);
+    assert_eq!(response.results[0].replicas.len(), 2);
+    assert!(response.results[0]
+        .replicas
+        .iter()
+        .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32));
+    assert!(response.results[0]
+        .replicas
+        .iter()
+        .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32));
 }
 
 #[test]

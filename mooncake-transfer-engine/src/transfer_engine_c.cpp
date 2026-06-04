@@ -51,6 +51,11 @@ int getLocalIpAndPort(transfer_engine_t engine, char *buf_out, size_t buf_len) {
     return 0;
 }
 
+int getRpcPort(transfer_engine_t engine) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->getRpcPort();
+}
+
 transport_t installTransport(transfer_engine_t engine, const char *proto,
                              void **args) {
     TransferEngine *native = (TransferEngine *)engine;
@@ -83,6 +88,12 @@ segment_id_t openSegmentNoCache(transfer_engine_t engine,
 int closeSegment(transfer_engine_t engine, segment_id_t segment_id) {
     TransferEngine *native = (TransferEngine *)engine;
     return native->closeSegment(segment_id);
+}
+
+int checkSegmentStatus(transfer_engine_t engine, segment_id_t segment_id) {
+    TransferEngine *native = (TransferEngine *)engine;
+    Status s = native->CheckSegmentStatus(segment_id);
+    return (int)s.code();
 }
 
 int warmupEfaSegment(transfer_engine_t engine, const char *segment_name) {
@@ -238,6 +249,24 @@ int genNotifyInEngine(transfer_engine_t engine, uint64_t target_id,
     return native->sendNotifyByID(target_id, notify);
 }
 
+int probePeerAliveByID(transfer_engine_t engine, segment_id_t target_id) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->probePeerAliveByID(target_id) == PeerLiveness::Alive ? 0 : 1;
+}
+
+int getBatchTransferStatus(transfer_engine_t engine, batch_id_t batch_id,
+                           struct transfer_status *status) {
+    TransferEngine *native = (TransferEngine *)engine;
+    Transport::TransferStatus native_status;
+    Status s = native->getBatchTransferStatus((Transport::BatchID)batch_id,
+                                              native_status);
+    if (s.ok()) {
+        status->status = (int)native_status.s;
+        status->transferred_bytes = native_status.transferred_bytes;
+    }
+    return (int)s.code();
+}
+
 int freeBatchID(transfer_engine_t engine, batch_id_t batch_id) {
     TransferEngine *native = (TransferEngine *)engine;
     Status s = native->freeBatchID(batch_id);
@@ -247,4 +276,24 @@ int freeBatchID(transfer_engine_t engine, batch_id_t batch_id) {
 int syncSegmentCache(transfer_engine_t engine) {
     TransferEngine *native = (TransferEngine *)engine;
     return native->syncSegmentCache();
+}
+
+int isTcpOnly(transfer_engine_t engine) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->isTcpOnly() ? 1 : 0;
+}
+
+int checkOverlap(transfer_engine_t engine, void *addr, uint64_t length) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->checkOverlap(addr, length) ? 1 : 0;
+}
+
+void setAutoDiscover(transfer_engine_t engine, int auto_discover) {
+    TransferEngine *native = (TransferEngine *)engine;
+    native->setAutoDiscover(auto_discover != 0);
+}
+
+void *getBaseAddr(transfer_engine_t engine) {
+    TransferEngine *native = (TransferEngine *)engine;
+    return native->getBaseAddr();
 }

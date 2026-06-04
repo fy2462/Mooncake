@@ -248,6 +248,13 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::get_replica_list_impl(self, request).await
     }
 
+    async fn batch_get_replica_list(
+        &self,
+        request: Request<proto::BatchGetReplicaListRequest>,
+    ) -> Result<Response<proto::BatchGetReplicaListResponse>, Status> {
+        MasterServiceImpl::batch_get_replica_list_impl(self, request).await
+    }
+
     async fn get_replica_list_by_regex(
         &self,
         request: Request<proto::GetReplicaListByRegexRequest>,

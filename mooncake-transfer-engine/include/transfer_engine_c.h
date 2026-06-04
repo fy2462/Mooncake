@@ -109,6 +109,8 @@ int discoverTopology(transfer_engine_t engine);
 
 int getLocalIpAndPort(transfer_engine_t engine, char *buf_out, size_t buf_len);
 
+int getRpcPort(transfer_engine_t engine);
+
 transport_t installTransport(transfer_engine_t engine, const char *proto,
                              void **args);
 
@@ -120,6 +122,8 @@ segment_id_t openSegmentNoCache(transfer_engine_t engine,
                                 const char *segment_name);
 
 int closeSegment(transfer_engine_t engine, segment_id_t segment_id);
+
+int checkSegmentStatus(transfer_engine_t engine, segment_id_t segment_id);
 
 // Eagerly pre-connect all EFA endpoints to `segment_name`. Eliminates the
 // first-batch fi_av_insert stall (observed ~6 s for 16 local NICs × N peer
@@ -158,12 +162,25 @@ int freeNotifsMsgBuf(notify_msg_t *msg, int size);
 int genNotifyInEngine(transfer_engine_t engine, uint64_t target_id,
                       notify_msg_t notify_msg);
 
+int probePeerAliveByID(transfer_engine_t engine, segment_id_t target_id);
+
 int getTransferStatus(transfer_engine_t engine, batch_id_t batch_id,
                       size_t task_id, struct transfer_status *status);
+
+int getBatchTransferStatus(transfer_engine_t engine, batch_id_t batch_id,
+                           struct transfer_status *status);
 
 int freeBatchID(transfer_engine_t engine, batch_id_t batch_id);
 
 int syncSegmentCache(transfer_engine_t engine);
+
+int isTcpOnly(transfer_engine_t engine);
+
+int checkOverlap(transfer_engine_t engine, void *addr, uint64_t length);
+
+void setAutoDiscover(transfer_engine_t engine, int auto_discover);
+
+void *getBaseAddr(transfer_engine_t engine);
 
 #ifdef __cplusplus
 }

@@ -189,14 +189,20 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = normalize_tenant_id(&req.tenant_id);
+        let tenant_filter = if req.tenant_id.is_empty() {
+            None
+        } else {
+            Some(normalize_tenant_id(&req.tenant_id))
+        };
         let keys = self
             .state
             .objects
             .iter()
             .filter(|entry| {
-                if entry.tenant_id != tenant_filter {
-                    return false;
+                if let Some(tenant_filter) = tenant_filter.as_ref() {
+                    if entry.tenant_id != *tenant_filter {
+                        return false;
+                    }
                 }
                 !self.state.replication_tasks.contains_key(entry.key())
                     && entry

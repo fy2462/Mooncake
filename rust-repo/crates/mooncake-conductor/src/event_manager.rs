@@ -131,8 +131,7 @@ impl EventManager {
             info!("Stopped subscription: svc_key={}", entry.key());
         }
 
-        let handles: Vec<thread::JoinHandle<()>> =
-            self.thread_handles.lock().drain(..).collect();
+        let handles: Vec<thread::JoinHandle<()>> = self.thread_handles.lock().drain(..).collect();
         for handle in handles {
             let _ = handle.join();
         }

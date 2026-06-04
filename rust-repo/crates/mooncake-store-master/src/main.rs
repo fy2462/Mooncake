@@ -83,6 +83,11 @@ struct Args {
     #[arg(long)]
     enable_offload: bool,
 
+    /// 是否禁用 NoF (NVMe-oF) 功能
+    /// Disable NoF (NVMe-oF) workflows
+    #[arg(long)]
+    disable_nof: bool,
+
     /// 驱逐时是否触发 offload（下沉到本地磁盘）
     /// Whether to offload to local disk on eviction
     #[arg(long)]
@@ -736,6 +741,7 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
         eviction_ratio: args.eviction_ratio,
         enable_offload: args.enable_offload,
+        enable_nof: !args.disable_nof,
         offload_on_evict: args.offload_on_evict,
         offload_force_evict: args.offload_force_evict,
         cluster_id: resolve_cluster_id(args),

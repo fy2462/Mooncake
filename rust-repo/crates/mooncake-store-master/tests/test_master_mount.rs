@@ -5,6 +5,13 @@ use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use tonic::Request;
 use uuid::Uuid;
 
+fn proto_uuid(id: Uuid) -> proto::Uuid {
+    proto::Uuid {
+        high: id.as_u64_pair().0,
+        low: id.as_u64_pair().1,
+    }
+}
+
 #[tokio::test]
 async fn test_ping_requires_remount_before_ok_status() {
     let service = MasterServiceImpl::default();
@@ -283,4 +290,59 @@ async fn test_graceful_unmount_segment_removes_after_delay() {
         .segments
         .iter()
         .any(|segment| segment == "host-g:3333"));
+}
+
+#[tokio::test]
+async fn test_unmount_segment_missing_is_idempotent() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(proto_uuid(Uuid::new_v4())),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_nof_disabled_rejects_nof_operations() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: false,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    let segment_id = Uuid::new_v4();
+
+    let mount_err = MasterService::mount_no_f_segment(
+        &service,
+        Request::new(proto::MountNoFSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment: Some(proto::NoFSegment {
+                id: Some(proto_uuid(segment_id)),
+                name: "nof-disabled:1".into(),
+                base: 0x100000000,
+                size: 4096,
+                te_endpoint: String::new(),
+                client_id: Some(proto_uuid(client_id)),
+            }),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(mount_err.code(), tonic::Code::Unavailable);
+
+    let unmount_err = MasterService::unmount_no_f_segment(
+        &service,
+        Request::new(proto::UnmountNoFSegmentRequest {
+            segment_id: Some(proto_uuid(segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unmount_err.code(), tonic::Code::Unavailable);
 }

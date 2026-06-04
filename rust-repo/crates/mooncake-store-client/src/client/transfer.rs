@@ -194,6 +194,53 @@ impl MooncakeClient {
         Ok(replicas)
     }
 
+    /// Query the master for replica lists for multiple keys in one RPC.
+    /// Results preserve input order and each key carries its own error.
+    ///
+    /// 批量向 master 查询多个 key 的副本列表。
+    /// 返回顺序与输入一致，每个 key 独立携带错误。
+    /// C++ equivalent: Client::BatchQuery() → BatchGetReplicaList()
+    pub(crate) async fn fetch_batch_replicas(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<StoreResult<Vec<ReplicaDescriptor>>>> {
+        let request = proto::BatchGetReplicaListRequest {
+            keys: keys.to_vec(),
+            tenant_id: String::new(),
+        };
+        let response = self
+            .master
+            .batch_get_replica_list(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        if response.results.len() != keys.len() {
+            return Err(StoreError::Internal(format!(
+                "BatchGetReplicaList response size mismatch: expected {}, got {}",
+                keys.len(),
+                response.results.len()
+            )));
+        }
+
+        let results = response
+            .results
+            .into_iter()
+            .zip(keys.iter())
+            .map(|(result, key)| match result.status {
+                0 => result
+                    .response
+                    .map(|response| self.replicas_from_proto(&response.replicas))
+                    .ok_or_else(|| {
+                        StoreError::Internal(format!("missing replica response for {key}"))
+                    }),
+                -1 => Err(StoreError::KeyNotFound(key.clone())),
+                -5 => Err(StoreError::ReplicaNotReady),
+                _ => Err(StoreError::Internal(result.error_message)),
+            })
+            .collect();
+        Ok(results)
+    }
+
     /// Convert protobuf replica descriptors into domain [`ReplicaDescriptor`]s.
     ///
     /// Maps proto enums:

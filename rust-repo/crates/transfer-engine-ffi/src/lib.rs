@@ -259,6 +259,12 @@ impl TransferEngine {
         Ok(cstr.to_str()?.to_string())
     }
 
+    /// Get the RPC port used by this engine.
+    /// 获取当前引擎使用的 RPC 端口。
+    pub fn get_rpc_port(&self) -> i32 {
+        unsafe { ffi::getRpcPort(self.handle.as_ptr()) }
+    }
+
     // -----------------------------------------------------------------------
     // Memory registration / 内存注册
     // -----------------------------------------------------------------------
@@ -431,6 +437,16 @@ impl TransferEngine {
         tracing::info!(target: "te_debug", seg_id = segment_id.0, rc, "close_segment: C API returned");
         if rc != 0 {
             tracing::error!(target: "te_debug", seg_id = segment_id.0, rc, "close_segment: FAILED");
+            return Err(TransferEngineError::OperationFailed(rc));
+        }
+        Ok(())
+    }
+
+    /// Check whether an opened segment is still valid/reachable.
+    /// 检查已打开 segment 是否仍然有效/可达。
+    pub fn check_segment_status(&self, segment_id: SegmentId) -> TransferEngineResult<()> {
+        let rc = unsafe { ffi::checkSegmentStatus(self.handle.as_ptr(), segment_id.0) };
+        if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(())
@@ -641,6 +657,27 @@ impl TransferEngine {
         })
     }
 
+    /// Poll the aggregate status of a batch.
+    /// 轮询整个批次的聚合传输状态。
+    pub fn get_batch_transfer_status(
+        &self,
+        batch_id: BatchId,
+    ) -> TransferEngineResult<TransferStatus> {
+        let mut status = ffi::transfer_status_t {
+            status: 0,
+            transferred_bytes: 0,
+        };
+        let rc =
+            unsafe { ffi::getBatchTransferStatus(self.handle.as_ptr(), batch_id.0, &mut status) };
+        if rc != 0 {
+            return Err(TransferEngineError::OperationFailed(rc));
+        }
+        Ok(TransferStatus {
+            status: TransferStatusEnum::from_i32(status.status),
+            transferred_bytes: status.transferred_bytes,
+        })
+    }
+
     /// Release a batch ID after all transfers complete.
     /// 在所有传输完成后释放批次 ID。
     ///
@@ -736,6 +773,42 @@ impl TransferEngine {
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(())
+    }
+
+    /// Probe whether a peer segment is alive.
+    /// 探测目标 peer segment 是否存活。
+    pub fn probe_peer_alive_by_id(&self, target_id: SegmentId) -> bool {
+        unsafe { ffi::probePeerAliveByID(self.handle.as_ptr(), target_id.0) == 0 }
+    }
+
+    /// Return true when TCP is the only installed transport.
+    /// 当 TCP 是唯一安装的传输协议时返回 true。
+    pub fn is_tcp_only(&self) -> bool {
+        unsafe { ffi::isTcpOnly(self.handle.as_ptr()) != 0 }
+    }
+
+    /// Check whether a memory range overlaps an already registered region.
+    /// 检查内存范围是否与已注册区域重叠。
+    ///
+    /// # Safety
+    /// `addr` and `length` must describe the caller-owned memory range to check.
+    pub unsafe fn check_overlap(&self, addr: *mut c_void, length: u64) -> bool {
+        unsafe { ffi::checkOverlap(self.handle.as_ptr(), addr, length) != 0 }
+    }
+
+    /// Toggle automatic topology discovery in the native engine.
+    /// 切换 native engine 的自动拓扑发现开关。
+    pub fn set_auto_discover(&self, auto_discover: bool) {
+        unsafe { ffi::setAutoDiscover(self.handle.as_ptr(), auto_discover as i32) };
+    }
+
+    /// Get the native base address used by transports that expose one.
+    /// 获取传输层暴露的 native base address。
+    ///
+    /// # Safety
+    /// The returned pointer is owned by the native engine and must not be freed.
+    pub unsafe fn get_base_addr(&self) -> *mut c_void {
+        unsafe { ffi::getBaseAddr(self.handle.as_ptr()) }
     }
 
     /// Poll for incoming notification messages.

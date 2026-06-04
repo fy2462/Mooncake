@@ -416,6 +416,9 @@ pub struct MasterRuntimeConfig {
     /// 全局 offload 开关；关闭时拒绝注册本地磁盘 offload segment。
     /// Global offload gate; local disk offload segments cannot register when disabled.
     pub enable_offload: bool,
+    /// 全局 NoF 开关；关闭时拒绝 NoF segment 和 NoF replica 操作。
+    /// Global NoF gate; NoF segment and NoF replica operations are unavailable when disabled.
+    pub enable_nof: bool,
     /// 淘汰时是否触发 offload（将内存副本写入本地磁盘）。
     /// Whether to trigger offload (write memory replicas to local disk) on eviction.
     pub offload_on_evict: bool,
@@ -473,6 +476,7 @@ impl Default for MasterRuntimeConfig {
             soft_pin_ttl: Duration::from_secs(1800),
             lease_ttl: Duration::from_secs(3600),
             enable_offload: false,
+            enable_nof: true,
             offload_on_evict: false,
             offload_force_evict: false,
             client_live_ttl: Duration::from_secs(30),

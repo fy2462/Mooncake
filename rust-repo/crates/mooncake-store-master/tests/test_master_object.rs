@@ -473,6 +473,41 @@ async fn test_put_revoke_remove_all_and_storage_config() {
         .unwrap();
     }
 
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "remove-all-tenant".into(),
+            slice_length: 128,
+            tenant_id: "tenant-a".into(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: "revoke:1".into(),
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "remove-all-tenant".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
     // PutStart revoke-key without PutEnd so it stays in Allocating state for PutRevoke
     MasterService::put_start(
         &service,
@@ -529,7 +564,16 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .await
     .unwrap()
     .into_inner();
-    assert_eq!(removed.removed_count, 2);
+    assert_eq!(removed.removed_count, 3);
+    assert!(MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "remove-all-tenant".into(),
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .is_err());
 
     let storage = MasterService::get_storage_config(
         &service,

@@ -187,6 +187,42 @@ async fn test_batch_exist_key_is_tenant_scoped_and_requires_complete() {
 }
 
 #[tokio::test]
+async fn test_batch_get_replica_list_preserves_per_key_results() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "batch-get:1", 4096).await;
+
+    put_start_one(&service, client_id, "ready", "batch-get:1").await;
+    put_end_one(&service, client_id, "ready").await;
+    put_start_one(&service, client_id, "pending", "batch-get:1").await;
+
+    let response = MasterService::batch_get_replica_list(
+        &service,
+        Request::new(proto::BatchGetReplicaListRequest {
+            keys: vec!["ready".into(), "missing".into(), "pending".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.results.len(), 3);
+    assert_eq!(response.results[0].status, 0);
+    assert_eq!(
+        response.results[0]
+            .response
+            .as_ref()
+            .unwrap()
+            .replicas
+            .len(),
+        1
+    );
+    assert_eq!(response.results[1].status, -1);
+    assert_eq!(response.results[2].status, -5);
+}
+
+#[tokio::test]
 async fn test_batch_put_start_records_owner_and_revoke_uses_replica_type() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();

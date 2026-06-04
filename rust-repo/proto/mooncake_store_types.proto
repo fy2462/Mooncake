@@ -429,6 +429,21 @@ message GetReplicaListResponse {
   uint64 lease_ttl_ms = 2;
 }
 
+message BatchGetReplicaListRequest {
+  repeated string keys = 1;
+  string tenant_id = 2;
+}
+
+message BatchGetReplicaListResult {
+  int32 status = 1;
+  GetReplicaListResponse response = 2;
+  string error_message = 3;
+}
+
+message BatchGetReplicaListResponse {
+  repeated BatchGetReplicaListResult results = 1;
+}
+
 message GetReplicaListByRegexRequest {
   string key_regex = 1;
   string tenant_id = 2;

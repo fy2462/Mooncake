@@ -228,6 +228,9 @@ impl MasterServiceImpl {
         &self,
         _request: Request<proto::GetAllNoFSegmentsRequest>,
     ) -> Result<Response<proto::GetAllNoFSegmentsResponse>, Status> {
+        if !self.state.runtime_config.enable_nof {
+            return Err(Status::unavailable("NoF is not enabled"));
+        }
         let segments = self
             .state
             .nof_segments
@@ -244,6 +247,9 @@ impl MasterServiceImpl {
         &self,
         request: Request<proto::GetNoFSegmentsByNameRequest>,
     ) -> Result<Response<proto::GetNoFSegmentsByNameResponse>, Status> {
+        if !self.state.runtime_config.enable_nof {
+            return Err(Status::unavailable("NoF is not enabled"));
+        }
         let req = request.into_inner();
         let owners = self
             .state
@@ -500,6 +506,9 @@ impl MasterServiceImpl {
                 "prefer_alloc_in_same_node is not supported with NoF replicas",
             ));
         }
+        if !self.state.runtime_config.enable_nof && config.nof_replica_num > 0 {
+            return Err(Status::invalid_argument("NoF is not enabled"));
+        }
         let group_id = Self::group_id_for_key(&config, 1, 0)?;
         let replica_count = config.replica_num as usize;
 
@@ -680,7 +689,16 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListRequest>,
     ) -> Result<Response<proto::GetReplicaListResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let response = self.replica_list_for_key(&req.tenant_id, &req.key)?;
+        Ok(Response::new(response))
+    }
+
+    pub(super) fn replica_list_for_key(
+        &self,
+        tenant_id: &str,
+        key: &str,
+    ) -> Result<proto::GetReplicaListResponse, Status> {
+        let scoped_key = make_tenant_scoped_key(tenant_id, key);
 
         // Phase 1: read-only (uses get() — shared lock, allows concurrent reads).
         // 阶段 1：只读（使用 get() — 共享锁，允许并发读）
@@ -706,7 +724,7 @@ impl MasterServiceImpl {
                 }
                 (replicas, eligible)
             }
-            None => return Err(Status::not_found(format!("key not found: {}", req.key))),
+            None => return Err(Status::not_found(format!("key not found: {key}"))),
         };
 
         // Phase 2: brief write lock for timestamp updates only (microseconds).
@@ -733,10 +751,10 @@ impl MasterServiceImpl {
         }
         metrics::GET_REQUESTS.inc();
         let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
-        Ok(Response::new(proto::GetReplicaListResponse {
+        Ok(proto::GetReplicaListResponse {
             replicas: completed_replicas,
             lease_ttl_ms,
-        }))
+        })
     }
 
     // ---- GetReplicaListByRegex ----
@@ -1025,6 +1043,9 @@ impl MasterServiceImpl {
             return Err(Status::invalid_argument(
                 "prefer_alloc_in_same_node is not supported with NoF replicas",
             ));
+        }
+        if !self.state.runtime_config.enable_nof && config.nof_replica_num > 0 {
+            return Err(Status::invalid_argument("NoF is not enabled"));
         }
         let requested_group_id = Self::group_id_for_key(&config, 1, 0)?;
 

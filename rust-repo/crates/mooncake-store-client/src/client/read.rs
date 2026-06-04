@@ -339,15 +339,15 @@ impl MooncakeClient {
     }
 
     // -----------------------------------------------------------------------
-    // Batch Get — sequential key iteration with per-key error tolerance
-    // 批量获取 —— 顺序遍历 key，每个 key 独立容错
+    // Batch Get — batched metadata query with per-key error tolerance
+    // 批量获取 —— 批量查询元数据，每个 key 独立容错
     //
-    // Each key is fetched independently via get(); failures are recorded as
-    // `None` in the result vector rather than aborting the entire batch.
-    // This matches the C++ behavior: errors are absorbed per-key.
+    // Hot-cache hits are served locally. Remaining keys are queried through
+    // BatchGetReplicaList, then read independently; failures are recorded as
+    // `None` rather than aborting the entire batch.
     //
-    // 每个 key 通过 get() 独立获取；失败记录为 None 而非中止整个批次。
-    // 这与 C++ 行为一致：错误按 key 吸收。
+    // hot-cache 命中直接本地返回；剩余 key 通过 BatchGetReplicaList 批量查询，
+    // 再逐 key 读取；失败记录为 None 而非中止整个批次。
     // C++ equivalent: Client::BatchGet()
     // -----------------------------------------------------------------------
 
@@ -358,27 +358,68 @@ impl MooncakeClient {
     /// 批量获取多个 key。每个 key 独立获取；某个 key 的失败不会中止整个批次 ——
     /// 对应位置为 None，成功的位置包含 Some(data)。
     ///
-    /// This is a convenience wrapper that calls [`get`](Self::get) for each key.
-    /// For better performance with many small keys, consider using
-    /// [`batch_get_into`](Self::batch_get_into) with pre-registered buffers.
-    ///
-    /// 这是为每个 key 调用 get() 的便捷封装。对于许多小 key 的场景，
-    /// 考虑使用 batch_get_into 配合预注册的缓冲区以获得更好的性能。
     pub async fn batch_get(&mut self, keys: &[String]) -> StoreResult<Vec<Option<Vec<u8>>>> {
         tracing::info!(target: "te_debug", key_count = keys.len(), "batch_get: ENTER");
-        let mut results = Vec::with_capacity(keys.len());
+        let mut results = vec![None; keys.len()];
+        let mut pending = Vec::new();
+
         for (i, key) in keys.iter().enumerate() {
+            if let Some(ref cache) = self.hot_cache {
+                if let Some(data) = cache.get(key) {
+                    tracing::info!(target: "te_debug", index = i, %key, data_len = data.len(), "batch_get: HIT hot cache");
+                    results[i] = Some(data);
+                    continue;
+                }
+            }
+            pending.push((i, key.clone()));
+        }
+
+        let pending_keys = pending
+            .iter()
+            .map(|(_, key)| key.clone())
+            .collect::<Vec<_>>();
+        let replica_results = if pending_keys.is_empty() {
+            Vec::new()
+        } else {
+            match self.fetch_batch_replicas(&pending_keys).await {
+                Ok(results) => results,
+                Err(err) => pending_keys
+                    .iter()
+                    .map(|_| Err(StoreError::Internal(err.to_string())))
+                    .collect(),
+            }
+        };
+
+        for ((i, key), replica_result) in pending.into_iter().zip(replica_results.into_iter()) {
             tracing::info!(target: "te_debug", index = i, total = keys.len(), %key, "batch_get: processing key");
-            match self.get(key).await {
+            let data_result = match replica_result {
+                Ok(replicas) => match self.select_best_replica(&replicas) {
+                    Some(replica) => self.read_from_replica(&key, replica).await,
+                    None => Err(StoreError::KeyNotFound(key.clone())),
+                },
+                Err(err) => Err(err),
+            };
+
+            match data_result {
                 Ok(data) => {
                     tracing::info!(target: "te_debug", index = i, %key, data_len = data.len(), "batch_get: key OK");
-                    results.push(Some(data));
+                    if let Some(ref cache) = self.hot_cache {
+                        cache.put(&key, &data);
+                    }
+                    results[i] = Some(data);
                 }
                 Err(e) => {
-                    // Per-key error tolerance: log and continue.
-                    // 按 key 容错：记录错误并继续。
                     tracing::warn!(target: "te_debug", index = i, %key, error = %e, "batch_get: key FAILED");
-                    results.push(None);
+                    if let Some(ref handler) = self.miss_handler {
+                        if handler.is_enabled() {
+                            if let Ok(data) = handler.handle_miss(&key).await {
+                                if let Some(ref cache) = self.hot_cache {
+                                    cache.put(&key, &data);
+                                }
+                                results[i] = Some(data);
+                            }
+                        }
+                    }
                 }
             }
         }

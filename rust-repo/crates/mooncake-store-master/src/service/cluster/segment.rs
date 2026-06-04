@@ -122,6 +122,9 @@ impl MasterServiceImpl {
         &self,
         request: Request<proto::MountNoFSegmentRequest>,
     ) -> Result<Response<proto::MountNoFSegmentResponse>, Status> {
+        if !self.state.runtime_config.enable_nof {
+            return Err(Status::unavailable("NoF is not enabled"));
+        }
         let req = request.into_inner();
         let client_id = uuid_from_proto(
             req.client_id
@@ -181,12 +184,15 @@ impl MasterServiceImpl {
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
 
-        let segment_name = self
-            .state
-            .segments
-            .get(&segment_id)
-            .map(|e| e.segment.name.clone())
-            .unwrap_or_default();
+        let segment = match self.state.segments.get(&segment_id) {
+            Some(segment) => segment,
+            None => return Ok(Response::new(proto::UnmountSegmentResponse {})),
+        };
+        let segment_name = segment.segment.name.clone();
+        if segment.client_id != client_id {
+            return Err(Status::not_found("segment not found for client"));
+        }
+        drop(segment);
 
         if !unmount_segment_owned(&self.state, segment_id, client_id) {
             return Err(Status::not_found("segment not found for client"));
@@ -205,6 +211,9 @@ impl MasterServiceImpl {
         &self,
         request: Request<proto::UnmountNoFSegmentRequest>,
     ) -> Result<Response<proto::UnmountNoFSegmentResponse>, Status> {
+        if !self.state.runtime_config.enable_nof {
+            return Err(Status::unavailable("NoF is not enabled"));
+        }
         let req = request.into_inner();
         let segment_id = uuid_from_proto(
             req.segment_id
@@ -216,12 +225,15 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        let nof_segment_name = self
-            .state
-            .nof_segments
-            .get(&segment_id)
-            .map(|e| e.segment.name.clone())
-            .unwrap_or_default();
+        let nof_segment = match self.state.nof_segments.get(&segment_id) {
+            Some(segment) => segment,
+            None => return Ok(Response::new(proto::UnmountNoFSegmentResponse {})),
+        };
+        let nof_segment_name = nof_segment.segment.name.clone();
+        if nof_segment.segment.client_id != client_id {
+            return Err(Status::not_found("NoF segment not found for client"));
+        }
+        drop(nof_segment);
 
         if !unmount_nof_segment_owned(&self.state, segment_id, client_id) {
             return Err(Status::not_found("NoF segment not found for client"));
@@ -368,6 +380,9 @@ impl MasterServiceImpl {
         &self,
         request: Request<proto::ReMountNoFSegmentRequest>,
     ) -> Result<Response<proto::ReMountNoFSegmentResponse>, Status> {
+        if !self.state.runtime_config.enable_nof {
+            return Err(Status::unavailable("NoF is not enabled"));
+        }
         let req = request.into_inner();
         let client_id = uuid_from_proto(
             req.client_id

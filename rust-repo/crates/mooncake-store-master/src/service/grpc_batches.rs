@@ -55,7 +55,45 @@ impl From<BatchStatus> for i32 {
     }
 }
 
+fn status_to_batch_status(status: &Status) -> BatchStatus {
+    match status.code() {
+        tonic::Code::NotFound => BatchStatus::KeyNotFound,
+        tonic::Code::FailedPrecondition => BatchStatus::ReplicaNotReady,
+        tonic::Code::PermissionDenied => BatchStatus::IllegalClient,
+        _ => BatchStatus::InvalidState,
+    }
+}
+
 impl MasterServiceImpl {
+    // ---- BatchGetReplicaList ----
+    // C++ equivalent: WrappedMasterService::BatchGetReplicaList, implemented as
+    // repeated GetReplicaList calls with per-key expected/error results.
+    pub(super) async fn batch_get_replica_list_impl(
+        &self,
+        request: Request<proto::BatchGetReplicaListRequest>,
+    ) -> Result<Response<proto::BatchGetReplicaListResponse>, Status> {
+        let req = request.into_inner();
+        let results = req
+            .keys
+            .iter()
+            .map(|key| match self.replica_list_for_key(&req.tenant_id, key) {
+                Ok(response) => proto::BatchGetReplicaListResult {
+                    status: BatchStatus::Success.into(),
+                    response: Some(response),
+                    error_message: String::new(),
+                },
+                Err(status) => proto::BatchGetReplicaListResult {
+                    status: status_to_batch_status(&status).into(),
+                    response: None,
+                    error_message: status.message().to_string(),
+                },
+            })
+            .collect();
+        Ok(Response::new(proto::BatchGetReplicaListResponse {
+            results,
+        }))
+    }
+
     // ---- BatchExistKey ----
     // 批量检查 key 是否存在，返回布尔数组与输入 keys 一一对应。
     pub(super) async fn batch_exist_key_impl(
@@ -484,12 +522,16 @@ impl MasterServiceImpl {
                 "replica_num and nof_replica_num cannot both be zero",
             ));
         }
-        if config.nof_replica_num > 0 {
+        if config.prefer_alloc_in_same_node && config.nof_replica_num > 0 {
             return Err(Status::invalid_argument(
-                "batch_put_start does not support NoF replicas",
+                "prefer_alloc_in_same_node is not supported with NoF replicas",
             ));
         }
-        let replica_count = config.replica_num as usize;
+        if config.nof_replica_num > 0 && !self.state.runtime_config.enable_nof {
+            return Err(Status::invalid_argument("NoF is not enabled"));
+        }
+        let memory_replica_count = config.replica_num as usize;
+        let nof_replica_count = config.nof_replica_num as usize;
         let mut all_replicas = Vec::new();
         let mut results = Vec::with_capacity(req.keys.len());
         let invalid_group_ids =
@@ -526,19 +568,63 @@ impl MasterServiceImpl {
                 });
                 continue;
             }
-            let replicas = {
+            let mut replicas = {
                 let mut allocator = self.state.allocator.write();
                 allocator.allocate_for_client(
                     &key,
                     Some(client_id),
                     *slice_len,
-                    replica_count,
+                    memory_replica_count,
                     &config,
                 )
             };
-            if replicas.len() == replica_count {
+            if replicas.len() != memory_replica_count {
+                release_replicas(&self.state, &replicas);
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
+                continue;
+            }
+            if nof_replica_count > 0 {
+                match allocate_nof_replicas(
+                    &self.state,
+                    &key,
+                    *slice_len,
+                    nof_replica_count,
+                    &config.preferred_nof_segments,
+                ) {
+                    Ok(nof_replicas) => replicas.extend(nof_replicas),
+                    Err(_) => {
+                        release_replicas(&self.state, &replicas);
+                        results.push(proto::BatchStartEntryResult {
+                            key: raw_key.clone(),
+                            replicas: vec![],
+                            status: BatchStatus::InvalidState.into(),
+                            tenant_id: normalize_tenant_id(&req.tenant_id),
+                        });
+                        continue;
+                    }
+                }
+            }
+            if replicas.len() == memory_replica_count + nof_replica_count {
                 let proto_r: Vec<_> = replicas.iter().map(replica_to_proto).collect();
-                sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
+                sync_segment_usage(
+                    &self.state,
+                    replicas
+                        .iter()
+                        .filter(|r| r.replica_type == ReplicaType::Memory)
+                        .map(|r| r.segment_id),
+                );
+                sync_nof_segment_usage(
+                    &self.state,
+                    replicas
+                        .iter()
+                        .filter(|r| r.replica_type == ReplicaType::NoFSsd)
+                        .map(|r| r.segment_id),
+                );
                 let now = SystemTime::now();
                 let (t_id, u_key) = split_scoped_key(&key);
                 self.state.objects.insert(
