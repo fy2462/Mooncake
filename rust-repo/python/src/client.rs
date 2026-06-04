@@ -91,10 +91,12 @@ use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
 use mooncake_store_client::proto::StorageObjectMetadata;
 use mooncake_store_client::MooncakeClient;
+use mooncake_store_core::NoFSegment;
 use parking_lot::Mutex;
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -187,7 +189,48 @@ pub(crate) fn replicas_to_py(replicas: Vec<mooncake_store_core::ReplicaDescripto
             d.into()
         })
         .collect();
-    out.into_pyobject(py).expect("replicas_to_py: into_pyobject failed").unbind()
+    out.into_pyobject(py)
+        .expect("replicas_to_py: into_pyobject failed")
+        .unbind()
+}
+
+fn parse_uuid(id: &str) -> PyResult<Uuid> {
+    Uuid::parse_str(id).map_err(|e| to_py_err(format!("invalid UUID: {e}")))
+}
+
+fn nof_segment_from_dict(d: &Bound<'_, PyDict>) -> PyResult<NoFSegment> {
+    let id = d
+        .get_item("id")?
+        .and_then(|v| v.extract::<String>().ok())
+        .map(|s| parse_uuid(&s))
+        .transpose()?
+        .unwrap_or_else(Uuid::nil);
+    let client_id = d
+        .get_item("client_id")?
+        .and_then(|v| v.extract::<String>().ok())
+        .map(|s| parse_uuid(&s))
+        .transpose()?
+        .unwrap_or_else(Uuid::nil);
+    Ok(NoFSegment {
+        id,
+        name: d
+            .get_item("name")?
+            .and_then(|v| v.extract::<String>().ok())
+            .unwrap_or_default(),
+        base: d
+            .get_item("base")?
+            .and_then(|v| v.extract::<u64>().ok())
+            .unwrap_or(0),
+        size: d
+            .get_item("size")?
+            .and_then(|v| v.extract::<u64>().ok())
+            .unwrap_or(0),
+        te_endpoint: d
+            .get_item("te_endpoint")?
+            .and_then(|v| v.extract::<String>().ok())
+            .unwrap_or_default(),
+        client_id,
+    })
 }
 
 // =========================================================================
@@ -594,12 +637,17 @@ impl PythonMooncakeClient {
 
     /// Remove all keys from the store. Destructive — careful!
     /// 删除 store 中的所有 key。危险操作，请谨慎使用！
-    fn remove_all<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (force = false))]
+    fn remove_all<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        force: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner)?;
-            let removed = client.remove_all().await;
+            let removed = client.remove_all(force).await;
             *inner.lock() = Some(client);
             removed.map_err(to_py_err)
         })
@@ -819,7 +867,9 @@ impl PythonMooncakeClient {
             let result = client.query_task(task_id).await;
             *inner.lock() = Some(client);
             let resp = result.map_err(to_py_err)?;
-            let task_id_str = resp.id.map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
+            let task_id_str = resp
+                .id
+                .map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
             Ok((task_id_str, resp.status, resp.message))
         })
     }
@@ -843,8 +893,15 @@ impl PythonMooncakeClient {
             let out: Vec<(Option<String>, i32, String, i64, u32)> = tasks
                 .iter()
                 .map(|t| {
-                    let id_str = t.id.map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
-                    (id_str, t.r#type, t.payload.clone(), t.created_at_ms_epoch, t.max_retry_attempts)
+                    let id_str =
+                        t.id.map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
+                    (
+                        id_str,
+                        t.r#type,
+                        t.payload.clone(),
+                        t.created_at_ms_epoch,
+                        t.max_retry_attempts,
+                    )
                 })
                 .collect();
             Ok(out)
@@ -1246,6 +1303,287 @@ impl PythonMooncakeClient {
             .map(|replicas| replicas_to_py(replicas.clone()))
             .collect();
         Ok(out.into_pyobject(py)?.unbind())
+    }
+
+    // ===================================================================
+    // Storage admin / segment queries — 存储管理与 segment 查询
+    // ===================================================================
+
+    /// Mount a NoF segment. The segment dict accepts:
+    /// id, name, base, size, te_endpoint, client_id.
+    fn mount_nof_segment<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment: Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let segment = nof_segment_from_dict(&segment)?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.mount_nof_segment(&segment).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Re-mount NoF segments after restart. Each segment is a dict accepted by
+    /// mount_nof_segment().
+    fn remount_nof_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segments: Vec<Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let segments = segments
+            .iter()
+            .map(nof_segment_from_dict)
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.remount_nof_segments(&segments).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Unmount a NoF segment by UUID string.
+    fn unmount_nof_segment<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let segment_id = parse_uuid(&segment_id)?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.unmount_nof_segment(segment_id).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Return all NoF segments as tuples:
+    /// (id, name, base, size, te_endpoint, client_id).
+    fn get_all_nof_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let segments = client.get_all_nof_segments().await.map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            let out: Vec<(String, String, u64, u64, String, String)> = segments
+                .iter()
+                .map(|s| {
+                    (
+                        s.id.to_string(),
+                        s.name.clone(),
+                        s.base,
+                        s.size,
+                        s.te_endpoint.clone(),
+                        s.client_id.to_string(),
+                    )
+                })
+                .collect();
+            Ok(out)
+        })
+    }
+
+    /// Return owners for NoF segments with a given name as
+    /// (segment_id, client_id) tuples.
+    fn get_nof_segments_by_name<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let owners = client
+                .get_nof_segments_by_name(&segment_name)
+                .await
+                .map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            let out: Vec<(String, String)> = owners
+                .iter()
+                .map(|o| (o.segment_id.to_string(), o.client_id.to_string()))
+                .collect();
+            Ok(out)
+        })
+    }
+
+    /// Query segment usage, returning (total_size, used_size).
+    fn query_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let usage = client
+                .query_segments(&segment_name)
+                .await
+                .map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok((usage.total_size, usage.used_size))
+        })
+    }
+
+    /// Query storage config, returning (fs_dir, enable_disk_eviction, quota_bytes).
+    fn get_storage_config<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let config = client.get_storage_config().await.map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok((
+                config.fs_dir,
+                config.enable_disk_eviction,
+                config.quota_bytes,
+            ))
+        })
+    }
+
+    /// Query segment status by name. Returns the proto enum value as int.
+    fn query_segment_status<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let status = client
+                .query_segment_status(&segment_name)
+                .await
+                .map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(status)
+        })
+    }
+
+    /// Query segment status by UUID string. Returns the proto enum value as int.
+    fn query_segment_status_by_id<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let segment_id = parse_uuid(&segment_id)?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let status = client
+                .query_segment_status_by_id(segment_id)
+                .await
+                .map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(status)
+        })
+    }
+
+    /// Return the master's configured filesystem directory.
+    fn get_fsdir<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let fsdir = client.get_fsdir().await.map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(fsdir)
+        })
+    }
+
+    /// Check master readiness and return its version string.
+    fn service_ready<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let version = client.service_ready().await.map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(version)
+        })
+    }
+
+    /// Return all keys across tenants for admin/debug use.
+    fn get_all_keys_for_admin<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let keys = client.get_all_keys_for_admin().await.map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(keys)
+        })
+    }
+
+    /// Return all memory segment names for admin/debug use.
+    fn get_all_segments_for_admin<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let segments = client
+                .get_all_segments_for_admin()
+                .await
+                .map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(segments)
+        })
+    }
+
+    /// Query segment usage for admin/debug use, returning (total_size, used_size).
+    fn query_segment_for_admin<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_name: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let usage = client
+                .query_segment_for_admin(&segment_name)
+                .await
+                .map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok((usage.total_size, usage.used_size))
+        })
+    }
+
+    /// Calculate cache stats. Returns a dict-like mapping of metric name to value.
+    fn calc_cache_stats<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let stats: HashMap<String, f64> = client.calc_cache_stats().await.map_err(to_py_err)?;
+            *inner.lock() = Some(client);
+            Ok(stats)
+        })
     }
 
     // ===================================================================

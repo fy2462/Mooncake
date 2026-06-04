@@ -22,6 +22,8 @@
 // - data_type:       Semantic type of data (Kvcache, Weight, etc.) used by
 //                    the eviction policy to make smarter decisions.
 //                    数据的语义类型，用于驱逐策略做智能决策。
+// - group_ids:       Optional per-key group routing ids for C++ parity.
+//                    分组路由 ID；batch 操作时数量必须与 keys 数量一致。
 
 use mooncake_store_core::{ObjectDataType, ReplicateConfig};
 use pyo3::prelude::*;
@@ -59,6 +61,7 @@ use pyo3::prelude::*;
 ///     7 = OptimizerState (优化器状态)
 ///     8 = Metadata (元数据)
 ///     9 = General (通用)
+/// - group_ids: Optional per-key group ids for group routing / leases.
 #[pyclass(name = "ReplicateConfig", from_py_object)]
 #[derive(Clone)]
 pub(crate) struct ReplicateConfigPy {
@@ -84,6 +87,8 @@ pub(crate) struct ReplicateConfigPy {
     /// 对象数据类型枚举值（见上方说明）
     #[pyo3(get, set)]
     pub data_type: i32,
+    #[pyo3(get, set)]
+    pub group_ids: Vec<String>,
 }
 
 #[pymethods]
@@ -102,6 +107,7 @@ impl ReplicateConfigPy {
         preferred_segments = vec![],
         preferred_nof_segments = vec![],
         data_type = 0,
+        group_ids = vec![],
     ))]
     fn new(
         replica_num: u32,
@@ -113,6 +119,7 @@ impl ReplicateConfigPy {
         preferred_segments: Vec<String>,
         preferred_nof_segments: Vec<String>,
         data_type: i32,
+        group_ids: Vec<String>,
     ) -> Self {
         Self {
             replica_num,
@@ -124,13 +131,14 @@ impl ReplicateConfigPy {
             preferred_segments,
             preferred_nof_segments,
             data_type,
+            group_ids,
         }
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "ReplicateConfig(replica_num={}, nof_replica_num={}, data_type={}, preferred_segment='{}')",
-            self.replica_num, self.nof_replica_num, self.data_type, self.preferred_segment
+            "ReplicateConfig(replica_num={}, nof_replica_num={}, data_type={}, preferred_segment='{}', group_ids={:?})",
+            self.replica_num, self.nof_replica_num, self.data_type, self.preferred_segment, self.group_ids
         )
     }
 }
@@ -165,6 +173,7 @@ impl ReplicateConfigPy {
                 9 => ObjectDataType::General,
                 _ => ObjectDataType::Unknown,
             },
+            group_ids: self.group_ids.clone(),
         }
     }
 }
