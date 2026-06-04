@@ -41,6 +41,48 @@
 use super::*;
 
 impl MasterServiceImpl {
+    pub(crate) fn group_id_for_key(
+        config: &ReplicateConfig,
+        key_count: usize,
+        key_index: usize,
+    ) -> Result<String, Status> {
+        if config.group_ids.is_empty() {
+            return Ok(String::new());
+        }
+        if config.group_ids.len() != key_count || key_index >= key_count {
+            return Err(Status::invalid_argument("invalid group_ids"));
+        }
+        Ok(config.group_ids[key_index].clone())
+    }
+
+    pub(crate) fn grant_group_lease(&self, tenant_id: &str, group_id: &str) {
+        if group_id.is_empty() {
+            return;
+        }
+        let keys = self
+            .state
+            .objects
+            .iter()
+            .filter(|entry| entry.tenant_id == tenant_id && entry.group_id == group_id)
+            .filter(|entry| {
+                entry
+                    .replicas
+                    .iter()
+                    .any(|replica| replica.status == ReplicaStatus::Complete)
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(mut entry) = self.state.objects.get_mut(&key) {
+                entry.last_access = SystemTime::now();
+                entry.grant_lease(
+                    self.state.runtime_config.lease_ttl,
+                    self.state.runtime_config.soft_pin_ttl,
+                );
+            }
+        }
+    }
+
     pub(crate) fn cleanup_removed_object(&self, scoped_key: &str, object: &ObjectEntry) {
         for mut entry in self.state.client_objects.iter_mut() {
             entry.value_mut().remove(scoped_key);
@@ -67,6 +109,10 @@ impl MasterServiceImpl {
                 self.state.runtime_config.lease_ttl,
                 self.state.runtime_config.soft_pin_ttl,
             );
+            let tenant_id = entry.tenant_id.clone();
+            let group_id = entry.group_id.clone();
+            drop(entry);
+            self.grant_group_lease(&tenant_id, &group_id);
         }
         exists
     }
@@ -216,6 +262,118 @@ impl MasterServiceImpl {
         }))
     }
 
+    pub(super) async fn service_ready_impl(
+        &self,
+        _request: Request<proto::ServiceReadyRequest>,
+    ) -> Result<Response<proto::ServiceReadyResponse>, Status> {
+        Ok(Response::new(proto::ServiceReadyResponse {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }))
+    }
+
+    pub(super) async fn get_all_keys_for_admin_impl(
+        &self,
+        _request: Request<proto::GetAllKeysForAdminRequest>,
+    ) -> Result<Response<proto::GetAllKeysForAdminResponse>, Status> {
+        let keys = self
+            .state
+            .objects
+            .iter()
+            .map(|entry| entry.user_key.clone())
+            .collect();
+        Ok(Response::new(proto::GetAllKeysForAdminResponse { keys }))
+    }
+
+    pub(super) async fn get_all_segments_for_admin_impl(
+        &self,
+        _request: Request<proto::GetAllSegmentsForAdminRequest>,
+    ) -> Result<Response<proto::GetAllSegmentsForAdminResponse>, Status> {
+        let segments = self
+            .state
+            .segments
+            .iter()
+            .map(|entry| entry.segment.name.clone())
+            .collect();
+        Ok(Response::new(proto::GetAllSegmentsForAdminResponse {
+            segments,
+        }))
+    }
+
+    pub(super) async fn query_segment_for_admin_impl(
+        &self,
+        request: Request<proto::QuerySegmentsRequest>,
+    ) -> Result<Response<proto::QuerySegmentsResponse>, Status> {
+        self.query_segments_impl(request).await
+    }
+
+    pub(super) async fn calc_cache_stats_impl(
+        &self,
+        _request: Request<proto::CalcCacheStatsRequest>,
+    ) -> Result<Response<proto::CalcCacheStatsResponse>, Status> {
+        let mut memory_total = 0f64;
+        let mut ssd_total = 0f64;
+        let mut memory_hits = 0f64;
+        let mut ssd_hits = 0f64;
+
+        for entry in self.state.objects.iter() {
+            let has_memory = entry.replicas.iter().any(|replica| {
+                replica.status == ReplicaStatus::Complete
+                    && replica.replica_type == ReplicaType::Memory
+            });
+            let has_ssd = entry.replicas.iter().any(|replica| {
+                replica.status == ReplicaStatus::Complete
+                    && matches!(
+                        replica.replica_type,
+                        ReplicaType::LocalDisk | ReplicaType::Disk | ReplicaType::NoFSsd
+                    )
+            });
+            if has_memory {
+                memory_total += 1.0;
+                if !is_lease_expired(&entry) {
+                    memory_hits += 1.0;
+                }
+            }
+            if has_ssd {
+                ssd_total += 1.0;
+                if !is_lease_expired(&entry) {
+                    ssd_hits += 1.0;
+                }
+            }
+        }
+
+        let memory_hit_rate = if memory_total > 0.0 {
+            memory_hits / memory_total
+        } else {
+            0.0
+        };
+        let ssd_hit_rate = if ssd_total > 0.0 {
+            ssd_hits / ssd_total
+        } else {
+            0.0
+        };
+        let total = memory_total + ssd_total;
+        let hits = memory_hits + ssd_hits;
+        let overall_hit_rate = if total > 0.0 { hits / total } else { 0.0 };
+
+        let mut stats = HashMap::new();
+        stats.insert("memory_hits".to_string(), memory_hits);
+        stats.insert("ssd_hits".to_string(), ssd_hits);
+        stats.insert("memory_total".to_string(), memory_total);
+        stats.insert("ssd_total".to_string(), ssd_total);
+        stats.insert("memory_hit_rate".to_string(), memory_hit_rate);
+        stats.insert("ssd_hit_rate".to_string(), ssd_hit_rate);
+        stats.insert("overall_hit_rate".to_string(), overall_hit_rate);
+        stats.insert(
+            "valid_get_rate".to_string(),
+            if self.state.objects.is_empty() {
+                0.0
+            } else {
+                hits / self.state.objects.len() as f64
+            },
+        );
+        Ok(Response::new(proto::CalcCacheStatsResponse { stats }))
+    }
+
     // ---- PutStart ----
     // 对象写入的第一阶段：分配副本、注册对象元数据。
     // 流程：(1) 校验 key/size → (2) 若对象已存在则清理过期 handle 或超时丢弃
@@ -342,6 +500,7 @@ impl MasterServiceImpl {
                 "prefer_alloc_in_same_node is not supported with NoF replicas",
             ));
         }
+        let group_id = Self::group_id_for_key(&config, 1, 0)?;
         let replica_count = config.replica_num as usize;
 
         // 分配 Memory 副本 / Allocate Memory replicas
@@ -406,6 +565,7 @@ impl MasterServiceImpl {
                     None
                 },
                 tenant_id,
+                group_id,
                 user_key,
             },
         );
@@ -499,6 +659,7 @@ impl MasterServiceImpl {
                     lease_timeout: None,
                     soft_pin_timeout: None,
                     tenant_id,
+                    group_id: String::new(),
                     user_key: req.key.clone(),
                 },
             );
@@ -550,12 +711,19 @@ impl MasterServiceImpl {
 
         // Phase 2: brief write lock for timestamp updates only (microseconds).
         // 阶段 2：短暂写锁仅更新时间戳（微秒级）
+        let mut group_to_refresh = None;
         if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
             entry.last_access = SystemTime::now();
             entry.grant_lease(
                 self.state.runtime_config.lease_ttl,
                 self.state.runtime_config.soft_pin_ttl,
             );
+            if !entry.group_id.is_empty() {
+                group_to_refresh = Some((entry.tenant_id.clone(), entry.group_id.clone()));
+            }
+        }
+        if let Some((tenant_id, group_id)) = group_to_refresh {
+            self.grant_group_lease(&tenant_id, &group_id);
         }
 
         // Phase 3: promotion after all locks released.
@@ -621,6 +789,7 @@ impl MasterServiceImpl {
             lease_keys.push(entry.key().clone());
         }
 
+        let mut groups_to_refresh = Vec::new();
         for key in lease_keys {
             if let Some(mut entry) = self.state.objects.get_mut(&key) {
                 entry.last_access = SystemTime::now();
@@ -628,7 +797,13 @@ impl MasterServiceImpl {
                     self.state.runtime_config.lease_ttl,
                     self.state.runtime_config.soft_pin_ttl,
                 );
+                if !entry.group_id.is_empty() {
+                    groups_to_refresh.push((entry.tenant_id.clone(), entry.group_id.clone()));
+                }
             }
+        }
+        for (tenant_id, group_id) in groups_to_refresh {
+            self.grant_group_lease(&tenant_id, &group_id);
         }
 
         metrics::GET_REQUESTS.inc();
@@ -851,6 +1026,7 @@ impl MasterServiceImpl {
                 "prefer_alloc_in_same_node is not supported with NoF replicas",
             ));
         }
+        let requested_group_id = Self::group_id_for_key(&config, 1, 0)?;
 
         let tenant_id = normalize_tenant_id(tenant_id);
         let scoped_key = make_tenant_scoped_key(&tenant_id, user_key);
@@ -873,6 +1049,17 @@ impl MasterServiceImpl {
                 if existing.replicas.iter().any(|r| r.refcnt > 0) {
                     return Err(Status::failed_precondition("object replica busy"));
                 }
+                let existing_group_id = existing.group_id.clone();
+                if !config.group_ids.is_empty() && requested_group_id != existing_group_id {
+                    return Err(Status::invalid_argument(
+                        "group membership is immutable while object exists",
+                    ));
+                }
+                let effective_group_id = if config.group_ids.is_empty() {
+                    existing_group_id.clone()
+                } else {
+                    requested_group_id.clone()
+                };
                 if existing.size == slice_length {
                     existing.client_id = client_id;
                     existing.put_start_time = Some(now);
@@ -880,6 +1067,7 @@ impl MasterServiceImpl {
                     existing.soft_pin_timeout =
                         Self::reconcile_soft_pin(config.with_soft_pin, existing.soft_pin_timeout);
                     existing.data_type = config.data_type;
+                    existing.group_id = effective_group_id;
                     for replica in &mut existing.replicas {
                         if replica.status == ReplicaStatus::Complete {
                             replica.status = ReplicaStatus::Allocating;
@@ -913,6 +1101,7 @@ impl MasterServiceImpl {
                     merged_config,
                     None,
                     hard_pinned,
+                    effective_group_id,
                 );
             }
         }
@@ -927,6 +1116,7 @@ impl MasterServiceImpl {
             config.clone(),
             None,
             config.with_hard_pin,
+            requested_group_id,
         )
     }
 
@@ -941,6 +1131,7 @@ impl MasterServiceImpl {
         config: ReplicateConfig,
         previous_soft_pin: Option<SystemTime>,
         hard_pinned: bool,
+        group_id: String,
     ) -> Result<Vec<ReplicaDescriptor>, Status> {
         let mut replicas = if replica_count > 0 {
             self.state.allocator.write().allocate_for_client(
@@ -1000,6 +1191,7 @@ impl MasterServiceImpl {
                 lease_timeout: None,
                 soft_pin_timeout,
                 tenant_id: tenant_id.to_string(),
+                group_id,
                 user_key: user_key.to_string(),
             },
         );

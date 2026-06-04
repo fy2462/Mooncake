@@ -114,6 +114,7 @@ pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
         preferred_nof_segments: c.preferred_nof_segments.clone(),
         prefer_alloc_in_same_node: c.prefer_alloc_in_same_node,
         data_type: object_data_type_from_i32(c.data_type),
+        group_ids: c.group_ids.clone(),
     }
 }
 

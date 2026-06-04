@@ -56,9 +56,9 @@ pub mod offload;
 pub mod remote_source;
 
 pub use client::{BufferHandle, MooncakeClient};
-pub use local_storage_backend::{LocalStorageBackend, LocalStorageConfig};
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
+pub use local_storage_backend::{LocalStorageBackend, LocalStorageConfig};
 pub use remote_source::{
     config::{RemoteSourceConfig, S3Config},
     distributed::DistributedMissHandler,

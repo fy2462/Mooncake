@@ -20,7 +20,10 @@ use uuid::Uuid;
 
 use crate::local_storage_backend::LocalStorageBackend;
 use crate::proto;
-use crate::{LocalHotCache, MissHandler, RemoteSource, RemoteSourceConfig};
+use crate::{
+    LocalHotCache, MissHandler, MissHandlerSnapshot, MissHandlerStats, RemoteSource,
+    RemoteSourceConfig,
+};
 
 // ---------------------------------------------------------------------------
 // BufferHandle — owned get result (key + data + size triple)
@@ -552,6 +555,20 @@ impl MooncakeClient {
         self
     }
 
+    /// Return a snapshot of remote miss / hot-cache fallback statistics.
+    ///
+    /// This exposes the Rust client's local miss-handler counters. It is not a
+    /// replacement for the C++ master's `CalcCacheStats`, which requires a
+    /// master-side RPC that is not present in the Rust proto surface.
+    pub fn miss_handler_snapshot(&self) -> Option<MissHandlerSnapshot> {
+        self.miss_handler.as_ref().map(MissHandler::snapshot)
+    }
+
+    /// Return raw remote miss / hot-cache fallback counters.
+    pub fn miss_handler_stats(&self) -> Option<MissHandlerStats> {
+        self.miss_handler.as_ref().map(MissHandler::stats)
+    }
+
     /// Attach a local storage backend for offload/promotion to local disk.
     ///
     /// When set, [`offload_objects`](Self::offload_objects) and
@@ -648,10 +665,7 @@ impl MooncakeClient {
     ///
     /// 查询 master 获取某个 key 的副本列表，但不获取数据。
     /// 如果 key 未找到则返回空向量。
-    pub async fn get_replica_list(
-        &mut self,
-        key: &str,
-    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+    pub async fn get_replica_list(&mut self, key: &str) -> StoreResult<Vec<ReplicaDescriptor>> {
         self.fetch_replicas(key).await
     }
 

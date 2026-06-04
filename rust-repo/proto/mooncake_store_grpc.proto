@@ -98,6 +98,13 @@ service MasterService {
   // HA fsdir
   rpc GetFsdir(GetFsdirRequest) returns (GetFsdirResponse);
 
+  // Admin / service readiness / cache stats
+  rpc ServiceReady(ServiceReadyRequest) returns (ServiceReadyResponse);
+  rpc GetAllKeysForAdmin(GetAllKeysForAdminRequest) returns (GetAllKeysForAdminResponse);
+  rpc GetAllSegmentsForAdmin(GetAllSegmentsForAdminRequest) returns (GetAllSegmentsForAdminResponse);
+  rpc QuerySegmentForAdmin(QuerySegmentsRequest) returns (QuerySegmentsResponse);
+  rpc CalcCacheStats(CalcCacheStatsRequest) returns (CalcCacheStatsResponse);
+
   // Remote pull coordination — prevents duplicate S3 fetches across nodes
   rpc AcquireRemotePull(AcquireRemotePullRequest) returns (AcquireRemotePullResponse);
   rpc CompleteRemotePull(CompleteRemotePullRequest) returns (CompleteRemotePullResponse);

@@ -870,6 +870,7 @@ mod tests {
                 lease_timeout: None,
                 soft_pin_timeout: None,
                 tenant_id: "default".to_string(),
+                group_id: String::new(),
                 user_key: "nof-only".to_string(),
             },
         );

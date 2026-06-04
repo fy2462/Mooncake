@@ -189,6 +189,10 @@ pub struct ObjectEntry {
     /// C++ equivalent: ObjectMetadata::tenant_id
     #[serde(default = "default_tenant_id")]
     pub tenant_id: String,
+    /// Optional group id for grouped lease/routing semantics.
+    /// 分组租约/路由语义使用的可选 group id。
+    #[serde(default)]
+    pub group_id: String,
     /// 用户提供的原始 key（不包含租户作用域前缀）。
     /// Original user-provided key (without tenant scope prefix).
     /// C++ equivalent: ObjectMetadata::user_key

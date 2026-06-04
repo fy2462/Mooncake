@@ -96,6 +96,7 @@ async fn test_put_start_rejects_same_node_preference_with_nof_replicas() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -158,6 +159,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -210,6 +212,7 @@ async fn test_client_monitor_reaps_expired_clients() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )

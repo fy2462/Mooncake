@@ -19,6 +19,7 @@ fn replicate_config() -> proto::ReplicateConfig {
         preferred_segments: vec![],
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
+        group_ids: vec![],
     }
 }
 

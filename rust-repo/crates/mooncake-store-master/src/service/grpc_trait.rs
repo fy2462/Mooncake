@@ -178,6 +178,41 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::get_nof_segments_by_name_impl(self, request).await
     }
 
+    async fn service_ready(
+        &self,
+        request: Request<proto::ServiceReadyRequest>,
+    ) -> Result<Response<proto::ServiceReadyResponse>, Status> {
+        MasterServiceImpl::service_ready_impl(self, request).await
+    }
+
+    async fn get_all_keys_for_admin(
+        &self,
+        request: Request<proto::GetAllKeysForAdminRequest>,
+    ) -> Result<Response<proto::GetAllKeysForAdminResponse>, Status> {
+        MasterServiceImpl::get_all_keys_for_admin_impl(self, request).await
+    }
+
+    async fn get_all_segments_for_admin(
+        &self,
+        request: Request<proto::GetAllSegmentsForAdminRequest>,
+    ) -> Result<Response<proto::GetAllSegmentsForAdminResponse>, Status> {
+        MasterServiceImpl::get_all_segments_for_admin_impl(self, request).await
+    }
+
+    async fn query_segment_for_admin(
+        &self,
+        request: Request<proto::QuerySegmentsRequest>,
+    ) -> Result<Response<proto::QuerySegmentsResponse>, Status> {
+        MasterServiceImpl::query_segment_for_admin_impl(self, request).await
+    }
+
+    async fn calc_cache_stats(
+        &self,
+        request: Request<proto::CalcCacheStatsRequest>,
+    ) -> Result<Response<proto::CalcCacheStatsResponse>, Status> {
+        MasterServiceImpl::calc_cache_stats_impl(self, request).await
+    }
+
     async fn put_start(
         &self,
         request: Request<proto::PutStartRequest>,

@@ -25,6 +25,7 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         soft_pin_timeout: None,
         tenant_id: "default".to_string(),
         user_key: String::new(),
+        group_id: String::new(),
     }
 }
 

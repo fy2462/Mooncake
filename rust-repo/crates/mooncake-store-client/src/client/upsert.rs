@@ -33,9 +33,126 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use std::ffi::c_void;
 
 use super::MooncakeClient;
+use crate::client::batches::BatchUpsertEntry;
 use crate::proto;
 
 impl MooncakeClient {
+    async unsafe fn batch_upsert_from_internal(
+        &mut self,
+        keys: &[String],
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<(Vec<i32>, Vec<Vec<ReplicaDescriptor>>)> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "keys, buffers, and sizes length mismatch".to_string(),
+            ));
+        }
+        if keys.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let cfg = config.unwrap_or_default();
+        let slice_lengths: Vec<u64> = sizes.iter().map(|&size| size as u64).collect();
+        let start_results = match self
+            .batch_upsert_start_results(keys, &slice_lengths, &cfg, "")
+            .await
+        {
+            Ok(results) => results,
+            Err(_) => return Ok((vec![-1; keys.len()], vec![Vec::new(); keys.len()])),
+        };
+        if start_results.len() != keys.len() {
+            return Ok((vec![-1; keys.len()], vec![Vec::new(); keys.len()]));
+        }
+
+        let mut statuses = vec![-1i32; keys.len()];
+        let mut descriptors = vec![Vec::new(); keys.len()];
+        let mut success_indices = Vec::new();
+        let mut success_keys = Vec::new();
+        let mut revoke_indices = Vec::new();
+
+        for (idx, (key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+            if start_result.status != 0 || start_result.replicas.is_empty() {
+                statuses[idx] = start_result.status;
+                continue;
+            }
+
+            let mut ok = true;
+            for replica in &start_result.replicas {
+                if unsafe {
+                    self.zero_copy_write(replica, buffers[idx], sizes[idx])
+                        .await
+                }
+                .is_err()
+                {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if ok {
+                statuses[idx] = 0;
+                descriptors[idx] = start_result.replicas.clone();
+                success_indices.push(idx);
+                success_keys.push(key.clone());
+            } else {
+                revoke_indices.push(idx);
+            }
+        }
+
+        if !success_keys.is_empty() {
+            let entries: Vec<BatchUpsertEntry<'_>> = success_keys
+                .iter()
+                .map(|key| BatchUpsertEntry {
+                    key,
+                    slice_length: 0,
+                    config: cfg.clone(),
+                    replica_type: 0,
+                    tenant_id: "",
+                })
+                .collect();
+            match self.batch_upsert_end(&entries).await {
+                Ok(end_statuses) if end_statuses.len() == success_indices.len() => {
+                    for (idx, status) in success_indices.into_iter().zip(end_statuses) {
+                        if status != 0 {
+                            statuses[idx] = status;
+                            descriptors[idx].clear();
+                            revoke_indices.push(idx);
+                        }
+                    }
+                }
+                _ => {
+                    for idx in success_indices {
+                        statuses[idx] = -1;
+                        descriptors[idx].clear();
+                        revoke_indices.push(idx);
+                    }
+                }
+            }
+        }
+
+        if !revoke_indices.is_empty() {
+            let revoke_keys: Vec<String> = revoke_indices
+                .iter()
+                .map(|&idx| keys[idx].clone())
+                .collect();
+            let entries: Vec<BatchUpsertEntry<'_>> = revoke_keys
+                .iter()
+                .map(|key| BatchUpsertEntry {
+                    key,
+                    slice_length: 0,
+                    config: cfg.clone(),
+                    replica_type: 0,
+                    tenant_id: "",
+                })
+                .collect();
+            let _ = self.batch_upsert_revoke(&entries).await;
+        }
+
+        Ok((statuses, descriptors))
+    }
+
     // -----------------------------------------------------------------------
     // Upsert — single key update-or-insert
     // Upsert —— 单 key 更新或插入
@@ -87,6 +204,7 @@ impl MooncakeClient {
                 preferred_segments: cfg.preferred_segments.clone(),
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
+                group_ids: cfg.group_ids.clone(),
             }),
             tenant_id: String::new(),
         };
@@ -179,6 +297,7 @@ impl MooncakeClient {
                 preferred_segments: cfg.preferred_segments.clone(),
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
+                group_ids: cfg.group_ids.clone(),
             }),
             tenant_id: String::new(),
         };
@@ -251,14 +370,29 @@ impl MooncakeClient {
         sizes: &[usize],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<Vec<ReplicaDescriptor>>> {
-        let mut results = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
-            results.push(
-                self.upsert_from(key, buffers[i], sizes[i], config.clone())
-                    .await?,
-            );
-        }
-        Ok(results)
+        let (_statuses, descriptors) = unsafe {
+            self.batch_upsert_from_internal(keys, buffers, sizes, config)
+                .await?
+        };
+        Ok(descriptors)
+    }
+
+    /// C++-style batch upsert from pre-registered buffers.
+    ///
+    /// Returns one status per key (`0` on success, negative on failure), matching
+    /// `RealClient::batch_upsert_from`.
+    pub async unsafe fn batch_upsert_from_statuses(
+        &mut self,
+        keys: &[String],
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<i32>> {
+        let (statuses, _descriptors) = unsafe {
+            self.batch_upsert_from_internal(keys, buffers, sizes, config)
+                .await?
+        };
+        Ok(statuses)
     }
 
     /// Upsert as multiple data slices. Convenience wrapper that concatenates

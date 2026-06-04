@@ -333,10 +333,9 @@ impl MooncakeClient {
                 mooncake_store_core::ReplicaType::LocalDisk => {
                     best = Some(r); // LOCAL_DISK always overrides DISK / LOCAL_DISK 始终覆盖 DISK
                 }
-                mooncake_store_core::ReplicaType::Disk
-                    if best.is_none() => {
-                        best = Some(r); // DISK only if no LOCAL_DISK / DISK 仅在没有任何 LOCAL_DISK 时
-                    }
+                mooncake_store_core::ReplicaType::Disk if best.is_none() => {
+                    best = Some(r); // DISK only if no LOCAL_DISK / DISK 仅在没有任何 LOCAL_DISK 时
+                }
                 _ => {}
             }
         }
@@ -660,6 +659,7 @@ impl MooncakeClient {
     /// local_memcpy 快速路径。
     pub(crate) async fn read_from_replica(
         &self,
+        key: &str,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
         tracing::info!(
@@ -680,7 +680,7 @@ impl MooncakeClient {
         if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
             && !self.is_local_replica(replica)
         {
-            return self.read_from_remote_local_disk(replica).await;
+            return self.read_from_remote_local_disk(key, replica).await;
         }
 
         // Fast path: local segment — direct memcpy, no TE overhead.
@@ -934,10 +934,10 @@ impl MooncakeClient {
     /// 通过 P2P 卸载 RPC 从远端 LOCAL_DISK 副本读取数据。
     async fn read_from_remote_local_disk(
         &self,
+        key: &str,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
         let peer_addr = &replica.segment_name;
-        let key = "offload_read"; // synthetic key for the RPC
         let size = replica.size as i64;
 
         tracing::info!(

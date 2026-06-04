@@ -9,9 +9,9 @@
 use clap::Parser;
 use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{
-    HABackendSpec, HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle,
-    LeadershipSession, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
-    parse_ha_backend_type,
+    parse_ha_backend_type, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
+    LeadershipMonitorHandle, LeadershipSession, MasterServiceSupervisor,
+    MasterServiceSupervisorConfig, MasterView,
 };
 use mooncake_store_master::http_metadata::serve_metadata_http;
 use mooncake_store_master::metrics;

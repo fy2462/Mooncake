@@ -49,6 +49,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -180,6 +181,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
                     preferred_segments: vec![],
                     preferred_nof_segments: vec![],
                     data_type: proto::ObjectDataType::Unknown as i32,
+                    group_ids: vec![],
                 }),
             }),
         )
@@ -262,6 +264,7 @@ async fn test_copy_move_and_revoke_workflow() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -451,6 +454,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                     preferred_segments: vec![],
                     preferred_nof_segments: vec![],
                     data_type: proto::ObjectDataType::Unknown as i32,
+                    group_ids: vec![],
                 }),
             }),
         )
@@ -487,6 +491,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )

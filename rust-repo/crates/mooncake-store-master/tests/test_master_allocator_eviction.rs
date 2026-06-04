@@ -184,6 +184,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -210,6 +211,7 @@ async fn test_runtime_config_applies_allocator_strategy() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )

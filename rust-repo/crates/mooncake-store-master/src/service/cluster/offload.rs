@@ -138,6 +138,7 @@ impl MasterServiceImpl {
                         lease_timeout: None,
                         soft_pin_timeout: None,
                         tenant_id: t_id,
+                        group_id: String::new(),
                         user_key: u_key,
                     },
                 );

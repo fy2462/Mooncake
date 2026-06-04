@@ -222,6 +222,7 @@ fn test_object_entry_creation() {
         soft_pin_timeout: None,
         tenant_id: "default".to_string(),
         user_key: String::new(),
+        group_id: String::new(),
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");

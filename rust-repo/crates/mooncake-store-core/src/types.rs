@@ -404,6 +404,9 @@ pub struct ReplicateConfig {
     /// Semantic data type — affects placement heuristics.
     /// 语义数据类型——影响放置启发式算法。
     pub data_type: ObjectDataType,
+    /// Optional group id per key. Grouped objects share lease refresh semantics.
+    /// 每个 key 可选的 group id。分组对象共享租约刷新语义。
+    pub group_ids: Vec<String>,
 }
 
 /// Metadata persisted alongside each stored object in the backend (etcd/Redis/S3).
@@ -443,6 +446,7 @@ impl Default for ReplicateConfig {
             preferred_nof_segments: vec![],
             prefer_alloc_in_same_node: false,
             data_type: ObjectDataType::Unknown,
+            group_ids: vec![],
         }
     }
 }

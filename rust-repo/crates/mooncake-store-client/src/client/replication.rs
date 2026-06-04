@@ -71,7 +71,10 @@ impl MooncakeClient {
             .into_inner();
         let source = self
             .replicas_from_proto(std::slice::from_ref(
-                response.source.as_ref().ok_or(StoreError::OperationFailed(-1))?,
+                response
+                    .source
+                    .as_ref()
+                    .ok_or(StoreError::OperationFailed(-1))?,
             ))
             .pop()
             .ok_or(StoreError::OperationFailed(-1))?;
@@ -159,7 +162,10 @@ impl MooncakeClient {
             .into_inner();
         let source = self
             .replicas_from_proto(std::slice::from_ref(
-                response.source.as_ref().ok_or(StoreError::OperationFailed(-1))?,
+                response
+                    .source
+                    .as_ref()
+                    .ok_or(StoreError::OperationFailed(-1))?,
             ))
             .pop()
             .ok_or(StoreError::OperationFailed(-1))?;
@@ -262,16 +268,10 @@ impl MooncakeClient {
     /// - `key` — the object key to copy. / 要复制的对象 key。
     /// - `source` — source segment name. / 源 segment 名称。
     /// - `targets` — target segment names. / 目标 segment 名称列表。
-    pub async fn copy(
-        &mut self,
-        key: &str,
-        source: &str,
-        targets: &[String],
-    ) -> StoreResult<()> {
+    pub async fn copy(&mut self, key: &str, source: &str, targets: &[String]) -> StoreResult<()> {
         // Phase 1: CopyStart — allocate targets + pin source.
         // 阶段 1：CopyStart —— 分配目标 + 固定源。
-        let (source_replica, target_replicas) =
-            self.copy_start(key, source, targets, "").await?;
+        let (source_replica, target_replicas) = self.copy_start(key, source, targets, "").await?;
 
         if target_replicas.is_empty() {
             // Targets already exist — just finalize.
@@ -283,12 +283,7 @@ impl MooncakeClient {
         // 阶段 2：读取源数据，然后写入每个目标。
         let key_owned = key.to_string();
         match self
-            .do_execute_replica_transfer(
-                &key_owned,
-                "copy",
-                &source_replica,
-                &target_replicas,
-            )
+            .do_execute_replica_transfer(&key_owned, "copy", &source_replica, &target_replicas)
             .await
         {
             Ok(()) => {
@@ -322,12 +317,7 @@ impl MooncakeClient {
     /// - `key` — the object key to move. / 要移动的对象 key。
     /// - `source` — source segment name. / 源 segment 名称。
     /// - `target` — target segment name. / 目标 segment 名称。
-    pub async fn move_object(
-        &mut self,
-        key: &str,
-        source: &str,
-        target: &str,
-    ) -> StoreResult<()> {
+    pub async fn move_object(&mut self, key: &str, source: &str, target: &str) -> StoreResult<()> {
         // Phase 1: MoveStart — allocate/reuse target + pin source.
         // 阶段 1：MoveStart —— 分配/复用目标 + 固定源。
         let (source_replica, target_opt) = self.move_start(key, source, target, "").await?;
@@ -342,12 +332,7 @@ impl MooncakeClient {
         // 阶段 2：读取源数据，然后写入目标。
         let key_owned = key.to_string();
         match self
-            .do_execute_replica_transfer(
-                &key_owned,
-                "move",
-                &source_replica,
-                &[target_replica],
-            )
+            .do_execute_replica_transfer(&key_owned, "move", &source_replica, &[target_replica])
             .await
         {
             Ok(()) => {
@@ -396,7 +381,7 @@ impl MooncakeClient {
                 "{action_name}: source replica is not MEMORY type"
             )));
         }
-        let data = self.read_from_replica(source).await.map_err(|e| {
+        let data = self.read_from_replica(key, source).await.map_err(|e| {
             tracing::error!(target: "te_debug", %key, %e, "{action_name}: failed to read source replica");
             e
         })?;

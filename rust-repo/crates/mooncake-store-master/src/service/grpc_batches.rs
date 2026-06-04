@@ -492,7 +492,19 @@ impl MasterServiceImpl {
         let replica_count = config.replica_num as usize;
         let mut all_replicas = Vec::new();
         let mut results = Vec::with_capacity(req.keys.len());
-        for (raw_key, slice_len) in req.keys.iter().zip(req.slice_lengths.iter()) {
+        let invalid_group_ids =
+            !config.group_ids.is_empty() && config.group_ids.len() != req.keys.len();
+        for (idx, (raw_key, slice_len)) in req.keys.iter().zip(req.slice_lengths.iter()).enumerate()
+        {
+            if invalid_group_ids {
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
+                continue;
+            }
             if *slice_len == 0 {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
@@ -503,6 +515,8 @@ impl MasterServiceImpl {
                 continue;
             }
             let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+            let group_id = Self::group_id_for_key(&config, req.keys.len(), idx)
+                .map_err(|_| Status::invalid_argument("invalid group_ids"))?;
             if self.state.objects.contains_key(&key) {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
@@ -545,6 +559,7 @@ impl MasterServiceImpl {
                             None
                         },
                         tenant_id: t_id,
+                        group_id,
                         user_key: u_key,
                     },
                 );

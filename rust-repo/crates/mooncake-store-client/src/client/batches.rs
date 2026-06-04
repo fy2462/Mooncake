@@ -21,6 +21,14 @@ use uuid::Uuid;
 use super::MooncakeClient;
 use crate::proto;
 
+#[derive(Debug, Clone)]
+pub struct BatchPutStartResult {
+    pub key: String,
+    pub replicas: Vec<ReplicaDescriptor>,
+    pub status: i32,
+    pub tenant_id: String,
+}
+
 impl MooncakeClient {
     // -----------------------------------------------------------------------
     // BatchQueryIp — batch query client IP addresses
@@ -138,6 +146,7 @@ impl MooncakeClient {
                 preferred_segments: config.preferred_segments.clone(),
                 preferred_nof_segments: config.preferred_nof_segments.clone(),
                 data_type: config.data_type as i32,
+                group_ids: config.group_ids.clone(),
             }),
             tenant_id: tenant_id.to_string(),
         };
@@ -148,6 +157,73 @@ impl MooncakeClient {
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
         Ok(self.replicas_from_proto(&response.replicas))
+    }
+
+    pub async fn batch_put_start_results(
+        &mut self,
+        keys: &[String],
+        slice_lengths: &[u64],
+        config: &ReplicateConfig,
+        tenant_id: &str,
+    ) -> StoreResult<Vec<BatchPutStartResult>> {
+        let request = proto::BatchPutStartRequest {
+            client_id: Some(self.client_id_proto()),
+            keys: keys.to_vec(),
+            slice_lengths: slice_lengths.to_vec(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: config.replica_num,
+                nof_replica_num: config.nof_replica_num,
+                with_soft_pin: config.with_soft_pin,
+                with_hard_pin: config.with_hard_pin,
+                preferred_segment: config.preferred_segment.clone(),
+                prefer_alloc_in_same_node: config.prefer_alloc_in_same_node,
+                preferred_segments: config.preferred_segments.clone(),
+                preferred_nof_segments: config.preferred_nof_segments.clone(),
+                data_type: config.data_type as i32,
+                group_ids: config.group_ids.clone(),
+            }),
+            tenant_id: tenant_id.to_string(),
+        };
+        let response = self
+            .master
+            .batch_put_start(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        if !response.results.is_empty() {
+            return Ok(response
+                .results
+                .iter()
+                .map(|result| BatchPutStartResult {
+                    key: result.key.clone(),
+                    replicas: self.replicas_from_proto(&result.replicas),
+                    status: result.status,
+                    tenant_id: result.tenant_id.clone(),
+                })
+                .collect());
+        }
+
+        let replicas = self.replicas_from_proto(&response.replicas);
+        let per_key = (config.replica_num + config.nof_replica_num) as usize;
+        Ok(keys
+            .iter()
+            .enumerate()
+            .map(|(idx, key)| {
+                let start = idx * per_key;
+                let end = start.saturating_add(per_key);
+                let key_replicas = if per_key > 0 && end <= replicas.len() {
+                    replicas[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                BatchPutStartResult {
+                    key: key.clone(),
+                    status: if key_replicas.is_empty() { -6 } else { 0 },
+                    replicas: key_replicas,
+                    tenant_id: tenant_id.to_string(),
+                }
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------
@@ -260,6 +336,111 @@ impl MooncakeClient {
         let response = self
             .master
             .batch_upsert_end(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.statuses)
+    }
+
+    pub async fn batch_upsert_start_results(
+        &mut self,
+        keys: &[String],
+        slice_lengths: &[u64],
+        config: &ReplicateConfig,
+        tenant_id: &str,
+    ) -> StoreResult<Vec<BatchPutStartResult>> {
+        let request = proto::BatchUpsertStartRequest {
+            entries: keys
+                .iter()
+                .zip(slice_lengths.iter())
+                .map(|(key, &slice_length)| proto::UpsertEntry {
+                    client_id: Some(self.client_id_proto()),
+                    key: key.clone(),
+                    slice_length,
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: config.replica_num,
+                        nof_replica_num: config.nof_replica_num,
+                        with_soft_pin: config.with_soft_pin,
+                        with_hard_pin: config.with_hard_pin,
+                        preferred_segment: config.preferred_segment.clone(),
+                        prefer_alloc_in_same_node: config.prefer_alloc_in_same_node,
+                        preferred_segments: config.preferred_segments.clone(),
+                        preferred_nof_segments: config.preferred_nof_segments.clone(),
+                        data_type: config.data_type as i32,
+                        group_ids: config.group_ids.clone(),
+                    }),
+                    tenant_id: tenant_id.to_string(),
+                })
+                .collect(),
+        };
+        let response = self
+            .master
+            .batch_upsert_start(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+
+        if !response.results.is_empty() {
+            return Ok(response
+                .results
+                .iter()
+                .map(|result| BatchPutStartResult {
+                    key: result.key.clone(),
+                    replicas: self.replicas_from_proto(&result.replicas),
+                    status: result.status,
+                    tenant_id: result.tenant_id.clone(),
+                })
+                .collect());
+        }
+
+        let replicas = self.replicas_from_proto(&response.replicas);
+        let per_key = (config.replica_num + config.nof_replica_num) as usize;
+        Ok(keys
+            .iter()
+            .enumerate()
+            .map(|(idx, key)| {
+                let start = idx * per_key;
+                let end = start.saturating_add(per_key);
+                let key_replicas = if per_key > 0 && end <= replicas.len() {
+                    replicas[start..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                let status = response.statuses.get(idx).copied().unwrap_or_else(|| {
+                    if key_replicas.is_empty() {
+                        -6
+                    } else {
+                        0
+                    }
+                });
+                BatchPutStartResult {
+                    key: key.clone(),
+                    status,
+                    replicas: key_replicas,
+                    tenant_id: tenant_id.to_string(),
+                }
+            })
+            .collect())
+    }
+
+    pub async fn batch_upsert_revoke(
+        &mut self,
+        entries: &[BatchUpsertEntry<'_>],
+    ) -> StoreResult<Vec<i32>> {
+        let request = proto::BatchUpsertRevokeRequest {
+            entries: entries
+                .iter()
+                .map(|e| proto::PutEndEntry {
+                    client_id: Some(self.client_id_proto()),
+                    key: e.key.to_string(),
+                    replica_type: e.replica_type,
+                    tenant_id: e.tenant_id.to_string(),
+                })
+                .collect(),
+        };
+        let response = self
+            .master
+            .batch_upsert_revoke(request)
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();

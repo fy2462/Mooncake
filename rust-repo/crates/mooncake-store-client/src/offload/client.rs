@@ -53,10 +53,7 @@ pub(crate) async fn batch_get_offload_objects(
 /// Release a batch on the peer (fire-and-forget).
 ///
 /// C++ equivalent: `ClientRequester::release_offload_buffer`
-pub(crate) async fn release_offload_buffer(
-    peer_addr: &str,
-    batch_id: u64,
-) {
+pub(crate) async fn release_offload_buffer(peer_addr: &str, batch_id: u64) {
     let url = format!("http://{peer_addr}");
     let channel = match Channel::from_shared(url)
         .map_err(|e| format!("{e}"))

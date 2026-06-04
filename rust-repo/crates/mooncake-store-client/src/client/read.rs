@@ -86,7 +86,7 @@ impl MooncakeClient {
                     replica_type = ?r.replica_type,
                     "get: selected replica, calling read_from_replica"
                 );
-                let data = self.read_from_replica(r).await?;
+                let data = self.read_from_replica(key, r).await?;
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: read_from_replica success");
                 // Store in hot cache for future hits / 存入 hot_cache 以供将来命中
                 if let Some(ref cache) = self.hot_cache {
@@ -194,18 +194,44 @@ impl MooncakeClient {
         src_offsets: &[Vec<Vec<usize>>],
         sizes: &[Vec<Vec<usize>>],
     ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
-        // Determine the minimum count across all arrays to avoid OOB.
-        // 取所有数组的最小长度以避免越界。
-        let count = buffers
-            .len()
-            .min(keys.len())
-            .min(dst_offsets.len())
-            .min(src_offsets.len())
-            .min(sizes.len());
+        if buffers.len() != keys.len()
+            || buffers.len() != dst_offsets.len()
+            || buffers.len() != src_offsets.len()
+            || buffers.len() != sizes.len()
+        {
+            return Err(StoreError::InvalidParams(
+                "buffers, keys, dst_offsets, src_offsets, and sizes length mismatch".to_string(),
+            ));
+        }
+
+        for buf_idx in 0..keys.len() {
+            let key_count = keys[buf_idx].len();
+            if dst_offsets[buf_idx].len() != key_count
+                || src_offsets[buf_idx].len() != key_count
+                || sizes[buf_idx].len() != key_count
+            {
+                return Err(StoreError::InvalidParams(format!(
+                    "range matrix key dimension mismatch at buffer index {buf_idx}"
+                )));
+            }
+            for key_idx in 0..key_count {
+                let range_count = sizes[buf_idx][key_idx].len();
+                if dst_offsets[buf_idx][key_idx].len() != range_count
+                    || src_offsets[buf_idx][key_idx].len() != range_count
+                {
+                    return Err(StoreError::InvalidParams(format!(
+                        "range dimension mismatch at buffer index {buf_idx}, key index {key_idx}"
+                    )));
+                }
+            }
+        }
+
+        let count = buffers.len();
         let mut results = Vec::with_capacity(count);
         for buf_idx in 0..count {
             let mut buf_results = vec![];
             for (key_idx, key) in keys[buf_idx].iter().enumerate() {
+                let range_count = sizes[buf_idx][key_idx].len();
                 // Fetch replicas and select the best one.
                 // 获取副本列表并选择最优副本。
                 let replicas = self.fetch_replicas(key).await?;
@@ -214,10 +240,25 @@ impl MooncakeClient {
                     None => {
                         // Key not found — mark all ranges as -1.
                         // 未找到 key —— 所有范围标记为 -1。
-                        buf_results.push(vec![-1]);
+                        buf_results.push(vec![-1; range_count]);
                         continue;
                     }
                 };
+
+                let mut range_results: Vec<i64> = vec![-1; range_count];
+                let valid_ranges: Vec<usize> = sizes[buf_idx][key_idx]
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ri, &sz)| {
+                        let src_end = src_offsets[buf_idx][key_idx][ri].checked_add(sz)?;
+                        let _dst_end = dst_offsets[buf_idx][key_idx][ri].checked_add(sz)?;
+                        (src_end as u64 <= replica.size).then_some(ri)
+                    })
+                    .collect();
+                if valid_ranges.is_empty() {
+                    buf_results.push(range_results);
+                    continue;
+                }
 
                 // Open the target segment on the TransferEngine.
                 // 在 TransferEngine 上打开目标 segment。
@@ -225,10 +266,7 @@ impl MooncakeClient {
 
                 // Allocate a batch_id for this key's range group.
                 // 为此 key 的范围组分配 batch_id。
-                let batch_id = match self
-                    .engine
-                    .allocate_batch_id(sizes[buf_idx][key_idx].len())
-                {
+                let batch_id = match self.engine.allocate_batch_id(valid_ranges.len()) {
                     Ok(id) => id,
                     Err(e) => {
                         let _ = self.engine.close_segment(seg);
@@ -238,40 +276,52 @@ impl MooncakeClient {
 
                 // Build TransferRequests: one per range, all in the same batch.
                 // 构建传输请求：每个范围一个，全部在同一批次中。
-                let reqs: Vec<TransferRequest> = sizes[buf_idx][key_idx]
+                let reqs: Vec<TransferRequest> = valid_ranges
                     .iter()
-                    .enumerate()
-                    .map(|(ri, &sz)| TransferRequest {
-                        opcode: Opcode::Read,
-                        source: buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri]),
-                        target_id: seg,
-                        target_offset: replica.base_addr
-                            + replica.offset
-                            + src_offsets[buf_idx][key_idx][ri] as u64,
-                        length: sz as u64,
+                    .map(|&ri| {
+                        let sz = sizes[buf_idx][key_idx][ri];
+                        TransferRequest {
+                            opcode: Opcode::Read,
+                            source: buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri]),
+                            target_id: seg,
+                            target_offset: replica.base_addr
+                                + replica.offset
+                                + src_offsets[buf_idx][key_idx][ri] as u64,
+                            length: sz as u64,
+                        }
                     })
                     .collect();
 
-                self.engine.submit_transfer(batch_id, &reqs)?;
+                if let Err(e) = self.engine.submit_transfer(batch_id, &reqs) {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(seg);
+                    return Err(e.into());
+                }
 
                 // Poll each range's status with a 10s timeout.
                 // 以 10s 超时轮询每个范围的状态。
-                let mut range_results: Vec<i64> = vec![0; sizes[buf_idx][key_idx].len()];
                 let start = tokio::time::Instant::now();
                 let timeout = tokio::time::Duration::from_secs(10);
-                for ri in 0..sizes[buf_idx][key_idx].len() {
+                for (request_idx, &range_idx) in valid_ranges.iter().enumerate() {
                     loop {
-                        let status = self.engine.get_transfer_status(batch_id, ri)?;
+                        let status = match self.engine.get_transfer_status(batch_id, request_idx) {
+                            Ok(status) => status,
+                            Err(e) => {
+                                let _ = self.engine.free_batch_id(batch_id);
+                                let _ = self.engine.close_segment(seg);
+                                return Err(e.into());
+                            }
+                        };
                         if status.status == TransferStatusEnum::Completed {
-                            range_results[ri] = status.transferred_bytes as i64;
+                            range_results[range_idx] = status.transferred_bytes as i64;
                             break;
                         }
                         if status.status == TransferStatusEnum::Failed {
-                            range_results[ri] = -1;
+                            range_results[range_idx] = -1;
                             break;
                         }
                         if start.elapsed() > timeout {
-                            range_results[ri] = -1;
+                            range_results[range_idx] = -1;
                             break;
                         }
                         // 50us poll interval — tight enough for RDMA latency.

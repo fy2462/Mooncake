@@ -19,6 +19,7 @@ fn replicate_config() -> proto::ReplicateConfig {
         preferred_segments: vec![],
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
+        group_ids: vec![],
     }
 }
 
@@ -57,6 +58,26 @@ async fn put_complete(
     tenant_id: &str,
     segment: &str,
 ) {
+    put_complete_with_config(
+        service,
+        client_id,
+        key,
+        tenant_id,
+        proto::ReplicateConfig {
+            preferred_segment: segment.into(),
+            ..replicate_config()
+        },
+    )
+    .await;
+}
+
+async fn put_complete_with_config(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    tenant_id: &str,
+    config: proto::ReplicateConfig,
+) {
     MasterService::put_start(
         service,
         Request::new(proto::PutStartRequest {
@@ -64,10 +85,7 @@ async fn put_complete(
             key: key.into(),
             slice_length: 128,
             tenant_id: tenant_id.into(),
-            config: Some(proto::ReplicateConfig {
-                preferred_segment: segment.into(),
-                ..replicate_config()
-            }),
+            config: Some(config),
         }),
     )
     .await
@@ -258,4 +276,139 @@ async fn test_batch_put_start_returns_per_key_results() {
     assert_eq!(response.results[0].replicas.len(), 1);
     assert_eq!(response.results[1].key, "batch-zero");
     assert!(response.results[1].status < 0);
+}
+
+#[tokio::test]
+async fn test_group_lookup_grants_lease_to_all_group_members() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_secs(3600),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "group-lease:1", 4096).await;
+
+    for key in ["group-a", "group-b"] {
+        put_complete_with_config(
+            &service,
+            client_id,
+            key,
+            "",
+            proto::ReplicateConfig {
+                preferred_segment: "group-lease:1".into(),
+                group_ids: vec!["shared-group".into()],
+                ..replicate_config()
+            },
+        )
+        .await;
+    }
+
+    MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "group-a".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let remove_other_group_member = MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "group-b".into(),
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(remove_other_group_member.code(), Code::FailedPrecondition);
+}
+
+#[tokio::test]
+async fn test_upsert_group_membership_is_immutable_when_explicit() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "group-upsert:1", 4096).await;
+
+    put_complete_with_config(
+        &service,
+        client_id,
+        "group-upsert-key",
+        "",
+        proto::ReplicateConfig {
+            preferred_segment: "group-upsert:1".into(),
+            group_ids: vec!["group-one".into()],
+            ..replicate_config()
+        },
+    )
+    .await;
+
+    MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "group-upsert-key".into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                preferred_segment: "group-upsert:1".into(),
+                ..replicate_config()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let changed_group = MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "group-upsert-key".into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                preferred_segment: "group-upsert:1".into(),
+                group_ids: vec!["group-two".into()],
+                ..replicate_config()
+            }),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(changed_group.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn test_batch_put_start_rejects_mismatched_group_ids_per_key() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "batch-group:1", 4096).await;
+
+    let response = MasterService::batch_put_start(
+        &service,
+        Request::new(proto::BatchPutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["batch-group-a".into(), "batch-group-b".into()],
+            slice_lengths: vec![128, 128],
+            config: Some(proto::ReplicateConfig {
+                preferred_segment: "batch-group:1".into(),
+                group_ids: vec!["only-one-group".into()],
+                ..replicate_config()
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.results.len(), 2);
+    assert_eq!(response.results[0].key, "batch-group-a");
+    assert_eq!(response.results[1].key, "batch-group-b");
+    assert!(response.results.iter().all(|result| result.status < 0));
+    assert!(response
+        .results
+        .iter()
+        .all(|result| result.replicas.is_empty()));
 }

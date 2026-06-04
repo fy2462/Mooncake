@@ -6,7 +6,7 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicateConfig, StoreError};
+use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
@@ -14,6 +14,89 @@ use super::MooncakeClient;
 use crate::proto;
 
 impl MooncakeClient {
+    async unsafe fn write_parts_from_to_replica(
+        &self,
+        replica: &ReplicaDescriptor,
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+    ) -> StoreResult<()> {
+        if buffers.len() != sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "buffers and sizes length mismatch".to_string(),
+            ));
+        }
+        if buffers.is_empty() {
+            return Err(StoreError::InvalidParams(
+                "object must contain at least one buffer".to_string(),
+            ));
+        }
+
+        let total_len = sizes.iter().try_fold(0usize, |acc, &size| {
+            acc.checked_add(size)
+                .ok_or_else(|| StoreError::InvalidParams("object size overflow".to_string()))
+        })?;
+        if total_len as u64 > replica.size {
+            return Err(StoreError::InvalidParams(format!(
+                "object size {} exceeds replica size {}",
+                total_len, replica.size
+            )));
+        }
+
+        let segment_id = self.engine.open_segment(&replica.segment_name)?;
+        let batch_id = match self.engine.allocate_batch_id(buffers.len()) {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = self.engine.close_segment(segment_id);
+                return Err(e.into());
+            }
+        };
+
+        let mut offset = 0u64;
+        let mut requests = Vec::with_capacity(buffers.len());
+        for (&buffer, &size) in buffers.iter().zip(sizes.iter()) {
+            requests.push(TransferRequest {
+                opcode: Opcode::Write,
+                source: buffer,
+                target_id: segment_id,
+                target_offset: replica.base_addr + replica.offset + offset,
+                length: size as u64,
+            });
+            offset += size as u64;
+        }
+
+        if let Err(e) = self.engine.submit_transfer(batch_id, &requests) {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
+
+        let start = tokio::time::Instant::now();
+        let timeout = tokio::time::Duration::from_secs(10);
+        for i in 0..buffers.len() {
+            loop {
+                let status = self.engine.get_transfer_status(batch_id, i)?;
+                if status.status == TransferStatusEnum::Completed {
+                    break;
+                }
+                if status.status == TransferStatusEnum::Failed {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(segment_id);
+                    return Err(StoreError::OperationFailed(-1));
+                }
+                if start.elapsed() > timeout {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(segment_id);
+                    return Err(StoreError::OperationFailed(-2));
+                }
+                tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+            }
+        }
+
+        self.engine.free_batch_id(batch_id)?;
+        self.engine.close_segment(segment_id)?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Put — three-phase write lifecycle (三阶段写生命周期):
     //   put_start  →  write_to_replica (per replica)  →  put_end
@@ -101,6 +184,7 @@ impl MooncakeClient {
                 preferred_segments: cfg.preferred_segments.clone(),
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
+                group_ids: cfg.group_ids.clone(),
             }),
         };
 
@@ -155,13 +239,10 @@ impl MooncakeClient {
             replica_type: 0,
             tenant_id: String::new(),
         };
-        self.master
-            .put_end(end_request)
-            .await
-            .map_err(|e| {
-                tracing::error!(target: "te_debug", %key, error = %e, "put: put_end FAILED");
-                StoreError::Internal(e.to_string())
-            })?;
+        self.master.put_end(end_request).await.map_err(|e| {
+            tracing::error!(target: "te_debug", %key, error = %e, "put: put_end FAILED");
+            StoreError::Internal(e.to_string())
+        })?;
 
         tracing::info!(target: "te_debug", %key, "put: EXIT (success)");
         Ok(())
@@ -206,6 +287,7 @@ impl MooncakeClient {
                 preferred_segments: cfg.preferred_segments.clone(),
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
+                group_ids: cfg.group_ids.clone(),
             }),
         };
 
@@ -297,6 +379,7 @@ impl MooncakeClient {
                 preferred_segments: cfg.preferred_segments.clone(),
                 preferred_nof_segments: cfg.preferred_nof_segments.clone(),
                 data_type: cfg.data_type as i32,
+                group_ids: cfg.group_ids.clone(),
             }),
         };
 
@@ -454,14 +537,10 @@ impl MooncakeClient {
         }
 
         let cfg = config.unwrap_or_default();
-        let replica_count = cfg.replica_num.max(1) as usize;
-        let nof_count = cfg.nof_replica_num as usize;
-        let per_key = replica_count + nof_count;
-
         // Phase 1: BatchPutStart — allocate replicas for all keys in one RPC.
         let slice_lengths: Vec<u64> = values.iter().map(|v| v.len() as u64).collect();
-        let all_replicas = match self
-            .batch_put_start(keys, &slice_lengths, &cfg, "")
+        let start_results = match self
+            .batch_put_start_results(keys, &slice_lengths, &cfg, "")
             .await
         {
             Ok(r) => r,
@@ -470,25 +549,25 @@ impl MooncakeClient {
                 return Ok(vec![-1; keys.len()]);
             }
         };
+        if start_results.len() != keys.len() {
+            return Ok(vec![-1; keys.len()]);
+        }
 
-        // Phase 2: per-key TE writes. Replicas are returned in key order,
-        // per_key replicas per key. Write each key's replicas.
+        // Phase 2: per-key TE writes. C++ BatchPutStart returns one expected
+        // result per key; consume Rust's per-key results to avoid flattened
+        // replica misalignment when one key fails allocation or already exists.
         let mut statuses = vec![-1i32; keys.len()];
         let mut success_keys: Vec<String> = Vec::new();
-        let mut failed_keys: Vec<String> = Vec::new();
-        let mut ri = 0usize;
+        let mut success_indices: Vec<usize> = Vec::new();
+        let mut revoke_keys: Vec<String> = Vec::new();
 
-        for (ki, key) in keys.iter().enumerate() {
-            if ri + per_key > all_replicas.len() {
-                // No more replicas — this key (and subsequent) were skipped by master
-                // because they already existed or allocation failed.
-                break;
+        for (ki, (key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+            if start_result.status != 0 || start_result.replicas.is_empty() {
+                continue;
             }
-            let replicas = &all_replicas[ri..ri + per_key];
-            ri += per_key;
 
             let mut ok = true;
-            for replica in replicas {
+            for replica in &start_result.replicas {
                 if let Err(_) = self.write_to_replica(replica, values[ki]).await {
                     ok = false;
                     break;
@@ -498,8 +577,9 @@ impl MooncakeClient {
             if ok {
                 statuses[ki] = 0;
                 success_keys.push(key.clone());
+                success_indices.push(ki);
             } else {
-                failed_keys.push(key.clone());
+                revoke_keys.push(key.clone());
             }
         }
 
@@ -510,24 +590,40 @@ impl MooncakeClient {
                 success_keys.len(),
                 &success_keys[..success_keys.len().min(3)]
             );
-            match self
-                .batch_put_end(&success_keys, 0 /* MEMORY */, "")
-                .await
-            {
-                Ok(statuses) => {
+            match self.batch_put_end(&success_keys, 0 /* MEMORY */, "").await {
+                Ok(end_statuses) => {
                     tracing::info!(
                         "batch_put: batch_put_end returned statuses: {:?}",
-                        statuses
+                        end_statuses
                     );
+                    if end_statuses.len() != success_indices.len() {
+                        for idx in success_indices {
+                            statuses[idx] = -1;
+                        }
+                    } else {
+                        for (idx, status) in success_indices.into_iter().zip(end_statuses) {
+                            if status != 0 {
+                                statuses[idx] = status;
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("batch_put: batch_put_end FAILED: {:?}", e);
+                    for idx in success_indices {
+                        statuses[idx] = -1;
+                    }
                 }
             }
         }
-        if !failed_keys.is_empty() {
-            tracing::warn!("batch_put: {} keys failed writes, revoking", failed_keys.len());
-            let _ = self.batch_put_revoke(&failed_keys, 0 /* MEMORY */, "").await;
+        if !revoke_keys.is_empty() {
+            tracing::warn!(
+                "batch_put: {} keys failed writes, revoking",
+                revoke_keys.len()
+            );
+            let _ = self
+                .batch_put_revoke(&revoke_keys, 0 /* MEMORY */, "")
+                .await;
         }
 
         Ok(statuses)
@@ -549,17 +645,62 @@ impl MooncakeClient {
         sizes: &[usize],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<i32>> {
-        let mut statuses = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
-            match self
-                .put_from(key, buffers[i], sizes[i], config.clone())
-                .await
-            {
-                Ok(()) => statuses.push(0),
-                Err(_) => statuses.push(-1), // per-key error tolerance / 按 key 容错
-            }
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "keys, buffers, and sizes length mismatch".to_string(),
+            ));
         }
-        Ok(statuses)
+
+        let all_buffers: Vec<Vec<*mut c_void>> =
+            buffers.iter().map(|&buffer| vec![buffer]).collect();
+        let all_sizes: Vec<Vec<usize>> = sizes.iter().map(|&size| vec![size]).collect();
+        unsafe {
+            self.batch_put_from_multi_buffers(keys, &all_buffers, &all_sizes, config)
+                .await
+        }
+    }
+
+    /// Zero-copy put from a data buffer plus a metadata buffer.
+    ///
+    /// The object layout matches C++ `RealClient::put_from_with_metadata`:
+    /// metadata bytes are written first, followed by data bytes. If `size == 0`,
+    /// this is a no-op success.
+    ///
+    /// # Safety
+    /// `buffer` and `metadata_buffer` must be valid and pre-registered with the
+    /// TransferEngine for their respective sizes.
+    pub async unsafe fn put_from_with_metadata(
+        &mut self,
+        key: &str,
+        buffer: *mut c_void,
+        metadata_buffer: *mut c_void,
+        size: usize,
+        metadata_size: usize,
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<i32> {
+        let cfg = config.unwrap_or_default();
+        if cfg.prefer_alloc_in_same_node {
+            return Ok(-1);
+        }
+        if size == 0 {
+            return Ok(0);
+        }
+
+        let keys = vec![key.to_string()];
+        let mut buffers = Vec::with_capacity(2);
+        let mut sizes = Vec::with_capacity(2);
+        if metadata_size > 0 {
+            buffers.push(metadata_buffer);
+            sizes.push(metadata_size);
+        }
+        buffers.push(buffer);
+        sizes.push(size);
+
+        let statuses = unsafe {
+            self.batch_put_from_multi_buffers(&keys, &[buffers], &[sizes], Some(cfg))
+                .await?
+        };
+        Ok(statuses.first().copied().unwrap_or(-1))
     }
 
     /// Zero-copy batch put from multiple buffers per key.
@@ -584,27 +725,98 @@ impl MooncakeClient {
         all_sizes: &[Vec<usize>],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<i32>> {
-        let mut statuses = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
-            let buffers = &all_buffers[i];
-            let sizes = &all_sizes[i];
+        if keys.len() != all_buffers.len() || keys.len() != all_sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "keys, all_buffers, and all_sizes length mismatch".to_string(),
+            ));
+        }
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        for (idx, (buffers, sizes)) in all_buffers.iter().zip(all_sizes.iter()).enumerate() {
+            if buffers.len() != sizes.len() {
+                return Err(StoreError::InvalidParams(format!(
+                    "buffers and sizes length mismatch for key index {idx}"
+                )));
+            }
+            if buffers.is_empty() {
+                return Err(StoreError::InvalidParams(format!(
+                    "key index {idx} has no buffers"
+                )));
+            }
+        }
+
+        let cfg = config.unwrap_or_default();
+        let slice_lengths: Vec<u64> = all_sizes
+            .iter()
+            .map(|sizes| sizes.iter().map(|&size| size as u64).sum())
+            .collect();
+
+        let start_results = match self
+            .batch_put_start_results(keys, &slice_lengths, &cfg, "")
+            .await
+        {
+            Ok(results) => results,
+            Err(_) => return Ok(vec![-1; keys.len()]),
+        };
+        if start_results.len() != keys.len() {
+            return Ok(vec![-1; keys.len()]);
+        }
+
+        let mut statuses = vec![-1i32; keys.len()];
+        let mut success_keys = Vec::new();
+        let mut success_indices = Vec::new();
+        let mut revoke_keys = Vec::new();
+
+        for (idx, (key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+            if start_result.status != 0 || start_result.replicas.is_empty() {
+                continue;
+            }
+
             let mut ok = true;
-            for (j, (&buf, &sz)) in buffers.iter().zip(sizes.iter()).enumerate() {
-                let part_key = if j == 0 {
-                    key.clone()
-                } else {
-                    format!("{key}:part:{j}")
-                };
-                match self.put_from(&part_key, buf, sz, config.clone()).await {
-                    Ok(()) => {}
-                    Err(_) => {
-                        ok = false;
-                        break;
+            for replica in &start_result.replicas {
+                if unsafe {
+                    self.write_parts_from_to_replica(replica, &all_buffers[idx], &all_sizes[idx])
+                        .await
+                }
+                .is_err()
+                {
+                    ok = false;
+                    break;
+                }
+            }
+
+            if ok {
+                statuses[idx] = 0;
+                success_keys.push(key.clone());
+                success_indices.push(idx);
+            } else {
+                revoke_keys.push(key.clone());
+            }
+        }
+
+        if !success_keys.is_empty() {
+            match self.batch_put_end(&success_keys, 0 /* MEMORY */, "").await {
+                Ok(end_statuses) if end_statuses.len() == success_indices.len() => {
+                    for (idx, status) in success_indices.into_iter().zip(end_statuses) {
+                        if status != 0 {
+                            statuses[idx] = status;
+                        }
+                    }
+                }
+                _ => {
+                    for idx in success_indices {
+                        statuses[idx] = -1;
                     }
                 }
             }
-            statuses.push(if ok { 0 } else { -1 });
         }
+        if !revoke_keys.is_empty() {
+            let _ = self
+                .batch_put_revoke(&revoke_keys, 0 /* MEMORY */, "")
+                .await;
+        }
+
         Ok(statuses)
     }
 }

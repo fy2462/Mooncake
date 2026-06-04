@@ -149,19 +149,26 @@ impl MooncakeClient {
         Ok(response.removed_count)
     }
 
-    /// Remove all keys from the store. Convenience wrapper that calls
-    /// [`remove_by_regex`](Self::remove_by_regex) with pattern `".*"` and
-    /// `force = true`.
+    /// Remove all keys from the store using the master's RemoveAll RPC.
     ///
-    /// 从存储中删除所有 key。便捷封装，以 ".*" 和 force=true
-    /// 调用 remove_by_regex。
+    /// 从存储中删除所有 key，直接调用 master 的 RemoveAll RPC。
     ///
     /// # Warning (警告)
     /// This is a destructive operation — use with caution.
     /// 这是一个破坏性操作 —— 请谨慎使用。
     ///
-    /// C++ equivalent: `Client::RemoveAll()`
-    pub async fn remove_all(&mut self) -> StoreResult<i64> {
-        self.remove_by_regex(".*", true).await
+    /// C++ equivalent: `Client::RemoveAll(force)`
+    pub async fn remove_all(&mut self, force: bool) -> StoreResult<i64> {
+        let request = proto::RemoveAllRequest {
+            force,
+            tenant_id: String::new(),
+        };
+        let response = self
+            .master
+            .remove_all(request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.removed_count)
     }
 }

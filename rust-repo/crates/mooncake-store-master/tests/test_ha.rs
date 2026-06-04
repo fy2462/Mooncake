@@ -211,6 +211,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
             put_start_time: None,
             lease_timeout: None,
             soft_pin_timeout: None,
+            group_id: String::new(),
         },
     );
     backend
@@ -252,6 +253,7 @@ fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
             put_start_time: None,
             lease_timeout: None,
             soft_pin_timeout: None,
+            group_id: String::new(),
         },
     );
     StorageBackend::new(StorageBackendType::LocalDisk, &root.join("cluster-a"))

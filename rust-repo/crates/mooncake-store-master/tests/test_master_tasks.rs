@@ -64,6 +64,7 @@ async fn test_create_and_query_task_returns_real_state() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -149,6 +150,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )
@@ -312,6 +314,7 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )

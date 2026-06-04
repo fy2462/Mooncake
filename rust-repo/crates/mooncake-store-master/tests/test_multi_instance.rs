@@ -57,6 +57,7 @@ async fn put_object(service: &MasterServiceImpl, key: &str, tenant: &str, cid: U
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
             tenant_id: tenant.into(),
         }),

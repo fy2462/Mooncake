@@ -4,9 +4,11 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use crate::local_storage_backend::LocalStorageBackend;
 use super::buffer::{OffloadBatch, OffloadBufferPool};
-use crate::offload_proto::offload_read_service_server::{OffloadReadService, OffloadReadServiceServer};
+use crate::local_storage_backend::LocalStorageBackend;
+use crate::offload_proto::offload_read_service_server::{
+    OffloadReadService, OffloadReadServiceServer,
+};
 use crate::offload_proto::{
     BatchGetOffloadObjectRequest, BatchGetOffloadObjectResponse, ReleaseOffloadBufferRequest,
     ReleaseOffloadBufferResponse,
@@ -55,12 +57,14 @@ impl OffloadReadService for OffloadReadHandler {
             let ptr = buf.as_ptr() as u64;
             // Safety: buffer lives for the lifetime of the batch.
             unsafe {
-                self.engine.register_local_memory(
-                    buf.as_ptr() as *mut c_void,
-                    buf.len(),
-                    "cpu:0", // registered on CPU memory
-                    true,    // remote accessible
-                ).map_err(|e| Status::internal(format!("register memory: {e}")))?;
+                self.engine
+                    .register_local_memory(
+                        buf.as_ptr() as *mut c_void,
+                        buf.len(),
+                        "cpu:0", // registered on CPU memory
+                        true,    // remote accessible
+                    )
+                    .map_err(|e| Status::internal(format!("register memory: {e}")))?;
             }
             pointers.push(ptr);
         }

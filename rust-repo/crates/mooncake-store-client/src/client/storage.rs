@@ -21,14 +21,86 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicaDescriptor, StoreError};
+use mooncake_store_core::{NoFSegment, NoFSegmentOwnerInfo, ReplicaDescriptor, StoreError};
 use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use super::MooncakeClient;
 use crate::proto;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentUsage {
+    pub total_size: u64,
+    pub used_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageConfig {
+    pub fs_dir: String,
+    pub enable_disk_eviction: bool,
+    pub quota_bytes: u64,
+}
+
 impl MooncakeClient {
+    fn uuid_to_proto_uuid(id: Uuid) -> proto::Uuid {
+        let (high, low) = id.as_u64_pair();
+        proto::Uuid { high, low }
+    }
+
+    fn uuid_from_proto_uuid(id: &proto::Uuid) -> Uuid {
+        Uuid::from_u64_pair(id.high, id.low)
+    }
+
+    fn optional_uuid_to_proto_uuid(id: Uuid) -> Option<proto::Uuid> {
+        (!id.is_nil()).then(|| Self::uuid_to_proto_uuid(id))
+    }
+
+    fn nof_segment_to_proto(segment: &NoFSegment) -> proto::NoFSegment {
+        proto::NoFSegment {
+            id: Self::optional_uuid_to_proto_uuid(segment.id),
+            name: segment.name.clone(),
+            base: segment.base,
+            size: segment.size,
+            te_endpoint: segment.te_endpoint.clone(),
+            client_id: Self::optional_uuid_to_proto_uuid(segment.client_id),
+        }
+    }
+
+    fn nof_segment_from_proto(segment: &proto::NoFSegment) -> NoFSegment {
+        NoFSegment {
+            id: segment
+                .id
+                .as_ref()
+                .map(Self::uuid_from_proto_uuid)
+                .unwrap_or_else(Uuid::nil),
+            name: segment.name.clone(),
+            base: segment.base,
+            size: segment.size,
+            te_endpoint: segment.te_endpoint.clone(),
+            client_id: segment
+                .client_id
+                .as_ref()
+                .map(Self::uuid_from_proto_uuid)
+                .unwrap_or_else(Uuid::nil),
+        }
+    }
+
+    fn nof_owner_info_from_proto(owner: &proto::NoFSegmentOwnerInfo) -> NoFSegmentOwnerInfo {
+        NoFSegmentOwnerInfo {
+            segment_id: owner
+                .segment_id
+                .as_ref()
+                .map(Self::uuid_from_proto_uuid)
+                .unwrap_or_else(Uuid::nil),
+            client_id: owner
+                .client_id
+                .as_ref()
+                .map(Self::uuid_from_proto_uuid)
+                .unwrap_or_else(Uuid::nil),
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Segment mount — register a local disk segment with the master
     // Segment 挂载 —— 向 master 注册本地磁盘 segment
@@ -55,6 +127,238 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         Ok(())
+    }
+
+    /// Mount a NoF (NVMe-over-Fabric) segment with the master.
+    ///
+    /// C++ equivalent: `MasterClient::MountNoFSegment(segment, client_id)`.
+    pub async fn mount_nof_segment(&mut self, segment: &NoFSegment) -> StoreResult<()> {
+        self.master
+            .mount_no_f_segment(proto::MountNoFSegmentRequest {
+                client_id: Some(self.client_id_proto()),
+                segment: Some(Self::nof_segment_to_proto(segment)),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Re-register NoF segments after a client restart.
+    ///
+    /// C++ equivalent: `MasterClient::ReMountNoFSegment(segments, client_id)`.
+    pub async fn remount_nof_segments(&mut self, segments: &[NoFSegment]) -> StoreResult<()> {
+        self.master
+            .re_mount_no_f_segment(proto::ReMountNoFSegmentRequest {
+                client_id: Some(self.client_id_proto()),
+                segments: segments.iter().map(Self::nof_segment_to_proto).collect(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Unmount a NoF segment by id.
+    ///
+    /// C++ equivalent: `MasterClient::UnmountNoFSegment(segment_id, client_id)`.
+    pub async fn unmount_nof_segment(&mut self, segment_id: Uuid) -> StoreResult<()> {
+        self.master
+            .unmount_no_f_segment(proto::UnmountNoFSegmentRequest {
+                segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
+                client_id: Some(self.client_id_proto()),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Query all mounted NoF segments.
+    ///
+    /// C++ equivalent: `MasterClient::GetAllNoFSegments()`.
+    pub async fn get_all_nof_segments(&mut self) -> StoreResult<Vec<NoFSegment>> {
+        let response = self
+            .master
+            .get_all_no_f_segments(proto::GetAllNoFSegmentsRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response
+            .segments
+            .iter()
+            .map(Self::nof_segment_from_proto)
+            .collect())
+    }
+
+    /// Query owners for NoF segments with a given name.
+    ///
+    /// C++ equivalent: `MasterClient::GetNoFSegmentsByName(segment_name)`.
+    pub async fn get_nof_segments_by_name(
+        &mut self,
+        segment_name: &str,
+    ) -> StoreResult<Vec<NoFSegmentOwnerInfo>> {
+        let response = self
+            .master
+            .get_no_f_segments_by_name(proto::GetNoFSegmentsByNameRequest {
+                segment_name: segment_name.to_string(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response
+            .owners
+            .iter()
+            .map(Self::nof_owner_info_from_proto)
+            .collect())
+    }
+
+    /// Query aggregate capacity usage for a mounted segment name.
+    ///
+    /// C++ equivalent: `MasterClient::QuerySegments(segment_name)`.
+    pub async fn query_segments(&mut self, segment_name: &str) -> StoreResult<SegmentUsage> {
+        let response = self
+            .master
+            .query_segments(proto::QuerySegmentsRequest {
+                segment_name: segment_name.to_string(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(SegmentUsage {
+            total_size: response.total_size,
+            used_size: response.used_size,
+        })
+    }
+
+    /// Query the storage configuration advertised by the master.
+    ///
+    /// C++ equivalent: `MasterClient::GetStorageConfig()`.
+    pub async fn get_storage_config(&mut self) -> StoreResult<StorageConfig> {
+        let response = self
+            .master
+            .get_storage_config(proto::GetStorageConfigRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(StorageConfig {
+            fs_dir: response.fs_dir,
+            enable_disk_eviction: response.enable_disk_eviction,
+            quota_bytes: response.quota_bytes,
+        })
+    }
+
+    /// Query segment status by name.
+    ///
+    /// Returns the proto enum value as `i32` to avoid duplicating enum mapping.
+    pub async fn query_segment_status(&mut self, segment_name: &str) -> StoreResult<i32> {
+        let response = self
+            .master
+            .query_segment_status(proto::QuerySegmentStatusRequest {
+                segment_name: segment_name.to_string(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.status)
+    }
+
+    /// Query segment status by id.
+    ///
+    /// Returns the proto enum value as `i32` to avoid duplicating enum mapping.
+    pub async fn query_segment_status_by_id(&mut self, segment_id: Uuid) -> StoreResult<i32> {
+        let response = self
+            .master
+            .query_segment_status_by_id(proto::QuerySegmentStatusByIdRequest {
+                segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.status)
+    }
+
+    /// Return the HA filesystem directory configured on the master.
+    ///
+    /// C++ equivalent: `MasterClient::GetFsdir()`.
+    pub async fn get_fsdir(&mut self) -> StoreResult<String> {
+        let response = self
+            .master
+            .get_fsdir(proto::GetFsdirRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.fs_dir)
+    }
+
+    /// Check master service readiness and return its version string.
+    ///
+    /// C++ equivalent: `MasterClient::ServiceReady()`.
+    pub async fn service_ready(&mut self) -> StoreResult<String> {
+        let response = self
+            .master
+            .service_ready(proto::ServiceReadyRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.version)
+    }
+
+    /// Return all keys across tenants for admin/debug use.
+    ///
+    /// C++ equivalent: `MasterClient::GetAllKeysForAdmin()`.
+    pub async fn get_all_keys_for_admin(&mut self) -> StoreResult<Vec<String>> {
+        let response = self
+            .master
+            .get_all_keys_for_admin(proto::GetAllKeysForAdminRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.keys)
+    }
+
+    /// Return all memory segment names for admin/debug use.
+    ///
+    /// C++ equivalent: `MasterClient::GetAllSegmentsForAdmin()`.
+    pub async fn get_all_segments_for_admin(&mut self) -> StoreResult<Vec<String>> {
+        let response = self
+            .master
+            .get_all_segments_for_admin(proto::GetAllSegmentsForAdminRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.segments)
+    }
+
+    /// Query segment usage for admin/debug use.
+    ///
+    /// C++ equivalent: `MasterClient::QuerySegmentForAdmin(segment)`.
+    pub async fn query_segment_for_admin(
+        &mut self,
+        segment_name: &str,
+    ) -> StoreResult<SegmentUsage> {
+        let response = self
+            .master
+            .query_segment_for_admin(proto::QuerySegmentsRequest {
+                segment_name: segment_name.to_string(),
+            })
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(SegmentUsage {
+            total_size: response.total_size,
+            used_size: response.used_size,
+        })
+    }
+
+    /// Calculate store-side cache reuse metrics.
+    ///
+    /// C++ equivalent: `MasterClient::CalcCacheStats()`.
+    pub async fn calc_cache_stats(&mut self) -> StoreResult<HashMap<String, f64>> {
+        let response = self
+            .master
+            .calc_cache_stats(proto::CalcCacheStatsRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response.stats)
     }
 
     // -----------------------------------------------------------------------
@@ -286,6 +590,11 @@ impl MooncakeClient {
             return Ok(0);
         }
 
+        if self.offload_rpc_address().is_empty() {
+            let _ = self.start_offload_server().await?;
+        }
+        let transport_endpoint = self.offload_rpc_address();
+
         let storage = self.local_storage.as_ref().ok_or_else(|| {
             StoreError::Internal("no local storage backend configured".to_string())
         })?;
@@ -325,7 +634,7 @@ impl MooncakeClient {
                 offset: 0,
                 key_size: key.len() as i64,
                 data_size: *size,
-                transport_endpoint: String::new(),
+                transport_endpoint: transport_endpoint.clone(),
             });
         }
 

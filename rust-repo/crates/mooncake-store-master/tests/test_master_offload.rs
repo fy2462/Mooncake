@@ -63,6 +63,7 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
                 preferred_segments: vec![],
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
             }),
         }),
     )

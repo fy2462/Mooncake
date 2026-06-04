@@ -72,6 +72,7 @@ message ReplicateConfig {
   repeated string preferred_segments = 7;
   repeated string preferred_nof_segments = 8;
   ObjectDataType data_type = 9;
+  repeated string group_ids = 10;
 }
 
 message NoFSegment {
@@ -826,6 +827,34 @@ message GetFsdirRequest {}
 
 message GetFsdirResponse {
   string fs_dir = 1;
+}
+
+// ---------------------------------------------------------------
+// Admin / service readiness / cache stats
+// ---------------------------------------------------------------
+
+message ServiceReadyRequest {}
+
+message ServiceReadyResponse {
+  string version = 1;
+}
+
+message GetAllKeysForAdminRequest {}
+
+message GetAllKeysForAdminResponse {
+  repeated string keys = 1;
+}
+
+message GetAllSegmentsForAdminRequest {}
+
+message GetAllSegmentsForAdminResponse {
+  repeated string segments = 1;
+}
+
+message CalcCacheStatsRequest {}
+
+message CalcCacheStatsResponse {
+  map<string, double> stats = 1;
 }
 
 // ---------------------------------------------------------------

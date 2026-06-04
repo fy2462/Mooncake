@@ -244,4 +244,3 @@ impl RemoteSource for S3RemoteSource {
         results
     }
 }
-
