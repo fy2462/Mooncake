@@ -529,6 +529,29 @@ impl PythonMooncakeClient {
         })
     }
 
+    /// C++-compatible alias for put_batch: returns one aggregate status.
+    #[pyo3(signature = (keys, values, config = None))]
+    fn put_batch<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        values: Vec<Bound<'py, PyBytes>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let cfg = config.map(|c| c.borrow().to_core());
+        let data: Vec<Vec<u8>> = values.iter().map(|v| v.as_bytes().to_vec()).collect();
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
+            let result = client.batch_put(&keys, &slices, cfg).await;
+            *inner.lock() = Some(client);
+            let statuses = result.map_err(to_py_err)?;
+            Ok(statuses.into_iter().find(|status| *status < 0).unwrap_or(0))
+        })
+    }
+
     /// Retrieve multiple values by key. Returns Vec<Vec<u8>>.
     /// 批量获取多个 key 的值，返回 Vec<Vec<u8>>，转为 Python list of bytes。
     fn batch_get<'py>(
@@ -806,6 +829,36 @@ impl PythonMooncakeClient {
         })
     }
 
+    /// C++-compatible batch upsert: returns one aggregate status.
+    #[pyo3(signature = (keys, values, config = None))]
+    fn upsert_batch<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        values: Vec<Bound<'py, PyBytes>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if keys.len() != values.len() {
+            return Err(to_py_err("keys and values must have same length"));
+        }
+        let cfg = config.map(|c| c.borrow().to_core());
+        let data: Vec<Vec<u8>> = values.iter().map(|v| v.as_bytes().to_vec()).collect();
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let mut status = 0;
+            for (key, value) in keys.iter().zip(data.iter()) {
+                if client.upsert(key, value, cfg.clone()).await.is_err() {
+                    status = -1;
+                    break;
+                }
+            }
+            *inner.lock() = Some(client);
+            Ok(status)
+        })
+    }
+
     // ===================================================================
     // Task management — 任务管理（复制/移动/查询/完成）
     // ===================================================================
@@ -1037,7 +1090,7 @@ impl PythonMooncakeClient {
         all_buffers: Vec<Vec<Bound<'_, PyAny>>>,
         all_sizes: Vec<Vec<usize>>,
         prefer_same_node: bool,
-    ) -> PyResult<Vec<Vec<i64>>> {
+    ) -> PyResult<Vec<i64>> {
         let ptrs: Vec<Vec<*mut c_void>> = all_buffers
             .iter()
             .map(|bufs| {
@@ -1053,6 +1106,38 @@ impl PythonMooncakeClient {
                 client.batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
             }
             .await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Zero-copy multi-range read into pre-registered Python buffers.
+    fn get_into_ranges(
+        slf: &Bound<'_, Self>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        all_keys: Vec<Vec<String>>,
+        all_dst_offsets: Vec<Vec<Vec<usize>>>,
+        all_src_offsets: Vec<Vec<Vec<usize>>>,
+        all_sizes: Vec<Vec<Vec<usize>>>,
+    ) -> PyResult<Vec<Vec<Vec<i64>>>> {
+        let ptrs: Vec<*mut c_void> = buffers
+            .iter()
+            .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
+            .collect::<PyResult<_>>()?;
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner)?;
+            let result = unsafe {
+                client
+                    .get_into_ranges(
+                        &ptrs,
+                        &all_keys,
+                        &all_dst_offsets,
+                        &all_src_offsets,
+                        &all_sizes,
+                    )
+                    .await
+            };
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
@@ -1115,6 +1200,64 @@ impl PythonMooncakeClient {
         })
     }
 
+    /// Write an object from metadata and data buffers.
+    #[pyo3(signature = (key, buffer, metadata_buffer, size, metadata_size, config = None))]
+    fn put_from_with_metadata(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        metadata_buffer: Bound<'_, PyAny>,
+        size: usize,
+        metadata_size: usize,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+    ) -> PyResult<i32> {
+        let (ptr, _) = get_buffer_ptr(&buffer)?;
+        let (metadata_ptr, _) = get_buffer_ptr(&metadata_buffer)?;
+        let cfg = config.map(|c| c.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner)?;
+            let result = unsafe {
+                client
+                    .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
+                    .await
+            };
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Batch zero-copy write where each key is assembled from multiple buffers.
+    #[pyo3(signature = (keys, all_buffers, all_sizes, config = None))]
+    fn batch_put_from_multi_buffers(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        all_buffers: Vec<Vec<Bound<'_, PyAny>>>,
+        all_sizes: Vec<Vec<usize>>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+    ) -> PyResult<Vec<i32>> {
+        let ptrs: Vec<Vec<*mut c_void>> = all_buffers
+            .iter()
+            .map(|bufs| {
+                bufs.iter()
+                    .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .collect::<PyResult<_>>()?;
+        let cfg = config.map(|c| c.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner)?;
+            let result = unsafe {
+                client
+                    .batch_put_from_multi_buffers(&keys, &ptrs, &all_sizes, cfg)
+                    .await
+            };
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
     // ===================================================================
     // Buffer-based get — 基于 buffer 句柄的读取
     //
@@ -1169,6 +1312,69 @@ impl PythonMooncakeClient {
                 .map(|opt| opt.map(|bh| bh.data))
                 .collect();
             Ok(out)
+        })
+    }
+
+    /// Return replica descriptors for one key as dictionaries.
+    fn get_replica_desc(slf: &Bound<'_, Self>, key: String) -> PyResult<Py<PyAny>> {
+        let inner = slf.borrow().inner.clone();
+        let replicas = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner)?;
+            let result = client.get_replica_list(&key).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })?;
+        Ok(replicas_to_py(replicas))
+    }
+
+    /// Return replica descriptors for multiple keys as a dict keyed by object key.
+    fn batch_get_replica_desc(slf: &Bound<'_, Self>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
+        let inner = slf.borrow().inner.clone();
+        let results = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner)?;
+            let mut out = Vec::with_capacity(keys.len());
+            let mut error = None;
+            for key in &keys {
+                match client.get_replica_list(key).await {
+                    Ok(replicas) => out.push(replicas),
+                    Err(err) => {
+                        error = Some(err);
+                        break;
+                    }
+                }
+            }
+            *inner.lock() = Some(client);
+            match error {
+                Some(err) => Err(to_py_err(err)),
+                None => Ok(out),
+            }
+        })?;
+
+        let py = unsafe { Python::assume_attached() };
+        let dict = PyDict::new(py);
+        for (key, replicas) in keys.into_iter().zip(results.into_iter()) {
+            dict.set_item(key, replicas_to_py(replicas))?;
+        }
+        Ok(dict.into_any().unbind())
+    }
+
+    /// Clear replicas for keys owned by this client.
+    #[pyo3(signature = (keys, segment_name = String::new(), tenant_id = String::new()))]
+    fn batch_replica_clear(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        segment_name: String,
+        tenant_id: String,
+    ) -> PyResult<Vec<String>> {
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner)?;
+            let client_id = client.client_id();
+            let result = client
+                .batch_replica_clear(&keys, client_id, &segment_name, &tenant_id)
+                .await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
         })
     }
 
@@ -1308,6 +1514,42 @@ impl PythonMooncakeClient {
     // ===================================================================
     // Storage admin / segment queries — 存储管理与 segment 查询
     // ===================================================================
+
+    /// Mount a memory segment by name, size, and base address.
+    fn mount_segment<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_name: String,
+        size: u64,
+        base_addr: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.mount_segment(&segment_name, size, base_addr).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Unmount a memory segment by name.
+    #[pyo3(signature = (segment_name, grace_period_ms = 0))]
+    fn unmount_segment<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_name: String,
+        grace_period_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.unmount_segment(&segment_name, grace_period_ms).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
 
     /// Mount a NoF segment. The segment dict accepts:
     /// id, name, base, size, te_endpoint, client_id.

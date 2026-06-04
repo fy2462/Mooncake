@@ -83,7 +83,15 @@ impl MasterServiceImpl {
         }
     }
 
-    pub(crate) fn cleanup_removed_object(&self, scoped_key: &str, object: &ObjectEntry) {
+    pub(crate) fn cleanup_removed_object(
+        &self,
+        scoped_key: &str,
+        object: &ObjectEntry,
+    ) -> Result<(), Status> {
+        self.oplog_manager
+            .lock()
+            .record_remove_durable(scoped_key)
+            .map_err(|e| Status::internal(format!("failed to persist remove oplog: {e}")))?;
         for mut entry in self.state.client_objects.iter_mut() {
             entry.value_mut().remove(scoped_key);
         }
@@ -92,7 +100,7 @@ impl MasterServiceImpl {
         clear_offloading_task(&self.state, scoped_key);
         clear_promotion_task(&self.state, scoped_key);
         release_object_replicas(&self.state, scoped_key, &object.replicas);
-        self.oplog_manager.lock().record_remove(scoped_key);
+        Ok(())
     }
 
     pub(crate) fn completed_object_exists_and_grant_lease(&self, scoped_key: &str) -> bool {
@@ -157,7 +165,19 @@ impl MasterServiceImpl {
                     .or_default()
                     .insert(scoped_key.to_string());
             }
-            self.oplog_manager.lock().record_put_end(scoped_key, size);
+            if let Some(entry) = self.state.objects.get(scoped_key) {
+                self.oplog_manager.lock().record_put_end_with_metadata(
+                    scoped_key,
+                    size,
+                    Some(entry.client_id),
+                    &entry.tenant_id,
+                    &entry.group_id,
+                    &entry.user_key,
+                    &entry.replicas,
+                );
+            } else {
+                self.oplog_manager.lock().record_put_end(scoped_key, size);
+            }
             Ok(())
         } else {
             Err(Status::not_found("key not found"))
@@ -863,7 +883,10 @@ impl MasterServiceImpl {
         let Some((_, object)) = self.state.objects.remove(&scoped_key) else {
             return Err(Status::not_found("key not found"));
         };
-        self.cleanup_removed_object(&scoped_key, &object);
+        if let Err(status) = self.cleanup_removed_object(&scoped_key, &object) {
+            self.state.objects.insert(scoped_key, object);
+            return Err(status);
+        }
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
     }
@@ -906,8 +929,11 @@ impl MasterServiceImpl {
                 }
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
-                self.cleanup_removed_object(&key, &object);
-                removed += 1;
+                if self.cleanup_removed_object(&key, &object).is_ok() {
+                    removed += 1;
+                } else {
+                    self.state.objects.insert(key, object);
+                }
             }
         }
 

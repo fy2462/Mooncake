@@ -12,6 +12,7 @@
 // CPython 胶水代码。
 
 mod client;
+mod dummy_client;
 mod engram;
 mod p2p_store;
 pub mod remote_config;
@@ -137,6 +138,7 @@ fn enable_te_debug_tracing() {
 #[pymodule]
 fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<client::PythonMooncakeClient>()?;
+    m.add_class::<dummy_client::PythonMooncakeDummyClient>()?;
     m.add_class::<replicate_config::ReplicateConfigPy>()?;
     m.add_class::<remote_config::PyS3Config>()?;
     m.add_class::<remote_config::PyRemoteSourceConfig>()?;

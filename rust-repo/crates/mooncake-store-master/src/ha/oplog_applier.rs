@@ -11,10 +11,12 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value;
+use std::time::SystemTime;
+use uuid::Uuid;
 
 use crate::ha::types::OpLogRecord;
 use crate::oplog::OpLogStore;
-use crate::service::state::MasterState;
+use crate::service::state::{MasterState, ObjectEntry};
 
 /// Applies OpLog entries to a MasterState, tracking the expected sequence ID.
 pub(crate) struct OpLogApplier {
@@ -148,6 +150,33 @@ impl OpLogApplier {
                         }
                     }
                     entry.size = entry.size.max(size);
+                } else if let Some(replicas_value) = v.get("replicas") {
+                    let Ok(replicas) = serde_json::from_value(replicas_value.clone()) else {
+                        return false;
+                    };
+                    let client_id = v["client_id"]
+                        .as_str()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .unwrap_or_else(Uuid::nil);
+                    let tenant_id = v["tenant_id"].as_str().unwrap_or("default").to_string();
+                    let user_key = v["user_key"].as_str().unwrap_or(key).to_string();
+                    state.objects.insert(
+                        key.to_string(),
+                        ObjectEntry {
+                            replicas,
+                            size,
+                            last_access: SystemTime::now(),
+                            hard_pinned: false,
+                            data_type: mooncake_store_core::ObjectDataType::General,
+                            client_id,
+                            put_start_time: None,
+                            lease_timeout: None,
+                            soft_pin_timeout: None,
+                            tenant_id,
+                            group_id: v["group_id"].as_str().unwrap_or_default().to_string(),
+                            user_key,
+                        },
+                    );
                 }
                 state.processing_keys.remove(key);
                 true
@@ -228,6 +257,53 @@ mod tests {
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 1);
         assert!(!state.processing_keys.contains_key("k1"));
+    }
+
+    #[test]
+    fn test_apply_put_end_recreates_object_from_metadata_payload() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let segment_id = uuid::Uuid::new_v4();
+        let client_id = uuid::Uuid::new_v4();
+        let replica = mooncake_store_core::ReplicaDescriptor {
+            segment_id,
+            segment_name: "seg-a".to_string(),
+            offset: 128,
+            size: 256,
+            status: mooncake_store_core::ReplicaStatus::Complete,
+            replica_type: mooncake_store_core::ReplicaType::Memory,
+            holder_client_id: Some(client_id),
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 4096,
+        };
+        let payload = serde_json::json!({
+            "op": "put_end",
+            "key": "tenant-a/k1",
+            "size": 256,
+            "client_id": client_id.to_string(),
+            "tenant_id": "tenant-a",
+            "group_id": "group-a",
+            "user_key": "k1",
+            "replicas": [replica],
+        })
+        .to_string();
+
+        let n = applier.apply_op_log_entries(&[OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload,
+        }]);
+
+        assert_eq!(n, 1);
+        let object = state.objects.get("tenant-a/k1").unwrap();
+        assert_eq!(object.size, 256);
+        assert_eq!(object.client_id, client_id);
+        assert_eq!(object.tenant_id, "tenant-a");
+        assert_eq!(object.group_id, "group-a");
+        assert_eq!(object.user_key, "k1");
+        assert_eq!(object.replicas.len(), 1);
+        assert_eq!(object.replicas[0].segment_id, segment_id);
     }
 
     #[test]

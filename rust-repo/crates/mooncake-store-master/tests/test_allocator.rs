@@ -6,7 +6,8 @@ use common::{make_seg, make_seg_with_usage};
 use mooncake_store_core::{ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{
     cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
-    AllocationStrategy, MemoryAllocatorKind, SegmentAllocator, SlabReleaseMode, CACHELIB_SLAB_SIZE,
+    AllocationStrategy, MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator,
+    SlabReleaseMode, CACHELIB_SLAB_SIZE,
 };
 use uuid::Uuid;
 
@@ -557,4 +558,58 @@ fn test_preferred_segment_takes_precedence_over_preferred_segments() {
     let repls = a.allocate_for_client("k", Some(Uuid::new_v4()), 500, 2, &config);
     assert_eq!(repls.len(), 2);
     assert_eq!(repls[0].segment_name, "singular:1");
+}
+
+#[test]
+fn test_allocate_with_exclusions_skips_preferred_and_fallback_segments() {
+    let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
+    a.add_segment(make_seg("preferred:1", 10000), 0, Uuid::new_v4());
+    a.add_segment(make_seg("excluded:1", 10000), 0, Uuid::new_v4());
+    a.add_segment(make_seg("allowed:1", 10000), 0, Uuid::new_v4());
+
+    let config = ReplicateConfig {
+        preferred_segment: "preferred:1".into(),
+        ..Default::default()
+    };
+    let excluded = vec!["preferred:1".to_string(), "excluded:1".to_string()];
+
+    let repls = a.allocate_with_exclusions("k", 128, 2, &config, &excluded);
+    assert_eq!(repls.len(), 1);
+    assert_eq!(repls[0].segment_name, "allowed:1");
+}
+
+#[test]
+fn test_allocate_from_segment_reports_cpp_style_errors() {
+    let mut a = SegmentAllocator::new();
+    a.add_segment(make_seg("target:1", 256), 0, Uuid::new_v4());
+    a.add_segment(make_seg("full:1", 256), 256, Uuid::new_v4());
+
+    let replica = a.allocate_from_segment("target:1", 128).unwrap();
+    assert_eq!(replica.segment_name, "target:1");
+    assert_eq!(replica.offset, 0);
+
+    assert_eq!(
+        a.allocate_from_segment("target:1", 0).unwrap_err(),
+        SegmentAllocationError::InvalidParams
+    );
+    assert_eq!(
+        a.allocate_from_segment("ghost:1", 128).unwrap_err(),
+        SegmentAllocationError::SegmentNotFound
+    );
+    assert_eq!(
+        a.allocate_from_segment("full:1", 128).unwrap_err(),
+        SegmentAllocationError::NoAvailableHandle
+    );
+}
+
+#[test]
+fn test_free_ratio_first_aggregates_allocators_with_same_segment_name() {
+    let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
+    a.add_segment(make_seg("aggregated:1", 1000), 1000, Uuid::new_v4());
+    a.add_segment(make_seg("aggregated:1", 1000), 0, Uuid::new_v4());
+    a.add_segment(make_seg("other:1", 1000), 400, Uuid::new_v4());
+
+    let repls = a.allocate("k", 100, 1, &ReplicateConfig::default());
+    assert_eq!(repls.len(), 1);
+    assert_eq!(repls[0].segment_name, "other:1");
 }

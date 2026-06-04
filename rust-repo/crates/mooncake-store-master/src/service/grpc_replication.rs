@@ -48,48 +48,48 @@ use super::*;
 /// Allocate one replica on a specified Memory or NoF segment; sync usage on success.
 fn allocate_replica_on_segment(
     state: &MasterState,
-    key: &str,
+    _key: &str,
     size: u64,
     segment_name: &str,
 ) -> Result<ReplicaDescriptor, Status> {
     let is_nof = client_id_by_nof_segment_name(state, segment_name).is_some();
     if is_nof {
-        let config = ReplicateConfig {
-            preferred_segment: segment_name.to_string(),
-            replica_num: 1,
-            ..Default::default()
-        };
-        let replicas = state.nof_allocator.write().allocate(key, size, 1, &config);
-        if replicas.len() == 1 && replicas[0].segment_name == segment_name {
-            sync_nof_segment_usage(state, replicas.iter().map(|r| r.segment_id));
-            let mut replica = replicas[0].clone();
-            replica.replica_type = ReplicaType::NoFSsd;
-            return Ok(replica);
-        }
-        if !replicas.is_empty() {
-            release_replicas(state, &replicas);
-        }
-        return Err(Status::resource_exhausted(format!(
-            "failed to allocate on NoF target segment: {segment_name}"
-        )));
+        let mut replica = state
+            .nof_allocator
+            .write()
+            .allocate_from_segment(segment_name, size)
+            .map_err(|err| allocation_error_status(err, segment_name, true))?;
+        replica.replica_type = ReplicaType::NoFSsd;
+        sync_nof_segment_usage(state, [replica.segment_id]);
+        return Ok(replica);
     }
 
-    let config = ReplicateConfig {
-        preferred_segment: segment_name.to_string(),
-        replica_num: 1,
-        ..Default::default()
-    };
-    let replicas = state.allocator.write().allocate(key, size, 1, &config);
-    if replicas.len() == 1 && replicas[0].segment_name == segment_name {
-        sync_segment_usage(state, replicas.iter().map(|r| r.segment_id));
-        return Ok(replicas[0].clone());
+    let replica = state
+        .allocator
+        .write()
+        .allocate_from_segment(segment_name, size)
+        .map_err(|err| allocation_error_status(err, segment_name, false))?;
+    sync_segment_usage(state, [replica.segment_id]);
+    Ok(replica)
+}
+
+fn allocation_error_status(
+    err: SegmentAllocationError,
+    segment_name: &str,
+    is_nof: bool,
+) -> Status {
+    let target = if is_nof { "NoF target" } else { "target" };
+    match err {
+        SegmentAllocationError::InvalidParams => {
+            Status::invalid_argument(format!("invalid allocation size for {target} segment"))
+        }
+        SegmentAllocationError::SegmentNotFound => {
+            Status::not_found(format!("{target} segment not found: {segment_name}"))
+        }
+        SegmentAllocationError::NoAvailableHandle => Status::resource_exhausted(format!(
+            "failed to allocate on {target} segment: {segment_name}"
+        )),
     }
-    if !replicas.is_empty() {
-        release_replicas(state, &replicas);
-    }
-    Err(Status::resource_exhausted(format!(
-        "failed to allocate on target segment: {segment_name}"
-    )))
 }
 
 fn same_replica(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
@@ -173,12 +173,23 @@ impl MasterServiceImpl {
         });
         let remove_object = object.replicas.is_empty();
         drop(object);
-        release_object_replicas(&self.state, &scoped_key, &removed);
         if remove_object {
+            if let Err(e) = self
+                .oplog_manager
+                .lock()
+                .record_put_revoke_durable(&scoped_key)
+            {
+                if let Some(mut object) = self.state.objects.get_mut(&scoped_key) {
+                    object.replicas.extend(removed.clone());
+                }
+                return Err(Status::internal(format!(
+                    "failed to persist put_revoke oplog: {e}"
+                )));
+            }
             self.state.objects.remove(&scoped_key);
             self.state.processing_keys.remove(&scoped_key);
-            self.oplog_manager.lock().record_put_revoke(&scoped_key);
         }
+        release_object_replicas(&self.state, &scoped_key, &removed);
         metrics::PUT_REVOKE_REQUESTS.inc();
         Ok(Response::new(proto::PutRevokeResponse {}))
     }
@@ -216,8 +227,11 @@ impl MasterServiceImpl {
         let mut removed_count = 0i64;
         for key in keys {
             if let Some((_, object)) = self.state.objects.remove(&key) {
-                self.cleanup_removed_object(&key, &object);
-                removed_count += 1;
+                if self.cleanup_removed_object(&key, &object).is_ok() {
+                    removed_count += 1;
+                } else {
+                    self.state.objects.insert(key, object);
+                }
             }
         }
         Ok(Response::new(proto::RemoveAllResponse { removed_count }))

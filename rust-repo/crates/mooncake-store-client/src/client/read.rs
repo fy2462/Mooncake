@@ -495,8 +495,8 @@ impl MooncakeClient {
         keys: &[String],
         all_buffers: &[Vec<*mut c_void>],
         all_sizes: &[Vec<usize>],
-        _prefer_same_node: bool,
-    ) -> StoreResult<Vec<Vec<i64>>> {
+        prefer_same_node: bool,
+    ) -> StoreResult<Vec<i64>> {
         if keys.len() != all_buffers.len() || keys.len() != all_sizes.len() {
             return Err(StoreError::InvalidParams(
                 "keys, all_buffers, and all_sizes length mismatch".to_string(),
@@ -516,21 +516,31 @@ impl MooncakeClient {
             let replicas = match self.fetch_replicas(key).await {
                 Ok(replicas) => replicas,
                 Err(_) => {
-                    results.push(vec![-1; all_buffers[key_idx].len()]);
+                    results.push(-1);
                     continue;
                 }
             };
-            let replica = match self.select_best_replica(&replicas) {
+            let local_replica = || {
+                let endpoints = self.local_endpoints.read();
+                replicas.iter().find(|r| {
+                    r.status == mooncake_store_core::ReplicaStatus::Complete
+                        && endpoints.contains(&r.segment_name)
+                })
+            };
+            let replica = match prefer_same_node
+                .then(local_replica)
+                .flatten()
+                .or_else(|| self.select_best_replica(&replicas))
+            {
                 Some(r) => r,
                 None => {
-                    // All buffers for this key get -1. / 此 key 的所有缓冲区得到 -1。
-                    results.push(vec![-1; all_buffers[key_idx].len()]);
+                    results.push(-1);
                     continue;
                 }
             };
             let total_capacity = all_sizes[key_idx].iter().sum::<usize>();
             if total_capacity < replica.size as usize {
-                results.push(vec![-1; all_buffers[key_idx].len()]);
+                results.push(-1);
                 continue;
             }
 
@@ -551,7 +561,7 @@ impl MooncakeClient {
                 .count();
             if request_count == 0 {
                 let _ = self.engine.close_segment(seg);
-                results.push(vec![0; count]);
+                results.push(0);
                 continue;
             }
             let batch_id = match self.engine.allocate_batch_id(request_count) {
@@ -590,10 +600,11 @@ impl MooncakeClient {
             }
 
             // Poll with 10s timeout. / 以 10s 超时轮询。
-            let mut key_results: Vec<i64> = vec![0; count];
+            let mut total_transferred = 0i64;
+            let mut failed = false;
             let start = tokio::time::Instant::now();
             let timeout = tokio::time::Duration::from_secs(10);
-            for (request_idx, &buffer_idx) in request_to_buffer.iter().enumerate() {
+            for request_idx in 0..request_to_buffer.len() {
                 loop {
                     let status = match self.engine.get_transfer_status(batch_id, request_idx) {
                         Ok(status) => status,
@@ -604,15 +615,15 @@ impl MooncakeClient {
                         }
                     };
                     if status.status == TransferStatusEnum::Completed {
-                        key_results[buffer_idx] = status.transferred_bytes as i64;
+                        total_transferred += status.transferred_bytes as i64;
                         break;
                     }
                     if status.status == TransferStatusEnum::Failed {
-                        key_results[buffer_idx] = -1;
+                        failed = true;
                         break;
                     }
                     if start.elapsed() > timeout {
-                        key_results[buffer_idx] = -1;
+                        failed = true;
                         break;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
@@ -620,7 +631,7 @@ impl MooncakeClient {
             }
             self.engine.free_batch_id(batch_id)?;
             self.engine.close_segment(seg)?;
-            results.push(key_results);
+            results.push(if failed { -1 } else { total_transferred });
         }
         Ok(results)
     }

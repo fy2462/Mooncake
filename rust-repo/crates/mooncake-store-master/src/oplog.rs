@@ -39,9 +39,10 @@
 
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use mooncake_store_core::ReplicaDescriptor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -54,6 +55,8 @@ use xxhash_rust::xxh32::xxh32;
 const CPP_OP_PUT_END: u8 = 1;
 const CPP_OP_PUT_REVOKE: u8 = 2;
 const CPP_OP_REMOVE: u8 = 3;
+const MAX_OBJECT_KEY_SIZE: usize = 4096;
+const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CppOpLogWireEntry {
@@ -88,6 +91,28 @@ pub trait OpLogStore: Send + Sync {
     /// 获取最新已提交的序列号。
     fn latest_sequence(&self) -> u64;
 
+    /// Get the maximum sequence number currently present in the backend.
+    fn max_sequence_id(&self) -> Result<u64, HaError>;
+
+    /// Update the latest sequence pointer without appending a new entry.
+    fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError>;
+
+    /// Persist the sequence id associated with a published snapshot.
+    fn record_snapshot_sequence_id(
+        &mut self,
+        snapshot_id: &str,
+        sequence_id: u64,
+    ) -> Result<(), HaError>;
+
+    /// Read the sequence id associated with a published snapshot.
+    fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError>;
+
+    /// Remove oplog entries strictly before before_sequence_id.
+    fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError>;
+
+    /// Flush pending entries that were appended but not durably persisted yet.
+    fn flush_durable(&mut self) -> Result<(), HaError>;
+
     /// Poll for records from since_seq, returning records, next_seq, and timeout flag.
     /// 从 since_seq 开始轮询记录，返回记录列表、next_seq 和是否超时。
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult;
@@ -115,6 +140,7 @@ pub struct InMemoryOpLog {
     /// Maximum number of entries to retain.
     /// 最大保留条目数。
     max_entries: usize,
+    snapshot_sequences: HashMap<String, u64>,
 }
 
 impl InMemoryOpLog {
@@ -123,6 +149,7 @@ impl InMemoryOpLog {
             buffer: VecDeque::new(),
             last_seq: 0,
             max_entries: max_entries.max(1),
+            snapshot_sequences: HashMap::new(),
         }
     }
 }
@@ -176,6 +203,43 @@ impl OpLogStore for InMemoryOpLog {
         self.last_seq
     }
 
+    fn max_sequence_id(&self) -> Result<u64, HaError> {
+        Ok(self.last_seq)
+    }
+
+    fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+        self.last_seq = sequence_id;
+        Ok(())
+    }
+
+    fn record_snapshot_sequence_id(
+        &mut self,
+        snapshot_id: &str,
+        sequence_id: u64,
+    ) -> Result<(), HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        self.snapshot_sequences
+            .insert(snapshot_id.to_string(), sequence_id);
+        Ok(())
+    }
+
+    fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        self.snapshot_sequences
+            .get(snapshot_id)
+            .copied()
+            .ok_or_else(|| HaError::InvalidBackend(format!("snapshot not found: {snapshot_id}")))
+    }
+
+    fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+        self.buffer.retain(|entry| entry.seq >= before_sequence_id);
+        Ok(())
+    }
+
+    fn flush_durable(&mut self) -> Result<(), HaError> {
+        Ok(())
+    }
+
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
         let records = self.read_since(since_seq, max_count).unwrap_or_default();
         let next_seq = records.last().map(|r| r.seq + 1).unwrap_or(since_seq);
@@ -225,6 +289,19 @@ pub struct LocalFsOpLogStore {
     _flush_handle: Option<std::thread::JoinHandle<()>>,
 }
 
+fn validate_snapshot_id(snapshot_id: &str) -> Result<(), HaError> {
+    if snapshot_id.is_empty()
+        || snapshot_id.contains('/')
+        || snapshot_id.contains("..")
+        || snapshot_id.as_bytes().contains(&0)
+    {
+        return Err(HaError::InvalidBackend(format!(
+            "invalid snapshot id: {snapshot_id}"
+        )));
+    }
+    Ok(())
+}
+
 impl LocalFsOpLogStore {
     /// Create a local filesystem oplog store.
     /// 创建本地文件 oplog store。
@@ -267,6 +344,9 @@ impl LocalFsOpLogStore {
     /// numbered segment file and parse its last record's seq.
     /// 从磁盘恢复 last_seq：扫描编号最大的分段文件，解析其中最后一条记录的 seq。
     fn recover(&mut self) -> Result<(), HaError> {
+        let persisted_latest = fs::read_to_string(self.latest_path())
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok());
         let mut segments: Vec<u64> = self.list_segment_files()?;
         segments.sort();
         if let Some(&highest_start) = segments.last() {
@@ -278,6 +358,9 @@ impl LocalFsOpLogStore {
                 self.last_seq = last.seq;
                 self.current_segment_seq = highest_start;
             }
+        }
+        if let Some(persisted_latest) = persisted_latest {
+            self.last_seq = self.last_seq.max(persisted_latest);
         }
         Ok(())
     }
@@ -309,6 +392,18 @@ impl LocalFsOpLogStore {
     /// 根据起始序列号构建分段文件的路径。
     fn segment_path(&self, start_seq: u64) -> PathBuf {
         self.dir.join(format!("oplog_{:020}.bin", start_seq))
+    }
+
+    fn latest_path(&self) -> PathBuf {
+        self.dir.join("latest")
+    }
+
+    fn snapshots_dir(&self) -> PathBuf {
+        self.dir.join("snapshots")
+    }
+
+    fn snapshot_path(&self, snapshot_id: &str) -> PathBuf {
+        self.snapshots_dir().join(snapshot_id)
     }
 
     /// Flush entries to a segment file atomically (synchronous — used by both
@@ -353,7 +448,17 @@ impl LocalFsOpLogStore {
         }
         Self::flush_inner(&self.dir, &self.buffer)?;
         self.current_segment_seq = self.buffer.first().map(|e| e.seq).unwrap_or(0);
+        self.write_latest(self.last_seq)?;
         self.buffer.clear();
+        Ok(())
+    }
+
+    fn write_latest(&self, sequence_id: u64) -> Result<(), HaError> {
+        fs::write(self.latest_path(), sequence_id.to_string())
+            .map_err(|e| HaError::InvalidBackend(format!("oplog write latest: {e}")))?;
+        if let Ok(f) = fs::File::open(&self.dir) {
+            let _ = f.sync_all();
+        }
         Ok(())
     }
 
@@ -468,6 +573,83 @@ impl OpLogStore for LocalFsOpLogStore {
         self.last_seq
     }
 
+    fn max_sequence_id(&self) -> Result<u64, HaError> {
+        let mut max_seq = self.last_seq;
+        for start_seq in self.list_segment_files()? {
+            let data = fs::read(self.segment_path(start_seq))
+                .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
+            if let Some(entry) = Self::parse_entries(&data).last() {
+                max_seq = max_seq.max(entry.seq);
+            }
+        }
+        for entry in &self.buffer {
+            max_seq = max_seq.max(entry.seq);
+        }
+        Ok(max_seq)
+    }
+
+    fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+        self.last_seq = sequence_id;
+        self.write_latest(sequence_id)
+    }
+
+    fn record_snapshot_sequence_id(
+        &mut self,
+        snapshot_id: &str,
+        sequence_id: u64,
+    ) -> Result<(), HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        fs::create_dir_all(self.snapshots_dir())
+            .map_err(|e| HaError::InvalidBackend(format!("oplog create snapshots dir: {e}")))?;
+        fs::write(self.snapshot_path(snapshot_id), sequence_id.to_string())
+            .map_err(|e| HaError::InvalidBackend(format!("oplog write snapshot seq: {e}")))?;
+        if let Ok(f) = fs::File::open(self.snapshots_dir()) {
+            let _ = f.sync_all();
+        }
+        Ok(())
+    }
+
+    fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        let value = fs::read_to_string(self.snapshot_path(snapshot_id))
+            .map_err(|e| HaError::InvalidBackend(format!("oplog read snapshot seq: {e}")))?;
+        value
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| HaError::InvalidBackend(format!("oplog parse snapshot seq: {e}")))
+    }
+
+    fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+        self.buffer.retain(|entry| entry.seq >= before_sequence_id);
+        for start_seq in self.list_segment_files()? {
+            let path = self.segment_path(start_seq);
+            let data = fs::read(&path)
+                .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
+            let entries = Self::parse_entries(&data);
+            let retained = entries
+                .iter()
+                .filter(|entry| entry.seq >= before_sequence_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if retained.is_empty() {
+                fs::remove_file(&path)
+                    .map_err(|e| HaError::InvalidBackend(format!("oplog cleanup segment: {e}")))?;
+            } else if retained.len() != entries.len() {
+                fs::remove_file(&path)
+                    .map_err(|e| HaError::InvalidBackend(format!("oplog rewrite segment: {e}")))?;
+                Self::flush_inner(&self.dir, &retained)?;
+            }
+        }
+        if let Ok(f) = fs::File::open(&self.dir) {
+            let _ = f.sync_all();
+        }
+        Ok(())
+    }
+
+    fn flush_durable(&mut self) -> Result<(), HaError> {
+        self.flush()
+    }
+
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
         let records = self.read_since(since_seq, max_count).unwrap_or_default();
         let next_seq = records.last().map(|r| r.seq + 1).unwrap_or(since_seq);
@@ -480,6 +662,7 @@ impl OpLogStore for LocalFsOpLogStore {
 }
 
 fn serialize_etcd_oplog_value(entry: &OpLogRecord) -> Result<String, HaError> {
+    validate_record_size(entry)?;
     if let Some(wire) = cpp_wire_entry_from_record(entry) {
         serde_json::to_string(&wire)
             .map_err(|e| HaError::InvalidBackend(format!("oplog wire serialize: {e}")))
@@ -496,12 +679,50 @@ fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, HaError> {
 
     let wire: CppOpLogWireEntry = serde_json::from_str(value)
         .map_err(|e| HaError::InvalidBackend(format!("oplog wire deserialize: {e}")))?;
+    validate_wire_entry_size(&wire)?;
     let payload = rust_payload_from_cpp_wire_entry(&wire)?;
     Ok(OpLogRecord {
         seq: wire.sequence_id,
         producer_view_version: 0,
         payload,
     })
+}
+
+fn validate_record_size(entry: &OpLogRecord) -> Result<(), HaError> {
+    if entry.payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(HaError::InvalidBackend(format!(
+            "oplog payload too large: {}",
+            entry.payload.len()
+        )));
+    }
+    if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(&entry.payload) {
+        if let Some(key) = payload_json.get("key").and_then(|key| key.as_str()) {
+            if key.len() > MAX_OBJECT_KEY_SIZE {
+                return Err(HaError::InvalidBackend(format!(
+                    "oplog object key too large: {}",
+                    key.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_wire_entry_size(wire: &CppOpLogWireEntry) -> Result<(), HaError> {
+    if wire.object_key.len() > MAX_OBJECT_KEY_SIZE {
+        return Err(HaError::InvalidBackend(format!(
+            "oplog object key too large: {}",
+            wire.object_key.len()
+        )));
+    }
+    let max_base64_payload = MAX_PAYLOAD_SIZE.div_ceil(3) * 4;
+    if wire.payload.len() > max_base64_payload {
+        return Err(HaError::InvalidBackend(format!(
+            "oplog payload too large: {}",
+            wire.payload.len()
+        )));
+    }
+    Ok(())
 }
 
 fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> {
@@ -672,6 +893,10 @@ impl EtcdOpLogStore {
         format!("{}/latest", self.key_prefix)
     }
 
+    fn snapshot_key(&self, snapshot_id: &str) -> String {
+        format!("{}/snapshot/{}", self.key_prefix, snapshot_id)
+    }
+
     /// Flush buffered entries to etcd: put each record, then update /latest.
     /// 将 buffer 批量写入 etcd：逐个 put 每条记录，最后更新 `/latest` 指针。
     async fn flush(&mut self) -> Result<(), HaError> {
@@ -729,6 +954,115 @@ impl OpLogStore for EtcdOpLogStore {
             }
         })
         .unwrap_or(self.last_seq)
+    }
+
+    fn max_sequence_id(&self) -> Result<u64, HaError> {
+        let mut max_seq = self.last_seq;
+        let c = self.client.clone();
+        let range_start = self.entry_key(0);
+        let range_end = self.entry_key(u64::MAX);
+        let backend_max = block_on_runtime(async move {
+            c.kv_client()
+                .get(
+                    range_start.as_bytes(),
+                    Some(
+                        etcd_client::GetOptions::new()
+                            .with_range(range_end.as_bytes())
+                            .with_sort(
+                                etcd_client::SortTarget::Key,
+                                etcd_client::SortOrder::Descend,
+                            )
+                            .with_limit(1),
+                    ),
+                )
+                .await
+                .map_err(|e| HaError::InvalidBackend(format!("etcd get max oplog: {e}")))
+        })?
+        .kvs()
+        .first()
+        .and_then(|kv| String::from_utf8(kv.key().to_vec()).ok())
+        .and_then(|key| {
+            key.rsplit('/')
+                .next()
+                .and_then(|seq| seq.parse::<u64>().ok())
+        });
+        if let Some(backend_max) = backend_max {
+            max_seq = max_seq.max(backend_max);
+        }
+        Ok(max_seq)
+    }
+
+    fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+        self.last_seq = sequence_id;
+        let c = self.client.clone();
+        let latest_key = self.latest_key();
+        block_on_runtime(async move {
+            c.kv_client()
+                .put(
+                    latest_key.as_bytes(),
+                    sequence_id.to_string().as_bytes(),
+                    None,
+                )
+                .await
+                .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog latest: {e}")))
+        })?;
+        Ok(())
+    }
+
+    fn record_snapshot_sequence_id(
+        &mut self,
+        snapshot_id: &str,
+        sequence_id: u64,
+    ) -> Result<(), HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        let c = self.client.clone();
+        let key = self.snapshot_key(snapshot_id);
+        block_on_runtime(async move {
+            c.kv_client()
+                .put(key.as_bytes(), sequence_id.to_string().as_bytes(), None)
+                .await
+                .map_err(|e| HaError::InvalidBackend(format!("etcd put snapshot seq: {e}")))
+        })?;
+        Ok(())
+    }
+
+    fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+        validate_snapshot_id(snapshot_id)?;
+        let c = self.client.clone();
+        let key = self.snapshot_key(snapshot_id);
+        let value = block_on_runtime(async move {
+            c.kv_client()
+                .get(key.as_bytes(), None)
+                .await
+                .map_err(|e| HaError::InvalidBackend(format!("etcd get snapshot seq: {e}")))
+        })?
+        .kvs()
+        .first()
+        .and_then(|kv| String::from_utf8(kv.value().to_vec()).ok())
+        .ok_or_else(|| HaError::InvalidBackend(format!("snapshot not found: {snapshot_id}")))?;
+        value
+            .parse::<u64>()
+            .map_err(|e| HaError::InvalidBackend(format!("etcd parse snapshot seq: {e}")))
+    }
+
+    fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+        let c = self.client.clone();
+        let range_start = self.entry_key(0);
+        let range_end = self.entry_key(before_sequence_id);
+        block_on_runtime(async move {
+            c.kv_client()
+                .delete(
+                    range_start.as_bytes(),
+                    Some(etcd_client::DeleteOptions::new().with_range(range_end.as_bytes())),
+                )
+                .await
+                .map_err(|e| HaError::InvalidBackend(format!("etcd cleanup oplog: {e}")))
+        })?;
+        Ok(())
+    }
+
+    fn flush_durable(&mut self) -> Result<(), HaError> {
+        block_on_runtime(self.flush())
     }
 
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
@@ -828,10 +1162,9 @@ impl EtcdOpLogStore {
 /// etc.) as JSON and appends them to the underlying OpLogStore.
 /// OpLog 管理器：将业务操作（put/remove/mount 等）序列化为 JSON 并追加到底层 OpLogStore。
 ///
-/// All errors are logged via warn! but never propagated — oplog uses best-effort
-/// semantics to ensure the main write path is never blocked by oplog failures.
-/// 所有错误仅 warn 日志记录，不向上传播——oplog 采用 best-effort 语义，
-/// 确保主写路径永不因 oplog 故障而被阻塞。
+/// Best-effort record_* helpers keep the old non-blocking behavior. The
+/// append_and_persist / record_*_durable helpers are used for mutations where
+/// stale standby state would be unsafe after promotion.
 pub struct OpLogManager {
     store: Option<Box<dyn OpLogStore + Send>>,
     view_version: u64,
@@ -852,6 +1185,13 @@ impl OpLogManager {
             .unwrap_or(0)
     }
 
+    pub fn max_sequence_id(&self) -> Result<u64, HaError> {
+        self.store
+            .as_ref()
+            .map(|s| s.max_sequence_id())
+            .unwrap_or(Ok(0))
+    }
+
     pub fn set_view_version(&mut self, version: u64) {
         self.view_version = version;
     }
@@ -864,17 +1204,100 @@ impl OpLogManager {
         self.store
     }
 
-    /// Record a put_end mutation: object data write completed.
-    /// 记录 put_end 操作：对象数据写入完成。
-    /// payload 格式：{ "op": "put_end", "key": "...", "size": ... }
-    pub fn record_put_end(&mut self, key: &str, size: u64) {
+    fn append_payload(&mut self, payload: String) -> Result<u64, HaError> {
+        let Some(store) = &mut self.store else {
+            return Ok(0);
+        };
+        let record = OpLogRecord {
+            seq: 0,
+            producer_view_version: self.view_version,
+            payload,
+        };
+        validate_record_size(&record)?;
+        store.append(&record)
+    }
+
+    pub fn append_and_persist(&mut self, payload: String) -> Result<u64, HaError> {
+        let Some(store) = &mut self.store else {
+            return Ok(0);
+        };
+        let record = OpLogRecord {
+            seq: 0,
+            producer_view_version: self.view_version,
+            payload,
+        };
+        validate_record_size(&record)?;
+        let seq = store.append(&record)?;
+        store.flush_durable()?;
+        Ok(seq)
+    }
+
+    pub fn set_initial_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
         if let Some(store) = &mut self.store {
-            let payload = json!({"op": "put_end", "key": key, "size": size}).to_string();
-            if let Err(e) = store.append(&OpLogRecord {
+            store.update_latest_sequence_id(sequence_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+        if let Some(store) = &mut self.store {
+            store.cleanup_before(before_sequence_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn record_snapshot_sequence_id(
+        &mut self,
+        snapshot_id: &str,
+        sequence_id: u64,
+    ) -> Result<(), HaError> {
+        if let Some(store) = &mut self.store {
+            store.record_snapshot_sequence_id(snapshot_id, sequence_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+        self.store
+            .as_ref()
+            .map(|s| s.get_snapshot_sequence_id(snapshot_id))
+            .unwrap_or(Ok(0))
+    }
+
+    pub fn record_put_end(&mut self, key: &str, size: u64) {
+        self.record_put_end_with_metadata(key, size, None, "", "", "", &[]);
+    }
+
+    /// Record a put_end mutation with enough metadata for standby replay to
+    /// recreate an object that was created after the latest snapshot.
+    pub fn record_put_end_with_metadata(
+        &mut self,
+        key: &str,
+        size: u64,
+        client_id: Option<Uuid>,
+        tenant_id: &str,
+        group_id: &str,
+        user_key: &str,
+        replicas: &[ReplicaDescriptor],
+    ) {
+        if let Some(store) = &mut self.store {
+            let payload = json!({
+                "op": "put_end",
+                "key": key,
+                "size": size,
+                "client_id": client_id.map(|id| id.to_string()),
+                "tenant_id": tenant_id,
+                "group_id": group_id,
+                "user_key": user_key,
+                "replicas": replicas,
+            })
+            .to_string();
+            let record = OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
                 payload,
-            }) {
+            };
+            if let Err(e) = validate_record_size(&record).and_then(|_| store.append(&record)) {
                 warn!("OpLogManager: failed to record put_end for key={key}: {e}");
             }
         }
@@ -882,30 +1305,24 @@ impl OpLogManager {
 
     /// Record a remove mutation: { "op": "remove", "key": "..." }
     pub fn record_remove(&mut self, key: &str) {
-        if let Some(store) = &mut self.store {
-            let payload = json!({"op": "remove", "key": key}).to_string();
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record remove for key={key}: {e}");
-            }
+        if let Err(e) = self.append_payload(json!({"op": "remove", "key": key}).to_string()) {
+            warn!("OpLogManager: failed to record remove for key={key}: {e}");
         }
+    }
+
+    pub fn record_remove_durable(&mut self, key: &str) -> Result<u64, HaError> {
+        self.append_and_persist(json!({"op": "remove", "key": key}).to_string())
     }
 
     /// Record a put_revoke mutation that fully removes an unfinished object.
     pub fn record_put_revoke(&mut self, key: &str) {
-        if let Some(store) = &mut self.store {
-            let payload = json!({"op": "put_revoke", "key": key}).to_string();
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record put_revoke for key={key}: {e}");
-            }
+        if let Err(e) = self.append_payload(json!({"op": "put_revoke", "key": key}).to_string()) {
+            warn!("OpLogManager: failed to record put_revoke for key={key}: {e}");
         }
+    }
+
+    pub fn record_put_revoke_durable(&mut self, key: &str) -> Result<u64, HaError> {
+        self.append_and_persist(json!({"op": "put_revoke", "key": key}).to_string())
     }
 
     /// Record a mount-segment mutation.
@@ -1148,6 +1565,71 @@ mod tests {
         assert_eq!(store.latest_sequence(), 3);
         let entries = store.read_since(1, 10).unwrap();
         assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn test_local_fs_snapshot_sequence_and_cleanup_parity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = LocalFsOpLogStore::new(dir.path(), 2).unwrap();
+
+        for _ in 0..5 {
+            store.append(&make_entry(0)).unwrap();
+        }
+        store.flush_durable().unwrap();
+        assert_eq!(store.max_sequence_id().unwrap(), 5);
+
+        store.record_snapshot_sequence_id("snap1", 3).unwrap();
+        assert_eq!(store.get_snapshot_sequence_id("snap1").unwrap(), 3);
+        assert!(store.record_snapshot_sequence_id("../bad", 1).is_err());
+
+        store.cleanup_before(4).unwrap();
+        let entries = store.read_since(1, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].seq, 4);
+
+        let reopened = LocalFsOpLogStore::new(dir.path(), 2).unwrap();
+        assert_eq!(reopened.latest_sequence(), 5);
+        assert_eq!(reopened.get_snapshot_sequence_id("snap1").unwrap(), 3);
+    }
+
+    #[test]
+    fn test_manager_append_and_persist_flushes_local_fs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
+        let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
+
+        let seq = manager.record_remove_durable("k1").unwrap();
+        assert_eq!(seq, 1);
+
+        let store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
+        let entries = store.read_since(1, 10).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&entries[0].payload).unwrap(),
+            json!({"op": "remove", "key": "k1"})
+        );
+    }
+
+    #[test]
+    fn test_oplog_size_validation_matches_cpp_limits() {
+        let long_key = "k".repeat(MAX_OBJECT_KEY_SIZE + 1);
+        let entry = OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload: json!({"op": "remove", "key": long_key}).to_string(),
+        };
+        assert!(validate_record_size(&entry).is_err());
+
+        let wire = CppOpLogWireEntry {
+            sequence_id: 1,
+            timestamp_ms: 1,
+            op_type: CPP_OP_PUT_END,
+            object_key: "k".to_string(),
+            payload: "A".repeat((MAX_PAYLOAD_SIZE.div_ceil(3) * 4) + 1),
+            checksum: 0,
+            prefix_hash: 0,
+        };
+        assert!(validate_wire_entry_size(&wire).is_err());
     }
 
     #[test]

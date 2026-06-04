@@ -807,6 +807,11 @@ impl MooncakeClient {
         *self.tear_down.read()
     }
 
+    /// Return this client's UUID. / 返回当前客户端 UUID。
+    pub fn client_id(&self) -> Uuid {
+        self.client_id
+    }
+
     /// Tear down the client: set the shutdown flag, unregister the local buffer
     /// and all user-registered buffers from the TransferEngine.
     ///

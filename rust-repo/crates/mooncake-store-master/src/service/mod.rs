@@ -35,7 +35,9 @@ mod proto_conv;
 pub(crate) mod state;
 mod workers;
 
-use crate::allocator::{MemoryAllocatorKind, SegmentAllocator, CACHELIB_SLAB_SIZE};
+use crate::allocator::{
+    MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator, CACHELIB_SLAB_SIZE,
+};
 use crate::count_min_sketch::CountMinSketch;
 use crate::http_metadata::MetadataState;
 use crate::metrics;
