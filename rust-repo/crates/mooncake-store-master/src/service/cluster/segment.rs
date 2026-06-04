@@ -112,7 +112,9 @@ impl MasterServiceImpl {
             .lock()
             .record_mount_segment(&req.segment_name, segment_id, req.size);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);
-        Ok(Response::new(proto::MountSegmentResponse {}))
+        Ok(Response::new(proto::MountSegmentResponse {
+            segment_id: Some(uuid_to_proto(segment_id)),
+        }))
     }
 
     // ---- MountNoFSegment ----

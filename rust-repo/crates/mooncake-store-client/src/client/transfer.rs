@@ -474,7 +474,13 @@ impl MooncakeClient {
 
         // Step 2: allocate a batch_id for grouping transfer requests.
         // 第 2 步：分配 batch_id 用于分组传输请求。
-        let batch_id = self.engine.allocate_batch_id(1)?;
+        let batch_id = match self.engine.allocate_batch_id(1) {
+            Ok(batch_id) => batch_id,
+            Err(e) => {
+                let _ = self.engine.close_segment(segment_id);
+                return Err(e.into());
+            }
+        };
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: batch_id allocated");
 
         // Step 3: copy data into the registered local_buffer (TE source).
@@ -507,7 +513,11 @@ impl MooncakeClient {
             "write_to_replica: submitting transfer"
         );
 
-        self.engine.submit_transfer(batch_id, &[request])?;
+        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         tracing::info!(target: "te_debug", "write_to_replica: transfer submitted, polling...");
 
         // Step 5: poll transfer status with 10s timeout.
@@ -519,7 +529,14 @@ impl MooncakeClient {
         let timeout = tokio::time::Duration::from_secs(10);
         let mut poll_count: u64 = 0;
         loop {
-            let status = self.engine.get_transfer_status(batch_id, 0)?;
+            let status = match self.engine.get_transfer_status(batch_id, 0) {
+                Ok(status) => status,
+                Err(e) => {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(segment_id);
+                    return Err(e.into());
+                }
+            };
             poll_count += 1;
             if status.status == TransferStatusEnum::Completed {
                 tracing::info!(
@@ -538,7 +555,7 @@ impl MooncakeClient {
                     elapsed_ms = start.elapsed().as_millis(),
                     batch_id = batch_id.0,
                     seg_id = segment_id.0,
-                    "write_to_replica: transfer FAILED (leaking batch_id and segment!)"
+                    "write_to_replica: transfer FAILED (cleaning up)"
                 );
                 // Cleanup on failure: free batch_id, close segment.
                 // 失败时清理：释放 batch_id，关闭 segment。
@@ -567,7 +584,10 @@ impl MooncakeClient {
 
         // Step 6: cleanup resources. / 第 6 步：清理资源。
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: freeing batch_id");
-        self.engine.free_batch_id(batch_id)?;
+        if let Err(e) = self.engine.free_batch_id(batch_id) {
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: closing segment");
         self.engine.close_segment(segment_id)?;
         tracing::info!(target: "te_debug", "write_to_replica: EXIT (success)");
@@ -622,7 +642,13 @@ impl MooncakeClient {
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "zero_copy_write: segment opened");
 
-        let batch_id = self.engine.allocate_batch_id(1)?;
+        let batch_id = match self.engine.allocate_batch_id(1) {
+            Ok(batch_id) => batch_id,
+            Err(e) => {
+                let _ = self.engine.close_segment(segment_id);
+                return Err(e.into());
+            }
+        };
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_write: batch_id allocated");
 
         // Build transfer: source = caller's buffer directly (no intermediate copy).
@@ -635,7 +661,11 @@ impl MooncakeClient {
             length: size as u64,
         };
 
-        self.engine.submit_transfer(batch_id, &[request])?;
+        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         tracing::info!(target: "te_debug", "zero_copy_write: transfer submitted, polling...");
 
         // Poll with 10s timeout. / 以 10s 超时轮询。
@@ -643,7 +673,14 @@ impl MooncakeClient {
         let timeout = tokio::time::Duration::from_secs(10);
         let mut poll_count: u64 = 0;
         loop {
-            let status = self.engine.get_transfer_status(batch_id, 0)?;
+            let status = match self.engine.get_transfer_status(batch_id, 0) {
+                Ok(status) => status,
+                Err(e) => {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(segment_id);
+                    return Err(e.into());
+                }
+            };
             poll_count += 1;
             if status.status.is_terminal() {
                 if status.status != TransferStatusEnum::Completed {
@@ -683,7 +720,10 @@ impl MooncakeClient {
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
-        self.engine.free_batch_id(batch_id)?;
+        if let Err(e) = self.engine.free_batch_id(batch_id) {
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         self.engine.close_segment(segment_id)?;
         tracing::info!(target: "te_debug", "zero_copy_write: EXIT (success)");
         Ok(())
@@ -771,7 +811,13 @@ impl MooncakeClient {
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "read_from_replica: segment opened");
 
         let read_len = replica.size as usize;
-        let batch_id = self.engine.allocate_batch_id(1)?;
+        let batch_id = match self.engine.allocate_batch_id(1) {
+            Ok(batch_id) => batch_id,
+            Err(e) => {
+                let _ = self.engine.close_segment(segment_id);
+                return Err(e.into());
+            }
+        };
         tracing::info!(target: "te_debug", batch_id = batch_id.0, read_len, "read_from_replica: batch_id allocated");
 
         // Build transfer: Read from remote segment into local_buffer.
@@ -793,7 +839,11 @@ impl MooncakeClient {
             "read_from_replica: submitting transfer"
         );
 
-        self.engine.submit_transfer(batch_id, &[request])?;
+        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         tracing::info!(target: "te_debug", "read_from_replica: transfer submitted, polling...");
 
         // Poll with 10s timeout. / 以 10s 超时轮询。
@@ -803,7 +853,14 @@ impl MooncakeClient {
         let mut poll_count: u64 = 0;
         loop {
             let status: transfer_engine_ffi::TransferStatus =
-                self.engine.get_transfer_status(batch_id, 0)?;
+                match self.engine.get_transfer_status(batch_id, 0) {
+                    Ok(status) => status,
+                    Err(e) => {
+                        let _ = self.engine.free_batch_id(batch_id);
+                        let _ = self.engine.close_segment(segment_id);
+                        return Err(e.into());
+                    }
+                };
             poll_count += 1;
             transferred = status.transferred_bytes;
             if status.status == TransferStatusEnum::Completed {
@@ -823,7 +880,7 @@ impl MooncakeClient {
                     elapsed_ms = start.elapsed().as_millis(),
                     batch_id = batch_id.0,
                     seg_id = segment_id.0,
-                    "read_from_replica: transfer FAILED (leaking batch_id and segment!)"
+                    "read_from_replica: transfer FAILED (cleaning up)"
                 );
                 let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(segment_id);
@@ -845,7 +902,10 @@ impl MooncakeClient {
         }
 
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "read_from_replica: freeing batch_id");
-        self.engine.free_batch_id(batch_id)?;
+        if let Err(e) = self.engine.free_batch_id(batch_id) {
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "read_from_replica: closing segment");
         self.engine.close_segment(segment_id)?;
 
@@ -903,7 +963,13 @@ impl MooncakeClient {
             self.engine.open_segment(&replica.segment_name)?;
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "zero_copy_read: segment opened");
 
-        let batch_id: transfer_engine_ffi::BatchId = self.engine.allocate_batch_id(1)?;
+        let batch_id: transfer_engine_ffi::BatchId = match self.engine.allocate_batch_id(1) {
+            Ok(batch_id) => batch_id,
+            Err(e) => {
+                let _ = self.engine.close_segment(segment_id);
+                return Err(e.into());
+            }
+        };
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_read: batch_id allocated");
 
         // Build transfer: source = caller's buffer (RDMA destination).
@@ -916,7 +982,11 @@ impl MooncakeClient {
             length: size as u64,
         };
 
-        self.engine.submit_transfer(batch_id, &[request])?;
+        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         tracing::info!(target: "te_debug", "zero_copy_read: transfer submitted, polling...");
 
         // Poll with 10s timeout. / 以 10s 超时轮询。
@@ -926,7 +996,14 @@ impl MooncakeClient {
         let mut poll_count: u64 = 0;
         loop {
             let status: transfer_engine_ffi::TransferStatus =
-                self.engine.get_transfer_status(batch_id, 0)?;
+                match self.engine.get_transfer_status(batch_id, 0) {
+                    Ok(status) => status,
+                    Err(e) => {
+                        let _ = self.engine.free_batch_id(batch_id);
+                        let _ = self.engine.close_segment(segment_id);
+                        return Err(e.into());
+                    }
+                };
             poll_count += 1;
             transferred = status.transferred_bytes;
             if status.status.is_terminal() {
@@ -968,7 +1045,10 @@ impl MooncakeClient {
             tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
         }
 
-        self.engine.free_batch_id(batch_id)?;
+        if let Err(e) = self.engine.free_batch_id(batch_id) {
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         self.engine.close_segment(segment_id)?;
         tracing::info!(target: "te_debug", transferred, "zero_copy_read: EXIT (success)");
         Ok(transferred as usize)
@@ -1007,10 +1087,13 @@ impl MooncakeClient {
             .engine
             .open_segment(&result.transfer_engine_addr)
             .map_err(|e| StoreError::Internal(format!("open peer segment: {e}")))?;
-        let batch_id = self
-            .engine
-            .allocate_batch_id(1)
-            .map_err(|e| StoreError::Internal(format!("allocate batch: {e}")))?;
+        let batch_id = match self.engine.allocate_batch_id(1) {
+            Ok(batch_id) => batch_id,
+            Err(e) => {
+                let _ = self.engine.close_segment(seg_id);
+                return Err(StoreError::Internal(format!("allocate batch: {e}")));
+            }
+        };
 
         let read_len = replica.size as usize;
         let request = TransferRequest {
@@ -1021,32 +1104,46 @@ impl MooncakeClient {
             length: read_len as u64,
         };
 
-        self.engine
-            .submit_transfer(batch_id, &[request])
-            .map_err(|e| StoreError::Internal(format!("submit offload transfer: {e}")))?;
+        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(seg_id);
+            return Err(StoreError::Internal(format!(
+                "submit offload transfer: {e}"
+            )));
+        }
 
         // Poll with 10s timeout.
         let start = tokio::time::Instant::now();
         let timeout = tokio::time::Duration::from_secs(10);
         loop {
-            let status = self
-                .engine
-                .get_transfer_status(batch_id, 0)
-                .map_err(|e| StoreError::Internal(format!("poll offload transfer: {e}")))?;
+            let status = match self.engine.get_transfer_status(batch_id, 0) {
+                Ok(status) => status,
+                Err(e) => {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(seg_id);
+                    return Err(StoreError::Internal(format!("poll offload transfer: {e}")));
+                }
+            };
             if status.status == TransferStatusEnum::Completed {
                 break;
             }
             if status.status == TransferStatusEnum::Failed {
+                let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(seg_id);
                 return Err(StoreError::OperationFailed(-1));
             }
             if start.elapsed() >= timeout {
+                let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(seg_id);
                 return Err(StoreError::Internal("offload transfer timeout".to_string()));
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         }
 
+        if let Err(e) = self.engine.free_batch_id(batch_id) {
+            let _ = self.engine.close_segment(seg_id);
+            return Err(StoreError::Internal(format!("free offload batch: {e}")));
+        }
         let _ = self.engine.close_segment(seg_id);
 
         // Fire-and-forget: release remote buffer.

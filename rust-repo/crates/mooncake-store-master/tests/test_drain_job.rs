@@ -158,6 +158,78 @@ async fn test_drain_job_rejects_empty_segments() {
 }
 
 #[tokio::test]
+async fn test_drain_job_schedules_one_unit_per_draining_source_replica() {
+    let service = MasterServiceImpl::default();
+    let client_id = uuid::Uuid::new_v4();
+    for name in ["source-a:1", "source-b:1", "target-a:1"] {
+        service
+            .mount_segment(Request::new(
+                mooncake_store_master::proto::MountSegmentRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    segment_name: name.into(),
+                    size: 4096,
+                    base_addr: 0x100000000,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+
+    service
+        .put_start(Request::new(
+            mooncake_store_master::proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "multi-source-drain".into(),
+                slice_length: 256,
+                tenant_id: String::new(),
+                config: Some(mooncake_store_master::proto::ReplicateConfig {
+                    replica_num: 2,
+                    preferred_segments: vec!["source-a:1".into(), "source-b:1".into()],
+                    ..Default::default()
+                }),
+            },
+        ))
+        .await
+        .unwrap();
+    service
+        .put_end(Request::new(mooncake_store_master::proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "multi-source-drain".into(),
+            replica_type: mooncake_store_master::proto::replica_descriptor::ReplicaType::All as i32,
+            tenant_id: String::new(),
+        }))
+        .await
+        .unwrap();
+
+    let create_resp = service
+        .create_drain_job(Request::new(
+            mooncake_store_master::proto::CreateDrainJobRequest {
+                segments: vec!["source-a:1".into(), "source-b:1".into()],
+                target_segments: vec!["target-a:1".into()],
+                max_concurrency: 2,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let job_id = create_resp.job_id.unwrap();
+
+    let query_resp = service
+        .query_drain_job(Request::new(
+            mooncake_store_master::proto::QueryDrainJobRequest {
+                job_id: Some(job_id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(query_resp.active_units, 2);
+}
+
+#[tokio::test]
 async fn test_drain_job_rejects_invalid_concurrency_duplicates_and_overlap() {
     let service = MasterServiceImpl::default();
     let client_id = uuid::Uuid::new_v4();

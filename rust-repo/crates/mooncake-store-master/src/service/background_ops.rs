@@ -849,6 +849,7 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             }
             continue;
         }
+        let mut seen_source_segments = HashSet::new();
         for replica in &entry.replicas {
             if draining_segments.contains(&replica.segment_name)
                 && replica.status == ReplicaStatus::Complete
@@ -857,10 +858,10 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
                 if !job.completed_unit_keys.contains(&unit_key)
                     && !job.terminal_failed_unit_keys.contains(&unit_key)
                     && !job.active_tasks.values().any(|t| t.unit_key == unit_key)
+                    && seen_source_segments.insert(replica.segment_name.clone())
                 {
                     units.push((key.clone(), replica.segment_name.clone(), replica.size));
                 }
-                break;
             }
         }
     }

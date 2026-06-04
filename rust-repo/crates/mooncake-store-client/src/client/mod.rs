@@ -8,7 +8,7 @@ pub(crate) mod upsert;
 pub(crate) mod write;
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicaDescriptor, StoreError};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -45,6 +45,127 @@ pub struct BufferHandle {
     pub key: String,
     /// Byte length of the payload (== data.len()). / 负载的字节长度。
     pub size: usize,
+}
+
+pub(crate) const REPLICA_TYPE_MEMORY: i32 = ReplicaType::Memory as i32;
+pub(crate) const REPLICA_TYPE_NOF_SSD: i32 = ReplicaType::NoFSsd as i32;
+pub(crate) const REPLICA_TYPE_ALL: i32 = ReplicaType::All as i32;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ReplicaTransferSummary {
+    pub(crate) allocated_memory_replicas: usize,
+    pub(crate) allocated_nof_replicas: usize,
+    pub(crate) successful_memory_transfers: usize,
+    pub(crate) successful_nof_transfers: usize,
+    pub(crate) failed_memory_transfers: usize,
+    pub(crate) failed_nof_transfers: usize,
+}
+
+impl ReplicaTransferSummary {
+    pub(crate) fn from_replicas(replicas: &[ReplicaDescriptor]) -> Self {
+        let mut summary = Self::default();
+        for replica in replicas {
+            match replica.replica_type {
+                ReplicaType::Memory => summary.allocated_memory_replicas += 1,
+                ReplicaType::NoFSsd => summary.allocated_nof_replicas += 1,
+                _ => {}
+            }
+        }
+        summary
+    }
+
+    pub(crate) fn record_success(&mut self, replica_type: ReplicaType) {
+        match replica_type {
+            ReplicaType::Memory => self.successful_memory_transfers += 1,
+            ReplicaType::NoFSsd => self.successful_nof_transfers += 1,
+            _ => {}
+        }
+    }
+
+    pub(crate) fn record_failure(&mut self, replica_type: ReplicaType) {
+        match replica_type {
+            ReplicaType::Memory => self.failed_memory_transfers += 1,
+            ReplicaType::NoFSsd => self.failed_nof_transfers += 1,
+            _ => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplicaFinalizeDecision {
+    pub(crate) end_type: Option<i32>,
+    pub(crate) revoke_type: Option<i32>,
+    pub(crate) success: bool,
+}
+
+fn has_expected_replica_allocation(
+    config: &ReplicateConfig,
+    summary: &ReplicaTransferSummary,
+) -> bool {
+    if config.nof_replica_num == 0 {
+        return summary.allocated_memory_replicas > 0;
+    }
+    if config.replica_num == 1 && config.nof_replica_num == 1 {
+        return summary.allocated_memory_replicas + summary.allocated_nof_replicas > 0;
+    }
+    summary.allocated_memory_replicas == config.replica_num as usize
+        && summary.allocated_nof_replicas == config.nof_replica_num as usize
+}
+
+pub(crate) fn determine_finalize_decision(
+    config: &ReplicateConfig,
+    summary: &ReplicaTransferSummary,
+) -> ReplicaFinalizeDecision {
+    let allocation_satisfied = has_expected_replica_allocation(config, summary);
+    let flexible_dual = config.replica_num == 1 && config.nof_replica_num == 1;
+
+    if !flexible_dual {
+        let all_transfers_succeeded = summary.successful_memory_transfers
+            == summary.allocated_memory_replicas
+            && summary.successful_nof_transfers == summary.allocated_nof_replicas
+            && summary.failed_memory_transfers == 0
+            && summary.failed_nof_transfers == 0;
+        if allocation_satisfied && all_transfers_succeeded {
+            return ReplicaFinalizeDecision {
+                end_type: Some(REPLICA_TYPE_ALL),
+                revoke_type: None,
+                success: true,
+            };
+        }
+        return ReplicaFinalizeDecision {
+            end_type: None,
+            revoke_type: Some(REPLICA_TYPE_ALL),
+            success: false,
+        };
+    }
+
+    let memory_succeeded = summary.successful_memory_transfers > 0;
+    let nof_succeeded = summary.successful_nof_transfers > 0;
+    if memory_succeeded && nof_succeeded {
+        ReplicaFinalizeDecision {
+            end_type: Some(REPLICA_TYPE_ALL),
+            revoke_type: None,
+            success: true,
+        }
+    } else if memory_succeeded {
+        ReplicaFinalizeDecision {
+            end_type: Some(REPLICA_TYPE_MEMORY),
+            revoke_type: Some(REPLICA_TYPE_NOF_SSD),
+            success: true,
+        }
+    } else if nof_succeeded {
+        ReplicaFinalizeDecision {
+            end_type: Some(REPLICA_TYPE_NOF_SSD),
+            revoke_type: Some(REPLICA_TYPE_MEMORY),
+            success: true,
+        }
+    } else {
+        ReplicaFinalizeDecision {
+            end_type: None,
+            revoke_type: Some(REPLICA_TYPE_ALL),
+            success: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +277,11 @@ pub struct MooncakeClient {
     /// 当 segment 端点在此集合中时，其副本被视为"本地"，可使用 local_memcpy 快速路径。
     /// C++ 等价：Client::GetLocalEndpoints() → segment.te_endpoint。
     pub(crate) local_endpoints: RwLock<HashSet<String>>,
+
+    /// Map mounted segment names to master-assigned segment IDs.
+    /// Used by UnmountSegment/GracefulUnmountSegment, whose protocol identifies
+    /// segments by UUID just like the C++ MasterClient layer.
+    pub(crate) mounted_segment_ids: RwLock<HashMap<String, Uuid>>,
 
     /// Optional remote source miss handler for cache-miss fallback.
     /// When a key is not found in the distributed store, and this handler is
@@ -316,6 +442,7 @@ impl MooncakeClient {
         let client_id = Uuid::new_v4();
         let mut segment_name = String::new();
         let mut segment_size = 0u64;
+        let mut mounted_segment_ids = HashMap::new();
 
         // Step 7: If this node is a storage node (global_segment_size > 0),
         // allocate, register, open, and mount a segment.
@@ -364,10 +491,15 @@ impl MooncakeClient {
                 te_endpoint: local_host.to_string(),
                 protocol: protocol.to_string(),
             };
-            master
+            let mount_response = master
                 .mount_segment(request)
                 .await
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
+                .map_err(|e| StoreError::Internal(e.to_string()))?
+                .into_inner();
+            if let Some(id) = mount_response.segment_id {
+                mounted_segment_ids
+                    .insert(segment_name.clone(), Uuid::from_u64_pair(id.high, id.low));
+            }
         }
 
         // Step 8: Register the current node's hostname as a local endpoint.
@@ -390,6 +522,7 @@ impl MooncakeClient {
             registered_buffers: RwLock::new(HashMap::new()),
             tear_down: Arc::new(RwLock::new(false)),
             local_endpoints: RwLock::new(endpoints),
+            mounted_segment_ids: RwLock::new(mounted_segment_ids),
             miss_handler: None,
             hot_cache: None,
             local_storage: None,
@@ -706,5 +839,80 @@ impl MooncakeClient {
         }
         self.registered_buffers.write().clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary,
+        REPLICA_TYPE_ALL, REPLICA_TYPE_MEMORY, REPLICA_TYPE_NOF_SSD,
+    };
+    use mooncake_store_core::ReplicateConfig;
+
+    #[test]
+    fn finalize_decision_reliable_memory_nof_requires_all_transfers() {
+        let config = ReplicateConfig {
+            replica_num: 1,
+            nof_replica_num: 2,
+            ..Default::default()
+        };
+        let summary = ReplicaTransferSummary {
+            allocated_memory_replicas: 1,
+            allocated_nof_replicas: 2,
+            successful_memory_transfers: 1,
+            successful_nof_transfers: 1,
+            failed_nof_transfers: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            determine_finalize_decision(&config, &summary),
+            ReplicaFinalizeDecision {
+                end_type: None,
+                revoke_type: Some(REPLICA_TYPE_ALL),
+                success: false,
+            }
+        );
+    }
+
+    #[test]
+    fn finalize_decision_flexible_dual_can_keep_one_successful_side() {
+        let config = ReplicateConfig {
+            replica_num: 1,
+            nof_replica_num: 1,
+            ..Default::default()
+        };
+        let memory_only = ReplicaTransferSummary {
+            allocated_memory_replicas: 1,
+            allocated_nof_replicas: 1,
+            successful_memory_transfers: 1,
+            failed_nof_transfers: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            determine_finalize_decision(&config, &memory_only),
+            ReplicaFinalizeDecision {
+                end_type: Some(REPLICA_TYPE_MEMORY),
+                revoke_type: Some(REPLICA_TYPE_NOF_SSD),
+                success: true,
+            }
+        );
+
+        let nof_only = ReplicaTransferSummary {
+            allocated_memory_replicas: 1,
+            allocated_nof_replicas: 1,
+            failed_memory_transfers: 1,
+            successful_nof_transfers: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            determine_finalize_decision(&config, &nof_only),
+            ReplicaFinalizeDecision {
+                end_type: Some(REPLICA_TYPE_NOF_SSD),
+                revoke_type: Some(REPLICA_TYPE_MEMORY),
+                success: true,
+            }
+        );
     }
 }

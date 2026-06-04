@@ -6,14 +6,148 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
-use super::MooncakeClient;
+use super::{
+    determine_finalize_decision, MooncakeClient, ReplicaFinalizeDecision, ReplicaTransferSummary,
+};
 use crate::proto;
 
+const BATCH_STATUS_OBJECT_ALREADY_EXISTS: i32 = -7;
+
 impl MooncakeClient {
+    async fn put_end_for_type(
+        &mut self,
+        key: &str,
+        replica_type: i32,
+        tenant_id: &str,
+    ) -> StoreResult<()> {
+        let end_request = proto::PutEndRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            replica_type,
+            tenant_id: tenant_id.to_string(),
+        };
+        self.master
+            .put_end(end_request)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn put_revoke_for_type(
+        &mut self,
+        key: &str,
+        replica_type: i32,
+        tenant_id: &str,
+    ) -> StoreResult<()> {
+        let revoke_req = proto::PutRevokeRequest {
+            client_id: Some(self.client_id_proto()),
+            key: key.to_string(),
+            replica_type,
+            tenant_id: tenant_id.to_string(),
+        };
+        self.master
+            .put_revoke(revoke_req)
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn finalize_put_for_key(
+        &mut self,
+        key: &str,
+        decision: ReplicaFinalizeDecision,
+        tenant_id: &str,
+    ) -> StoreResult<()> {
+        if let Some(replica_type) = decision.end_type {
+            self.put_end_for_type(key, replica_type, tenant_id).await?;
+        }
+        if let Some(replica_type) = decision.revoke_type {
+            self.put_revoke_for_type(key, replica_type, tenant_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn finalize_batch_put_groups(
+        &mut self,
+        keys: &[String],
+        decisions: &[(usize, ReplicaFinalizeDecision)],
+        statuses: &mut [i32],
+        tenant_id: &str,
+    ) {
+        let mut end_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
+        let mut revoke_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
+        for (idx, decision) in decisions {
+            if let Some(replica_type) = decision.end_type {
+                end_groups
+                    .entry(replica_type)
+                    .or_default()
+                    .push((*idx, keys[*idx].clone()));
+            }
+            if let Some(replica_type) = decision.revoke_type {
+                revoke_groups
+                    .entry(replica_type)
+                    .or_default()
+                    .push((*idx, keys[*idx].clone()));
+            }
+        }
+
+        for (replica_type, group) in end_groups {
+            let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
+            match self
+                .batch_put_end(&group_keys, replica_type, tenant_id)
+                .await
+            {
+                Ok(end_statuses) if end_statuses.len() == group.len() => {
+                    for ((idx, _), status) in group.into_iter().zip(end_statuses) {
+                        if status != 0 {
+                            statuses[idx] = status;
+                        }
+                    }
+                }
+                _ => {
+                    for (idx, _) in group {
+                        statuses[idx] = -1;
+                    }
+                }
+            }
+        }
+
+        for (replica_type, group) in revoke_groups {
+            let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
+            match self
+                .batch_put_revoke(&group_keys, replica_type, tenant_id)
+                .await
+            {
+                Ok(revoke_statuses) if revoke_statuses.len() == group.len() => {
+                    for ((idx, _), status) in group.into_iter().zip(revoke_statuses) {
+                        if status != 0 {
+                            statuses[idx] = status;
+                        }
+                    }
+                }
+                _ => {
+                    for (idx, _) in group {
+                        statuses[idx] = -1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn put_start_error_from_status(key: &str, status: tonic::Status) -> StoreError {
+        if status.code() == tonic::Code::AlreadyExists {
+            StoreError::ObjectExists(key.to_string())
+        } else {
+            StoreError::Internal(status.to_string())
+        }
+    }
+
     async unsafe fn write_parts_from_to_replica(
         &self,
         replica: &ReplicaDescriptor,
@@ -74,7 +208,14 @@ impl MooncakeClient {
         let timeout = tokio::time::Duration::from_secs(10);
         for i in 0..buffers.len() {
             loop {
-                let status = self.engine.get_transfer_status(batch_id, i)?;
+                let status = match self.engine.get_transfer_status(batch_id, i) {
+                    Ok(status) => status,
+                    Err(e) => {
+                        let _ = self.engine.free_batch_id(batch_id);
+                        let _ = self.engine.close_segment(segment_id);
+                        return Err(e.into());
+                    }
+                };
                 if status.status == TransferStatusEnum::Completed {
                     break;
                 }
@@ -92,7 +233,10 @@ impl MooncakeClient {
             }
         }
 
-        self.engine.free_batch_id(batch_id)?;
+        if let Err(e) = self.engine.free_batch_id(batch_id) {
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e.into());
+        }
         self.engine.close_segment(segment_id)?;
         Ok(())
     }
@@ -189,15 +333,17 @@ impl MooncakeClient {
         };
 
         tracing::info!(target: "te_debug", %key, "put: calling put_start");
-        let response = self
-            .master
-            .put_start(request)
-            .await
-            .map_err(|e| {
-                tracing::error!(target: "te_debug", %key, error = %e, "put: put_start FAILED");
-                StoreError::Internal(e.to_string())
-            })?
-            .into_inner();
+        let response = match self.master.put_start(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                tracing::error!(target: "te_debug", %key, error = %status, "put: put_start FAILED");
+                let err = Self::put_start_error_from_status(key, status);
+                if matches!(err, StoreError::ObjectExists(_)) {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
 
         let replicas = self.replicas_from_proto(&response.replicas);
         tracing::info!(target: "te_debug", %key, replica_count = replicas.len(), "put: replicas allocated");
@@ -206,43 +352,44 @@ impl MooncakeClient {
             return Err(StoreError::NoAvailableHandle);
         }
 
-        // Phase 2: write_to_replica — write data to each allocated replica.
-        // 阶段 2：write_to_replica —— 向每个已分配副本写入数据。
+        let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
+        let mut first_error = None;
+
+        // Phase 2: write_to_replica — write data to each allocated Memory/NoF replica.
+        // 阶段 2：write_to_replica —— 向每个已分配 Memory/NoF 副本写入数据。
         for (i, replica) in replicas.iter().enumerate() {
+            if !matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) {
+                continue;
+            }
             tracing::info!(
                 target: "te_debug", %key, replica_idx = i, total = replicas.len(),
                 seg_name = %replica.segment_name,
                 "put: writing to replica"
             );
-            if let Err(e) = self.write_to_replica(replica, value).await {
-                tracing::error!(target: "te_debug", %key, replica_idx = i, error = %e, "put: write_to_replica FAILED, revoking");
-                // On any replica write failure, revoke the entire allocation.
-                // C++ 写失败时调用 PutRevoke 撤销已分配的资源。
-                // 任何一个副本写入失败，撤销整个分配。
-                let revoke_req = proto::PutRevokeRequest {
-                    client_id: Some(self.client_id_proto()),
-                    key: key.to_string(),
-                    replica_type: 0,
-                    tenant_id: String::new(),
-                };
-                let _ = self.master.put_revoke(revoke_req).await;
-                return Err(e);
+            match self.write_to_replica(replica, value).await {
+                Ok(()) => transfer_summary.record_success(replica.replica_type),
+                Err(e) => {
+                    tracing::error!(target: "te_debug", %key, replica_idx = i, error = %e, "put: write_to_replica FAILED");
+                    transfer_summary.record_failure(replica.replica_type);
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
             }
         }
 
-        // Phase 3: put_end — commit the put, transitioning replicas to Written.
-        // 阶段 3：put_end —— 提交本次 put，将副本状态转换为 Written。
+        // Phase 3: C++-style finalize. Reliable modes end/revoke ALL; flexible
+        // 1+1 Memory/NoF mode can keep the successful side and revoke the failed side.
+        // 阶段 3：按 C++ 策略提交或撤销副本。
         tracing::info!(target: "te_debug", %key, "put: calling put_end");
-        let end_request = proto::PutEndRequest {
-            client_id: Some(self.client_id_proto()),
-            key: key.to_string(),
-            replica_type: 0,
-            tenant_id: String::new(),
-        };
-        self.master.put_end(end_request).await.map_err(|e| {
-            tracing::error!(target: "te_debug", %key, error = %e, "put: put_end FAILED");
-            StoreError::Internal(e.to_string())
-        })?;
+        let decision = determine_finalize_decision(&cfg, &transfer_summary);
+        self.finalize_put_for_key(key, decision, "").await?;
+        if !decision.success {
+            return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
+        }
 
         tracing::info!(target: "te_debug", %key, "put: EXIT (success)");
         Ok(())
@@ -291,41 +438,46 @@ impl MooncakeClient {
             }),
         };
 
-        let response = self
-            .master
-            .put_start(request)
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
-            .into_inner();
+        let response = match self.master.put_start(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                let err = Self::put_start_error_from_status(key, status);
+                if matches!(err, StoreError::ObjectExists(_)) {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
         let replicas = self.replicas_from_proto(&response.replicas);
 
-        // Phase 2: zero_copy_write to each replica / 阶段 2：零拷贝写入每个副本
+        let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
+        let mut first_error = None;
+
+        // Phase 2: zero_copy_write to each Memory/NoF replica / 阶段 2：零拷贝写入每个 Memory/NoF 副本
         for replica in &replicas {
-            if let Err(e) = self.zero_copy_write(replica, buffer, size).await {
-                // On failure, revoke the allocation. / 失败时撤销分配。
-                // C++ 写失败时调用 PutRevoke 撤销已分配的资源
-                let revoke_req = proto::PutRevokeRequest {
-                    client_id: Some(self.client_id_proto()),
-                    key: key.to_string(),
-                    replica_type: 0,
-                    tenant_id: String::new(),
-                };
-                let _ = self.master.put_revoke(revoke_req).await;
-                return Err(e);
+            if !matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) {
+                continue;
+            }
+            match self.zero_copy_write(replica, buffer, size).await {
+                Ok(()) => transfer_summary.record_success(replica.replica_type),
+                Err(e) => {
+                    transfer_summary.record_failure(replica.replica_type);
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
             }
         }
 
-        // Phase 3: put_end / 阶段 3：put_end
-        let end_request = proto::PutEndRequest {
-            client_id: Some(self.client_id_proto()),
-            key: key.to_string(),
-            replica_type: 0,
-            tenant_id: String::new(),
-        };
-        self.master
-            .put_end(end_request)
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Phase 3: put_end / put_revoke according to C++ finalize decision.
+        let decision = determine_finalize_decision(&cfg, &transfer_summary);
+        self.finalize_put_for_key(key, decision, "").await?;
+        if !decision.success {
+            return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
+        }
 
         Ok(())
     }
@@ -362,6 +514,13 @@ impl MooncakeClient {
     ) -> StoreResult<()> {
         let cfg = config.unwrap_or_default();
         let total_len: usize = values.iter().map(|v| v.len()).sum();
+        if total_len > self.local_buffer.len() {
+            return Err(StoreError::InvalidParams(format!(
+                "object size {} exceeds local buffer size {}",
+                total_len,
+                self.local_buffer.len()
+            )));
+        }
 
         // Phase 1: put_start with total_len / 阶段 1：put_start 带上 total_len
         let request = proto::PutStartRequest {
@@ -383,24 +542,57 @@ impl MooncakeClient {
             }),
         };
 
-        let response = self
-            .master
-            .put_start(request)
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
-            .into_inner();
+        let response = match self.master.put_start(request).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                let err = Self::put_start_error_from_status(key, status);
+                if matches!(err, StoreError::ObjectExists(_)) {
+                    return Ok(());
+                }
+                return Err(err);
+            }
+        };
         let replicas = self.replicas_from_proto(&response.replicas);
 
         if replicas.is_empty() {
             return Err(StoreError::NoAvailableHandle);
         }
 
-        // Phase 2: for each replica, copy all slices into local_buffer
+        let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
+        let mut first_error = None;
+
+        // Phase 2: for each Memory/NoF replica, copy all slices into local_buffer
         // contiguously and submit as one batch.
         // 阶段 2：对每个副本，将所有切片连续拷贝到 local_buffer 并作为单个批次提交。
         for replica in &replicas {
-            let segment_id = self.engine.open_segment(&replica.segment_name)?;
-            let batch_id = self.engine.allocate_batch_id(values.len())?;
+            if !matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) {
+                continue;
+            }
+            let segment_id = match self.engine.open_segment(&replica.segment_name) {
+                Ok(segment_id) => segment_id,
+                Err(e) => {
+                    transfer_summary.record_failure(replica.replica_type);
+                    if first_error.is_none() {
+                        first_error = Some(e.into());
+                    }
+                    continue;
+                }
+            };
+            let batch_id = match self.engine.allocate_batch_id(values.len()) {
+                Ok(batch_id) => batch_id,
+                Err(e) => {
+                    let _ = self.engine.close_segment(segment_id);
+                    transfer_summary.record_failure(replica.replica_type);
+                    if first_error.is_none() {
+                        first_error = Some(e.into());
+                    }
+                    continue;
+                }
+            };
+            let mut replica_failed = false;
 
             // Build TransferRequests: each slice → one RDMA write at the correct
             // offset within the replica.
@@ -410,7 +602,7 @@ impl MooncakeClient {
                 .enumerate()
                 .map(|(i, data)| {
                     let src_offset = values[..i].iter().map(|v| v.len()).sum::<usize>();
-                    let tgt_offset = replica.offset + src_offset as u64;
+                    let tgt_offset = replica.base_addr + replica.offset + src_offset as u64;
                     // Copy slice into local_buffer at the correct offset.
                     // 将切片拷贝到 local_buffer 的正确偏移位置。
                     unsafe {
@@ -432,7 +624,15 @@ impl MooncakeClient {
                 })
                 .collect();
 
-            self.engine.submit_transfer(batch_id, &requests)?;
+            if let Err(e) = self.engine.submit_transfer(batch_id, &requests) {
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
+                transfer_summary.record_failure(replica.replica_type);
+                if first_error.is_none() {
+                    first_error = Some(e.into());
+                }
+                continue;
+            }
 
             // Poll each slice's transfer with 10s timeout.
             // 以 10s 超时轮询每个切片的传输状态。
@@ -440,7 +640,19 @@ impl MooncakeClient {
                 let start = tokio::time::Instant::now();
                 let timeout = tokio::time::Duration::from_secs(10);
                 loop {
-                    let status = self.engine.get_transfer_status(batch_id, i)?;
+                    let status = match self.engine.get_transfer_status(batch_id, i) {
+                        Ok(status) => status,
+                        Err(e) => {
+                            let _ = self.engine.free_batch_id(batch_id);
+                            let _ = self.engine.close_segment(segment_id);
+                            transfer_summary.record_failure(replica.replica_type);
+                            if first_error.is_none() {
+                                first_error = Some(e.into());
+                            }
+                            replica_failed = true;
+                            break;
+                        }
+                    };
                     if status.status == TransferStatusEnum::Completed {
                         break;
                     }
@@ -448,50 +660,47 @@ impl MooncakeClient {
                         // On any slice failure, revoke + cleanup.
                         // 任何切片失败，撤销 + 清理。
                         // C++ 写失败时调用 PutRevoke 撤销已分配的资源
-                        let revoke_req = proto::PutRevokeRequest {
-                            client_id: Some(self.client_id_proto()),
-                            key: key.to_string(),
-                            replica_type: 0,
-                            tenant_id: String::new(),
-                        };
-                        let _ = self.master.put_revoke(revoke_req).await;
                         let _ = self.engine.free_batch_id(batch_id);
                         let _ = self.engine.close_segment(segment_id);
-                        return Err(StoreError::OperationFailed(-1));
+                        transfer_summary.record_failure(replica.replica_type);
+                        if first_error.is_none() {
+                            first_error = Some(StoreError::OperationFailed(-1));
+                        }
+                        replica_failed = true;
+                        break;
                     }
                     if start.elapsed() > timeout {
                         // Timeout: revoke + cleanup. / 超时：撤销 + 清理。
-                        let revoke_req = proto::PutRevokeRequest {
-                            client_id: Some(self.client_id_proto()),
-                            key: key.to_string(),
-                            replica_type: 0,
-                            tenant_id: String::new(),
-                        };
-                        let _ = self.master.put_revoke(revoke_req).await;
                         let _ = self.engine.free_batch_id(batch_id);
                         let _ = self.engine.close_segment(segment_id);
-                        return Err(StoreError::OperationFailed(-2));
+                        transfer_summary.record_failure(replica.replica_type);
+                        if first_error.is_none() {
+                            first_error = Some(StoreError::OperationFailed(-2));
+                        }
+                        replica_failed = true;
+                        break;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+                }
+                if replica_failed {
+                    break;
                 }
             }
 
             // Cleanup per-replica resources. / 清理每个副本的资源。
-            self.engine.free_batch_id(batch_id)?;
-            self.engine.close_segment(segment_id)?;
+            if !replica_failed {
+                self.engine.free_batch_id(batch_id)?;
+                self.engine.close_segment(segment_id)?;
+                transfer_summary.record_success(replica.replica_type);
+            }
         }
 
-        // Phase 3: put_end / 阶段 3：put_end
-        let end_request = proto::PutEndRequest {
-            client_id: Some(self.client_id_proto()),
-            key: key.to_string(),
-            replica_type: 0,
-            tenant_id: String::new(),
-        };
-        self.master
-            .put_end(end_request)
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        // Phase 3: put_end / put_revoke according to C++ finalize decision.
+        let decision = determine_finalize_decision(&cfg, &transfer_summary);
+        self.finalize_put_for_key(key, decision, "").await?;
+        if !decision.success {
+            return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
+        }
 
         Ok(())
     }
@@ -557,74 +766,43 @@ impl MooncakeClient {
         // result per key; consume Rust's per-key results to avoid flattened
         // replica misalignment when one key fails allocation or already exists.
         let mut statuses = vec![-1i32; keys.len()];
-        let mut success_keys: Vec<String> = Vec::new();
-        let mut success_indices: Vec<usize> = Vec::new();
-        let mut revoke_keys: Vec<String> = Vec::new();
+        let mut decisions = Vec::new();
 
-        for (ki, (key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+        for (ki, (_key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+            if start_result.status == BATCH_STATUS_OBJECT_ALREADY_EXISTS {
+                statuses[ki] = 0;
+                continue;
+            }
             if start_result.status != 0 || start_result.replicas.is_empty() {
+                statuses[ki] = start_result.status;
                 continue;
             }
 
-            let mut ok = true;
+            let mut transfer_summary =
+                ReplicaTransferSummary::from_replicas(&start_result.replicas);
             for replica in &start_result.replicas {
-                if let Err(_) = self.write_to_replica(replica, values[ki]).await {
-                    ok = false;
-                    break;
+                if !matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd
+                ) {
+                    continue;
+                }
+                match self.write_to_replica(replica, values[ki]).await {
+                    Ok(()) => transfer_summary.record_success(replica.replica_type),
+                    Err(_) => transfer_summary.record_failure(replica.replica_type),
                 }
             }
 
-            if ok {
+            let decision = determine_finalize_decision(&cfg, &transfer_summary);
+            if decision.success {
                 statuses[ki] = 0;
-                success_keys.push(key.clone());
-                success_indices.push(ki);
-            } else {
-                revoke_keys.push(key.clone());
             }
+            decisions.push((ki, decision));
         }
 
         // Phase 3: BatchPutEnd / BatchPutRevoke.
-        if !success_keys.is_empty() {
-            tracing::info!(
-                "batch_put: calling batch_put_end for {} success keys: {:?}",
-                success_keys.len(),
-                &success_keys[..success_keys.len().min(3)]
-            );
-            match self.batch_put_end(&success_keys, 0 /* MEMORY */, "").await {
-                Ok(end_statuses) => {
-                    tracing::info!(
-                        "batch_put: batch_put_end returned statuses: {:?}",
-                        end_statuses
-                    );
-                    if end_statuses.len() != success_indices.len() {
-                        for idx in success_indices {
-                            statuses[idx] = -1;
-                        }
-                    } else {
-                        for (idx, status) in success_indices.into_iter().zip(end_statuses) {
-                            if status != 0 {
-                                statuses[idx] = status;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("batch_put: batch_put_end FAILED: {:?}", e);
-                    for idx in success_indices {
-                        statuses[idx] = -1;
-                    }
-                }
-            }
-        }
-        if !revoke_keys.is_empty() {
-            tracing::warn!(
-                "batch_put: {} keys failed writes, revoking",
-                revoke_keys.len()
-            );
-            let _ = self
-                .batch_put_revoke(&revoke_keys, 0 /* MEMORY */, "")
-                .await;
-        }
+        self.finalize_batch_put_groups(keys, &decisions, &mut statuses, "")
+            .await;
 
         Ok(statuses)
     }
@@ -764,58 +942,48 @@ impl MooncakeClient {
         }
 
         let mut statuses = vec![-1i32; keys.len()];
-        let mut success_keys = Vec::new();
-        let mut success_indices = Vec::new();
-        let mut revoke_keys = Vec::new();
+        let mut decisions = Vec::new();
 
-        for (idx, (key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+        for (idx, (_key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+            if start_result.status == BATCH_STATUS_OBJECT_ALREADY_EXISTS {
+                statuses[idx] = 0;
+                continue;
+            }
             if start_result.status != 0 || start_result.replicas.is_empty() {
+                statuses[idx] = start_result.status;
                 continue;
             }
 
-            let mut ok = true;
+            let mut transfer_summary =
+                ReplicaTransferSummary::from_replicas(&start_result.replicas);
             for replica in &start_result.replicas {
+                if !matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd
+                ) {
+                    continue;
+                }
                 if unsafe {
                     self.write_parts_from_to_replica(replica, &all_buffers[idx], &all_sizes[idx])
                         .await
                 }
                 .is_err()
                 {
-                    ok = false;
-                    break;
+                    transfer_summary.record_failure(replica.replica_type);
+                } else {
+                    transfer_summary.record_success(replica.replica_type);
                 }
             }
 
-            if ok {
+            let decision = determine_finalize_decision(&cfg, &transfer_summary);
+            if decision.success {
                 statuses[idx] = 0;
-                success_keys.push(key.clone());
-                success_indices.push(idx);
-            } else {
-                revoke_keys.push(key.clone());
             }
+            decisions.push((idx, decision));
         }
 
-        if !success_keys.is_empty() {
-            match self.batch_put_end(&success_keys, 0 /* MEMORY */, "").await {
-                Ok(end_statuses) if end_statuses.len() == success_indices.len() => {
-                    for (idx, status) in success_indices.into_iter().zip(end_statuses) {
-                        if status != 0 {
-                            statuses[idx] = status;
-                        }
-                    }
-                }
-                _ => {
-                    for idx in success_indices {
-                        statuses[idx] = -1;
-                    }
-                }
-            }
-        }
-        if !revoke_keys.is_empty() {
-            let _ = self
-                .batch_put_revoke(&revoke_keys, 0 /* MEMORY */, "")
-                .await;
-        }
+        self.finalize_batch_put_groups(keys, &decisions, &mut statuses, "")
+            .await;
 
         Ok(statuses)
     }

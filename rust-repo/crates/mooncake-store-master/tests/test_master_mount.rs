@@ -124,6 +124,48 @@ async fn test_query_ip_derives_address_from_mounted_segment() {
 }
 
 #[tokio::test]
+async fn test_mount_segment_returns_id_usable_for_unmount() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+
+    let mount = MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "return-id:1234".into(),
+            size: 1024,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let segment_id = mount.segment_id.expect("mount should return segment id");
+
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(segment_id),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let status = MasterService::query_segment_status(
+        &service,
+        Request::new(proto::QuerySegmentStatusRequest {
+            segment_name: "return-id:1234".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
 async fn test_mount_segment_updates_http_metadata_state() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();

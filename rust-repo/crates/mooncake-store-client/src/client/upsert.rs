@@ -29,10 +29,13 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
+use std::collections::HashMap;
 use std::ffi::c_void;
 
-use super::MooncakeClient;
+use super::{
+    determine_finalize_decision, MooncakeClient, ReplicaFinalizeDecision, ReplicaTransferSummary,
+};
 use crate::client::batches::BatchUpsertEntry;
 use crate::proto;
 
@@ -68,89 +71,133 @@ impl MooncakeClient {
 
         let mut statuses = vec![-1i32; keys.len()];
         let mut descriptors = vec![Vec::new(); keys.len()];
-        let mut success_indices = Vec::new();
-        let mut success_keys = Vec::new();
-        let mut revoke_indices = Vec::new();
+        let mut decisions = Vec::new();
 
-        for (idx, (key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
+        for (idx, (_key, start_result)) in keys.iter().zip(start_results.iter()).enumerate() {
             if start_result.status != 0 || start_result.replicas.is_empty() {
                 statuses[idx] = start_result.status;
                 continue;
             }
 
-            let mut ok = true;
+            let mut transfer_summary =
+                ReplicaTransferSummary::from_replicas(&start_result.replicas);
             for replica in &start_result.replicas {
+                if !matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd
+                ) {
+                    continue;
+                }
                 if unsafe {
                     self.zero_copy_write(replica, buffers[idx], sizes[idx])
                         .await
                 }
                 .is_err()
                 {
-                    ok = false;
-                    break;
+                    transfer_summary.record_failure(replica.replica_type);
+                } else {
+                    transfer_summary.record_success(replica.replica_type);
                 }
             }
 
-            if ok {
+            let decision = determine_finalize_decision(&cfg, &transfer_summary);
+            if decision.success {
                 statuses[idx] = 0;
                 descriptors[idx] = start_result.replicas.clone();
-                success_indices.push(idx);
-                success_keys.push(key.clone());
-            } else {
-                revoke_indices.push(idx);
+            }
+            decisions.push((idx, decision));
+        }
+
+        self.finalize_batch_upsert_groups(keys, &cfg, &decisions, &mut statuses, &mut descriptors)
+            .await;
+
+        Ok((statuses, descriptors))
+    }
+
+    async fn finalize_batch_upsert_groups(
+        &mut self,
+        keys: &[String],
+        cfg: &ReplicateConfig,
+        decisions: &[(usize, ReplicaFinalizeDecision)],
+        statuses: &mut [i32],
+        descriptors: &mut [Vec<ReplicaDescriptor>],
+    ) {
+        let mut end_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
+        let mut revoke_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
+        for (idx, decision) in decisions {
+            if let Some(replica_type) = decision.end_type {
+                end_groups
+                    .entry(replica_type)
+                    .or_default()
+                    .push((*idx, keys[*idx].clone()));
+            }
+            if let Some(replica_type) = decision.revoke_type {
+                revoke_groups
+                    .entry(replica_type)
+                    .or_default()
+                    .push((*idx, keys[*idx].clone()));
             }
         }
 
-        if !success_keys.is_empty() {
-            let entries: Vec<BatchUpsertEntry<'_>> = success_keys
+        for (replica_type, group) in end_groups {
+            let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
+            let entries: Vec<BatchUpsertEntry<'_>> = group_keys
                 .iter()
                 .map(|key| BatchUpsertEntry {
                     key,
                     slice_length: 0,
                     config: cfg.clone(),
-                    replica_type: 0,
+                    replica_type,
                     tenant_id: "",
                 })
                 .collect();
             match self.batch_upsert_end(&entries).await {
-                Ok(end_statuses) if end_statuses.len() == success_indices.len() => {
-                    for (idx, status) in success_indices.into_iter().zip(end_statuses) {
+                Ok(end_statuses) if end_statuses.len() == group.len() => {
+                    for ((idx, _), status) in group.into_iter().zip(end_statuses) {
                         if status != 0 {
                             statuses[idx] = status;
                             descriptors[idx].clear();
-                            revoke_indices.push(idx);
                         }
                     }
                 }
                 _ => {
-                    for idx in success_indices {
+                    for (idx, _) in group {
                         statuses[idx] = -1;
                         descriptors[idx].clear();
-                        revoke_indices.push(idx);
                     }
                 }
             }
         }
 
-        if !revoke_indices.is_empty() {
-            let revoke_keys: Vec<String> = revoke_indices
-                .iter()
-                .map(|&idx| keys[idx].clone())
-                .collect();
-            let entries: Vec<BatchUpsertEntry<'_>> = revoke_keys
+        for (replica_type, group) in revoke_groups {
+            let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
+            let entries: Vec<BatchUpsertEntry<'_>> = group_keys
                 .iter()
                 .map(|key| BatchUpsertEntry {
                     key,
                     slice_length: 0,
                     config: cfg.clone(),
-                    replica_type: 0,
+                    replica_type,
                     tenant_id: "",
                 })
                 .collect();
-            let _ = self.batch_upsert_revoke(&entries).await;
+            match self.batch_upsert_revoke(&entries).await {
+                Ok(revoke_statuses) if revoke_statuses.len() == group.len() => {
+                    for ((idx, _), status) in group.into_iter().zip(revoke_statuses) {
+                        if status != 0 {
+                            statuses[idx] = status;
+                            descriptors[idx].clear();
+                        }
+                    }
+                }
+                _ => {
+                    for (idx, _) in group {
+                        statuses[idx] = -1;
+                        descriptors[idx].clear();
+                    }
+                }
+            }
         }
-
-        Ok((statuses, descriptors))
     }
 
     // -----------------------------------------------------------------------

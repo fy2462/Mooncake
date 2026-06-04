@@ -47,6 +47,8 @@ enum BatchStatus {
     ReplicaNotReady = -5,
     /// 参数或状态不满足操作要求 / Invalid state for the requested operation.
     InvalidState = -6,
+    /// 对象已存在 / Object already exists.
+    ObjectAlreadyExists = -7,
 }
 
 impl From<BatchStatus> for i32 {
@@ -563,7 +565,7 @@ impl MasterServiceImpl {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
-                    status: BatchStatus::InvalidState.into(),
+                    status: BatchStatus::ObjectAlreadyExists.into(),
                     tenant_id: normalize_tenant_id(&req.tenant_id),
                 });
                 continue;

@@ -153,7 +153,22 @@ impl MooncakeClient {
         let replica = self
             .select_best_replica(&replicas)
             .ok_or(StoreError::KeyNotFound(key.to_string()))?;
-        self.zero_copy_read(replica, buffer, size).await
+        let object_size = replica.size as usize;
+        if size < object_size {
+            return Err(StoreError::InvalidParams(format!(
+                "buffer too small for key {key}: required={object_size}, available={size}"
+            )));
+        }
+        if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
+            && !self.local_endpoints.read().contains(&replica.segment_name)
+        {
+            let data = self.read_from_replica(key, replica).await?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), buffer as *mut u8, data.len());
+            }
+            return Ok(data.len());
+        }
+        self.zero_copy_read(replica, buffer, object_size).await
     }
 
     // -----------------------------------------------------------------------
@@ -445,6 +460,11 @@ impl MooncakeClient {
         buffers: &[*mut c_void],
         sizes: &[usize],
     ) -> StoreResult<Vec<i64>> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "keys, buffers, and sizes length mismatch".to_string(),
+            ));
+        }
         let mut results = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
             match self.get_into(key, buffers[i], sizes[i]).await {
@@ -477,10 +497,29 @@ impl MooncakeClient {
         all_sizes: &[Vec<usize>],
         _prefer_same_node: bool,
     ) -> StoreResult<Vec<Vec<i64>>> {
+        if keys.len() != all_buffers.len() || keys.len() != all_sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "keys, all_buffers, and all_sizes length mismatch".to_string(),
+            ));
+        }
+        for (idx, (buffers, sizes)) in all_buffers.iter().zip(all_sizes.iter()).enumerate() {
+            if buffers.len() != sizes.len() {
+                return Err(StoreError::InvalidParams(format!(
+                    "buffers and sizes length mismatch for key index {idx}"
+                )));
+            }
+        }
+
         let mut results = vec![];
         for (key_idx, key) in keys.iter().enumerate() {
             // Fetch and select replica. / 获取并选择副本。
-            let replicas = self.fetch_replicas(key).await?;
+            let replicas = match self.fetch_replicas(key).await {
+                Ok(replicas) => replicas,
+                Err(_) => {
+                    results.push(vec![-1; all_buffers[key_idx].len()]);
+                    continue;
+                }
+            };
             let replica = match self.select_best_replica(&replicas) {
                 Some(r) => r,
                 None => {
@@ -489,11 +528,33 @@ impl MooncakeClient {
                     continue;
                 }
             };
+            let total_capacity = all_sizes[key_idx].iter().sum::<usize>();
+            if total_capacity < replica.size as usize {
+                results.push(vec![-1; all_buffers[key_idx].len()]);
+                continue;
+            }
 
             // Open segment and allocate batch. / 打开 segment 并分配批次。
             let seg = self.engine.open_segment(&replica.segment_name)?;
             let count = all_buffers[key_idx].len();
-            let batch_id = match self.engine.allocate_batch_id(count) {
+            let request_count = all_sizes[key_idx]
+                .iter()
+                .scan(replica.size as usize, |remaining, &size| {
+                    if *remaining == 0 {
+                        Some(false)
+                    } else {
+                        *remaining = remaining.saturating_sub(size);
+                        Some(true)
+                    }
+                })
+                .filter(|included| *included)
+                .count();
+            if request_count == 0 {
+                let _ = self.engine.close_segment(seg);
+                results.push(vec![0; count]);
+                continue;
+            }
+            let batch_id = match self.engine.allocate_batch_id(request_count) {
                 Ok(id) => id,
                 Err(e) => {
                     let _ = self.engine.close_segment(seg);
@@ -501,38 +562,57 @@ impl MooncakeClient {
                 }
             };
 
-            // All buffers for this key share the same source offset
-            // (replica.base_addr + replica.offset) but read different sizes.
-            // 此 key 的所有缓冲区共享相同的源偏移，但读取不同的大小。
-            let reqs: Vec<TransferRequest> = (0..count)
-                .map(|i| TransferRequest {
+            let mut remaining = replica.size as usize;
+            let mut source_offset = 0usize;
+            let mut request_to_buffer = Vec::with_capacity(request_count);
+            let mut reqs = Vec::with_capacity(request_count);
+            for i in 0..count {
+                if remaining == 0 {
+                    break;
+                }
+                let read_len = remaining.min(all_sizes[key_idx][i]);
+                remaining -= read_len;
+                reqs.push(TransferRequest {
                     opcode: Opcode::Read,
                     source: all_buffers[key_idx][i],
                     target_id: seg,
-                    target_offset: replica.base_addr + replica.offset,
-                    length: all_sizes[key_idx][i] as u64,
-                })
-                .collect();
+                    target_offset: replica.base_addr + replica.offset + source_offset as u64,
+                    length: read_len as u64,
+                });
+                request_to_buffer.push(i);
+                source_offset += read_len;
+            }
 
-            self.engine.submit_transfer(batch_id, &reqs)?;
+            if let Err(e) = self.engine.submit_transfer(batch_id, &reqs) {
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(seg);
+                return Err(e.into());
+            }
 
             // Poll with 10s timeout. / 以 10s 超时轮询。
             let mut key_results: Vec<i64> = vec![0; count];
             let start = tokio::time::Instant::now();
             let timeout = tokio::time::Duration::from_secs(10);
-            for i in 0..count {
+            for (request_idx, &buffer_idx) in request_to_buffer.iter().enumerate() {
                 loop {
-                    let status = self.engine.get_transfer_status(batch_id, i)?;
+                    let status = match self.engine.get_transfer_status(batch_id, request_idx) {
+                        Ok(status) => status,
+                        Err(e) => {
+                            let _ = self.engine.free_batch_id(batch_id);
+                            let _ = self.engine.close_segment(seg);
+                            return Err(e.into());
+                        }
+                    };
                     if status.status == TransferStatusEnum::Completed {
-                        key_results[i] = status.transferred_bytes as i64;
+                        key_results[buffer_idx] = status.transferred_bytes as i64;
                         break;
                     }
                     if status.status == TransferStatusEnum::Failed {
-                        key_results[i] = -1;
+                        key_results[buffer_idx] = -1;
                         break;
                     }
                     if start.elapsed() > timeout {
-                        key_results[i] = -1;
+                        key_results[buffer_idx] = -1;
                         break;
                     }
                     tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;

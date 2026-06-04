@@ -748,7 +748,8 @@ impl MooncakeClient {
         size: u64,
         base_addr: u64,
     ) -> StoreResult<()> {
-        self.master
+        let response = self
+            .master
             .mount_segment(proto::MountSegmentRequest {
                 client_id: Some(self.client_id_proto()),
                 segment_name: segment_name.to_string(),
@@ -758,7 +759,15 @@ impl MooncakeClient {
                 protocol: self.protocol.clone(),
             })
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        let segment_id = response.segment_id.as_ref().ok_or_else(|| {
+            StoreError::Internal("MountSegment response missing segment_id".to_string())
+        })?;
+        self.mounted_segment_ids.write().insert(
+            segment_name.to_string(),
+            Uuid::from_u64_pair(segment_id.high, segment_id.low),
+        );
         // Register as a local endpoint for subsequent locality checks
         self.register_local_endpoint(segment_name);
         Ok(())
@@ -783,10 +792,18 @@ impl MooncakeClient {
         segment_name: &str,
         grace_period_ms: u64,
     ) -> StoreResult<()> {
+        let segment_id = self
+            .mounted_segment_ids
+            .read()
+            .get(segment_name)
+            .copied()
+            .ok_or_else(|| StoreError::SegmentNotFound(segment_name.to_string()))?;
+        let segment_id_proto = Self::uuid_to_proto_uuid(segment_id);
+
         if grace_period_ms > 0 {
             self.master
                 .graceful_unmount_segment(proto::GracefulUnmountSegmentRequest {
-                    segment_id: Some(proto::Uuid::default()), // identified by name via master
+                    segment_id: Some(segment_id_proto),
                     client_id: Some(self.client_id_proto()),
                     grace_period_ms,
                 })
@@ -795,12 +812,13 @@ impl MooncakeClient {
         } else {
             self.master
                 .unmount_segment(proto::UnmountSegmentRequest {
-                    segment_id: Some(proto::Uuid::default()),
+                    segment_id: Some(segment_id_proto),
                     client_id: Some(self.client_id_proto()),
                 })
                 .await
                 .map_err(|e| StoreError::Internal(e.to_string()))?;
         };
+        self.mounted_segment_ids.write().remove(segment_name);
         self.unregister_local_endpoint(segment_name);
         Ok(())
     }

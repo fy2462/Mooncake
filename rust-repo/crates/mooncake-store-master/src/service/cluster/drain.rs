@@ -250,12 +250,13 @@ impl MasterServiceImpl {
                 }
                 continue;
             }
+            let mut seen_source_segments = HashSet::new();
             for replica in &entry.replicas {
                 if draining_segments.contains(&replica.segment_name)
                     && replica.status == ReplicaStatus::Complete
+                    && seen_source_segments.insert(replica.segment_name.clone())
                 {
                     units.push((key.clone(), replica.segment_name.clone(), replica.size));
-                    break; // one unit per key / 每个 key 只创建一个 drain unit
                 }
             }
         }

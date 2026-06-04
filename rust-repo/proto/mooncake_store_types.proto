@@ -117,7 +117,9 @@ message MountSegmentRequest {
   string protocol = 6;
 }
 
-message MountSegmentResponse {}
+message MountSegmentResponse {
+  Uuid segment_id = 1;
+}
 
 message MountNoFSegmentRequest {
   Uuid client_id = 1;

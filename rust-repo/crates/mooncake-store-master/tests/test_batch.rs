@@ -139,6 +139,36 @@ async fn test_batch_put_start_supports_nof_replicas() {
         .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32));
 }
 
+#[tokio::test]
+async fn test_batch_put_start_marks_existing_object_separately() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "batch-existing:1").await;
+    put_start_one(&service, client_id, "already-there").await;
+    put_end_one(&service, client_id, "already-there").await;
+
+    let response = MasterService::batch_put_start(
+        &service,
+        Request::new(proto::BatchPutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["already-there".into()],
+            slice_lengths: vec![128],
+            config: Some(proto::ReplicateConfig {
+                preferred_segment: "batch-existing:1".into(),
+                ..replicate_config()
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(response.results[0].status, -7);
+    assert!(response.results[0].replicas.is_empty());
+}
+
 #[test]
 fn test_batch_remove_logic() {
     let objects: DashMap<String, ObjectEntry> = DashMap::new();
