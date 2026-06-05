@@ -18,6 +18,9 @@ use crate::ha::types::OpLogRecord;
 use crate::oplog::OpLogStore;
 use crate::service::state::{MasterState, ObjectEntry};
 
+const MAX_OBJECT_KEY_SIZE: usize = 4096;
+const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
+
 /// Applies OpLog entries to a MasterState, tracking the expected sequence ID.
 pub(crate) struct OpLogApplier {
     state: Arc<MasterState>,
@@ -126,6 +129,9 @@ impl OpLogApplier {
 
     /// Apply a single JSON payload to MasterState.
     fn apply_one(state: &MasterState, payload: &str) -> bool {
+        if payload.len() > MAX_PAYLOAD_SIZE {
+            return false;
+        }
         let v: Value = match serde_json::from_str(payload) {
             Ok(v) => v,
             Err(_) => return false,
@@ -140,6 +146,9 @@ impl OpLogApplier {
                 let Some(key) = v["key"].as_str() else {
                     return false;
                 };
+                if key.len() > MAX_OBJECT_KEY_SIZE {
+                    return false;
+                }
                 let size = v["size"].as_u64().unwrap_or(0);
                 // PutEnd: mark Allocating replicas as Complete.
                 // The actual size is recorded on the object entry.
@@ -185,6 +194,9 @@ impl OpLogApplier {
                 let Some(key) = v["key"].as_str() else {
                     return false;
                 };
+                if key.len() > MAX_OBJECT_KEY_SIZE {
+                    return false;
+                }
                 state.objects.remove(key);
                 state.processing_keys.remove(key);
                 true
@@ -304,6 +316,26 @@ mod tests {
         assert_eq!(object.user_key, "k1");
         assert_eq!(object.replicas.len(), 1);
         assert_eq!(object.replicas[0].segment_id, segment_id);
+    }
+
+    #[test]
+    fn test_rejects_oversized_oplog_key() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state);
+        let payload = serde_json::json!({
+            "op": "remove",
+            "key": "k".repeat(MAX_OBJECT_KEY_SIZE + 1),
+        })
+        .to_string();
+
+        let n = applier.apply_op_log_entries(&[OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload,
+        }]);
+
+        assert_eq!(n, 0);
+        assert_eq!(applier.get_expected_sequence_id(), 1);
     }
 
     #[test]

@@ -527,6 +527,49 @@ TEST_F(OpLogApplierTest, TestApplyPutEnd_ValidPayload) {
     EXPECT_EQ(2048u, meta->size);
 }
 
+TEST_F(OpLogApplierTest, TestApplyPutEnd_RustJsonPayload) {
+    std::string payload = R"({
+        "op": "put_end",
+        "key": "tenant-a/key1",
+        "size": 4096,
+        "client_id": "00000000-0000-0000-0000-000000000001",
+        "tenant_id": "tenant-a",
+        "group_id": "group-a",
+        "user_key": "key1",
+        "replicas": [{
+            "segment_id": "00000000-0000-0000-0000-000000000002",
+            "segment_name": "node-a:1234",
+            "offset": 128,
+            "size": 4096,
+            "status": "Complete",
+            "replica_type": "Memory",
+            "holder_client_id": "00000000-0000-0000-0000-000000000001",
+            "refcnt": 0,
+            "handle_valid": true,
+            "base_addr": 8192
+        }]
+    })";
+    OpLogEntry entry = MakeEntry(1, OpType::PUT_END, "tenant-a/key1", payload);
+
+    EXPECT_TRUE(applier_->ApplyOpLogEntry(entry));
+    EXPECT_EQ(2u, applier_->GetExpectedSequenceId());
+
+    auto meta = mock_metadata_store_->GetMetadata("tenant-a/key1");
+    ASSERT_TRUE(meta.has_value());
+    EXPECT_EQ(0u, meta->client_id.first);
+    EXPECT_EQ(1u, meta->client_id.second);
+    EXPECT_EQ(4096u, meta->size);
+    ASSERT_EQ(1u, meta->replicas.size());
+    EXPECT_EQ(ReplicaStatus::COMPLETE, meta->replicas[0].status);
+    ASSERT_TRUE(meta->replicas[0].is_memory_replica());
+    const auto& buffer =
+        meta->replicas[0].get_memory_descriptor().buffer_descriptor;
+    EXPECT_EQ(4096u, buffer.size_);
+    EXPECT_EQ(8320u, buffer.buffer_address_);
+    EXPECT_EQ("tcp", buffer.protocol_);
+    EXPECT_EQ("node-a:1234", buffer.transport_endpoint_);
+}
+
 TEST_F(OpLogApplierTest, TestApplyPutEnd_InvalidPayload) {
     std::string invalid_data = "{invalid data}";
     OpLogEntry entry = MakeEntry(1, OpType::PUT_END, "key1", invalid_data);

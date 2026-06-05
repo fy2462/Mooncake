@@ -3,14 +3,228 @@
 #include <glog/logging.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <sstream>
 
 #include "ha/oplog/oplog_store.h"
 #include "ha_metric_manager.h"
-#include "metadata_store.h"
 #include "ha/oplog/oplog_manager.h"
+#include "metadata_store.h"
+#include "json/json.h"
 
 namespace mooncake {
+namespace {
+
+bool ParseJsonPayload(const std::string& payload, Json::Value& root) {
+    Json::CharReaderBuilder builder;
+    std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+    std::string errs;
+    return reader->parse(payload.data(), payload.data() + payload.size(),
+                         &root, &errs) &&
+           root.isObject();
+}
+
+bool ReadUint64(const Json::Value& value, uint64_t& out) {
+    if (value.isUInt64()) {
+        out = value.asUInt64();
+        return true;
+    }
+    if (value.isInt64() && value.asInt64() >= 0) {
+        out = static_cast<uint64_t>(value.asInt64());
+        return true;
+    }
+    if (value.isString()) {
+        try {
+            out = std::stoull(value.asString());
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+    return false;
+}
+
+bool ParseUuidCompat(const std::string& value, UUID& uuid) {
+    if (StringToUuid(value, uuid)) {
+        return true;
+    }
+
+    std::string hex;
+    hex.reserve(32);
+    for (unsigned char c : value) {
+        if (c == '-') continue;
+        if (!std::isxdigit(c)) return false;
+        hex.push_back(static_cast<char>(c));
+    }
+    if (hex.size() != 32) {
+        return false;
+    }
+    try {
+        uuid = UUID{std::stoull(hex.substr(0, 16), nullptr, 16),
+                    std::stoull(hex.substr(16, 16), nullptr, 16)};
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+uint64_t ReadUint64OrDefault(const Json::Value& object, const char* key,
+                             uint64_t fallback = 0) {
+    uint64_t value = fallback;
+    if (object.isMember(key)) {
+        ReadUint64(object[key], value);
+    }
+    return value;
+}
+
+std::string JsonScalarKey(const Json::Value& value) {
+    if (value.isString()) return value.asString();
+    if (value.isInt64()) return std::to_string(value.asInt64());
+    if (value.isUInt64()) return std::to_string(value.asUInt64());
+    return "";
+}
+
+ReplicaStatus ParseRustReplicaStatus(const Json::Value& value) {
+    if (value.isString()) {
+        const std::string status = value.asString();
+        if (status == "Allocating") return ReplicaStatus::INITIALIZED;
+        if (status == "Written") return ReplicaStatus::PROCESSING;
+        if (status == "Complete") return ReplicaStatus::COMPLETE;
+        if (status == "Failed") return ReplicaStatus::FAILED;
+        return ReplicaStatus::UNDEFINED;
+    }
+    if (value.isInt()) {
+        switch (value.asInt()) {
+            case 1:
+                return ReplicaStatus::INITIALIZED;
+            case 2:
+                return ReplicaStatus::PROCESSING;
+            case 3:
+                return ReplicaStatus::COMPLETE;
+            case 4:
+                return ReplicaStatus::FAILED;
+            default:
+                return ReplicaStatus::UNDEFINED;
+        }
+    }
+    return ReplicaStatus::UNDEFINED;
+}
+
+ReplicaType ParseRustReplicaType(const Json::Value& value) {
+    if (value.isString()) {
+        const std::string type = value.asString();
+        if (type == "Disk") return ReplicaType::DISK;
+        if (type == "LocalDisk") return ReplicaType::LOCAL_DISK;
+        if (type == "NoFSsd") return ReplicaType::NOF_SSD;
+        return ReplicaType::MEMORY;
+    }
+    if (value.isInt()) {
+        switch (value.asInt()) {
+            case 1:
+                return ReplicaType::DISK;
+            case 2:
+                return ReplicaType::LOCAL_DISK;
+            case 3:
+                return ReplicaType::NOF_SSD;
+            default:
+                return ReplicaType::MEMORY;
+        }
+    }
+    return ReplicaType::MEMORY;
+}
+
+uint64_t StableReplicaId(const Json::Value& replica) {
+    std::ostringstream oss;
+    const uint64_t offset = ReadUint64OrDefault(replica, "offset");
+    oss << replica.get("segment_id", "").asString() << ':'
+        << offset << ':' << JsonScalarKey(replica["replica_type"]);
+    return static_cast<uint64_t>(std::hash<std::string>{}(oss.str()));
+}
+
+std::optional<Replica::Descriptor> ParseRustReplicaDescriptor(
+    const Json::Value& replica) {
+    if (!replica.isObject()) return std::nullopt;
+
+    Replica::Descriptor descriptor;
+    descriptor.id = StableReplicaId(replica);
+    descriptor.status = ParseRustReplicaStatus(replica["status"]);
+
+    const uint64_t size = ReadUint64OrDefault(replica, "size");
+    const uint64_t offset = ReadUint64OrDefault(replica, "offset");
+    const uint64_t base_addr = ReadUint64OrDefault(replica, "base_addr");
+    const std::string endpoint = replica.get("segment_name", "").asString();
+    const ReplicaType replica_type =
+        ParseRustReplicaType(replica["replica_type"]);
+
+    if (replica_type == ReplicaType::MEMORY ||
+        replica_type == ReplicaType::NOF_SSD) {
+        AllocatedBuffer::Descriptor buffer;
+        buffer.size_ = size;
+        buffer.buffer_address_ = static_cast<uintptr_t>(base_addr + offset);
+        buffer.protocol_ = "tcp";
+        buffer.transport_endpoint_ = endpoint;
+
+        if (replica_type == ReplicaType::NOF_SSD) {
+            NoFDescriptor nof;
+            nof.buffer_descriptor = std::move(buffer);
+            descriptor.descriptor_variant = std::move(nof);
+        } else {
+            MemoryDescriptor memory;
+            memory.buffer_descriptor = std::move(buffer);
+            descriptor.descriptor_variant = std::move(memory);
+        }
+    } else if (replica_type == ReplicaType::LOCAL_DISK) {
+        LocalDiskDescriptor local_disk;
+        if (replica.isMember("holder_client_id") &&
+            replica["holder_client_id"].isString()) {
+            ParseUuidCompat(replica["holder_client_id"].asString(),
+                            local_disk.client_id);
+        }
+        local_disk.object_size = size;
+        local_disk.transport_endpoint = endpoint;
+        descriptor.descriptor_variant = std::move(local_disk);
+    } else {
+        DiskDescriptor disk;
+        disk.file_path = endpoint;
+        disk.object_size = size;
+        descriptor.descriptor_variant = std::move(disk);
+    }
+
+    return descriptor;
+}
+
+std::optional<StandbyObjectMetadata> ParseRustPutEndJsonPayload(
+    const std::string& payload, uint64_t sequence_id) {
+    Json::Value root;
+    if (!ParseJsonPayload(payload, root) ||
+        root.get("op", "").asString() != "put_end") {
+        return std::nullopt;
+    }
+
+    StandbyObjectMetadata metadata;
+    metadata.last_sequence_id = sequence_id;
+    if (root.isMember("client_id") && root["client_id"].isString()) {
+        ParseUuidCompat(root["client_id"].asString(), metadata.client_id);
+    }
+    metadata.size = ReadUint64OrDefault(root, "size");
+
+    const Json::Value& replicas = root["replicas"];
+    if (replicas.isArray()) {
+        for (const auto& replica : replicas) {
+            auto parsed = ParseRustReplicaDescriptor(replica);
+            if (parsed.has_value()) {
+                metadata.replicas.push_back(std::move(*parsed));
+            }
+        }
+    }
+    return metadata;
+}
+
+}  // namespace
 
 OpLogApplier::OpLogApplier(MetadataStore* metadata_store,
                            const std::string& cluster_id,
@@ -447,6 +661,24 @@ void OpLogApplier::ApplyPutEnd(const OpLogEntry& entry) {
     MetadataPayload payload;
     auto result = struct_pack::deserialize_to(payload, entry.payload);
     if (result != struct_pack::errc::ok) {
+        if (auto rust_metadata =
+                ParseRustPutEndJsonPayload(entry.payload, entry.sequence_id);
+            rust_metadata.has_value()) {
+            if (!metadata_store_->PutMetadata(entry.object_key,
+                                              *rust_metadata)) {
+                LOG(ERROR) << "OpLogApplier: failed to PutMetadata key="
+                           << entry.object_key
+                           << ", sequence_id=" << entry.sequence_id;
+            } else {
+                VLOG(1) << "OpLogApplier: applied Rust JSON PUT_END, key="
+                        << entry.object_key
+                        << ", sequence_id=" << entry.sequence_id
+                        << ", replicas=" << rust_metadata->replicas.size()
+                        << ", size=" << rust_metadata->size;
+            }
+            return;
+        }
+
         LOG(ERROR) << "OpLogApplier: failed to deserialize payload for key="
                    << entry.object_key << ", sequence_id=" << entry.sequence_id
                    << ", payload_size=" << entry.payload.size()
