@@ -49,6 +49,7 @@
 
 pub mod buffer_allocator;
 pub mod client;
+pub mod dummy;
 pub mod engram;
 pub mod hot_cache;
 pub mod local_storage_backend;
@@ -56,6 +57,7 @@ pub mod offload;
 pub mod remote_source;
 
 pub use client::{BufferHandle, MooncakeClient};
+pub use dummy::{DummyIpcChannel, DummyMemoryPool};
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
 pub use local_storage_backend::{LocalStorageBackend, LocalStorageConfig};

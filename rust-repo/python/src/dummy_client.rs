@@ -1,52 +1,31 @@
 use crate::client::{take_client, PythonMooncakeClient};
 use crate::replicate_config::ReplicateConfigPy;
 use crate::to_py_err;
-use mooncake_store_client::MooncakeClient;
+use mooncake_store_client::{DummyMemoryPool, MooncakeClient};
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::Arc;
 
 #[pyclass(name = "MooncakeDummyClient")]
 pub(crate) struct PythonMooncakeDummyClient {
     inner: Arc<Mutex<Option<MooncakeClient>>>,
-    mem_pool: Vec<u8>,
-    next_offset: Mutex<usize>,
-    allocations: Mutex<HashMap<u64, usize>>,
+    mem_pool: DummyMemoryPool,
     registered_pool: Mutex<bool>,
 }
 
 impl PythonMooncakeDummyClient {
     fn checked_ptr(&self, addr: u64, size: usize) -> PyResult<*mut c_void> {
-        let alloc_size = self
-            .allocations
-            .lock()
-            .get(&addr)
-            .copied()
-            .ok_or_else(|| to_py_err(format!("unknown dummy address: {addr:#x}")))?;
-        if size > alloc_size {
-            return Err(to_py_err(format!(
-                "dummy buffer too small: requested={size}, allocated={alloc_size}"
-            )));
-        }
-        Ok(addr as usize as *mut c_void)
+        self.mem_pool.checked_ptr(addr, size).map_err(to_py_err)
     }
 
     fn pool_ptr(&self) -> *mut c_void {
-        self.mem_pool.as_ptr() as *mut c_void
+        self.mem_pool.base_ptr()
     }
 
     fn checked_ptrs(&self, addrs: &[u64], sizes: &[usize]) -> PyResult<Vec<*mut c_void>> {
-        if addrs.len() != sizes.len() {
-            return Err(to_py_err("addresses and sizes must have same length"));
-        }
-        addrs
-            .iter()
-            .zip(sizes.iter())
-            .map(|(&addr, &size)| self.checked_ptr(addr, size))
-            .collect()
+        self.mem_pool.checked_ptrs(addrs, sizes).map_err(to_py_err)
     }
 }
 
@@ -66,15 +45,10 @@ impl PythonMooncakeDummyClient {
         ipc_socket_path: String,
     ) -> PyResult<Self> {
         let _ = (local_buffer_size, server_address, ipc_socket_path);
-        if mem_pool_size == 0 {
-            return Err(to_py_err("mem_pool_size must be greater than 0"));
-        }
         let inner = real_client.borrow().inner.clone();
         let dummy = Self {
             inner,
-            mem_pool: vec![0; mem_pool_size],
-            next_offset: Mutex::new(0),
-            allocations: Mutex::new(HashMap::new()),
+            mem_pool: DummyMemoryPool::new(mem_pool_size).map_err(to_py_err)?,
             registered_pool: Mutex::new(false),
         };
 
@@ -95,32 +69,14 @@ impl PythonMooncakeDummyClient {
 
     /// Allocate from the dummy memory pool and return a process-local address.
     fn alloc_from_mem_pool(&self, size: usize) -> PyResult<u64> {
-        if size == 0 {
-            return Err(to_py_err("allocation size must be greater than 0"));
-        }
-        let align = 64usize;
-        let mut next = self.next_offset.lock();
-        let aligned = (*next + align - 1) & !(align - 1);
-        let end = aligned
-            .checked_add(size)
-            .ok_or_else(|| to_py_err("allocation size overflow"))?;
-        if end > self.mem_pool.len() {
-            return Err(to_py_err("dummy memory pool exhausted"));
-        }
-        *next = end;
-        let addr = unsafe { self.mem_pool.as_ptr().add(aligned) } as u64;
-        self.allocations.lock().insert(addr, size);
-        Ok(addr)
+        self.mem_pool.alloc(size).map_err(to_py_err)
     }
 
     /// Copy bytes into a dummy allocation.
     fn write_mem(&self, addr: u64, data: &Bound<'_, PyBytes>) -> PyResult<()> {
-        let bytes = data.as_bytes();
-        let ptr = self.checked_ptr(addr, bytes.len())? as *mut u8;
-        unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
-        }
-        Ok(())
+        self.mem_pool
+            .write(addr, data.as_bytes())
+            .map_err(to_py_err)
     }
 
     /// Read bytes from a dummy allocation.
@@ -130,9 +86,8 @@ impl PythonMooncakeDummyClient {
         addr: u64,
         size: usize,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let ptr = self.checked_ptr(addr, size)? as *const u8;
-        let data = unsafe { std::slice::from_raw_parts(ptr, size) };
-        Ok(PyBytes::new(py, data))
+        let data = self.mem_pool.read(addr, size).map_err(to_py_err)?;
+        Ok(PyBytes::new(py, &data))
     }
 
     #[pyo3(signature = (key, value, config = None))]
@@ -391,8 +346,7 @@ impl PythonMooncakeDummyClient {
             }
             *self.registered_pool.lock() = false;
         }
-        self.allocations.lock().clear();
-        *self.next_offset.lock() = 0;
+        self.mem_pool.reset();
         Ok(())
     }
 
@@ -400,7 +354,7 @@ impl PythonMooncakeDummyClient {
         format!(
             "MooncakeDummyClient(in_process, pool_size={}, allocations={})",
             self.mem_pool.len(),
-            self.allocations.lock().len()
+            self.mem_pool.allocations_len()
         )
     }
 }
