@@ -129,6 +129,28 @@ pub trait OpLogStore: Send + Sync {
     /// Poll for records from since_seq, returning records, next_seq, and timeout flag.
     /// 从 since_seq 开始轮询记录，返回记录列表、next_seq 和是否超时。
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult;
+
+    /// Create a change notifier for backends that support push-based updates.
+    /// 创建后端支持的变更通知器；不支持时返回 None 并由调用方回退轮询。
+    fn create_change_notifier(&self) -> Option<Box<dyn OpLogChangeNotifier>> {
+        None
+    }
+}
+
+pub type OpLogEntryCallback = Box<dyn FnMut(OpLogRecord) + Send + 'static>;
+pub type OpLogErrorCallback = Box<dyn FnMut(HaError) + Send + 'static>;
+
+pub trait OpLogChangeNotifier: Send {
+    fn start(
+        &mut self,
+        start_seq_id: u64,
+        on_entry: OpLogEntryCallback,
+        on_error: OpLogErrorCallback,
+    ) -> Result<(), HaError>;
+
+    fn stop(&mut self);
+
+    fn is_healthy(&self) -> bool;
 }
 
 // =============================================================================
@@ -936,6 +958,15 @@ impl EtcdOpLogStore {
         Ok(store)
     }
 
+    fn reader_clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            key_prefix: self.key_prefix.clone(),
+            last_seq: self.last_seq,
+            buffer: Vec::new(),
+        }
+    }
+
     /// Recover `last_seq` from the `/latest` key.
     async fn recover(&mut self) -> Result<(), HaError> {
         let latest_key = format!("{}/latest", self.key_prefix);
@@ -1150,6 +1181,72 @@ impl OpLogStore for EtcdOpLogStore {
             timed_out: false,
         }
     }
+
+    fn create_change_notifier(&self) -> Option<Box<dyn OpLogChangeNotifier>> {
+        Some(Box::new(EtcdOpLogChangeNotifier::new(self.reader_clone())))
+    }
+}
+
+struct EtcdOpLogChangeNotifier {
+    store: EtcdOpLogStore,
+    shutdown_tx: Option<tokio::sync::watch::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    healthy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EtcdOpLogChangeNotifier {
+    fn new(store: EtcdOpLogStore) -> Self {
+        Self {
+            store,
+            shutdown_tx: None,
+            thread: None,
+            healthy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}
+
+impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
+    fn start(
+        &mut self,
+        start_seq_id: u64,
+        mut on_entry: OpLogEntryCallback,
+        mut on_error: OpLogErrorCallback,
+    ) -> Result<(), HaError> {
+        if self.thread.is_some() {
+            return Ok(());
+        }
+        let store = self.store.reader_clone();
+        let healthy = self.healthy.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        self.shutdown_tx = Some(shutdown_tx);
+        self.thread = Some(std::thread::spawn(move || {
+            healthy.store(true, std::sync::atomic::Ordering::Release);
+            let _ = block_on_runtime(store.watch_entries_from_until(
+                start_seq_id,
+                1000,
+                shutdown_rx,
+                move |entry| on_entry(entry),
+                move |err| on_error(err),
+            ));
+            healthy.store(false, std::sync::atomic::Ordering::Release);
+        }));
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.healthy
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 fn block_on_runtime<F: Future>(future: F) -> F::Output {
@@ -1254,13 +1351,52 @@ impl EtcdOpLogStore {
         F: FnMut(OpLogRecord) + Send,
         E: FnMut(HaError) + Send,
     {
-        let (historical, revision) = self
-            .read_since_with_revision_async(start_seq_id, max_historical_batch)
-            .await?;
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
+        self.watch_entries_from_until(
+            start_seq_id,
+            max_historical_batch,
+            shutdown_rx,
+            &mut on_entry,
+            &mut on_error,
+        )
+        .await
+    }
+
+    pub async fn watch_entries_from_until<F, E>(
+        &self,
+        start_seq_id: u64,
+        max_historical_batch: usize,
+        mut shutdown_rx: tokio::sync::watch::Receiver<()>,
+        mut on_entry: F,
+        mut on_error: E,
+    ) -> Result<(), HaError>
+    where
+        F: FnMut(OpLogRecord) + Send,
+        E: FnMut(HaError) + Send,
+    {
+        let batch_size = max_historical_batch.max(1);
+        let mut read_seq = start_seq_id;
         let mut last_seq = start_seq_id.saturating_sub(1);
-        for entry in historical {
-            last_seq = last_seq.max(entry.seq);
-            on_entry(entry);
+        let mut revision = 0;
+        loop {
+            if shutdown_rx.has_changed().unwrap_or(true) {
+                return Ok(());
+            }
+            let (historical, read_revision) = self
+                .read_since_with_revision_async(read_seq, batch_size)
+                .await?;
+            if read_revision > 0 {
+                revision = read_revision;
+            }
+            let delivered = historical.len();
+            for entry in historical {
+                last_seq = last_seq.max(entry.seq);
+                read_seq = entry.seq.saturating_add(1);
+                on_entry(entry);
+            }
+            if delivered < batch_size {
+                break;
+            }
         }
 
         let watch_prefix = format!("{}/", self.key_prefix.trim_end_matches('/'));
@@ -1274,7 +1410,14 @@ impl EtcdOpLogStore {
             .map_err(|e| HaError::InvalidBackend(format!("etcd watch oplog: {e}")))?;
 
         loop {
-            match stream.message().await {
+            let message = tokio::select! {
+                changed = shutdown_rx.changed() => {
+                    let _ = changed;
+                    return Ok(());
+                }
+                message = stream.message() => message,
+            };
+            match message {
                 Ok(Some(response)) => {
                     if response.canceled() {
                         return Err(HaError::InvalidBackend(format!(

@@ -329,15 +329,67 @@ impl HotStandbyService {
                 status.is_connected = true;
             }
             let sync_status_ref = Arc::downgrade(&self.sync_status);
+            let poll_interval =
+                std::time::Duration::from_millis(self.config.oplog_poll_interval_ms.max(1));
 
             let handle = std::thread::spawn(move || {
-                let interval = std::time::Duration::from_secs(1);
+                if let Some(store) = oplog_store.as_ref() {
+                    if let Some(mut notifier) = store.create_change_notifier() {
+                        let callback_applier = applier_clone.clone();
+                        let callback_status = sync_status_ref.clone();
+                        let callback_store = store.clone();
+                        let error_state_machine = state_machine.clone();
+                        let start_seq_id = applier_clone.get_expected_sequence_id();
+                        let start_result = notifier.start(
+                            start_seq_id,
+                            Box::new(move |entry| {
+                                callback_applier.apply_op_log_entries(&[entry]);
+                                let expected = callback_applier.get_expected_sequence_id();
+                                let applied = expected.saturating_sub(1);
+                                let primary = callback_store.latest_sequence();
+                                if let Some(status) = callback_status.upgrade() {
+                                    let mut st = status.write();
+                                    st.applied_seq_id = applied;
+                                    st.primary_seq_id = primary;
+                                    st.lag_entries = primary.saturating_sub(applied);
+                                }
+                            }),
+                            Box::new(move |_err| {
+                                error_state_machine.process_event(StandbyEvent::WatchBroken);
+                            }),
+                        );
+                        if start_result.is_ok() {
+                            loop {
+                                if shutdown_rx.has_changed().unwrap_or(true) {
+                                    notifier.stop();
+                                    return;
+                                }
+                                if !notifier.is_healthy() {
+                                    state_machine.process_event(StandbyEvent::WatchBroken);
+                                    notifier.stop();
+                                    break;
+                                }
+                                let expected = applier_clone.get_expected_sequence_id();
+                                let applied = expected.saturating_sub(1);
+                                let primary = store.latest_sequence();
+                                if let Some(status) = sync_status_ref.upgrade() {
+                                    let mut st = status.write();
+                                    st.applied_seq_id = applied;
+                                    st.primary_seq_id = primary;
+                                    st.lag_entries = primary.saturating_sub(applied);
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                        }
+                    }
+                }
+
                 loop {
                     if shutdown_rx.has_changed().unwrap_or(true) {
                         break;
                     }
                     if !state_machine.is_connected() {
-                        std::thread::sleep(interval);
+                        std::thread::sleep(poll_interval);
                         continue;
                     }
                     let mut expected = applier_clone.get_expected_sequence_id();
@@ -366,7 +418,7 @@ impl HotStandbyService {
                         st.lag_entries = primary.saturating_sub(applied);
                     }
 
-                    std::thread::sleep(interval);
+                    std::thread::sleep(poll_interval);
                 }
             });
             self.replication_thread = Some(handle);
