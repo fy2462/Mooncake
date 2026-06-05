@@ -344,7 +344,10 @@ pub struct OpLogRecord {
     /// View version of the leader that produced this entry.
     /// 产生此条目的 leader 的视图版本。
     pub producer_view_version: u64,
-    /// Serialised operation payload (JSON). / 序列化的操作负载（JSON）。
+    /// Serialized operation payload. Rust writes rmp-serde msgpack bytes as
+    /// base64 text; legacy JSON payloads remain readable.
+    /// 序列化的操作负载。Rust 写入 rmp-serde msgpack bytes 的 base64 文本；
+    /// 旧 JSON payload 仍可读取。
     pub payload: String,
 }
 

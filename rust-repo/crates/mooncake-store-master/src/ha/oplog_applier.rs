@@ -1,7 +1,7 @@
 //! OpLog applier — replays OpLog entries onto a MasterState.
 //! C++ equivalent: `OpLogApplier` in oplog_applier.h/cpp.
 //!
-//! Parses JSON payloads from OpLogRecord entries and applies the
+//! Parses msgpack/base64 or legacy JSON payloads from OpLogRecord entries and applies the
 //! corresponding mutations (put_end, remove, segment mount/unmount)
 //! to the shared MasterState.
 
@@ -10,12 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde_json::Value;
 use std::time::SystemTime;
 use uuid::Uuid;
 
 use crate::ha::types::OpLogRecord;
-use crate::oplog::OpLogStore;
+use crate::oplog::{decode_record_payload_value, OpLogStore};
 use crate::service::state::{MasterState, ObjectEntry};
 
 const MAX_OBJECT_KEY_SIZE: usize = 4096;
@@ -127,12 +126,12 @@ impl OpLogApplier {
         (needed, fetched)
     }
 
-    /// Apply a single JSON payload to MasterState.
+    /// Apply a single payload to MasterState.
     fn apply_one(state: &MasterState, payload: &str) -> bool {
         if payload.len() > MAX_PAYLOAD_SIZE {
             return false;
         }
-        let v: Value = match serde_json::from_str(payload) {
+        let v = match decode_record_payload_value(payload) {
             Ok(v) => v,
             Err(_) => return false,
         };

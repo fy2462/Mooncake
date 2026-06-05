@@ -58,6 +58,7 @@ const CPP_OP_REMOVE: u8 = 3;
 const MAX_OBJECT_KEY_SIZE: usize = 4096;
 const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
 const PUT_END_MSGPACK_MAGIC: &[u8] = b"MCOPMETA1";
+const OPLOG_MSGPACK_RECORD_PREFIX: &str = "msgpack:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CppOpLogWireEntry {
@@ -71,15 +72,15 @@ struct CppOpLogWireEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PutEndMetadataPayloadV1 {
-    op: String,
-    key: String,
-    size: u64,
-    client_id: Option<String>,
-    tenant_id: String,
-    group_id: String,
-    user_key: String,
-    replicas: Vec<ReplicaDescriptor>,
+pub(crate) struct PutEndMetadataPayloadV1 {
+    pub(crate) op: String,
+    pub(crate) key: String,
+    pub(crate) size: u64,
+    pub(crate) client_id: Option<String>,
+    pub(crate) tenant_id: String,
+    pub(crate) group_id: String,
+    pub(crate) user_key: String,
+    pub(crate) replicas: Vec<ReplicaDescriptor>,
 }
 
 // =============================================================================
@@ -730,7 +731,7 @@ fn validate_record_size(entry: &OpLogRecord) -> Result<(), HaError> {
             entry.payload.len()
         )));
     }
-    if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(&entry.payload) {
+    if let Ok(payload_json) = decode_record_payload_value(&entry.payload) {
         if let Some(key) = payload_json.get("key").and_then(|key| key.as_str()) {
             if key.len() > MAX_OBJECT_KEY_SIZE {
                 return Err(HaError::InvalidBackend(format!(
@@ -761,7 +762,34 @@ fn validate_wire_entry_size(wire: &CppOpLogWireEntry) -> Result<(), HaError> {
 }
 
 fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> {
-    let payload_json: serde_json::Value = serde_json::from_str(&entry.payload).ok()?;
+    if let Some(payload_bytes) = decode_msgpack_record_payload_bytes(&entry.payload).ok()? {
+        if payload_bytes.starts_with(PUT_END_MSGPACK_MAGIC) {
+            let payload = decode_put_end_msgpack_typed(&payload_bytes).ok()?;
+            let object_key = payload.key;
+            let checksum = compute_cpp_checksum(&payload_bytes);
+            let prefix_hash = compute_cpp_prefix_hash(&object_key);
+            return Some(CppOpLogWireEntry {
+                sequence_id: entry.seq,
+                timestamp_ms: unix_timestamp_ms(),
+                op_type: CPP_OP_PUT_END,
+                object_key,
+                payload: BASE64_STANDARD.encode(payload_bytes),
+                checksum,
+                prefix_hash,
+            });
+        }
+        let payload_json: serde_json::Value = rmp_serde::from_slice(&payload_bytes).ok()?;
+        return cpp_wire_entry_from_payload_json(entry, &payload_json);
+    }
+
+    let payload_json = serde_json::from_str::<serde_json::Value>(&entry.payload).ok()?;
+    cpp_wire_entry_from_payload_json(entry, &payload_json)
+}
+
+fn cpp_wire_entry_from_payload_json(
+    entry: &OpLogRecord,
+    payload_json: &serde_json::Value,
+) -> Option<CppOpLogWireEntry> {
     let op = payload_json.get("op")?.as_str()?;
     let (op_type, object_key, payload_bytes) = match op {
         "put_end" => (
@@ -793,6 +821,35 @@ fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> 
         checksum,
         prefix_hash,
     })
+}
+
+fn encode_msgpack_record_payload_value(payload: &serde_json::Value) -> Result<String, HaError> {
+    let bytes = rmp_serde::to_vec_named(payload)
+        .map_err(|e| HaError::InvalidBackend(format!("oplog msgpack encode: {e}")))?;
+    Ok(format!(
+        "{}{}",
+        OPLOG_MSGPACK_RECORD_PREFIX,
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
+fn encode_put_end_record_payload(payload: &PutEndMetadataPayloadV1) -> Result<String, HaError> {
+    let bytes = encode_put_end_msgpack(payload)?;
+    Ok(format!(
+        "{}{}",
+        OPLOG_MSGPACK_RECORD_PREFIX,
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
+fn decode_msgpack_record_payload_bytes(payload: &str) -> Result<Option<Vec<u8>>, HaError> {
+    let Some(encoded) = payload.strip_prefix(OPLOG_MSGPACK_RECORD_PREFIX) else {
+        return Ok(None);
+    };
+    BASE64_STANDARD
+        .decode(encoded)
+        .map(Some)
+        .map_err(|e| HaError::InvalidBackend(format!("oplog msgpack base64 decode: {e}")))
 }
 
 fn encode_put_end_msgpack(payload: &PutEndMetadataPayloadV1) -> Result<Vec<u8>, HaError> {
@@ -845,14 +902,29 @@ fn encode_put_end_msgpack_from_json(payload_json: &serde_json::Value) -> Result<
     encode_put_end_msgpack(&payload)
 }
 
-pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, HaError> {
+fn decode_put_end_msgpack_typed(bytes: &[u8]) -> Result<PutEndMetadataPayloadV1, HaError> {
     let body = bytes
         .strip_prefix(PUT_END_MSGPACK_MAGIC)
         .ok_or_else(|| HaError::InvalidBackend("put_end msgpack magic mismatch".into()))?;
-    let payload: PutEndMetadataPayloadV1 = rmp_serde::from_slice(body)
-        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))?;
-    serde_json::to_value(payload)
+    rmp_serde::from_slice(body)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))
+}
+
+pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, HaError> {
+    serde_json::to_value(decode_put_end_msgpack_typed(bytes)?)
         .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack to json: {e}")))
+}
+
+pub(crate) fn decode_record_payload_value(payload: &str) -> Result<serde_json::Value, HaError> {
+    if let Some(bytes) = decode_msgpack_record_payload_bytes(payload)? {
+        if bytes.starts_with(PUT_END_MSGPACK_MAGIC) {
+            return decode_put_end_msgpack(&bytes);
+        }
+        return rmp_serde::from_slice(&bytes)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog msgpack decode: {e}")));
+    }
+    serde_json::from_str(payload)
+        .map_err(|e| HaError::InvalidBackend(format!("oplog json decode: {e}")))
 }
 
 fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, HaError> {
@@ -874,7 +946,11 @@ fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, 
         CPP_OP_PUT_END => {
             let metadata_payload_base64 = BASE64_STANDARD.encode(&decoded_payload);
             if decoded_payload.starts_with(PUT_END_MSGPACK_MAGIC) {
-                return decode_put_end_msgpack(&decoded_payload).map(|payload| payload.to_string());
+                return Ok(format!(
+                    "{}{}",
+                    OPLOG_MSGPACK_RECORD_PREFIX,
+                    BASE64_STANDARD.encode(decoded_payload)
+                ));
             }
             if let Ok(payload) = String::from_utf8(decoded_payload) {
                 if serde_json::from_str::<serde_json::Value>(&payload)
@@ -1598,21 +1674,26 @@ impl OpLogManager {
         replicas: &[ReplicaDescriptor],
     ) {
         if let Some(store) = &mut self.store {
-            let payload = json!({
-                "op": "put_end",
-                "key": key,
-                "size": size,
-                "client_id": client_id.map(|id| id.to_string()),
-                "tenant_id": tenant_id,
-                "group_id": group_id,
-                "user_key": user_key,
-                "replicas": replicas,
-            })
-            .to_string();
+            let payload = PutEndMetadataPayloadV1 {
+                op: "put_end".to_string(),
+                key: key.to_string(),
+                size,
+                client_id: client_id.map(|id| id.to_string()),
+                tenant_id: tenant_id.to_string(),
+                group_id: group_id.to_string(),
+                user_key: user_key.to_string(),
+                replicas: replicas.to_vec(),
+            };
             let record = OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
-                payload,
+                payload: match encode_put_end_record_payload(&payload) {
+                    Ok(payload) => payload,
+                    Err(e) => {
+                        warn!("OpLogManager: failed to encode put_end for key={key}: {e}");
+                        return;
+                    }
+                },
             };
             if let Err(e) = validate_record_size(&record).and_then(|_| store.append(&record)) {
                 warn!("OpLogManager: failed to record put_end for key={key}: {e}");
@@ -1622,36 +1703,55 @@ impl OpLogManager {
 
     /// Record a remove mutation: { "op": "remove", "key": "..." }
     pub fn record_remove(&mut self, key: &str) {
-        if let Err(e) = self.append_payload(json!({"op": "remove", "key": key}).to_string()) {
-            warn!("OpLogManager: failed to record remove for key={key}: {e}");
+        match encode_msgpack_record_payload_value(&json!({"op": "remove", "key": key})) {
+            Ok(payload) => {
+                if let Err(e) = self.append_payload(payload) {
+                    warn!("OpLogManager: failed to record remove for key={key}: {e}");
+                }
+            }
+            Err(e) => warn!("OpLogManager: failed to encode remove for key={key}: {e}"),
         }
     }
 
     pub fn record_remove_durable(&mut self, key: &str) -> Result<u64, HaError> {
-        self.append_and_persist(json!({"op": "remove", "key": key}).to_string())
+        self.append_and_persist(encode_msgpack_record_payload_value(
+            &json!({"op": "remove", "key": key}),
+        )?)
     }
 
     /// Record a put_revoke mutation that fully removes an unfinished object.
     pub fn record_put_revoke(&mut self, key: &str) {
-        if let Err(e) = self.append_payload(json!({"op": "put_revoke", "key": key}).to_string()) {
-            warn!("OpLogManager: failed to record put_revoke for key={key}: {e}");
+        match encode_msgpack_record_payload_value(&json!({"op": "put_revoke", "key": key})) {
+            Ok(payload) => {
+                if let Err(e) = self.append_payload(payload) {
+                    warn!("OpLogManager: failed to record put_revoke for key={key}: {e}");
+                }
+            }
+            Err(e) => warn!("OpLogManager: failed to encode put_revoke for key={key}: {e}"),
         }
     }
 
     pub fn record_put_revoke_durable(&mut self, key: &str) -> Result<u64, HaError> {
-        self.append_and_persist(json!({"op": "put_revoke", "key": key}).to_string())
+        self.append_and_persist(encode_msgpack_record_payload_value(
+            &json!({"op": "put_revoke", "key": key}),
+        )?)
     }
 
     /// Record a mount-segment mutation.
     pub fn record_mount_segment(&mut self, segment_name: &str, segment_id: Uuid, size: u64) {
         if let Some(store) = &mut self.store {
-            let payload = json!({
+            let payload = match encode_msgpack_record_payload_value(&json!({
                 "op": "mount_segment",
                 "segment_name": segment_name,
                 "segment_id": segment_id.to_string(),
                 "size": size
-            })
-            .to_string();
+            })) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    warn!("OpLogManager: failed to encode mount_segment for {segment_name}: {e}");
+                    return;
+                }
+            };
             if let Err(e) = store.append(&OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
@@ -1665,12 +1765,17 @@ impl OpLogManager {
     /// Record an unmount-segment mutation.
     pub fn record_unmount_segment(&mut self, segment_name: &str, segment_id: Uuid) {
         if let Some(store) = &mut self.store {
-            let payload = json!({
+            let payload = match encode_msgpack_record_payload_value(&json!({
                 "op": "unmount_segment",
                 "segment_name": segment_name,
                 "segment_id": segment_id.to_string()
-            })
-            .to_string();
+            })) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    warn!("OpLogManager: failed to encode unmount_segment for {segment_name}: {e}");
+                    return;
+                }
+            };
             if let Err(e) = store.append(&OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
@@ -1684,13 +1789,20 @@ impl OpLogManager {
     /// Record a mount-nof-segment mutation.
     pub fn record_mount_nof_segment(&mut self, segment_name: &str, segment_id: Uuid, size: u64) {
         if let Some(store) = &mut self.store {
-            let payload = json!({
+            let payload = match encode_msgpack_record_payload_value(&json!({
                 "op": "mount_nof_segment",
                 "segment_name": segment_name,
                 "segment_id": segment_id.to_string(),
                 "size": size
-            })
-            .to_string();
+            })) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    warn!(
+                        "OpLogManager: failed to encode mount_nof_segment for {segment_name}: {e}"
+                    );
+                    return;
+                }
+            };
             if let Err(e) = store.append(&OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
@@ -1704,12 +1816,19 @@ impl OpLogManager {
     /// Record an unmount-nof-segment mutation.
     pub fn record_unmount_nof_segment(&mut self, segment_name: &str, segment_id: Uuid) {
         if let Some(store) = &mut self.store {
-            let payload = json!({
+            let payload = match encode_msgpack_record_payload_value(&json!({
                 "op": "unmount_nof_segment",
                 "segment_name": segment_name,
                 "segment_id": segment_id.to_string()
-            })
-            .to_string();
+            })) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    warn!(
+                        "OpLogManager: failed to encode unmount_nof_segment for {segment_name}: {e}"
+                    );
+                    return;
+                }
+            };
             if let Err(e) = store.append(&OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
@@ -1723,12 +1842,17 @@ impl OpLogManager {
     /// Record a put-start mutation: { "op": "put_start", "key": "...", "client_id": "..." }
     pub fn record_put_start(&mut self, key: &str, client_id: Uuid) {
         if let Some(store) = &mut self.store {
-            let payload = json!({
+            let payload = match encode_msgpack_record_payload_value(&json!({
                 "op": "put_start",
                 "key": key,
                 "client_id": client_id.to_string()
-            })
-            .to_string();
+            })) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    warn!("OpLogManager: failed to encode put_start for key={key}: {e}");
+                    return;
+                }
+            };
             if let Err(e) = store.append(&OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,
@@ -1784,7 +1908,10 @@ mod tests {
         let entries = store.read_since(1, 10).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].producer_view_version, 7);
-        assert_eq!(entries[0].payload, r#"{"key":"k1","op":"put_revoke"}"#);
+        assert_eq!(
+            decode_record_payload_value(&entries[0].payload).unwrap(),
+            json!({"key":"k1","op":"put_revoke"})
+        );
     }
 
     #[test]
@@ -1922,7 +2049,7 @@ mod tests {
         let entries = store.read_since(1, 10).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&entries[0].payload).unwrap(),
+            decode_record_payload_value(&entries[0].payload).unwrap(),
             json!({"op": "remove", "key": "k1"})
         );
     }
@@ -1999,8 +2126,8 @@ mod tests {
         let parsed = deserialize_etcd_oplog_value(&value).unwrap();
         assert_eq!(parsed.seq, 12);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&parsed.payload).unwrap(),
-            serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap()
+            decode_record_payload_value(&parsed.payload).unwrap(),
+            decode_record_payload_value(&entry.payload).unwrap()
         );
     }
 
@@ -2029,7 +2156,7 @@ mod tests {
 
         let parsed = deserialize_etcd_oplog_value(&serde_json::to_string(&wire).unwrap()).unwrap();
         assert_eq!(parsed.seq, 21);
-        let value: serde_json::Value = serde_json::from_str(&parsed.payload).unwrap();
+        let value = decode_record_payload_value(&parsed.payload).unwrap();
         assert_eq!(value["op"], "put_end");
         assert_eq!(value["key"], "k-msgpack");
         assert_eq!(value["size"], 42);
