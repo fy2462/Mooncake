@@ -42,6 +42,40 @@ pub struct StorageConfig {
     pub quota_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffloadTaskItem {
+    pub tenant_id: String,
+    pub key: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionTaskItem {
+    pub tenant_id: String,
+    pub key: String,
+    pub size: i64,
+}
+
+impl From<proto::OffloadTaskItem> for OffloadTaskItem {
+    fn from(task: proto::OffloadTaskItem) -> Self {
+        Self {
+            tenant_id: task.tenant_id,
+            key: task.key,
+            size: task.size,
+        }
+    }
+}
+
+impl From<proto::PromotionTaskItem> for PromotionTaskItem {
+    fn from(task: proto::PromotionTaskItem) -> Self {
+        Self {
+            tenant_id: task.tenant_id,
+            key: task.key,
+            size: task.size,
+        }
+    }
+}
+
 impl MooncakeClient {
     fn uuid_to_proto_uuid(id: Uuid) -> proto::Uuid {
         let (high, low) = id.as_u64_pair();
@@ -390,6 +424,23 @@ impl MooncakeClient {
         &mut self,
         enable_offloading: bool,
     ) -> StoreResult<HashMap<String, i64>> {
+        let tasks = self
+            .offload_object_heartbeat_tasks(enable_offloading)
+            .await?;
+        Ok(tasks
+            .into_iter()
+            .map(|task| (task.key, task.size))
+            .collect())
+    }
+
+    /// Heartbeat to poll tenant-scoped offloading tasks from the master.
+    ///
+    /// C++ equivalent: `Client::OffloadObjectHeartbeat(enable_offloading)`
+    /// returning `std::vector<OffloadTaskItem>`.
+    pub async fn offload_object_heartbeat_tasks(
+        &mut self,
+        enable_offloading: bool,
+    ) -> StoreResult<Vec<OffloadTaskItem>> {
         let response = self
             .master
             .offload_object_heartbeat(proto::OffloadObjectHeartbeatRequest {
@@ -399,7 +450,18 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
-        Ok(response.objects)
+        if !response.tasks.is_empty() {
+            return Ok(response.tasks.into_iter().map(Into::into).collect());
+        }
+        Ok(response
+            .objects
+            .into_iter()
+            .map(|(key, size)| OffloadTaskItem {
+                tenant_id: String::new(),
+                key,
+                size,
+            })
+            .collect())
     }
 
     /// Report the local SSD capacity to the master.
@@ -433,11 +495,38 @@ impl MooncakeClient {
         keys: Vec<String>,
         metadatas: Vec<proto::StorageObjectMetadata>,
     ) -> StoreResult<()> {
+        let tasks = keys
+            .into_iter()
+            .map(|key| OffloadTaskItem {
+                tenant_id: String::new(),
+                key,
+                size: 0,
+            })
+            .collect();
+        self.notify_offload_success_tasks(tasks, metadatas).await
+    }
+
+    /// Notify the master of tenant-scoped offload completion.
+    ///
+    /// C++ equivalent: `Client::NotifyOffloadSuccess(tasks, metadatas)`.
+    pub async fn notify_offload_success_tasks(
+        &mut self,
+        tasks: Vec<OffloadTaskItem>,
+        metadatas: Vec<proto::StorageObjectMetadata>,
+    ) -> StoreResult<()> {
         self.master
             .notify_offload_success(proto::NotifyOffloadSuccessRequest {
                 client_id: Some(self.client_id_proto()),
-                keys,
+                keys: tasks.iter().map(|task| task.key.clone()).collect(),
                 metadatas,
+                tasks: tasks
+                    .into_iter()
+                    .map(|task| proto::OffloadTaskItem {
+                        tenant_id: task.tenant_id,
+                        key: task.key,
+                        size: task.size,
+                    })
+                    .collect(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -474,6 +563,20 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::PromotionObjectHeartbeat()`
     pub async fn promotion_object_heartbeat(&mut self) -> StoreResult<HashMap<String, i64>> {
+        let tasks = self.promotion_object_heartbeat_tasks().await?;
+        Ok(tasks
+            .into_iter()
+            .map(|task| (task.key, task.size))
+            .collect())
+    }
+
+    /// Heartbeat to poll tenant-scoped promotion tasks from the master.
+    ///
+    /// C++ equivalent: `Client::PromotionObjectHeartbeat()` returning
+    /// `std::vector<PromotionTaskItem>`.
+    pub async fn promotion_object_heartbeat_tasks(
+        &mut self,
+    ) -> StoreResult<Vec<PromotionTaskItem>> {
         let response = self
             .master
             .promotion_object_heartbeat(proto::PromotionObjectHeartbeatRequest {
@@ -482,7 +585,18 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
-        Ok(response.objects)
+        if !response.tasks.is_empty() {
+            return Ok(response.tasks.into_iter().map(Into::into).collect());
+        }
+        Ok(response
+            .objects
+            .into_iter()
+            .map(|(key, size)| PromotionTaskItem {
+                tenant_id: String::new(),
+                key,
+                size,
+            })
+            .collect())
     }
 
     /// Allocate a memory replica for a promoted object.
@@ -502,6 +616,17 @@ impl MooncakeClient {
         size: u64,
         preferred_segments: Vec<String>,
     ) -> StoreResult<ReplicaDescriptor> {
+        self.promotion_alloc_start_for_tenant(key, "", size, preferred_segments)
+            .await
+    }
+
+    pub async fn promotion_alloc_start_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        size: u64,
+        preferred_segments: Vec<String>,
+    ) -> StoreResult<ReplicaDescriptor> {
         let response = self
             .master
             .promotion_alloc_start(proto::PromotionAllocStartRequest {
@@ -509,7 +634,7 @@ impl MooncakeClient {
                 key: key.to_string(),
                 size,
                 preferred_segments,
-                tenant_id: String::new(),
+                tenant_id: tenant_id.to_string(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
@@ -530,11 +655,19 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::NotifyPromotionSuccess(key)`
     pub async fn notify_promotion_success(&mut self, key: &str) -> StoreResult<()> {
+        self.notify_promotion_success_for_tenant(key, "").await
+    }
+
+    pub async fn notify_promotion_success_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+    ) -> StoreResult<()> {
         self.master
             .notify_promotion_success(proto::NotifyPromotionSuccessRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
-                tenant_id: String::new(),
+                tenant_id: tenant_id.to_string(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -548,11 +681,19 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::NotifyPromotionFailure(key)`
     pub async fn notify_promotion_failure(&mut self, key: &str) -> StoreResult<()> {
+        self.notify_promotion_failure_for_tenant(key, "").await
+    }
+
+    pub async fn notify_promotion_failure_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+    ) -> StoreResult<()> {
         self.master
             .notify_promotion_failure(proto::NotifyPromotionFailureRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
-                tenant_id: String::new(),
+                tenant_id: tenant_id.to_string(),
             })
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;

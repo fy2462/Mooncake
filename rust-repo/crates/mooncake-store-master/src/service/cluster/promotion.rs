@@ -20,18 +20,29 @@ impl MasterServiceImpl {
             .get_mut(&client_id)
             .ok_or(Status::not_found("local disk segment not found"))?;
         let mut objects = HashMap::new();
-        if let Some((scoped_key, size)) = entry
-            .promotion_objects
-            .iter()
-            .next()
-            .map(|(key, size)| (key.clone(), *size))
-        {
+        let mut tasks = Vec::new();
+        while tasks.len() < self.state.runtime_config.promotion_max_per_heartbeat {
+            let Some((scoped_key, size)) = entry
+                .promotion_objects
+                .iter()
+                .next()
+                .map(|(key, size)| (key.clone(), *size))
+            else {
+                break;
+            };
             let (_t, uk) = split_scoped_key(&scoped_key);
             entry.promotion_objects.remove(&scoped_key);
             objects.insert(uk, size);
+            let (tenant_id, key) = split_scoped_key(&scoped_key);
+            tasks.push(proto::PromotionTaskItem {
+                tenant_id,
+                key,
+                size,
+            });
         }
         Ok(Response::new(proto::PromotionObjectHeartbeatResponse {
             objects,
+            tasks,
         }))
     }
 

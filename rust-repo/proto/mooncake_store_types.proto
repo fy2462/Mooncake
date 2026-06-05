@@ -182,6 +182,7 @@ message OffloadObjectHeartbeatRequest {
 
 message OffloadObjectHeartbeatResponse {
   map<string, int64> objects = 1;
+  repeated OffloadTaskItem tasks = 2;
 }
 
 message ReportSsdCapacityRequest {
@@ -199,10 +200,17 @@ message StorageObjectMetadata {
   string transport_endpoint = 5;
 }
 
+message OffloadTaskItem {
+  string tenant_id = 1;
+  string key = 2;
+  int64 size = 3;
+}
+
 message NotifyOffloadSuccessRequest {
   Uuid client_id = 1;
   repeated string keys = 2;
   repeated StorageObjectMetadata metadatas = 3;
+  repeated OffloadTaskItem tasks = 4;
 }
 
 message NotifyOffloadSuccessResponse {}
@@ -213,6 +221,13 @@ message PromotionObjectHeartbeatRequest {
 
 message PromotionObjectHeartbeatResponse {
   map<string, int64> objects = 1;
+  repeated PromotionTaskItem tasks = 2;
+}
+
+message PromotionTaskItem {
+  string tenant_id = 1;
+  string key = 2;
+  int64 size = 3;
 }
 
 message PromotionAllocStartRequest {

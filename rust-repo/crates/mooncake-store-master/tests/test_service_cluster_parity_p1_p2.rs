@@ -221,6 +221,7 @@ async fn test_promotion_queue_respects_memory_high_watermark() {
                 data_size: 128,
                 transport_endpoint: "holder".into(),
             }],
+            tasks: vec![],
         }),
     )
     .await

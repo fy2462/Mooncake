@@ -395,6 +395,9 @@ pub struct MasterRuntimeConfig {
     /// 提升队列最大长度，超过后新的提升请求被丢弃。
     /// Maximum promotion queue length; new promotion requests are dropped when exceeded.
     pub promotion_queue_limit: usize,
+    /// 单次 PromotionObjectHeartbeat 最多返回给一个客户端的任务数。
+    /// Maximum promotion tasks returned to one client per heartbeat.
+    pub promotion_max_per_heartbeat: usize,
     /// 后台 reaper 轮询间隔，用于清理过期的 offload / promotion / PutStart 任务。
     /// Background reaper poll interval for cleaning up expired offload/promotion/PutStart tasks.
     pub reaper_interval: Duration,
@@ -469,6 +472,7 @@ impl Default for MasterRuntimeConfig {
             promotion_on_hit: true,
             promotion_admission_threshold: 1,
             promotion_queue_limit: 1024,
+            promotion_max_per_heartbeat: 1,
             reaper_interval: Duration::from_millis(100),
             eviction_interval: Duration::from_millis(100),
             eviction_high_watermark_ratio: 0.95,

@@ -200,6 +200,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
                 data_size: 128,
                 transport_endpoint: "holder-existing".into(),
             }],
+            tasks: vec![],
         }),
     )
     .await

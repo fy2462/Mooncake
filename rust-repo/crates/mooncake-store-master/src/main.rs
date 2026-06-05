@@ -98,6 +98,11 @@ struct Args {
     #[arg(long)]
     offload_force_evict: bool,
 
+    /// 每次 promotion heartbeat 返回给单个客户端的最大任务数
+    /// Max promotion tasks returned to one client per heartbeat
+    #[arg(long, default_value_t = 1)]
+    promotion_max_per_heartbeat: usize,
+
     /// 是否启用高可用 (HA) 模式 / Enable High Availability (HA) mode
     #[arg(long)]
     enable_ha: bool,
@@ -123,8 +128,8 @@ struct Args {
     #[arg(long)]
     cluster_id: Option<String>,
 
-    /// 快照后端类型: "local-disk" 或 "hf3fs"
-    /// Snapshot backend type: "local-disk" or "hf3fs"
+    /// 快照后端类型: "local-disk"、"hf3fs" 或 "distributed"
+    /// Snapshot backend type: "local-disk", "hf3fs", or "distributed"
     #[arg(long)]
     snapshot_backend_type: Option<String>,
 
@@ -399,6 +404,8 @@ fn parse_snapshot_config(
             Some(mooncake_store_master::storage_backend::StorageBackendType::LocalDisk)
         } else if s == "hf3fs" {
             Some(mooncake_store_master::storage_backend::StorageBackendType::Hf3fs)
+        } else if s == "distributed" {
+            Some(mooncake_store_master::storage_backend::StorageBackendType::Distributed)
         } else {
             None
         }
@@ -518,6 +525,8 @@ async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(mooncake_store_master::storage_backend::StorageBackendType::LocalDisk)
         } else if s == "hf3fs" {
             Some(mooncake_store_master::storage_backend::StorageBackendType::Hf3fs)
+        } else if s == "distributed" {
+            Some(mooncake_store_master::storage_backend::StorageBackendType::Distributed)
         } else {
             None
         }
@@ -598,6 +607,7 @@ mod tests {
             eviction_ratio: 0.05,
             offload_on_evict: false,
             offload_force_evict: false,
+            promotion_max_per_heartbeat: 1,
             enable_ha: true,
             etcd_endpoints: None,
             ha_backend_type: "etcd".to_string(),
@@ -745,6 +755,7 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
         enable_nof: !args.disable_nof,
         offload_on_evict: args.offload_on_evict,
         offload_force_evict: args.offload_force_evict,
+        promotion_max_per_heartbeat: args.promotion_max_per_heartbeat,
         cluster_id: resolve_cluster_id(args),
         ..Default::default()
     })

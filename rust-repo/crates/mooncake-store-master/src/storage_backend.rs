@@ -38,6 +38,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+use xxhash_rust::xxh64::xxh64;
 
 /// Snapshot storage backend types.
 /// 快照存储后端类型：
@@ -55,6 +56,107 @@ pub enum StorageBackendType {
     /// File-per-key mode: each key is stored as a separate file.
     /// 每个 key 独立文件模式：每个 key 存储为单独的文件。
     FilePerKey,
+    /// Distributed filesystem mode: bucketed key files under a DFS root.
+    /// 分布式文件系统模式：在 DFS 根目录下按 hash bucket 存储 key 文件。
+    Distributed,
+}
+
+/// Configuration for the distributed storage backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedStorageConfig {
+    pub fsdir: PathBuf,
+    pub fs_adapter_type: String,
+    pub enable_health_check: bool,
+    pub hash_bucket_count: usize,
+}
+
+impl Default for DistributedStorageConfig {
+    fn default() -> Self {
+        Self {
+            fsdir: PathBuf::from("distributed_dir"),
+            fs_adapter_type: "hf3fs".to_string(),
+            enable_health_check: false,
+            hash_bucket_count: 256,
+        }
+    }
+}
+
+impl DistributedStorageConfig {
+    /// Load config from the same environment variables used by the C++ backend.
+    pub fn from_environment() -> Self {
+        let mut config = Self::default();
+        if let Ok(root) = std::env::var("MOONCAKE_DISTRIBUTED_ROOT_DIR") {
+            config.fsdir = PathBuf::from(root);
+        }
+        if !config.fsdir.is_absolute() {
+            config.fsdir = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&config.fsdir);
+        }
+        if let Ok(adapter) = std::env::var("MOONCAKE_DISTRIBUTED_FS_TYPE") {
+            config.fs_adapter_type = adapter;
+        }
+        if let Ok(enabled) = std::env::var("MOONCAKE_DISTRIBUTED_HEALTH_CHECK") {
+            config.enable_health_check = parse_bool_env(&enabled);
+        }
+        if let Ok(count) = std::env::var("MOONCAKE_DISTRIBUTED_HASH_BUCKET_COUNT") {
+            if let Ok(count) = count.parse::<usize>() {
+                config.hash_bucket_count = count;
+            }
+        }
+        config
+    }
+
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.fsdir = root.into();
+        if !self.fsdir.is_absolute() {
+            self.fsdir = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&self.fsdir);
+        }
+        self
+    }
+
+    pub fn with_hash_bucket_count(mut self, hash_bucket_count: usize) -> Self {
+        self.hash_bucket_count = hash_bucket_count;
+        self
+    }
+
+    pub fn with_health_check(mut self, enable_health_check: bool) -> Self {
+        self.enable_health_check = enable_health_check;
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.fsdir.as_os_str().is_empty() {
+            return Err("DistributedStorageConfig: fsdir is empty".into());
+        }
+        if !self.fsdir.is_absolute() {
+            return Err(format!(
+                "DistributedStorageConfig: fsdir must be absolute: {}",
+                self.fsdir.display()
+            )
+            .into());
+        }
+        if self.fs_adapter_type != "hf3fs" {
+            return Err(format!(
+                "DistributedStorageConfig: unsupported fs_adapter_type: {}",
+                self.fs_adapter_type
+            )
+            .into());
+        }
+        if self.hash_bucket_count == 0 {
+            return Err("DistributedStorageConfig: hash_bucket_count must > 0".into());
+        }
+        Ok(())
+    }
+}
+
+fn parse_bool_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 // =============================================================================
@@ -125,6 +227,7 @@ struct Snapshot {
 pub struct StorageBackend {
     backend_type: StorageBackendType,
     disk_dir: PathBuf,
+    distributed_config: Option<DistributedStorageConfig>,
 }
 
 /// Wraps fs::File with optional HF3FS fd registration for RAII cleanup.
@@ -150,7 +253,9 @@ impl BackendFile {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let file = fs::File::create(path)?;
         let registration = match backend_type {
-            StorageBackendType::LocalDisk | StorageBackendType::FilePerKey => None,
+            StorageBackendType::LocalDisk
+            | StorageBackendType::FilePerKey
+            | StorageBackendType::Distributed => None,
             StorageBackendType::Hf3fs => Some(hf3fs::register_fd(file.as_raw_fd())?),
         };
         Ok(Self {
@@ -167,7 +272,9 @@ impl BackendFile {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let file = fs::File::open(path)?;
         let registration = match backend_type {
-            StorageBackendType::LocalDisk | StorageBackendType::FilePerKey => None,
+            StorageBackendType::LocalDisk
+            | StorageBackendType::FilePerKey
+            | StorageBackendType::Distributed => None,
             StorageBackendType::Hf3fs => Some(hf3fs::register_fd(file.as_raw_fd())?),
         };
         Ok(Self {
@@ -207,11 +314,56 @@ impl StorageBackend {
     /// Create a new StorageBackend, ensuring the base directory exists.
     /// 创建新的 StorageBackend，确保基础目录存在。
     pub fn new(backend_type: StorageBackendType, disk_dir: &Path) -> Self {
+        if backend_type == StorageBackendType::Distributed {
+            let config = DistributedStorageConfig::from_environment().with_root(disk_dir);
+            return Self::new_distributed(config).unwrap_or_else(|err| {
+                tracing::warn!("Distributed storage init failed: {}", err);
+                fs::create_dir_all(disk_dir).ok();
+                Self {
+                    backend_type,
+                    disk_dir: disk_dir.to_path_buf(),
+                    distributed_config: None,
+                }
+            });
+        }
+
         fs::create_dir_all(disk_dir).ok();
         Self {
             backend_type,
             disk_dir: disk_dir.to_path_buf(),
+            distributed_config: None,
         }
+    }
+
+    /// Create a distributed backend with explicit C++-compatible configuration.
+    pub fn new_distributed(
+        config: DistributedStorageConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        config.validate()?;
+        fs::create_dir_all(&config.fsdir)?;
+        if config.enable_health_check {
+            Self::run_distributed_health_check(&config.fsdir)?;
+        }
+        for bucket in 0..config.hash_bucket_count {
+            fs::create_dir_all(config.fsdir.join(format!("{bucket:02x}")))?;
+        }
+        Ok(Self {
+            backend_type: StorageBackendType::Distributed,
+            disk_dir: config.fsdir.clone(),
+            distributed_config: Some(config),
+        })
+    }
+
+    fn run_distributed_health_check(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let probe = root.join(format!(".mooncake_health_probe_{}", Uuid::new_v4()));
+        let payload = b"health_check";
+        fs::write(&probe, payload)?;
+        let read_back = fs::read(&probe)?;
+        let _ = fs::remove_file(&probe);
+        if read_back != payload {
+            return Err("DFS health check failed: read back mismatch".into());
+        }
+        Ok(())
     }
 
     /// Save a snapshot of the current master state.
@@ -513,8 +665,71 @@ impl StorageBackend {
     /// Replaces '/' with '_' to prevent path traversal attacks.
     /// 编码 key：将 '/' 替换为 '_'，防止路径穿越攻击。
     fn key_path(&self, key: &str) -> PathBuf {
+        if self.backend_type == StorageBackendType::Distributed {
+            return self.distributed_object_path(key);
+        }
         let safe_key = key.replace('/', "_");
         self.key_dir().join(safe_key)
+    }
+
+    fn distributed_config(&self) -> Option<&DistributedStorageConfig> {
+        self.distributed_config.as_ref()
+    }
+
+    fn distributed_bucket_count(&self) -> usize {
+        self.distributed_config()
+            .map(|config| config.hash_bucket_count)
+            .unwrap_or(256)
+    }
+
+    fn distributed_object_path(&self, key: &str) -> PathBuf {
+        let bucket_count = self.distributed_bucket_count();
+        let bucket = xxh64(key.as_bytes(), 0) % bucket_count as u64;
+        self.disk_dir
+            .join(format!("{bucket:02x}"))
+            .join(Self::escape_distributed_filename(key))
+    }
+
+    pub fn escape_distributed_filename(key: &str) -> String {
+        let mut result = String::with_capacity(key.len() + 16);
+        for byte in key.bytes() {
+            if byte == b'@'
+                || byte == b':'
+                || byte == b'/'
+                || byte == b'\\'
+                || byte == b'%'
+                || !(0x20..=0x7e).contains(&byte)
+            {
+                result.push_str(&format!("%{byte:02x}"));
+            } else {
+                result.push(byte as char);
+            }
+        }
+        result
+    }
+
+    pub fn unescape_distributed_filename(name: &str) -> String {
+        let bytes = name.as_bytes();
+        let mut result = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] == b'%'
+                && index + 2 < bytes.len()
+                && bytes[index + 1].is_ascii_hexdigit()
+                && bytes[index + 2].is_ascii_hexdigit()
+            {
+                if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                    if let Ok(value) = u8::from_str_radix(hex, 16) {
+                        result.push(value);
+                        index += 3;
+                        continue;
+                    }
+                }
+            }
+            result.push(bytes[index]);
+            index += 1;
+        }
+        String::from_utf8_lossy(&result).into_owned()
     }
 
     /// Batch offload: write multiple key-value pairs to disk as individual files.
@@ -527,9 +742,14 @@ impl StorageBackend {
         entries: &[(String, Vec<u8>)],
     ) -> Result<(), Box<dyn std::error::Error>> {
         let dir = self.key_dir();
-        std::fs::create_dir_all(&dir)?;
+        if self.backend_type != StorageBackendType::Distributed {
+            std::fs::create_dir_all(&dir)?;
+        }
         for (key, value) in entries {
             let path = self.key_path(key);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             let mut f = std::fs::File::create(&path)?;
             f.write_all(value)?;
         }
@@ -579,6 +799,9 @@ impl StorageBackend {
     /// Remove all keys matching a regex pattern.
     /// 删除所有匹配正则表达式的 key。
     pub fn remove_by_regex(&self, pattern: &str) -> Result<usize, Box<dyn std::error::Error>> {
+        if self.backend_type == StorageBackendType::Distributed {
+            return self.remove_by_regex_distributed(pattern);
+        }
         let dir = self.key_dir();
         if !dir.exists() {
             return Ok(0);
@@ -599,6 +822,9 @@ impl StorageBackend {
     /// Remove all per-key files.
     /// 删除所有按 key 的文件。
     pub fn remove_all(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        if self.backend_type == StorageBackendType::Distributed {
+            return self.remove_all_distributed();
+        }
         let dir = self.key_dir();
         if !dir.exists() {
             return Ok(0);
@@ -612,6 +838,9 @@ impl StorageBackend {
     /// Scan metadata for all per-key files: return (key, size) pairs.
     /// 扫描所有按 key 的文件的元数据：返回 (key, size) 对。
     pub fn scan_meta(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
+        if self.backend_type == StorageBackendType::Distributed {
+            return self.scan_meta_distributed();
+        }
         let dir = self.key_dir();
         if !dir.exists() {
             return Ok(vec![]);
@@ -622,6 +851,80 @@ impl StorageBackend {
             let name = entry.file_name().to_string_lossy().into_owned();
             let meta = entry.metadata()?;
             results.push((name, meta.len()));
+        }
+        Ok(results)
+    }
+
+    pub fn is_enable_offloading(&self) -> bool {
+        matches!(
+            self.backend_type,
+            StorageBackendType::FilePerKey | StorageBackendType::Distributed
+        )
+    }
+
+    fn distributed_bucket_dirs(&self) -> Vec<PathBuf> {
+        (0..self.distributed_bucket_count())
+            .map(|bucket| self.disk_dir.join(format!("{bucket:02x}")))
+            .collect()
+    }
+
+    fn remove_by_regex_distributed(
+        &self,
+        pattern: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+        let mut count = 0;
+        for bucket_dir in self.distributed_bucket_dirs() {
+            if !bucket_dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&bucket_dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let key = Self::unescape_distributed_filename(&name);
+                if re.is_match(&key) {
+                    std::fs::remove_file(entry.path())?;
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    fn remove_all_distributed(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut count = 0;
+        for bucket_dir in self.distributed_bucket_dirs() {
+            if !bucket_dir.exists() {
+                std::fs::create_dir_all(&bucket_dir)?;
+                continue;
+            }
+            for entry in std::fs::read_dir(&bucket_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    std::fs::remove_file(entry.path())?;
+                    count += 1;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    fn scan_meta_distributed(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
+        let mut results = Vec::new();
+        for bucket_dir in self.distributed_bucket_dirs() {
+            if !bucket_dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&bucket_dir)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let key = Self::unescape_distributed_filename(&name);
+                let meta = entry.metadata()?;
+                results.push((key, meta.len()));
+            }
         }
         Ok(results)
     }

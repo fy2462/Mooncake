@@ -7,6 +7,8 @@ pub(crate) mod transfer;
 pub(crate) mod upsert;
 pub(crate) mod write;
 
+pub use storage::{OffloadTaskItem, PromotionTaskItem};
+
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use parking_lot::RwLock;

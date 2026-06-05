@@ -6,7 +6,9 @@ use common::temp_dir;
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
-use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
+use mooncake_store_master::storage_backend::{
+    DistributedStorageConfig, StorageBackend, StorageBackendType,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -343,4 +345,54 @@ fn test_storage_backend_clear_removes_both_formats() {
 
     assert!(!tmp.join("master_snapshot.msgpack").exists());
     assert!(!json_path.exists());
+}
+
+#[test]
+fn test_distributed_storage_backend_offload_load_scan_and_remove() {
+    let tmp = temp_dir();
+    let config = DistributedStorageConfig::default()
+        .with_root(&tmp)
+        .with_hash_bucket_count(8)
+        .with_health_check(true);
+    let backend = StorageBackend::new_distributed(config).unwrap();
+
+    let key_a = "tenant@a:key/with\\chars%".to_string();
+    let key_b = "plain-key".to_string();
+    backend
+        .batch_offload(&[
+            (key_a.clone(), b"hello distributed".to_vec()),
+            (key_b.clone(), b"world".to_vec()),
+        ])
+        .unwrap();
+
+    assert!(backend.is_enable_offloading());
+    assert!(backend.is_exist(&key_a).unwrap());
+
+    let loaded = backend.batch_load(&[key_a.clone(), key_b.clone()]).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0], (key_a.clone(), b"hello distributed".to_vec()));
+    assert_eq!(loaded[1], (key_b.clone(), b"world".to_vec()));
+
+    let mut meta = backend.scan_meta().unwrap();
+    meta.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        meta,
+        vec![(key_b.clone(), 5), (key_a.clone(), 17)]
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+
+    assert_eq!(backend.remove_by_regex("tenant@a:.*").unwrap(), 1);
+    assert!(!backend.is_exist(&key_a).unwrap());
+    assert!(backend.is_exist(&key_b).unwrap());
+    assert_eq!(backend.remove_all().unwrap(), 1);
+    assert!(backend.scan_meta().unwrap().is_empty());
+}
+
+#[test]
+fn test_distributed_storage_filename_codec_matches_cpp_rules() {
+    let key = "a@b:c/d\\e%f\n\u{2603}";
+    let escaped = StorageBackend::escape_distributed_filename(key);
+    assert_eq!(escaped, "a%40b%3ac%2fd%5ce%25f%0a%e2%98%83");
+    assert_eq!(StorageBackend::unescape_distributed_filename(&escaped), key);
 }

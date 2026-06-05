@@ -60,6 +60,7 @@ async fn test_promotion_flow_success_and_failure() {
                     data_size: 256,
                     transport_endpoint: "holder-endpoint".into(),
                 }],
+                tasks: vec![],
             }),
         )
         .await
@@ -254,6 +255,7 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
                 data_size: 256,
                 transport_endpoint: "holder-threshold".into(),
             }],
+            tasks: vec![],
         }),
     )
     .await
@@ -360,6 +362,7 @@ async fn test_promotion_queue_limit_released_after_success() {
                     data_size: 128,
                     transport_endpoint: "holder-limit".into(),
                 }],
+                tasks: vec![],
             }),
         )
         .await
@@ -510,6 +513,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
                 data_size: 256,
                 transport_endpoint: "holder-reaper".into(),
             }],
+            tasks: vec![],
         }),
     )
     .await

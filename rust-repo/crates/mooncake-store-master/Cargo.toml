@@ -22,7 +22,7 @@ base64 = "0.22"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
+xxhash-rust = { version = "0.8", features = ["xxh32", "xxh64"] }
 dashmap.workspace = true
 parking_lot.workspace = true
 regex.workspace = true

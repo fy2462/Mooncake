@@ -102,6 +102,14 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
     .unwrap()
     .into_inner();
     assert_eq!(heartbeat.objects.get("offload-key"), Some(&256));
+    assert_eq!(
+        heartbeat.tasks,
+        vec![proto::OffloadTaskItem {
+            tenant_id: "default".into(),
+            key: "offload-key".into(),
+            size: 256,
+        }]
+    );
 
     MasterService::notify_offload_success(
         &service,
@@ -127,6 +135,7 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
                     transport_endpoint: "holder-a".into(),
                 },
             ],
+            tasks: vec![],
         }),
     )
     .await
@@ -135,6 +144,43 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
         service.replica_refcnts_for_test("offload-key", ReplicaType::Memory, ""),
         vec![0]
     );
+
+    MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            keys: vec!["tenant-disk-key".into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: "tenant-disk-key".len() as i64,
+                data_size: 1024,
+                transport_endpoint: "holder-a".into(),
+            }],
+            tasks: vec![proto::OffloadTaskItem {
+                tenant_id: "tenant-a".into(),
+                key: "tenant-disk-key".into(),
+                size: 1024,
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let tenant_replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "tenant-disk-key".into(),
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(tenant_replicas.replicas.len(), 1);
 
     let replicas = MasterService::get_replica_list(
         &service,

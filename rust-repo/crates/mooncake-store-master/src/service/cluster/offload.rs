@@ -33,20 +33,28 @@ impl MasterServiceImpl {
             }
             return Ok(Response::new(proto::OffloadObjectHeartbeatResponse {
                 objects: HashMap::new(),
+                tasks: Vec::new(),
             }));
         }
         let objects = std::mem::take(&mut entry.offloading_objects);
         // Convert scoped keys back to user_keys for external API.
         // 将作用域 key 转换回 user_key，供外部 API 使用。
+        let mut tasks = Vec::with_capacity(objects.len());
         let unscoped: HashMap<String, i64> = objects
             .into_iter()
             .map(|(k, v)| {
-                let (_t, uk) = split_scoped_key(&k);
-                (uk, v)
+                let (tenant_id, key) = split_scoped_key(&k);
+                tasks.push(proto::OffloadTaskItem {
+                    tenant_id,
+                    key: key.clone(),
+                    size: v,
+                });
+                (key, v)
             })
             .collect();
         Ok(Response::new(proto::OffloadObjectHeartbeatResponse {
             objects: unscoped,
+            tasks,
         }))
     }
 
@@ -93,13 +101,30 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        if req.keys.len() != req.metadatas.len() {
+        let task_count = if req.tasks.is_empty() {
+            req.keys.len()
+        } else {
+            req.tasks.len()
+        };
+        if task_count != req.metadatas.len() {
             return Err(Status::invalid_argument(
-                "keys and metadatas must have same length",
+                "keys/tasks and metadatas must have same length",
             ));
         }
-        for (raw_key, metadata) in req.keys.iter().zip(req.metadatas.iter()) {
-            let key = make_tenant_scoped_key("", raw_key);
+        let tasks: Vec<proto::OffloadTaskItem> = if req.tasks.is_empty() {
+            req.keys
+                .iter()
+                .map(|key| proto::OffloadTaskItem {
+                    tenant_id: String::new(),
+                    key: key.clone(),
+                    size: 0,
+                })
+                .collect()
+        } else {
+            req.tasks.clone()
+        };
+        for (task, metadata) in tasks.iter().zip(req.metadatas.iter()) {
+            let key = make_tenant_scoped_key(&task.tenant_id, &task.key);
             clear_offloading_task(&self.state, &key);
             let replica = ReplicaDescriptor {
                 refcnt: 0,
