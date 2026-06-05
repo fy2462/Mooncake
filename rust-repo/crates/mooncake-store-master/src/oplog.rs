@@ -57,6 +57,7 @@ const CPP_OP_PUT_REVOKE: u8 = 2;
 const CPP_OP_REMOVE: u8 = 3;
 const MAX_OBJECT_KEY_SIZE: usize = 4096;
 const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
+const PUT_END_MSGPACK_MAGIC: &[u8] = b"MCOPMETA1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CppOpLogWireEntry {
@@ -67,6 +68,18 @@ struct CppOpLogWireEntry {
     payload: String,
     checksum: u32,
     prefix_hash: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PutEndMetadataPayloadV1 {
+    op: String,
+    key: String,
+    size: u64,
+    client_id: Option<String>,
+    tenant_id: String,
+    group_id: String,
+    user_key: String,
+    replicas: Vec<ReplicaDescriptor>,
 }
 
 // =============================================================================
@@ -732,7 +745,7 @@ fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> 
         "put_end" => (
             CPP_OP_PUT_END,
             payload_json.get("key")?.as_str()?.to_string(),
-            entry.payload.as_bytes().to_vec(),
+            encode_put_end_msgpack_from_json(&payload_json).ok()?,
         ),
         "put_revoke" => (
             CPP_OP_PUT_REVOKE,
@@ -760,6 +773,66 @@ fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> 
     })
 }
 
+fn encode_put_end_msgpack(payload: &PutEndMetadataPayloadV1) -> Result<Vec<u8>, HaError> {
+    let mut bytes = Vec::from(PUT_END_MSGPACK_MAGIC);
+    let body = rmp_serde::to_vec_named(payload)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack encode: {e}")))?;
+    bytes.extend_from_slice(&body);
+    Ok(bytes)
+}
+
+fn encode_put_end_msgpack_from_json(payload_json: &serde_json::Value) -> Result<Vec<u8>, HaError> {
+    let payload = PutEndMetadataPayloadV1 {
+        op: "put_end".to_string(),
+        key: payload_json
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        size: payload_json
+            .get("size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
+        client_id: payload_json
+            .get("client_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        tenant_id: payload_json
+            .get("tenant_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        group_id: payload_json
+            .get("group_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        user_key: payload_json
+            .get("user_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        replicas: payload_json
+            .get("replicas")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|e| HaError::InvalidBackend(format!("put_end replicas decode: {e}")))?
+            .unwrap_or_default(),
+    };
+    encode_put_end_msgpack(&payload)
+}
+
+pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, HaError> {
+    let body = bytes
+        .strip_prefix(PUT_END_MSGPACK_MAGIC)
+        .ok_or_else(|| HaError::InvalidBackend("put_end msgpack magic mismatch".into()))?;
+    let payload: PutEndMetadataPayloadV1 = rmp_serde::from_slice(body)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))?;
+    serde_json::to_value(payload)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack to json: {e}")))
+}
+
 fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, HaError> {
     let decoded_payload = if wire.payload.is_empty() {
         Vec::new()
@@ -778,6 +851,9 @@ fn rust_payload_from_cpp_wire_entry(wire: &CppOpLogWireEntry) -> Result<String, 
     match wire.op_type {
         CPP_OP_PUT_END => {
             let metadata_payload_base64 = BASE64_STANDARD.encode(&decoded_payload);
+            if decoded_payload.starts_with(PUT_END_MSGPACK_MAGIC) {
+                return decode_put_end_msgpack(&decoded_payload).map(|payload| payload.to_string());
+            }
             if let Ok(payload) = String::from_utf8(decoded_payload) {
                 if serde_json::from_str::<serde_json::Value>(&payload)
                     .ok()
@@ -1101,6 +1177,16 @@ impl EtcdOpLogStore {
         since_seq: u64,
         max_count: usize,
     ) -> Result<Vec<OpLogRecord>, HaError> {
+        self.read_since_with_revision_async(since_seq, max_count)
+            .await
+            .map(|(entries, _)| entries)
+    }
+
+    pub async fn read_since_with_revision_async(
+        &self,
+        since_seq: u64,
+        max_count: usize,
+    ) -> Result<(Vec<OpLogRecord>, i64), HaError> {
         let mut entries = Vec::new();
         let c = self.client.clone();
 
@@ -1108,7 +1194,7 @@ impl EtcdOpLogStore {
         let range_end = self.entry_key(u64::MAX);
         let range_start = self.entry_key(since_seq);
 
-        match c
+        let revision = match c
             .kv_client()
             .get(
                 range_start.as_bytes(),
@@ -1117,6 +1203,7 @@ impl EtcdOpLogStore {
             .await
         {
             Ok(resp) => {
+                let revision = resp.header().map(|h| h.revision()).unwrap_or_default();
                 for kv in resp.kvs().iter().take(max_count) {
                     if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
                         if let Ok(entry) = deserialize_etcd_oplog_value(&val) {
@@ -1127,11 +1214,14 @@ impl EtcdOpLogStore {
                         }
                     }
                 }
+                revision
             }
             Err(e) => {
-                warn!("etcd range query for oplog failed: {}", e);
+                return Err(HaError::InvalidBackend(format!(
+                    "etcd range query for oplog failed: {e}"
+                )));
             }
-        }
+        };
 
         // Supplement with buffered (not yet flushed) entries
         for entry in &self.buffer {
@@ -1145,12 +1235,96 @@ impl EtcdOpLogStore {
 
         entries.sort_by_key(|e| e.seq);
         entries.truncate(max_count);
-        Ok(entries)
+        Ok((entries, revision))
     }
 
     /// Flush buffered entries to etcd (async). Call periodically or before shutdown.
     pub async fn flush_async(&mut self) -> Result<(), HaError> {
         self.flush().await
+    }
+
+    pub async fn watch_entries_from<F, E>(
+        &self,
+        start_seq_id: u64,
+        max_historical_batch: usize,
+        mut on_entry: F,
+        mut on_error: E,
+    ) -> Result<(), HaError>
+    where
+        F: FnMut(OpLogRecord) + Send,
+        E: FnMut(HaError) + Send,
+    {
+        let (historical, revision) = self
+            .read_since_with_revision_async(start_seq_id, max_historical_batch)
+            .await?;
+        let mut last_seq = start_seq_id.saturating_sub(1);
+        for entry in historical {
+            last_seq = last_seq.max(entry.seq);
+            on_entry(entry);
+        }
+
+        let watch_prefix = format!("{}/", self.key_prefix.trim_end_matches('/'));
+        let mut watch_client = self.client.clone().watch_client();
+        let options = etcd_client::WatchOptions::new()
+            .with_prefix()
+            .with_start_revision(revision.saturating_add(1));
+        let (_watcher, mut stream) = watch_client
+            .watch(watch_prefix.as_bytes(), Some(options))
+            .await
+            .map_err(|e| HaError::InvalidBackend(format!("etcd watch oplog: {e}")))?;
+
+        loop {
+            match stream.message().await {
+                Ok(Some(response)) => {
+                    if response.canceled() {
+                        return Err(HaError::InvalidBackend(format!(
+                            "etcd watch canceled: {}",
+                            response.cancel_reason()
+                        )));
+                    }
+                    for event in response.events() {
+                        let Some(kv) = event.kv() else {
+                            continue;
+                        };
+                        let key = String::from_utf8_lossy(kv.key());
+                        if key.ends_with("/latest") || key.contains("/snapshot/") {
+                            continue;
+                        }
+                        if event.event_type() == etcd_client::EventType::Delete {
+                            continue;
+                        }
+                        let value = match String::from_utf8(kv.value().to_vec()) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                let err =
+                                    HaError::InvalidBackend(format!("etcd watch oplog utf8: {e}"));
+                                on_error(err.clone());
+                                continue;
+                            }
+                        };
+                        match deserialize_etcd_oplog_value(&value) {
+                            Ok(entry) => {
+                                if entry.seq > last_seq {
+                                    last_seq = entry.seq;
+                                    on_entry(entry);
+                                }
+                            }
+                            Err(e) => on_error(e),
+                        }
+                    }
+                }
+                Ok(None) => {
+                    return Err(HaError::InvalidBackend(
+                        "etcd watch stream closed".to_string(),
+                    ));
+                }
+                Err(e) => {
+                    let err = HaError::InvalidBackend(format!("etcd watch stream: {e}"));
+                    on_error(err.clone());
+                    return Err(err);
+                }
+            }
+        }
     }
 }
 
@@ -1641,10 +1815,32 @@ mod tests {
 
     #[test]
     fn test_etcd_oplog_value_writes_cpp_outer_json_for_put_end() {
+        let replica = ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: "seg-a:1234".to_string(),
+            offset: 16,
+            size: 100,
+            status: mooncake_store_core::ReplicaStatus::Complete,
+            replica_type: mooncake_store_core::ReplicaType::Memory,
+            holder_client_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 4096,
+        };
         let entry = OpLogRecord {
             seq: 12,
             producer_view_version: 7,
-            payload: r#"{"op":"put_end","key":"k1","size":100}"#.to_string(),
+            payload: json!({
+                "op": "put_end",
+                "key": "k1",
+                "size": 100,
+                "client_id": null,
+                "tenant_id": "default",
+                "group_id": "",
+                "user_key": "k1",
+                "replicas": [replica],
+            })
+            .to_string(),
         };
 
         let value = serialize_etcd_oplog_value(&entry).unwrap();
@@ -1652,17 +1848,10 @@ mod tests {
         assert_eq!(wire.sequence_id, 12);
         assert_eq!(wire.op_type, CPP_OP_PUT_END);
         assert_eq!(wire.object_key, "k1");
-        assert_eq!(
-            wire.checksum,
-            compute_cpp_checksum(entry.payload.as_bytes())
-        );
+        let decoded = BASE64_STANDARD.decode(&wire.payload).unwrap();
+        assert!(decoded.starts_with(PUT_END_MSGPACK_MAGIC));
+        assert_eq!(wire.checksum, compute_cpp_checksum(&decoded));
         assert_eq!(wire.prefix_hash, compute_cpp_prefix_hash("k1"));
-
-        let decoded = String::from_utf8(BASE64_STANDARD.decode(wire.payload).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&decoded).unwrap(),
-            serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap()
-        );
 
         let parsed = deserialize_etcd_oplog_value(&value).unwrap();
         assert_eq!(parsed.seq, 12);
@@ -1670,6 +1859,39 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&parsed.payload).unwrap(),
             serde_json::from_str::<serde_json::Value>(&entry.payload).unwrap()
         );
+    }
+
+    #[test]
+    fn test_etcd_oplog_value_reads_versioned_msgpack_put_end() {
+        let payload = PutEndMetadataPayloadV1 {
+            op: "put_end".to_string(),
+            key: "k-msgpack".to_string(),
+            size: 42,
+            client_id: Some(Uuid::new_v4().to_string()),
+            tenant_id: "tenant-a".to_string(),
+            group_id: "group-a".to_string(),
+            user_key: "k-msgpack".to_string(),
+            replicas: Vec::new(),
+        };
+        let bytes = encode_put_end_msgpack(&payload).unwrap();
+        let wire = CppOpLogWireEntry {
+            sequence_id: 21,
+            timestamp_ms: 1,
+            op_type: CPP_OP_PUT_END,
+            object_key: "k-msgpack".to_string(),
+            payload: BASE64_STANDARD.encode(&bytes),
+            checksum: compute_cpp_checksum(&bytes),
+            prefix_hash: compute_cpp_prefix_hash("k-msgpack"),
+        };
+
+        let parsed = deserialize_etcd_oplog_value(&serde_json::to_string(&wire).unwrap()).unwrap();
+        assert_eq!(parsed.seq, 21);
+        let value: serde_json::Value = serde_json::from_str(&parsed.payload).unwrap();
+        assert_eq!(value["op"], "put_end");
+        assert_eq!(value["key"], "k-msgpack");
+        assert_eq!(value["size"], 42);
+        assert_eq!(value["tenant_id"], "tenant-a");
+        assert_eq!(value["group_id"], "group-a");
     }
 
     #[test]

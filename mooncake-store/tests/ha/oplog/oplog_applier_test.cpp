@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include <msgpack.hpp>
 #include <xxhash.h>
 
 #include "metadata_store.h"
@@ -53,6 +54,53 @@ std::string MakeValidPayload(uint64_t client_id_first = 1,
     payload.size = size;
     auto result = struct_pack::serialize(payload);
     return std::string(result.begin(), result.end());
+}
+
+std::string MakeVersionedMsgpackPayload() {
+    msgpack::sbuffer buffer;
+    msgpack::packer<msgpack::sbuffer> packer(&buffer);
+    packer.pack_map(8);
+    packer.pack(std::string("op"));
+    packer.pack(std::string("put_end"));
+    packer.pack(std::string("key"));
+    packer.pack(std::string("tenant-a/key1"));
+    packer.pack(std::string("size"));
+    packer.pack_uint64(4096);
+    packer.pack(std::string("client_id"));
+    packer.pack(std::string("00000000-0000-0000-0000-000000000001"));
+    packer.pack(std::string("tenant_id"));
+    packer.pack(std::string("tenant-a"));
+    packer.pack(std::string("group_id"));
+    packer.pack(std::string("group-a"));
+    packer.pack(std::string("user_key"));
+    packer.pack(std::string("key1"));
+    packer.pack(std::string("replicas"));
+    packer.pack_array(1);
+    packer.pack_map(10);
+    packer.pack(std::string("segment_id"));
+    packer.pack(std::string("00000000-0000-0000-0000-000000000002"));
+    packer.pack(std::string("segment_name"));
+    packer.pack(std::string("node-a:1234"));
+    packer.pack(std::string("offset"));
+    packer.pack_uint64(128);
+    packer.pack(std::string("size"));
+    packer.pack_uint64(4096);
+    packer.pack(std::string("status"));
+    packer.pack(std::string("Complete"));
+    packer.pack(std::string("replica_type"));
+    packer.pack(std::string("Memory"));
+    packer.pack(std::string("holder_client_id"));
+    packer.pack(std::string("00000000-0000-0000-0000-000000000001"));
+    packer.pack(std::string("refcnt"));
+    packer.pack_uint64(0);
+    packer.pack(std::string("handle_valid"));
+    packer.pack(true);
+    packer.pack(std::string("base_addr"));
+    packer.pack_uint64(8192);
+
+    std::string payload("MCOPMETA1");
+    payload.append(buffer.data(), buffer.size());
+    return payload;
 }
 
 class OpLogApplierTest : public ::testing::Test {
@@ -550,6 +598,30 @@ TEST_F(OpLogApplierTest, TestApplyPutEnd_RustJsonPayload) {
         }]
     })";
     OpLogEntry entry = MakeEntry(1, OpType::PUT_END, "tenant-a/key1", payload);
+
+    EXPECT_TRUE(applier_->ApplyOpLogEntry(entry));
+    EXPECT_EQ(2u, applier_->GetExpectedSequenceId());
+
+    auto meta = mock_metadata_store_->GetMetadata("tenant-a/key1");
+    ASSERT_TRUE(meta.has_value());
+    EXPECT_EQ(0u, meta->client_id.first);
+    EXPECT_EQ(1u, meta->client_id.second);
+    EXPECT_EQ(4096u, meta->size);
+    ASSERT_EQ(1u, meta->replicas.size());
+    EXPECT_EQ(ReplicaStatus::COMPLETE, meta->replicas[0].status);
+    ASSERT_TRUE(meta->replicas[0].is_memory_replica());
+    const auto& buffer =
+        meta->replicas[0].get_memory_descriptor().buffer_descriptor;
+    EXPECT_EQ(4096u, buffer.size_);
+    EXPECT_EQ(8320u, buffer.buffer_address_);
+    EXPECT_EQ("tcp", buffer.protocol_);
+    EXPECT_EQ("node-a:1234", buffer.transport_endpoint_);
+}
+
+TEST_F(OpLogApplierTest, TestApplyPutEnd_VersionedMsgpackPayload) {
+    OpLogEntry entry =
+        MakeEntry(1, OpType::PUT_END, "tenant-a/key1",
+                  MakeVersionedMsgpackPayload());
 
     EXPECT_TRUE(applier_->ApplyOpLogEntry(entry));
     EXPECT_EQ(2u, applier_->GetExpectedSequenceId());
