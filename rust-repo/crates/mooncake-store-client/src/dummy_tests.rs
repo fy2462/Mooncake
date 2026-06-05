@@ -36,6 +36,15 @@ fn memory_pool_allocates_and_checks_bounds() {
 }
 
 #[test]
+fn shared_memory_pool_is_fd_backed() {
+    let pool = DummyMemoryPool::new_shared(128).unwrap();
+    assert!(pool.fd().is_some());
+    let addr = pool.alloc(16).unwrap();
+    pool.write(addr, b"shared").unwrap();
+    assert_eq!(pool.read(addr, 6).unwrap(), b"shared");
+}
+
+#[test]
 fn ipc_channel_sends_and_receives_fd() {
     let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
     let client = DummyIpcChannel::from_stream(left);

@@ -1,7 +1,10 @@
 use crate::client::{take_client, PythonMooncakeClient};
 use crate::replicate_config::ReplicateConfigPy;
 use crate::to_py_err;
-use mooncake_store_client::{DummyMemoryPool, MooncakeClient};
+use mooncake_store_client::{
+    DummyIpcChannel, DummyMemoryPool, MooncakeClient, ShmRegisterRequest,
+    INVALID_PHYSICAL_DEVICE_ID,
+};
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -12,6 +15,7 @@ use std::sync::Arc;
 pub(crate) struct PythonMooncakeDummyClient {
     inner: Arc<Mutex<Option<MooncakeClient>>>,
     mem_pool: DummyMemoryPool,
+    local_buffer_pool: Option<DummyMemoryPool>,
     registered_pool: Mutex<bool>,
 }
 
@@ -26,6 +30,29 @@ impl PythonMooncakeDummyClient {
 
     fn checked_ptrs(&self, addrs: &[u64], sizes: &[usize]) -> PyResult<Vec<*mut c_void>> {
         self.mem_pool.checked_ptrs(addrs, sizes).map_err(to_py_err)
+    }
+
+    fn register_pool_via_ipc(
+        socket_path: &str,
+        pool: &DummyMemoryPool,
+        client_id_first: u64,
+        client_id_second: u64,
+        is_local_buffer: bool,
+    ) -> PyResult<()> {
+        let fd = pool
+            .fd()
+            .ok_or_else(|| to_py_err("dummy memory pool is not fd-backed"))?;
+        let request = ShmRegisterRequest {
+            client_id_first,
+            client_id_second,
+            dummy_base_addr: pool.base_addr() as u64,
+            shm_size: pool.len() as u64,
+            device_id: INVALID_PHYSICAL_DEVICE_ID,
+            is_local_buffer,
+        };
+        DummyIpcChannel::register_shm_fd(socket_path, fd, request)
+            .map(|_| ())
+            .map_err(to_py_err)
     }
 }
 
@@ -44,11 +71,23 @@ impl PythonMooncakeDummyClient {
         server_address: String,
         ipc_socket_path: String,
     ) -> PyResult<Self> {
-        let _ = (local_buffer_size, server_address, ipc_socket_path);
+        let _ = server_address;
         let inner = real_client.borrow().inner.clone();
+        let use_ipc = !ipc_socket_path.is_empty();
+        let mem_pool = if use_ipc {
+            DummyMemoryPool::new_shared(mem_pool_size).map_err(to_py_err)?
+        } else {
+            DummyMemoryPool::new(mem_pool_size).map_err(to_py_err)?
+        };
+        let local_buffer_pool = if use_ipc && local_buffer_size > 0 {
+            Some(DummyMemoryPool::new_shared(local_buffer_size).map_err(to_py_err)?)
+        } else {
+            None
+        };
         let dummy = Self {
             inner,
-            mem_pool: DummyMemoryPool::new(mem_pool_size).map_err(to_py_err)?,
+            mem_pool,
+            local_buffer_pool,
             registered_pool: Mutex::new(false),
         };
 
@@ -57,12 +96,32 @@ impl PythonMooncakeDummyClient {
             let client = guard
                 .as_ref()
                 .ok_or_else(|| to_py_err("client already closed"))?;
-            unsafe {
-                client
-                    .register_buffer(dummy.pool_ptr(), mem_pool_size, "cpu:0")
-                    .map_err(to_py_err)?;
+            if use_ipc {
+                let (client_id_first, client_id_second) = client.client_id().as_u64_pair();
+                Self::register_pool_via_ipc(
+                    &ipc_socket_path,
+                    &dummy.mem_pool,
+                    client_id_first,
+                    client_id_second,
+                    false,
+                )?;
+                if let Some(local_buffer_pool) = dummy.local_buffer_pool.as_ref() {
+                    Self::register_pool_via_ipc(
+                        &ipc_socket_path,
+                        local_buffer_pool,
+                        client_id_first,
+                        client_id_second,
+                        true,
+                    )?;
+                }
+            } else {
+                unsafe {
+                    client
+                        .register_buffer(dummy.pool_ptr(), mem_pool_size, "cpu:0")
+                        .map_err(to_py_err)?;
+                }
+                *dummy.registered_pool.lock() = true;
             }
-            *dummy.registered_pool.lock() = true;
         }
         Ok(dummy)
     }
@@ -352,9 +411,10 @@ impl PythonMooncakeDummyClient {
 
     fn __repr__(&self) -> String {
         format!(
-            "MooncakeDummyClient(in_process, pool_size={}, allocations={})",
+            "MooncakeDummyClient(pool_size={}, allocations={}, ipc={})",
             self.mem_pool.len(),
-            self.mem_pool.allocations_len()
+            self.mem_pool.allocations_len(),
+            self.mem_pool.fd().is_some()
         )
     }
 }

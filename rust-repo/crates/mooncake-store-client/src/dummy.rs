@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::mem;
 #[cfg(target_os = "linux")]
@@ -53,11 +53,23 @@ pub enum DummyClientError {
 
 pub type DummyClientResult<T> = Result<T, DummyClientError>;
 
+enum DummyMemoryBacking {
+    Heap(Vec<u8>),
+    Shared {
+        file: File,
+        base_addr: usize,
+        len: usize,
+    },
+}
+
 pub struct DummyMemoryPool {
-    mem_pool: Vec<u8>,
+    backing: DummyMemoryBacking,
     next_offset: Mutex<usize>,
     allocations: Mutex<HashMap<u64, usize>>,
 }
+
+unsafe impl Send for DummyMemoryPool {}
+unsafe impl Sync for DummyMemoryPool {}
 
 impl DummyMemoryPool {
     pub fn new(mem_pool_size: usize) -> DummyClientResult<Self> {
@@ -67,17 +79,55 @@ impl DummyMemoryPool {
             ));
         }
         Ok(Self {
-            mem_pool: vec![0; mem_pool_size],
+            backing: DummyMemoryBacking::Heap(vec![0; mem_pool_size]),
             next_offset: Mutex::new(0),
             allocations: Mutex::new(HashMap::new()),
         })
     }
+
+    pub fn new_shared(mem_pool_size: usize) -> DummyClientResult<Self> {
+        if mem_pool_size == 0 {
+            return Err(DummyClientError::InvalidInput(
+                "mem_pool_size must be greater than 0".to_string(),
+            ));
+        }
+        let (file, base_addr) = create_shared_mapping(mem_pool_size)?;
+        Ok(Self {
+            backing: DummyMemoryBacking::Shared {
+                file,
+                base_addr,
+                len: mem_pool_size,
+            },
+            next_offset: Mutex::new(0),
+            allocations: Mutex::new(HashMap::new()),
+        })
+    }
+
     pub fn base_ptr(&self) -> *mut c_void {
-        self.mem_pool.as_ptr() as *mut c_void
+        self.base_addr() as *mut c_void
     }
+
+    pub fn base_addr(&self) -> usize {
+        match &self.backing {
+            DummyMemoryBacking::Heap(mem_pool) => mem_pool.as_ptr() as usize,
+            DummyMemoryBacking::Shared { base_addr, .. } => *base_addr,
+        }
+    }
+
     pub fn len(&self) -> usize {
-        self.mem_pool.len()
+        match &self.backing {
+            DummyMemoryBacking::Heap(mem_pool) => mem_pool.len(),
+            DummyMemoryBacking::Shared { len, .. } => *len,
+        }
     }
+
+    pub fn fd(&self) -> Option<RawFd> {
+        match &self.backing {
+            DummyMemoryBacking::Heap(_) => None,
+            DummyMemoryBacking::Shared { file, .. } => Some(file.as_raw_fd()),
+        }
+    }
+
     pub fn allocations_len(&self) -> usize {
         self.allocations.lock().len()
     }
@@ -98,13 +148,13 @@ impl DummyMemoryPool {
         let end = aligned
             .checked_add(size)
             .ok_or_else(|| DummyClientError::InvalidInput("allocation size overflow".into()))?;
-        if end > self.mem_pool.len() {
+        if end > self.len() {
             return Err(DummyClientError::InvalidInput(
                 "dummy memory pool exhausted".to_string(),
             ));
         }
         *next = end;
-        let addr = unsafe { self.mem_pool.as_ptr().add(aligned) } as u64;
+        let addr = (self.base_addr() + aligned) as u64;
         self.allocations.lock().insert(addr, size);
         Ok(addr)
     }
@@ -151,6 +201,46 @@ impl DummyMemoryPool {
         let data = unsafe { std::slice::from_raw_parts(ptr, size) };
         Ok(data.to_vec())
     }
+}
+
+impl Drop for DummyMemoryPool {
+    fn drop(&mut self) {
+        if let DummyMemoryBacking::Shared { base_addr, len, .. } = &self.backing {
+            unsafe {
+                libc::munmap(*base_addr as *mut libc::c_void, *len);
+            }
+        }
+    }
+}
+
+fn create_shared_mapping(len: usize) -> DummyClientResult<(File, usize)> {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "mooncake_dummy_shm_{}_{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    fs::remove_file(&path)?;
+    file.set_len(len as u64)?;
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok((file, ptr as usize))
 }
 
 pub struct DummyIpcChannel {

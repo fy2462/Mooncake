@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::ha::types::OpLogRecord;
 use crate::oplog::{decode_record_payload_value, OpLogStore};
+use crate::service::helpers::release_object_replicas;
 use crate::service::state::{MasterState, ObjectEntry};
 
 const MAX_OBJECT_KEY_SIZE: usize = 4096;
@@ -196,8 +197,7 @@ impl OpLogApplier {
                 if key.len() > MAX_OBJECT_KEY_SIZE {
                     return false;
                 }
-                state.objects.remove(key);
-                state.processing_keys.remove(key);
+                Self::apply_remove_like(state, key);
                 true
             }
             "mount_segment" => {
@@ -214,6 +214,17 @@ impl OpLogApplier {
                 true
             }
             _ => false,
+        }
+    }
+
+    fn apply_remove_like(state: &MasterState, key: &str) {
+        if let Some((_, object)) = state.objects.remove(key) {
+            release_object_replicas(state, key, &object.replicas);
+        }
+        state.processing_keys.remove(key);
+        state.replication_tasks.remove(key);
+        for mut entry in state.client_objects.iter_mut() {
+            entry.value_mut().remove(key);
         }
     }
 }
@@ -340,6 +351,7 @@ mod tests {
     #[test]
     fn test_apply_remove() {
         let state = make_state();
+        let client_id = uuid::Uuid::new_v4();
         state.objects.insert(
             "k1".to_string(),
             crate::service::state::ObjectEntry {
@@ -348,13 +360,39 @@ mod tests {
                 last_access: std::time::SystemTime::now(),
                 hard_pinned: false,
                 data_type: mooncake_store_core::ObjectDataType::General,
-                client_id: uuid::Uuid::nil(),
+                client_id,
                 put_start_time: None,
                 lease_timeout: None,
                 soft_pin_timeout: None,
                 tenant_id: "default".to_string(),
                 group_id: String::new(),
                 user_key: "k1".to_string(),
+            },
+        );
+        state
+            .client_objects
+            .insert(client_id, std::iter::once("k1".to_string()).collect());
+        state.processing_keys.insert("k1".to_string(), ());
+        let replica = mooncake_store_core::ReplicaDescriptor {
+            segment_id: uuid::Uuid::new_v4(),
+            segment_name: "seg".to_string(),
+            offset: 0,
+            size: 0,
+            status: mooncake_store_core::ReplicaStatus::Complete,
+            replica_type: mooncake_store_core::ReplicaType::Memory,
+            holder_client_id: Some(client_id),
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+        };
+        state.replication_tasks.insert(
+            "k1".to_string(),
+            crate::service::state::ReplicationTaskEntry {
+                client_id,
+                start_time: std::time::Instant::now(),
+                kind: crate::service::state::ReplicationTaskKind::Copy,
+                source: replica,
+                targets: vec![],
             },
         );
         let applier = OpLogApplier::new(state.clone());
@@ -368,6 +406,9 @@ mod tests {
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 1);
         assert!(!state.objects.contains_key("k1"));
+        assert!(!state.processing_keys.contains_key("k1"));
+        assert!(!state.replication_tasks.contains_key("k1"));
+        assert!(!state.client_objects.get(&client_id).unwrap().contains("k1"));
     }
 
     #[test]
