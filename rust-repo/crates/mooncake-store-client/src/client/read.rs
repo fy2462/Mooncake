@@ -313,36 +313,27 @@ impl MooncakeClient {
                     return Err(e.into());
                 }
 
-                // Poll each range's status with a 10s timeout.
-                // 以 10s 超时轮询每个范围的状态。
-                let start = tokio::time::Instant::now();
-                let timeout = tokio::time::Duration::from_secs(10);
-                for (request_idx, &range_idx) in valid_ranges.iter().enumerate() {
-                    loop {
-                        let status = match self.engine.get_transfer_status(batch_id, request_idx) {
-                            Ok(status) => status,
-                            Err(e) => {
-                                let _ = self.engine.free_batch_id(batch_id);
-                                let _ = self.engine.close_segment(seg);
-                                return Err(e.into());
-                            }
-                        };
-                        if status.status == TransferStatusEnum::Completed {
-                            range_results[range_idx] = status.transferred_bytes as i64;
-                            break;
-                        }
-                        if status.status == TransferStatusEnum::Failed {
-                            range_results[range_idx] = -1;
-                            break;
-                        }
-                        if start.elapsed() > timeout {
-                            range_results[range_idx] = -1;
-                            break;
-                        }
-                        // 50us poll interval — tight enough for RDMA latency.
-                        // 50us 轮询间隔 —— 足够紧凑以匹配 RDMA 延迟。
-                        tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+                let statuses = match self
+                    .wait_for_transfer_batch_terminal(
+                        batch_id,
+                        valid_ranges.len(),
+                        tokio::time::Duration::from_secs(10),
+                    )
+                    .await
+                {
+                    Ok(statuses) => statuses,
+                    Err(e) => {
+                        let _ = self.engine.free_batch_id(batch_id);
+                        let _ = self.engine.close_segment(seg);
+                        return Err(e);
                     }
+                };
+                for (status, &range_idx) in statuses.iter().zip(valid_ranges.iter()) {
+                    range_results[range_idx] = if status.status == TransferStatusEnum::Completed {
+                        status.transferred_bytes as i64
+                    } else {
+                        -1
+                    };
                 }
                 self.engine.free_batch_id(batch_id)?;
                 self.engine.close_segment(seg)?;
@@ -599,36 +590,29 @@ impl MooncakeClient {
                 return Err(e.into());
             }
 
-            // Poll with 10s timeout. / 以 10s 超时轮询。
-            let mut total_transferred = 0i64;
-            let mut failed = false;
-            let start = tokio::time::Instant::now();
-            let timeout = tokio::time::Duration::from_secs(10);
-            for request_idx in 0..request_to_buffer.len() {
-                loop {
-                    let status = match self.engine.get_transfer_status(batch_id, request_idx) {
-                        Ok(status) => status,
-                        Err(e) => {
-                            let _ = self.engine.free_batch_id(batch_id);
-                            let _ = self.engine.close_segment(seg);
-                            return Err(e.into());
-                        }
-                    };
-                    if status.status == TransferStatusEnum::Completed {
-                        total_transferred += status.transferred_bytes as i64;
-                        break;
-                    }
-                    if status.status == TransferStatusEnum::Failed {
-                        failed = true;
-                        break;
-                    }
-                    if start.elapsed() > timeout {
-                        failed = true;
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+            let statuses = match self
+                .wait_for_transfer_batch_terminal(
+                    batch_id,
+                    request_to_buffer.len(),
+                    tokio::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                Ok(statuses) => statuses,
+                Err(e) => {
+                    let _ = self.engine.free_batch_id(batch_id);
+                    let _ = self.engine.close_segment(seg);
+                    return Err(e);
                 }
-            }
+            };
+            let failed = statuses
+                .iter()
+                .any(|status| status.status != TransferStatusEnum::Completed);
+            let total_transferred = statuses
+                .iter()
+                .filter(|status| status.status == TransferStatusEnum::Completed)
+                .map(|status| status.transferred_bytes as i64)
+                .sum();
             self.engine.free_batch_id(batch_id)?;
             self.engine.close_segment(seg)?;
             results.push(if failed { -1 } else { total_transferred });

@@ -21,13 +21,71 @@
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
-use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
+use transfer_engine_ffi::{BatchId, Opcode, TransferRequest, TransferStatusEnum};
 use uuid::Uuid;
 
 use super::MooncakeClient;
 use crate::proto;
 
 impl MooncakeClient {
+    pub(crate) async fn wait_for_transfer_batch(
+        &self,
+        batch_id: BatchId,
+        task_count: usize,
+        timeout: tokio::time::Duration,
+    ) -> StoreResult<Vec<transfer_engine_ffi::TransferStatus>> {
+        let statuses = self
+            .wait_for_transfer_batch_terminal(batch_id, task_count, timeout)
+            .await?;
+        if statuses
+            .iter()
+            .all(|status| status.status == TransferStatusEnum::Completed)
+        {
+            return Ok(statuses);
+        }
+        Err(StoreError::OperationFailed(-1))
+    }
+
+    pub(crate) async fn wait_for_transfer_batch_terminal(
+        &self,
+        batch_id: BatchId,
+        task_count: usize,
+        timeout: tokio::time::Duration,
+    ) -> StoreResult<Vec<transfer_engine_ffi::TransferStatus>> {
+        let start = tokio::time::Instant::now();
+        let mut statuses = vec![
+            transfer_engine_ffi::TransferStatus {
+                status: TransferStatusEnum::Waiting,
+                transferred_bytes: 0,
+            };
+            task_count
+        ];
+        let mut terminal = vec![false; task_count];
+
+        loop {
+            let mut all_terminal = true;
+            for task_id in 0..task_count {
+                if terminal[task_id] {
+                    continue;
+                }
+                let status = self.engine.get_transfer_status(batch_id, task_id)?;
+                statuses[task_id] = status.clone();
+                if status.status.is_terminal() {
+                    terminal[task_id] = true;
+                } else {
+                    all_terminal = false;
+                }
+            }
+            if all_terminal {
+                return Ok(statuses);
+            }
+            if start.elapsed() > timeout {
+                return Err(StoreError::OperationFailed(-2));
+            }
+            tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // LOCAL_MEMCPY — bypass TE for same-node transfers (matches C++ strategy)
     // 本地内存拷贝 —— 同节点传输绕过 TE（与 C++ 策略一致）
@@ -525,62 +583,22 @@ impl MooncakeClient {
         // 10s is generous for RDMA (us-scale) but covers TCP retransmissions
         // and slow NVMe-oF targets. 10s 对 RDMA（微秒级）很充裕，但覆盖了 TCP
         // 重传和慢速 NVMe-oF 目标。
-        let start = tokio::time::Instant::now();
-        let timeout = tokio::time::Duration::from_secs(10);
-        let mut poll_count: u64 = 0;
-        loop {
-            let status = match self.engine.get_transfer_status(batch_id, 0) {
-                Ok(status) => status,
-                Err(e) => {
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(segment_id);
-                    return Err(e.into());
-                }
-            };
-            poll_count += 1;
-            if status.status == TransferStatusEnum::Completed {
-                tracing::info!(
-                    target: "te_debug",
-                    poll_count,
-                    transferred = status.transferred_bytes,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "write_to_replica: transfer COMPLETED"
-                );
-                break;
-            }
-            if status.status == TransferStatusEnum::Failed {
-                tracing::error!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    batch_id = batch_id.0,
-                    seg_id = segment_id.0,
-                    "write_to_replica: transfer FAILED (cleaning up)"
-                );
-                // Cleanup on failure: free batch_id, close segment.
-                // 失败时清理：释放 batch_id，关闭 segment。
+        let statuses = match self
+            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
+            .await
+        {
+            Ok(statuses) => statuses,
+            Err(e) => {
                 let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(segment_id);
-                return Err(StoreError::OperationFailed(-1));
+                return Err(e);
             }
-            if start.elapsed() > timeout {
-                tracing::error!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    batch_id = batch_id.0,
-                    "write_to_replica: transfer TIMEOUT"
-                );
-                // Cleanup on timeout: free batch_id, close segment.
-                // 超时时清理：释放 batch_id，关闭 segment。
-                let _ = self.engine.free_batch_id(batch_id);
-                let _ = self.engine.close_segment(segment_id);
-                return Err(StoreError::OperationFailed(-2));
-            }
-            // 50us poll interval — balances latency and CPU usage.
-            // 50us 轮询间隔 —— 平衡延迟和 CPU 使用。
-            tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
-        }
+        };
+        tracing::info!(
+            target: "te_debug",
+            transferred = statuses[0].transferred_bytes,
+            "write_to_replica: transfer COMPLETED"
+        );
 
         // Step 6: cleanup resources. / 第 6 步：清理资源。
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: freeing batch_id");
@@ -668,56 +686,13 @@ impl MooncakeClient {
         }
         tracing::info!(target: "te_debug", "zero_copy_write: transfer submitted, polling...");
 
-        // Poll with 10s timeout. / 以 10s 超时轮询。
-        let start = tokio::time::Instant::now();
-        let timeout = tokio::time::Duration::from_secs(10);
-        let mut poll_count: u64 = 0;
-        loop {
-            let status = match self.engine.get_transfer_status(batch_id, 0) {
-                Ok(status) => status,
-                Err(e) => {
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(segment_id);
-                    return Err(e.into());
-                }
-            };
-            poll_count += 1;
-            if status.status.is_terminal() {
-                if status.status != TransferStatusEnum::Completed {
-                    tracing::error!(
-                        target: "te_debug",
-                        poll_count,
-                        elapsed_ms = start.elapsed().as_millis(),
-                        batch_id = batch_id.0,
-                        seg_id = segment_id.0,
-                        "zero_copy_write: transfer FAILED (cleaning up)"
-                    );
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(segment_id);
-                    return Err(StoreError::OperationFailed(-1));
-                }
-                tracing::info!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "zero_copy_write: transfer COMPLETED"
-                );
-                break;
-            }
-            if start.elapsed() > timeout {
-                tracing::error!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    batch_id = batch_id.0,
-                    seg_id = segment_id.0,
-                    "zero_copy_write: transfer TIMEOUT (cleaning up)"
-                );
-                let _ = self.engine.free_batch_id(batch_id);
-                let _ = self.engine.close_segment(segment_id);
-                return Err(StoreError::OperationFailed(-2));
-            }
-            tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+        if let Err(e) = self
+            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
+            .await
+        {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e);
         }
 
         if let Err(e) = self.engine.free_batch_id(batch_id) {
@@ -846,60 +821,18 @@ impl MooncakeClient {
         }
         tracing::info!(target: "te_debug", "read_from_replica: transfer submitted, polling...");
 
-        // Poll with 10s timeout. / 以 10s 超时轮询。
-        let mut transferred: u64;
-        let start = tokio::time::Instant::now();
-        let timeout = tokio::time::Duration::from_secs(10);
-        let mut poll_count: u64 = 0;
-        loop {
-            let status: transfer_engine_ffi::TransferStatus =
-                match self.engine.get_transfer_status(batch_id, 0) {
-                    Ok(status) => status,
-                    Err(e) => {
-                        let _ = self.engine.free_batch_id(batch_id);
-                        let _ = self.engine.close_segment(segment_id);
-                        return Err(e.into());
-                    }
-                };
-            poll_count += 1;
-            transferred = status.transferred_bytes;
-            if status.status == TransferStatusEnum::Completed {
-                tracing::info!(
-                    target: "te_debug",
-                    poll_count,
-                    transferred,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "read_from_replica: transfer COMPLETED"
-                );
-                break;
-            }
-            if status.status == TransferStatusEnum::Failed {
-                tracing::error!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    batch_id = batch_id.0,
-                    seg_id = segment_id.0,
-                    "read_from_replica: transfer FAILED (cleaning up)"
-                );
+        let statuses = match self
+            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
+            .await
+        {
+            Ok(statuses) => statuses,
+            Err(e) => {
                 let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(segment_id);
-                return Err(StoreError::OperationFailed(-1));
+                return Err(e);
             }
-            if start.elapsed() > timeout {
-                tracing::error!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    batch_id = batch_id.0,
-                    "read_from_replica: transfer TIMEOUT"
-                );
-                let _ = self.engine.free_batch_id(batch_id);
-                let _ = self.engine.close_segment(segment_id);
-                return Err(StoreError::OperationFailed(-2));
-            }
-            tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
-        }
+        };
+        let transferred = statuses[0].transferred_bytes;
 
         tracing::info!(target: "te_debug", batch_id = batch_id.0, "read_from_replica: freeing batch_id");
         if let Err(e) = self.engine.free_batch_id(batch_id) {
@@ -989,61 +922,18 @@ impl MooncakeClient {
         }
         tracing::info!(target: "te_debug", "zero_copy_read: transfer submitted, polling...");
 
-        // Poll with 10s timeout. / 以 10s 超时轮询。
-        let mut transferred: u64;
-        let start = tokio::time::Instant::now();
-        let timeout = tokio::time::Duration::from_secs(10);
-        let mut poll_count: u64 = 0;
-        loop {
-            let status: transfer_engine_ffi::TransferStatus =
-                match self.engine.get_transfer_status(batch_id, 0) {
-                    Ok(status) => status,
-                    Err(e) => {
-                        let _ = self.engine.free_batch_id(batch_id);
-                        let _ = self.engine.close_segment(segment_id);
-                        return Err(e.into());
-                    }
-                };
-            poll_count += 1;
-            transferred = status.transferred_bytes;
-            if status.status.is_terminal() {
-                if status.status != TransferStatusEnum::Completed {
-                    tracing::error!(
-                        target: "te_debug",
-                        poll_count,
-                        elapsed_ms = start.elapsed().as_millis(),
-                        batch_id = batch_id.0,
-                        seg_id = segment_id.0,
-                        "zero_copy_read: transfer FAILED (cleaning up)"
-                    );
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(segment_id);
-                    return Err(StoreError::OperationFailed(-1));
-                }
-                tracing::info!(
-                    target: "te_debug",
-                    poll_count,
-                    transferred,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "zero_copy_read: transfer COMPLETED"
-                );
-                break;
-            }
-            if start.elapsed() > timeout {
-                tracing::error!(
-                    target: "te_debug",
-                    poll_count,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    batch_id = batch_id.0,
-                    seg_id = segment_id.0,
-                    "zero_copy_read: transfer TIMEOUT (cleaning up)"
-                );
+        let statuses = match self
+            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
+            .await
+        {
+            Ok(statuses) => statuses,
+            Err(e) => {
                 let _ = self.engine.free_batch_id(batch_id);
                 let _ = self.engine.close_segment(segment_id);
-                return Err(StoreError::OperationFailed(-2));
+                return Err(e);
             }
-            tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
-        }
+        };
+        let transferred = statuses[0].transferred_bytes;
 
         if let Err(e) = self.engine.free_batch_id(batch_id) {
             let _ = self.engine.close_segment(segment_id);
@@ -1112,32 +1002,13 @@ impl MooncakeClient {
             )));
         }
 
-        // Poll with 10s timeout.
-        let start = tokio::time::Instant::now();
-        let timeout = tokio::time::Duration::from_secs(10);
-        loop {
-            let status = match self.engine.get_transfer_status(batch_id, 0) {
-                Ok(status) => status,
-                Err(e) => {
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(seg_id);
-                    return Err(StoreError::Internal(format!("poll offload transfer: {e}")));
-                }
-            };
-            if status.status == TransferStatusEnum::Completed {
-                break;
-            }
-            if status.status == TransferStatusEnum::Failed {
-                let _ = self.engine.free_batch_id(batch_id);
-                let _ = self.engine.close_segment(seg_id);
-                return Err(StoreError::OperationFailed(-1));
-            }
-            if start.elapsed() >= timeout {
-                let _ = self.engine.free_batch_id(batch_id);
-                let _ = self.engine.close_segment(seg_id);
-                return Err(StoreError::Internal("offload transfer timeout".to_string()));
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+        if let Err(e) = self
+            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
+            .await
+        {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(seg_id);
+            return Err(StoreError::Internal(format!("poll offload transfer: {e}")));
         }
 
         if let Err(e) = self.engine.free_batch_id(batch_id) {

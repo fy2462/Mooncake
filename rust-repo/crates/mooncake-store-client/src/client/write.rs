@@ -9,7 +9,7 @@ use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
+use transfer_engine_ffi::{Opcode, TransferRequest};
 
 use super::{
     determine_finalize_decision, MooncakeClient, ReplicaFinalizeDecision, ReplicaTransferSummary,
@@ -204,33 +204,17 @@ impl MooncakeClient {
             return Err(e.into());
         }
 
-        let start = tokio::time::Instant::now();
-        let timeout = tokio::time::Duration::from_secs(10);
-        for i in 0..buffers.len() {
-            loop {
-                let status = match self.engine.get_transfer_status(batch_id, i) {
-                    Ok(status) => status,
-                    Err(e) => {
-                        let _ = self.engine.free_batch_id(batch_id);
-                        let _ = self.engine.close_segment(segment_id);
-                        return Err(e.into());
-                    }
-                };
-                if status.status == TransferStatusEnum::Completed {
-                    break;
-                }
-                if status.status == TransferStatusEnum::Failed {
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(segment_id);
-                    return Err(StoreError::OperationFailed(-1));
-                }
-                if start.elapsed() > timeout {
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(segment_id);
-                    return Err(StoreError::OperationFailed(-2));
-                }
-                tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
-            }
+        if let Err(e) = self
+            .wait_for_transfer_batch(
+                batch_id,
+                buffers.len(),
+                tokio::time::Duration::from_secs(10),
+            )
+            .await
+        {
+            let _ = self.engine.free_batch_id(batch_id);
+            let _ = self.engine.close_segment(segment_id);
+            return Err(e);
         }
 
         if let Err(e) = self.engine.free_batch_id(batch_id) {
@@ -634,57 +618,21 @@ impl MooncakeClient {
                 continue;
             }
 
-            // Poll each slice's transfer with 10s timeout.
-            // 以 10s 超时轮询每个切片的传输状态。
-            for i in 0..values.len() {
-                let start = tokio::time::Instant::now();
-                let timeout = tokio::time::Duration::from_secs(10);
-                loop {
-                    let status = match self.engine.get_transfer_status(batch_id, i) {
-                        Ok(status) => status,
-                        Err(e) => {
-                            let _ = self.engine.free_batch_id(batch_id);
-                            let _ = self.engine.close_segment(segment_id);
-                            transfer_summary.record_failure(replica.replica_type);
-                            if first_error.is_none() {
-                                first_error = Some(e.into());
-                            }
-                            replica_failed = true;
-                            break;
-                        }
-                    };
-                    if status.status == TransferStatusEnum::Completed {
-                        break;
-                    }
-                    if status.status == TransferStatusEnum::Failed {
-                        // On any slice failure, revoke + cleanup.
-                        // 任何切片失败，撤销 + 清理。
-                        // C++ 写失败时调用 PutRevoke 撤销已分配的资源
-                        let _ = self.engine.free_batch_id(batch_id);
-                        let _ = self.engine.close_segment(segment_id);
-                        transfer_summary.record_failure(replica.replica_type);
-                        if first_error.is_none() {
-                            first_error = Some(StoreError::OperationFailed(-1));
-                        }
-                        replica_failed = true;
-                        break;
-                    }
-                    if start.elapsed() > timeout {
-                        // Timeout: revoke + cleanup. / 超时：撤销 + 清理。
-                        let _ = self.engine.free_batch_id(batch_id);
-                        let _ = self.engine.close_segment(segment_id);
-                        transfer_summary.record_failure(replica.replica_type);
-                        if first_error.is_none() {
-                            first_error = Some(StoreError::OperationFailed(-2));
-                        }
-                        replica_failed = true;
-                        break;
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_micros(50)).await;
+            if let Err(e) = self
+                .wait_for_transfer_batch(
+                    batch_id,
+                    values.len(),
+                    tokio::time::Duration::from_secs(10),
+                )
+                .await
+            {
+                let _ = self.engine.free_batch_id(batch_id);
+                let _ = self.engine.close_segment(segment_id);
+                transfer_summary.record_failure(replica.replica_type);
+                if first_error.is_none() {
+                    first_error = Some(e);
                 }
-                if replica_failed {
-                    break;
-                }
+                replica_failed = true;
             }
 
             // Cleanup per-replica resources. / 清理每个副本的资源。
