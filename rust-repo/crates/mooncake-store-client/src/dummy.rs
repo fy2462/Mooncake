@@ -12,6 +12,37 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use thiserror::Error;
 
+pub const IPC_SHM_REGISTER: u32 = 0;
+pub const IPC_SHM_FD_REQUEST: u32 = 1;
+pub const SHM_SEG_HOT_CACHE: u32 = 0;
+pub const INVALID_PHYSICAL_DEVICE_ID: i32 = -1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShmRegisterRequest {
+    pub client_id_first: u64,
+    pub client_id_second: u64,
+    pub dummy_base_addr: u64,
+    pub shm_size: u64,
+    pub device_id: i32,
+    pub is_local_buffer: bool,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShmFdRequest {
+    pub client_id_first: u64,
+    pub client_id_second: u64,
+    pub segment_type: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShmFdResponse {
+    pub status: i32,
+    pub shm_size: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum DummyClientError {
     #[error("{0}")]
@@ -41,19 +72,15 @@ impl DummyMemoryPool {
             allocations: Mutex::new(HashMap::new()),
         })
     }
-
     pub fn base_ptr(&self) -> *mut c_void {
         self.mem_pool.as_ptr() as *mut c_void
     }
-
     pub fn len(&self) -> usize {
         self.mem_pool.len()
     }
-
     pub fn allocations_len(&self) -> usize {
         self.allocations.lock().len()
     }
-
     pub fn reset(&self) {
         self.allocations.lock().clear();
         *self.next_offset.lock() = 0;
@@ -131,6 +158,10 @@ pub struct DummyIpcChannel {
 }
 
 impl DummyIpcChannel {
+    #[cfg(test)]
+    pub(crate) fn from_stream(stream: UnixStream) -> Self {
+        Self { stream }
+    }
     pub fn connect(socket_path: impl AsRef<Path>) -> DummyClientResult<Self> {
         let stream = UnixStream::connect(socket_path)?;
         Ok(Self { stream })
@@ -166,6 +197,72 @@ impl DummyIpcChannel {
     pub fn recv_fd(&self) -> DummyClientResult<RawFd> {
         recv_fd(&self.stream)
     }
+    pub fn send_raw(&mut self, data: &[u8]) -> DummyClientResult<()> {
+        self.stream.write_all(data)?;
+        Ok(())
+    }
+    pub fn recv_exact(&mut self, len: usize) -> DummyClientResult<Vec<u8>> {
+        let mut data = vec![0u8; len];
+        self.stream.read_exact(&mut data)?;
+        Ok(data)
+    }
+
+    pub fn send_fd_with_bytes(&self, fd: RawFd, data: &[u8]) -> DummyClientResult<()> {
+        send_fd_with_bytes(&self.stream, fd, data)
+    }
+
+    pub fn recv_fd_with_bytes(&self, len: usize) -> DummyClientResult<(RawFd, Vec<u8>)> {
+        recv_fd_with_bytes(&self.stream, len)
+    }
+
+    pub fn send_request_type(&mut self, request_type: u32) -> DummyClientResult<()> {
+        self.stream.write_all(&request_type.to_ne_bytes())?;
+        Ok(())
+    }
+
+    pub fn register_shm_fd(
+        socket_name: &str,
+        fd: RawFd,
+        request: ShmRegisterRequest,
+    ) -> DummyClientResult<i32> {
+        let mut channel = Self::connect_abstract(socket_name)?;
+        channel.send_request_type(IPC_SHM_REGISTER)?;
+        channel.send_fd_with_bytes(fd, as_bytes(&request))?;
+        let status = channel.recv_i32()?;
+        if status != 0 {
+            return Err(DummyClientError::InvalidInput(format!(
+                "real client failed to map shared memory, status={status}"
+            )));
+        }
+        Ok(status)
+    }
+
+    pub fn request_hot_cache_fd(
+        socket_name: &str,
+        client_id_first: u64,
+        client_id_second: u64,
+    ) -> DummyClientResult<(RawFd, ShmFdResponse)> {
+        let mut channel = Self::connect_abstract(socket_name)?;
+        channel.send_request_type(IPC_SHM_FD_REQUEST)?;
+        let request = ShmFdRequest {
+            client_id_first,
+            client_id_second,
+            segment_type: SHM_SEG_HOT_CACHE,
+        };
+        channel.send_raw(as_bytes(&request))?;
+        let (fd, data) = channel.recv_fd_with_bytes(mem::size_of::<ShmFdResponse>())?;
+        let response = read_pod::<ShmFdResponse>(&data)?;
+        if response.status != 0 {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(DummyClientError::InvalidInput(format!(
+                "real client failed to return hot cache fd, status={}",
+                response.status
+            )));
+        }
+        Ok((fd, response))
+    }
 
     pub fn send_bytes(&mut self, data: &[u8]) -> DummyClientResult<()> {
         let len = (data.len() as u64).to_be_bytes();
@@ -182,13 +279,34 @@ impl DummyIpcChannel {
         self.stream.read_exact(&mut data)?;
         Ok(data)
     }
+
+    fn recv_i32(&mut self) -> DummyClientResult<i32> {
+        let data = self.recv_exact(mem::size_of::<i32>())?;
+        Ok(i32::from_ne_bytes(data.try_into().map_err(|_| {
+            DummyClientError::InvalidInput("invalid i32 response size".to_string())
+        })?))
+    }
 }
 
 fn send_fd(stream: &UnixStream, fd: RawFd) -> DummyClientResult<()> {
     let byte = [0u8; 1];
+    send_fd_with_bytes(stream, fd, &byte)
+}
+
+fn recv_fd(stream: &UnixStream) -> DummyClientResult<RawFd> {
+    let (fd, _) = recv_fd_with_bytes(stream, 1)?;
+    Ok(fd)
+}
+
+fn send_fd_with_bytes(stream: &UnixStream, fd: RawFd, data: &[u8]) -> DummyClientResult<()> {
+    if data.is_empty() {
+        return Err(DummyClientError::InvalidInput(
+            "fd payload must not be empty".to_string(),
+        ));
+    }
     let mut iov = libc::iovec {
-        iov_base: byte.as_ptr() as *mut libc::c_void,
-        iov_len: byte.len(),
+        iov_base: data.as_ptr() as *mut libc::c_void,
+        iov_len: data.len(),
     };
     let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as _) as usize }];
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
@@ -210,18 +328,31 @@ fn send_fd(stream: &UnixStream, fd: RawFd) -> DummyClientResult<()> {
         let data = libc::CMSG_DATA(cmsg) as *mut RawFd;
         *data = fd;
 
-        if libc::sendmsg(stream.as_raw_fd(), &msg, 0) < 0 {
+        let sent = libc::sendmsg(stream.as_raw_fd(), &msg, 0);
+        if sent < 0 {
             return Err(std::io::Error::last_os_error().into());
+        }
+        if sent as usize != iov.iov_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "short sendmsg while sending fd",
+            )
+            .into());
         }
     }
     Ok(())
 }
 
-fn recv_fd(stream: &UnixStream) -> DummyClientResult<RawFd> {
-    let mut byte = [0u8; 1];
+fn recv_fd_with_bytes(stream: &UnixStream, len: usize) -> DummyClientResult<(RawFd, Vec<u8>)> {
+    if len == 0 {
+        return Err(DummyClientError::InvalidInput(
+            "fd payload length must be greater than 0".to_string(),
+        ));
+    }
+    let mut data = vec![0u8; len];
     let mut iov = libc::iovec {
-        iov_base: byte.as_mut_ptr() as *mut libc::c_void,
-        iov_len: byte.len(),
+        iov_base: data.as_mut_ptr() as *mut libc::c_void,
+        iov_len: data.len(),
     };
     let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<RawFd>() as _) as usize }];
     let mut msg: libc::msghdr = unsafe { mem::zeroed() };
@@ -231,8 +362,16 @@ fn recv_fd(stream: &UnixStream) -> DummyClientResult<RawFd> {
     msg.msg_controllen = control.len() as _;
 
     unsafe {
-        if libc::recvmsg(stream.as_raw_fd(), &mut msg, 0) < 0 {
+        let received = libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_WAITALL);
+        if received < 0 {
             return Err(std::io::Error::last_os_error().into());
+        }
+        if received as usize != len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short recvmsg while receiving fd",
+            )
+            .into());
         }
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null()
@@ -243,7 +382,30 @@ fn recv_fd(stream: &UnixStream) -> DummyClientResult<RawFd> {
                 "message did not contain a file descriptor".to_string(),
             ));
         }
-        Ok(*(libc::CMSG_DATA(cmsg) as *const RawFd))
+        Ok((*(libc::CMSG_DATA(cmsg) as *const RawFd), data))
+    }
+}
+
+fn as_bytes<T>(value: &T) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
+}
+
+fn read_pod<T: Copy>(data: &[u8]) -> DummyClientResult<T> {
+    if data.len() != mem::size_of::<T>() {
+        return Err(DummyClientError::InvalidInput(format!(
+            "invalid payload size: got {}, expected {}",
+            data.len(),
+            mem::size_of::<T>()
+        )));
+    }
+    let mut value = mem::MaybeUninit::<T>::uninit();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            data.as_ptr(),
+            value.as_mut_ptr() as *mut u8,
+            mem::size_of::<T>(),
+        );
+        Ok(value.assume_init())
     }
 }
 
@@ -336,47 +498,4 @@ fn listen_abstract_socket_once(_name: &str) -> DummyClientResult<UnixStream> {
     Err(DummyClientError::InvalidInput(
         "Linux abstract Unix sockets are not supported on this platform".to_string(),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::fd::FromRawFd;
-
-    #[test]
-    fn memory_pool_allocates_and_checks_bounds() {
-        let pool = DummyMemoryPool::new(128).unwrap();
-        let addr = pool.alloc(16).unwrap();
-        pool.write(addr, b"hello").unwrap();
-        assert_eq!(pool.read(addr, 5).unwrap(), b"hello");
-        assert!(pool.checked_ptr(addr, 17).is_err());
-        assert!(pool.alloc(10_000).is_err());
-        pool.reset();
-        assert_eq!(pool.allocations_len(), 0);
-    }
-
-    #[test]
-    fn ipc_channel_sends_and_receives_fd() {
-        let (left, right) = UnixStream::pair().unwrap();
-        let left = DummyIpcChannel { stream: left };
-        let right = DummyIpcChannel { stream: right };
-        let mut fds = [0; 2];
-        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-
-        left.send_fd(fds[0]).unwrap();
-        let received = right.recv_fd().unwrap();
-
-        let mut writer = unsafe { fs::File::from_raw_fd(fds[1]) };
-        writer.write_all(b"ok").unwrap();
-        drop(writer);
-
-        let mut reader = unsafe { fs::File::from_raw_fd(received) };
-        let mut data = String::new();
-        reader.read_to_string(&mut data).unwrap();
-        assert_eq!(data, "ok");
-
-        unsafe {
-            libc::close(fds[0]);
-        }
-    }
 }

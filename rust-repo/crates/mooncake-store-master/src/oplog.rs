@@ -59,6 +59,10 @@ const MAX_OBJECT_KEY_SIZE: usize = 4096;
 const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
 const PUT_END_MSGPACK_MAGIC: &[u8] = b"MCOPMETA1";
 const OPLOG_MSGPACK_RECORD_PREFIX: &str = "msgpack:";
+const ETCD_WATCH_SYNC_BATCH_SIZE: usize = 1000;
+const ETCD_WATCH_MAX_CONSECUTIVE_ERRORS: usize = 10;
+const ETCD_WATCH_RECONNECT_DELAY_MS: u64 = 1000;
+const ETCD_WATCH_MAX_RECONNECT_DELAY_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CppOpLogWireEntry {
@@ -1296,11 +1300,12 @@ impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
         self.shutdown_tx = Some(shutdown_tx);
         self.thread = Some(std::thread::spawn(move || {
-            healthy.store(true, std::sync::atomic::Ordering::Release);
-            let _ = block_on_runtime(store.watch_entries_from_until(
+            let health_for_watch = healthy.clone();
+            let _ = block_on_runtime(store.watch_entries_from_until_with_health(
                 start_seq_id,
-                1000,
+                ETCD_WATCH_SYNC_BATCH_SIZE,
                 shutdown_rx,
+                Some(health_for_watch),
                 move |entry| on_entry(entry),
                 move |err| on_error(err),
             ));
@@ -1334,6 +1339,30 @@ fn block_on_runtime<F: Future>(future: F) -> F::Output {
             .build()
             .expect("failed to create temporary tokio runtime")
             .block_on(future)
+    }
+}
+
+fn set_etcd_watch_health(
+    health: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    healthy: bool,
+) {
+    if let Some(health) = health {
+        health.store(healthy, std::sync::atomic::Ordering::Release);
+    }
+}
+
+async fn sleep_reconnect_delay(
+    reconnect_count: usize,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<()>,
+) -> bool {
+    let delay_ms = (ETCD_WATCH_RECONNECT_DELAY_MS * reconnect_count.max(1) as u64)
+        .min(ETCD_WATCH_MAX_RECONNECT_DELAY_MS);
+    tokio::select! {
+        changed = shutdown_rx.changed() => {
+            let _ = changed;
+            false
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => true,
     }
 }
 
@@ -1442,7 +1471,31 @@ impl EtcdOpLogStore {
         &self,
         start_seq_id: u64,
         max_historical_batch: usize,
+        shutdown_rx: tokio::sync::watch::Receiver<()>,
+        on_entry: F,
+        on_error: E,
+    ) -> Result<(), HaError>
+    where
+        F: FnMut(OpLogRecord) + Send,
+        E: FnMut(HaError) + Send,
+    {
+        self.watch_entries_from_until_with_health(
+            start_seq_id,
+            max_historical_batch,
+            shutdown_rx,
+            None,
+            on_entry,
+            on_error,
+        )
+        .await
+    }
+
+    async fn watch_entries_from_until_with_health<F, E>(
+        &self,
+        start_seq_id: u64,
+        max_historical_batch: usize,
         mut shutdown_rx: tokio::sync::watch::Receiver<()>,
+        health: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         mut on_entry: F,
         mut on_error: E,
     ) -> Result<(), HaError>
@@ -1451,99 +1504,210 @@ impl EtcdOpLogStore {
         E: FnMut(HaError) + Send,
     {
         let batch_size = max_historical_batch.max(1);
-        let mut read_seq = start_seq_id;
+        let mut next_read_seq = start_seq_id;
         let mut last_seq = start_seq_id.saturating_sub(1);
-        let mut revision = 0;
+        let mut next_watch_revision = 0;
+        let mut consecutive_errors = 0usize;
+        let mut reconnect_count = 0usize;
+
         loop {
             if shutdown_rx.has_changed().unwrap_or(true) {
+                set_etcd_watch_health(&health, false);
                 return Ok(());
+            }
+
+            match self
+                .deliver_historical_entries(
+                    next_read_seq,
+                    batch_size,
+                    &mut shutdown_rx,
+                    &mut on_entry,
+                )
+                .await
+            {
+                Ok((delivered_last_seq, read_revision)) => {
+                    if delivered_last_seq > last_seq {
+                        last_seq = delivered_last_seq;
+                        next_read_seq = last_seq.saturating_add(1);
+                    }
+                    if read_revision > 0 {
+                        next_watch_revision = read_revision.saturating_add(1);
+                    }
+                }
+                Err(e) => {
+                    set_etcd_watch_health(&health, false);
+                    on_error(e.clone());
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    if consecutive_errors >= ETCD_WATCH_MAX_CONSECUTIVE_ERRORS {
+                        return Err(e);
+                    }
+                    reconnect_count = reconnect_count.saturating_add(1);
+                    if !sleep_reconnect_delay(reconnect_count, &mut shutdown_rx).await {
+                        set_etcd_watch_health(&health, false);
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+
+            let watch_prefix = format!("{}/", self.key_prefix.trim_end_matches('/'));
+            let mut watch_client = self.client.clone().watch_client();
+            let options = etcd_client::WatchOptions::new()
+                .with_prefix()
+                .with_start_revision(next_watch_revision.max(1));
+            let watch_result = watch_client
+                .watch(watch_prefix.as_bytes(), Some(options))
+                .await;
+            let (_watcher, mut stream) = match watch_result {
+                Ok(watch) => watch,
+                Err(e) => {
+                    let err = HaError::InvalidBackend(format!("etcd watch oplog: {e}"));
+                    set_etcd_watch_health(&health, false);
+                    on_error(err.clone());
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    if consecutive_errors >= ETCD_WATCH_MAX_CONSECUTIVE_ERRORS {
+                        return Err(err);
+                    }
+                    reconnect_count = reconnect_count.saturating_add(1);
+                    if !sleep_reconnect_delay(reconnect_count, &mut shutdown_rx).await {
+                        set_etcd_watch_health(&health, false);
+                        return Ok(());
+                    }
+                    continue;
+                }
+            };
+
+            set_etcd_watch_health(&health, true);
+            consecutive_errors = 0;
+            reconnect_count = 0;
+
+            loop {
+                let message = tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        let _ = changed;
+                        set_etcd_watch_health(&health, false);
+                        return Ok(());
+                    }
+                    message = stream.message() => message,
+                };
+                match message {
+                    Ok(Some(response)) => {
+                        if let Some(header) = response.header() {
+                            next_watch_revision =
+                                next_watch_revision.max(header.revision().saturating_add(1));
+                        }
+                        if response.canceled() {
+                            let err = HaError::InvalidBackend(format!(
+                                "etcd watch canceled: {}",
+                                response.cancel_reason()
+                            ));
+                            set_etcd_watch_health(&health, false);
+                            on_error(err);
+                            break;
+                        }
+                        for event in response.events() {
+                            let Some(kv) = event.kv() else {
+                                continue;
+                            };
+                            next_watch_revision =
+                                next_watch_revision.max(kv.mod_revision().saturating_add(1));
+                            let key = String::from_utf8_lossy(kv.key());
+                            if key.ends_with("/latest") || key.contains("/snapshot/") {
+                                continue;
+                            }
+                            if event.event_type() == etcd_client::EventType::Delete {
+                                continue;
+                            }
+                            let value = match String::from_utf8(kv.value().to_vec()) {
+                                Ok(value) => value,
+                                Err(e) => {
+                                    let err = HaError::InvalidBackend(format!(
+                                        "etcd watch oplog utf8: {e}"
+                                    ));
+                                    on_error(err);
+                                    consecutive_errors = consecutive_errors.saturating_add(1);
+                                    continue;
+                                }
+                            };
+                            match deserialize_etcd_oplog_value(&value) {
+                                Ok(entry) => {
+                                    if entry.seq > last_seq {
+                                        last_seq = entry.seq;
+                                        next_read_seq = entry.seq.saturating_add(1);
+                                        on_entry(entry);
+                                    }
+                                    consecutive_errors = 0;
+                                }
+                                Err(e) => {
+                                    on_error(e);
+                                    consecutive_errors = consecutive_errors.saturating_add(1);
+                                }
+                            }
+                        }
+                        if consecutive_errors >= ETCD_WATCH_MAX_CONSECUTIVE_ERRORS {
+                            set_etcd_watch_health(&health, false);
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        let err = HaError::InvalidBackend("etcd watch stream closed".to_string());
+                        set_etcd_watch_health(&health, false);
+                        on_error(err);
+                        break;
+                    }
+                    Err(e) => {
+                        let err = HaError::InvalidBackend(format!("etcd watch stream: {e}"));
+                        set_etcd_watch_health(&health, false);
+                        on_error(err);
+                        break;
+                    }
+                }
+            }
+
+            reconnect_count = reconnect_count.saturating_add(1);
+            if !sleep_reconnect_delay(reconnect_count, &mut shutdown_rx).await {
+                set_etcd_watch_health(&health, false);
+                return Ok(());
+            }
+        }
+    }
+
+    async fn deliver_historical_entries<F>(
+        &self,
+        start_seq_id: u64,
+        batch_size: usize,
+        shutdown_rx: &mut tokio::sync::watch::Receiver<()>,
+        on_entry: &mut F,
+    ) -> Result<(u64, i64), HaError>
+    where
+        F: FnMut(OpLogRecord) + Send,
+    {
+        let mut read_seq = start_seq_id;
+        let mut last_seq = start_seq_id.saturating_sub(1);
+        let mut last_revision = 0;
+        loop {
+            if shutdown_rx.has_changed().unwrap_or(true) {
+                return Ok((last_seq, last_revision));
             }
             let (historical, read_revision) = self
                 .read_since_with_revision_async(read_seq, batch_size)
                 .await?;
             if read_revision > 0 {
-                revision = read_revision;
+                last_revision = read_revision;
             }
             let delivered = historical.len();
             for entry in historical {
-                last_seq = last_seq.max(entry.seq);
-                read_seq = entry.seq.saturating_add(1);
-                on_entry(entry);
+                if entry.seq > last_seq {
+                    last_seq = entry.seq;
+                    read_seq = entry.seq.saturating_add(1);
+                    on_entry(entry);
+                }
             }
             if delivered < batch_size {
                 break;
             }
         }
-
-        let watch_prefix = format!("{}/", self.key_prefix.trim_end_matches('/'));
-        let mut watch_client = self.client.clone().watch_client();
-        let options = etcd_client::WatchOptions::new()
-            .with_prefix()
-            .with_start_revision(revision.saturating_add(1));
-        let (_watcher, mut stream) = watch_client
-            .watch(watch_prefix.as_bytes(), Some(options))
-            .await
-            .map_err(|e| HaError::InvalidBackend(format!("etcd watch oplog: {e}")))?;
-
-        loop {
-            let message = tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    let _ = changed;
-                    return Ok(());
-                }
-                message = stream.message() => message,
-            };
-            match message {
-                Ok(Some(response)) => {
-                    if response.canceled() {
-                        return Err(HaError::InvalidBackend(format!(
-                            "etcd watch canceled: {}",
-                            response.cancel_reason()
-                        )));
-                    }
-                    for event in response.events() {
-                        let Some(kv) = event.kv() else {
-                            continue;
-                        };
-                        let key = String::from_utf8_lossy(kv.key());
-                        if key.ends_with("/latest") || key.contains("/snapshot/") {
-                            continue;
-                        }
-                        if event.event_type() == etcd_client::EventType::Delete {
-                            continue;
-                        }
-                        let value = match String::from_utf8(kv.value().to_vec()) {
-                            Ok(value) => value,
-                            Err(e) => {
-                                let err =
-                                    HaError::InvalidBackend(format!("etcd watch oplog utf8: {e}"));
-                                on_error(err.clone());
-                                continue;
-                            }
-                        };
-                        match deserialize_etcd_oplog_value(&value) {
-                            Ok(entry) => {
-                                if entry.seq > last_seq {
-                                    last_seq = entry.seq;
-                                    on_entry(entry);
-                                }
-                            }
-                            Err(e) => on_error(e),
-                        }
-                    }
-                }
-                Ok(None) => {
-                    return Err(HaError::InvalidBackend(
-                        "etcd watch stream closed".to_string(),
-                    ));
-                }
-                Err(e) => {
-                    let err = HaError::InvalidBackend(format!("etcd watch stream: {e}"));
-                    on_error(err.clone());
-                    return Err(err);
-                }
-            }
-        }
+        Ok((last_seq, last_revision))
     }
 }
 

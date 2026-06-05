@@ -50,6 +50,8 @@
 pub mod buffer_allocator;
 pub mod client;
 pub mod dummy;
+#[cfg(test)]
+mod dummy_tests;
 pub mod engram;
 pub mod hot_cache;
 pub mod local_storage_backend;
@@ -57,7 +59,10 @@ pub mod offload;
 pub mod remote_source;
 
 pub use client::{BufferHandle, MooncakeClient};
-pub use dummy::{DummyIpcChannel, DummyMemoryPool};
+pub use dummy::{
+    DummyIpcChannel, DummyMemoryPool, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
+    INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST, IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE,
+};
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
 pub use local_storage_backend::{LocalStorageBackend, LocalStorageConfig};
