@@ -9,7 +9,6 @@
 #include <memory>
 #include <optional>
 #include <sstream>
-#include <string_view>
 
 #include <msgpack.hpp>
 
@@ -20,9 +19,6 @@
 #include "json/json.h"
 
 namespace mooncake {
-namespace {
-
-constexpr std::string_view kPutEndMsgpackMagic = "MCOPMETA1";
 
 bool ParseJsonPayload(const std::string& payload, Json::Value& root) {
     Json::CharReaderBuilder builder;
@@ -31,44 +27,6 @@ bool ParseJsonPayload(const std::string& payload, Json::Value& root) {
     return reader->parse(payload.data(), payload.data() + payload.size(),
                          &root, &errs) &&
            root.isObject();
-}
-
-Json::Value MsgpackToJson(const msgpack::object& object) {
-    switch (object.type) {
-        case msgpack::type::NIL:
-            return Json::Value(Json::nullValue);
-        case msgpack::type::BOOLEAN:
-            return Json::Value(object.via.boolean);
-        case msgpack::type::POSITIVE_INTEGER:
-            return Json::Value(Json::UInt64(object.via.u64));
-        case msgpack::type::NEGATIVE_INTEGER:
-            return Json::Value(Json::Int64(object.via.i64));
-        case msgpack::type::FLOAT32:
-        case msgpack::type::FLOAT64:
-            return Json::Value(object.via.f64);
-        case msgpack::type::STR:
-            return Json::Value(
-                std::string(object.via.str.ptr, object.via.str.size));
-        case msgpack::type::ARRAY: {
-            Json::Value array(Json::arrayValue);
-            for (uint32_t i = 0; i < object.via.array.size; ++i) {
-                array.append(MsgpackToJson(object.via.array.ptr[i]));
-            }
-            return array;
-        }
-        case msgpack::type::MAP: {
-            Json::Value map(Json::objectValue);
-            for (uint32_t i = 0; i < object.via.map.size; ++i) {
-                const auto& kv = object.via.map.ptr[i];
-                if (kv.key.type != msgpack::type::STR) continue;
-                map[std::string(kv.key.via.str.ptr, kv.key.via.str.size)] =
-                    MsgpackToJson(kv.val);
-            }
-            return map;
-        }
-        default:
-            return Json::Value(Json::nullValue);
-    }
 }
 
 bool ReadUint64(const Json::Value& value, uint64_t& out) {
@@ -240,9 +198,11 @@ std::optional<Replica::Descriptor> ParseRustReplicaDescriptor(
     return descriptor;
 }
 
-std::optional<StandbyObjectMetadata> MetadataFromJsonRoot(
-    const Json::Value& root, uint64_t sequence_id) {
-    if (!root.isObject() || root.get("op", "").asString() != "put_end") {
+std::optional<StandbyObjectMetadata> ParseRustPutEndJsonPayload(
+    const std::string& payload, uint64_t sequence_id) {
+    Json::Value root;
+    if (!ParseJsonPayload(payload, root) ||
+        root.get("op", "").asString() != "put_end") {
         return std::nullopt;
     }
 
@@ -263,35 +223,6 @@ std::optional<StandbyObjectMetadata> MetadataFromJsonRoot(
         }
     }
     return metadata;
-}
-
-std::optional<StandbyObjectMetadata> ParseVersionedMsgpackPutEndPayload(
-    const std::string& payload, uint64_t sequence_id) {
-    if (payload.size() < kPutEndMsgpackMagic.size() ||
-        payload.compare(0, kPutEndMsgpackMagic.size(),
-                        kPutEndMsgpackMagic.data(),
-                        kPutEndMsgpackMagic.size()) != 0) {
-        return std::nullopt;
-    }
-    try {
-        const char* body = payload.data() + kPutEndMsgpackMagic.size();
-        const size_t body_size = payload.size() - kPutEndMsgpackMagic.size();
-        msgpack::object_handle handle = msgpack::unpack(body, body_size);
-        return MetadataFromJsonRoot(MsgpackToJson(handle.get()), sequence_id);
-    } catch (const std::exception& e) {
-        LOG(ERROR) << "OpLogApplier: failed to parse msgpack PUT_END payload: "
-                   << e.what();
-        return std::nullopt;
-    }
-}
-
-std::optional<StandbyObjectMetadata> ParseRustPutEndJsonPayload(
-    const std::string& payload, uint64_t sequence_id) {
-    Json::Value root;
-    if (!ParseJsonPayload(payload, root)) {
-        return std::nullopt;
-    }
-    return MetadataFromJsonRoot(root, sequence_id);
 }
 
 }  // namespace
@@ -731,25 +662,6 @@ void OpLogApplier::ApplyPutEnd(const OpLogEntry& entry) {
     MetadataPayload payload;
     auto result = struct_pack::deserialize_to(payload, entry.payload);
     if (result != struct_pack::errc::ok) {
-        if (auto msgpack_metadata =
-                ParseVersionedMsgpackPutEndPayload(entry.payload,
-                                                   entry.sequence_id);
-            msgpack_metadata.has_value()) {
-            if (!metadata_store_->PutMetadata(entry.object_key,
-                                              *msgpack_metadata)) {
-                LOG(ERROR) << "OpLogApplier: failed to PutMetadata key="
-                           << entry.object_key
-                           << ", sequence_id=" << entry.sequence_id;
-            } else {
-                VLOG(1) << "OpLogApplier: applied msgpack PUT_END, key="
-                        << entry.object_key
-                        << ", sequence_id=" << entry.sequence_id
-                        << ", replicas=" << msgpack_metadata->replicas.size()
-                        << ", size=" << msgpack_metadata->size;
-            }
-            return;
-        }
-
         if (auto rust_metadata =
                 ParseRustPutEndJsonPayload(entry.payload, entry.sequence_id);
             rust_metadata.has_value()) {
