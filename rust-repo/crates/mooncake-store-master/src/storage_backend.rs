@@ -1,6 +1,3 @@
-// =============================================================================
-// Storage Backend — 存储后端抽象
-// =============================================================================
 // Provides snapshot persistence and per-key file storage with support for
 // different storage backends: local disk, HF3FS (3FS distributed filesystem),
 // and FilePerKey (offload storage).
@@ -29,6 +26,7 @@
 //   FilePerKey：每个 key 独立文件存储（用于 offload 场景）。
 
 use crate::hf3fs;
+use crate::storage_distributed::{create_filesystem_adapter, FileSystemAdapter};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{TaskInfo, TaskStatus, TaskType};
@@ -127,6 +125,11 @@ impl DistributedStorageConfig {
         self
     }
 
+    pub fn with_fs_adapter_type(mut self, fs_adapter_type: impl Into<String>) -> Self {
+        self.fs_adapter_type = fs_adapter_type.into();
+        self
+    }
+
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.fsdir.as_os_str().is_empty() {
             return Err("DistributedStorageConfig: fsdir is empty".into());
@@ -138,7 +141,10 @@ impl DistributedStorageConfig {
             )
             .into());
         }
-        if self.fs_adapter_type != "hf3fs" {
+        if !matches!(
+            self.fs_adapter_type.as_str(),
+            "hf3fs" | "posix" | "local" | "local-disk"
+        ) {
             return Err(format!(
                 "DistributedStorageConfig: unsupported fs_adapter_type: {}",
                 self.fs_adapter_type
@@ -228,6 +234,7 @@ pub struct StorageBackend {
     backend_type: StorageBackendType,
     disk_dir: PathBuf,
     distributed_config: Option<DistributedStorageConfig>,
+    distributed_adapter: Option<Box<dyn FileSystemAdapter>>,
 }
 
 /// Wraps fs::File with optional HF3FS fd registration for RAII cleanup.
@@ -323,6 +330,7 @@ impl StorageBackend {
                     backend_type,
                     disk_dir: disk_dir.to_path_buf(),
                     distributed_config: None,
+                    distributed_adapter: None,
                 }
             });
         }
@@ -332,6 +340,7 @@ impl StorageBackend {
             backend_type,
             disk_dir: disk_dir.to_path_buf(),
             distributed_config: None,
+            distributed_adapter: None,
         }
     }
 
@@ -340,9 +349,11 @@ impl StorageBackend {
         config: DistributedStorageConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         config.validate()?;
+        let adapter = create_filesystem_adapter(&config.fs_adapter_type)?;
+        adapter.init(&config.fsdir)?;
         fs::create_dir_all(&config.fsdir)?;
         if config.enable_health_check {
-            Self::run_distributed_health_check(&config.fsdir)?;
+            Self::run_distributed_health_check(adapter.as_ref(), &config.fsdir)?;
         }
         for bucket in 0..config.hash_bucket_count {
             fs::create_dir_all(config.fsdir.join(format!("{bucket:02x}")))?;
@@ -351,15 +362,19 @@ impl StorageBackend {
             backend_type: StorageBackendType::Distributed,
             disk_dir: config.fsdir.clone(),
             distributed_config: Some(config),
+            distributed_adapter: Some(adapter),
         })
     }
 
-    fn run_distributed_health_check(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn run_distributed_health_check(
+        adapter: &dyn FileSystemAdapter,
+        root: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let probe = root.join(format!(".mooncake_health_probe_{}", Uuid::new_v4()));
         let payload = b"health_check";
-        fs::write(&probe, payload)?;
-        let read_back = fs::read(&probe)?;
-        let _ = fs::remove_file(&probe);
+        adapter.write_file(&probe, payload)?;
+        let read_back = adapter.read_file(&probe)?;
+        let _ = adapter.delete_file(&probe);
         if read_back != payload {
             return Err("DFS health check failed: read back mismatch".into());
         }
@@ -676,6 +691,12 @@ impl StorageBackend {
         self.distributed_config.as_ref()
     }
 
+    fn distributed_adapter(&self) -> Option<&dyn FileSystemAdapter> {
+        self.distributed_adapter
+            .as_ref()
+            .map(|adapter| adapter.as_ref())
+    }
+
     fn distributed_bucket_count(&self) -> usize {
         self.distributed_config()
             .map(|config| config.hash_bucket_count)
@@ -747,11 +768,15 @@ impl StorageBackend {
         }
         for (key, value) in entries {
             let path = self.key_path(key);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+            if let Some(adapter) = self.distributed_adapter() {
+                adapter.write_file(&path, value)?;
+            } else {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut f = std::fs::File::create(&path)?;
+                f.write_all(value)?;
             }
-            let mut f = std::fs::File::create(&path)?;
-            f.write_all(value)?;
         }
         Ok(())
     }
@@ -768,7 +793,11 @@ impl StorageBackend {
         let mut results = Vec::new();
         for key in keys {
             let path = self.key_path(key);
-            if path.exists() {
+            if let Some(adapter) = self.distributed_adapter() {
+                if adapter.file_exists(&path)? {
+                    results.push((key.clone(), adapter.read_file(&path)?));
+                }
+            } else if path.exists() {
                 let mut f = std::fs::File::open(&path)?;
                 let mut buf = Vec::new();
                 f.read_to_end(&mut buf)?;
@@ -783,7 +812,11 @@ impl StorageBackend {
     pub fn remove_keys(&self, keys: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         for key in keys {
             let path = self.key_path(key);
-            if path.exists() {
+            if let Some(adapter) = self.distributed_adapter() {
+                if adapter.file_exists(&path)? {
+                    adapter.delete_file(&path)?;
+                }
+            } else if path.exists() {
                 std::fs::remove_file(&path)?;
             }
         }
@@ -793,7 +826,11 @@ impl StorageBackend {
     /// Check if a key exists on disk.
     /// 检查 key 是否存在于磁盘上。
     pub fn is_exist(&self, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        Ok(self.key_path(key).exists())
+        let path = self.key_path(key);
+        if let Some(adapter) = self.distributed_adapter() {
+            return adapter.file_exists(&path);
+        }
+        Ok(path.exists())
     }
 
     /// Remove all keys matching a regex pattern.
@@ -875,15 +912,28 @@ impl StorageBackend {
         let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
         let mut count = 0;
         for bucket_dir in self.distributed_bucket_dirs() {
-            if !bucket_dir.exists() {
-                continue;
-            }
-            for entry in std::fs::read_dir(&bucket_dir)? {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
+            let names = if let Some(adapter) = self.distributed_adapter() {
+                adapter.list_files(&bucket_dir)?
+            } else if bucket_dir.exists() {
+                std::fs::read_dir(&bucket_dir)?
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for name in names {
                 let key = Self::unescape_distributed_filename(&name);
                 if re.is_match(&key) {
-                    std::fs::remove_file(entry.path())?;
+                    let path = bucket_dir.join(&name);
+                    if let Some(adapter) = self.distributed_adapter() {
+                        adapter.delete_file(&path)?;
+                    } else {
+                        std::fs::remove_file(path)?;
+                    }
                     count += 1;
                 }
             }
@@ -894,16 +944,31 @@ impl StorageBackend {
     fn remove_all_distributed(&self) -> Result<usize, Box<dyn std::error::Error>> {
         let mut count = 0;
         for bucket_dir in self.distributed_bucket_dirs() {
-            if !bucket_dir.exists() {
+            let names = if let Some(adapter) = self.distributed_adapter() {
+                adapter.list_files(&bucket_dir)?
+            } else if bucket_dir.exists() {
+                std::fs::read_dir(&bucket_dir)?
+                    .filter_map(|entry| {
+                        entry.ok().and_then(|entry| match entry.file_type() {
+                            Ok(file_type) if file_type.is_file() => {
+                                Some(entry.file_name().to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .collect()
+            } else {
                 std::fs::create_dir_all(&bucket_dir)?;
-                continue;
-            }
-            for entry in std::fs::read_dir(&bucket_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file() {
-                    std::fs::remove_file(entry.path())?;
-                    count += 1;
+                Vec::new()
+            };
+            for name in names {
+                let path = bucket_dir.join(name);
+                if let Some(adapter) = self.distributed_adapter() {
+                    adapter.delete_file(&path)?;
+                } else {
+                    std::fs::remove_file(path)?;
                 }
+                count += 1;
             }
         }
         Ok(count)
@@ -912,18 +977,22 @@ impl StorageBackend {
     fn scan_meta_distributed(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
         let mut results = Vec::new();
         for bucket_dir in self.distributed_bucket_dirs() {
-            if !bucket_dir.exists() {
-                continue;
-            }
-            for entry in std::fs::read_dir(&bucket_dir)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_file() {
-                    continue;
+            if let Some(adapter) = self.distributed_adapter() {
+                for file in adapter.list_files_with_info(&bucket_dir)? {
+                    let key = Self::unescape_distributed_filename(&file.name);
+                    results.push((key, file.size));
                 }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let key = Self::unescape_distributed_filename(&name);
-                let meta = entry.metadata()?;
-                results.push((key, meta.len()));
+            } else if bucket_dir.exists() {
+                for entry in std::fs::read_dir(&bucket_dir)? {
+                    let entry = entry?;
+                    if !entry.file_type()?.is_file() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let key = Self::unescape_distributed_filename(&name);
+                    let meta = entry.metadata()?;
+                    results.push((key, meta.len()));
+                }
             }
         }
         Ok(results)

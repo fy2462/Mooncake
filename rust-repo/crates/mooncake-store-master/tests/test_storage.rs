@@ -352,6 +352,7 @@ fn test_distributed_storage_backend_offload_load_scan_and_remove() {
     let tmp = temp_dir();
     let config = DistributedStorageConfig::default()
         .with_root(&tmp)
+        .with_fs_adapter_type("posix")
         .with_hash_bucket_count(8)
         .with_health_check(true);
     let backend = StorageBackend::new_distributed(config).unwrap();
