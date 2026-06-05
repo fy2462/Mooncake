@@ -456,6 +456,40 @@ lazy_static! {
         "total OpLog checksum failures"
     )
     .unwrap();
+    pub static ref OPLOG_ETCD_WRITE_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_etcd_write_failures_total",
+        "total failed etcd OpLog write operations"
+    )
+    .unwrap();
+    pub static ref OPLOG_ETCD_WRITE_RETRIES: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_etcd_write_retries_total",
+        "total etcd OpLog write retry attempts"
+    )
+    .unwrap();
+    pub static ref OPLOG_WATCH_DISCONNECTIONS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_watch_disconnections_total",
+        "total OpLog watch disconnections"
+    )
+    .unwrap();
+    pub static ref OPLOG_BATCH_COMMITS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_batch_commits_total",
+        "total OpLog batches committed to etcd"
+    )
+    .unwrap();
+    pub static ref OPLOG_SYNC_BATCH_COMMITS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_sync_batch_commits_total",
+        "total sync OpLog batches committed to etcd"
+    )
+    .unwrap();
+    pub static ref OPLOG_ETCD_WRITE_LATENCY_US: Histogram = register_histogram!(
+        "mooncake_store_oplog_etcd_write_latency_us",
+        "latency of etcd OpLog write operations in microseconds",
+        vec![
+            100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0, 500_000.0,
+            1_000_000.0, 5_000_000.0
+        ]
+    )
+    .unwrap();
 }
 
 // =============================================================================
@@ -563,6 +597,11 @@ pub fn register_metrics() {
     register_gauge(&PENDING_MUTATION_QUEUE_SIZE);
     register_counter(&OPLOG_SKIPPED_ENTRIES);
     register_counter(&OPLOG_CHECKSUM_FAILURES);
+    register_counter(&OPLOG_ETCD_WRITE_FAILURES);
+    register_counter(&OPLOG_ETCD_WRITE_RETRIES);
+    register_counter(&OPLOG_WATCH_DISCONNECTIONS);
+    register_counter(&OPLOG_BATCH_COMMITS);
+    register_counter(&OPLOG_SYNC_BATCH_COMMITS);
 }
 
 /// Start the Prometheus metrics HTTP server.

@@ -1,4 +1,5 @@
 pub(crate) mod batches;
+pub(crate) mod offload_read;
 pub(crate) mod read;
 pub(crate) mod remove;
 pub(crate) mod storage;

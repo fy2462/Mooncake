@@ -22,6 +22,7 @@ pub(crate) async fn batch_get_offload_objects(
     peer_addr: &str,
     keys: &[String],
     sizes: &[i64],
+    tenant_ids: &[String],
 ) -> Result<BatchOffloadResult, String> {
     let url = format!("http://{peer_addr}");
     let channel = Channel::from_shared(url)
@@ -35,6 +36,7 @@ pub(crate) async fn batch_get_offload_objects(
     let request = BatchGetOffloadObjectRequest {
         keys: keys.to_vec(),
         sizes: sizes.to_vec(),
+        tenant_ids: tenant_ids.to_vec(),
     };
 
     let response: BatchGetOffloadObjectResponse = client

@@ -76,6 +76,14 @@ impl From<proto::PromotionTaskItem> for PromotionTaskItem {
     }
 }
 
+fn local_storage_key(tenant_id: &str, key: &str) -> String {
+    if tenant_id.is_empty() {
+        key.to_string()
+    } else {
+        format!("{tenant_id}\0{key}")
+    }
+}
+
 impl MooncakeClient {
     fn uuid_to_proto_uuid(id: Uuid) -> proto::Uuid {
         let (high, low) = id.as_u64_pair();
@@ -726,8 +734,10 @@ impl MooncakeClient {
     ///
     /// 返回成功 offload 的对象数量。
     pub async fn offload_objects(&mut self, enable_offloading: bool) -> StoreResult<usize> {
-        let objects = self.offload_object_heartbeat(enable_offloading).await?;
-        if objects.is_empty() {
+        let tasks = self
+            .offload_object_heartbeat_tasks(enable_offloading)
+            .await?;
+        if tasks.is_empty() {
             return Ok(0);
         }
 
@@ -742,21 +752,27 @@ impl MooncakeClient {
         let storage = Arc::clone(storage);
 
         let mut offloaded = 0usize;
-        let mut success_keys = Vec::with_capacity(objects.len());
-        let mut metadatas = Vec::with_capacity(objects.len());
+        let mut success_tasks = Vec::with_capacity(tasks.len());
+        let mut metadatas = Vec::with_capacity(tasks.len());
 
-        for (key, size) in &objects {
+        for task in &tasks {
+            let key = task.key.as_str();
+            let tenant_id = task.tenant_id.as_str();
+            if task.size < 0 {
+                tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "offload: invalid negative task size");
+                continue;
+            }
             // Read object data from memory.
-            let data = match self.get(key).await {
+            let data = match self.get_for_tenant(key, tenant_id).await {
                 Ok(d) => d,
                 Err(e) => {
-                    tracing::warn!(target: "storage_debug", %key, %e, "offload: failed to get object from memory, skipping");
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "offload: failed to get object from memory, skipping");
                     continue;
                 }
             };
 
             // Write to local disk (blocking I/O).
-            let key_owned = key.clone();
+            let key_owned = local_storage_key(tenant_id, key);
             let s = Arc::clone(&storage);
             let write_result =
                 tokio::task::spawn_blocking(move || s.write_object(&key_owned, &data))
@@ -769,18 +785,19 @@ impl MooncakeClient {
             }
 
             offloaded += 1;
-            success_keys.push(key.clone());
+            success_tasks.push(task.clone());
             metadatas.push(proto::StorageObjectMetadata {
                 bucket_id: 0,
                 offset: 0,
                 key_size: key.len() as i64,
-                data_size: *size,
+                data_size: task.size,
                 transport_endpoint: transport_endpoint.clone(),
             });
         }
 
-        if !success_keys.is_empty() {
-            self.notify_offload_success(success_keys, metadatas).await?;
+        if !success_tasks.is_empty() {
+            self.notify_offload_success_tasks(success_tasks, metadatas)
+                .await?;
         }
 
         Ok(offloaded)
@@ -809,8 +826,8 @@ impl MooncakeClient {
     ///
     /// 返回成功 promotion 的对象数量。
     pub async fn promote_objects(&mut self) -> StoreResult<usize> {
-        let objects = self.promotion_object_heartbeat().await?;
-        if objects.is_empty() {
+        let tasks = self.promotion_object_heartbeat_tasks().await?;
+        if tasks.is_empty() {
             return Ok(0);
         }
 
@@ -821,9 +838,18 @@ impl MooncakeClient {
 
         let mut promoted = 0usize;
 
-        for (key, size) in &objects {
+        for task in &tasks {
+            let key = task.key.as_str();
+            let tenant_id = task.tenant_id.as_str();
+            if task.size < 0 {
+                tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "promotion: invalid negative task size");
+                let _ = self
+                    .notify_promotion_failure_for_tenant(key, tenant_id)
+                    .await;
+                continue;
+            }
             // Read from local disk (blocking I/O).
-            let key_owned = key.clone();
+            let key_owned = local_storage_key(tenant_id, key);
             let data = {
                 let s = Arc::clone(&storage);
                 tokio::task::spawn_blocking(move || s.read_object(&key_owned))
@@ -832,11 +858,16 @@ impl MooncakeClient {
             };
 
             // Allocate a memory replica.
-            let replica = match self.promotion_alloc_start(key, *size as u64, vec![]).await {
+            let replica = match self
+                .promotion_alloc_start_for_tenant(key, tenant_id, task.size as u64, vec![])
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(target: "storage_debug", %key, %e, "promotion: alloc failed");
-                    let _ = self.notify_promotion_failure(key).await;
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "promotion: alloc failed");
+                    let _ = self
+                        .notify_promotion_failure_for_tenant(key, tenant_id)
+                        .await;
                     continue;
                 }
             };
@@ -844,12 +875,15 @@ impl MooncakeClient {
             // Write data to the allocated memory replica.
             match self.write_to_replica(&replica, &data).await {
                 Ok(()) => {
-                    self.notify_promotion_success(key).await?;
+                    self.notify_promotion_success_for_tenant(key, tenant_id)
+                        .await?;
                     promoted += 1;
                 }
                 Err(e) => {
-                    tracing::warn!(target: "storage_debug", %key, %e, "promotion: write_to_replica failed");
-                    let _ = self.notify_promotion_failure(key).await;
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "promotion: write_to_replica failed");
+                    let _ = self
+                        .notify_promotion_failure_for_tenant(key, tenant_id)
+                        .await;
                 }
             }
         }

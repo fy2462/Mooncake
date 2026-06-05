@@ -1,5 +1,6 @@
 mod common;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use common::proto_uuid;
 use mooncake_store_master::oplog::{InMemoryOpLog, OpLogManager};
 use mooncake_store_master::proto;
@@ -33,6 +34,17 @@ fn service_with_oplog(config: MasterRuntimeConfig) -> MasterServiceImpl {
             0,
         )),
     )
+}
+
+fn decode_oplog_payload(payload: &str) -> serde_json::Value {
+    if let Ok(value) = serde_json::from_str(payload) {
+        return value;
+    }
+    let encoded = payload
+        .strip_prefix("msgpack:")
+        .expect("expected legacy JSON or msgpack oplog payload");
+    let bytes = BASE64_STANDARD.decode(encoded).unwrap();
+    rmp_serde::from_slice(&bytes).unwrap()
 }
 
 async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str, size: u64) {
@@ -160,7 +172,7 @@ async fn test_remove_by_regex_records_remove_oplog() {
         .collect::<Vec<_>>();
     assert!(
         records.iter().any(|record| {
-            let payload: serde_json::Value = serde_json::from_str(&record.payload).unwrap();
+            let payload = decode_oplog_payload(&record.payload);
             payload["op"] == "remove"
                 && payload["key"]
                     .as_str()

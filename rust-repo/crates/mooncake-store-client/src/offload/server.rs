@@ -19,6 +19,14 @@ use tonic::{Request, Response, Status};
 /// Peers must complete their RDMA read within this window.
 const DEFAULT_GC_TTL_MS: u64 = 30_000;
 
+fn local_storage_key(tenant_id: &str, key: &str) -> String {
+    if tenant_id.is_empty() {
+        key.to_string()
+    } else {
+        format!("{tenant_id}\0{key}")
+    }
+}
+
 /// gRPC handler implementing the OffloadReadService.
 pub(crate) struct OffloadReadHandler {
     pub storage: Arc<LocalStorageBackend>,
@@ -39,15 +47,24 @@ impl OffloadReadService for OffloadReadHandler {
     ) -> Result<Response<BatchGetOffloadObjectResponse>, Status> {
         let req = request.into_inner();
         let n = req.keys.len();
+        if !req.tenant_ids.is_empty() && req.tenant_ids.len() != n {
+            return Err(Status::invalid_argument(format!(
+                "tenant_ids length {} does not match keys length {}",
+                req.tenant_ids.len(),
+                n
+            )));
+        }
 
         let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(n);
         let mut pointers: Vec<u64> = Vec::with_capacity(n);
 
         // Read each key from local SSD.
         for i in 0..n {
+            let tenant_id = req.tenant_ids.get(i).map(String::as_str).unwrap_or("");
+            let storage_key = local_storage_key(tenant_id, &req.keys[i]);
             let data = self
                 .storage
-                .read_object(&req.keys[i])
+                .read_object(&storage_key)
                 .map_err(|e| Status::internal(format!("read {} failed: {e}", req.keys[i])))?;
             buffers.push(data);
         }

@@ -38,6 +38,7 @@
 //   EtcdOpLogStore: etcd 键值存储，适合分布式部署。
 
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
+use crate::metrics;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use mooncake_store_core::ReplicaDescriptor;
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,7 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
 use xxhash_rust::xxh32::xxh32;
@@ -1090,24 +1091,40 @@ impl EtcdOpLogStore {
         if self.buffer.is_empty() {
             return Ok(());
         }
+        let started = Instant::now();
         let c = self.client.clone();
         for entry in &self.buffer {
             let key = self.entry_key(entry.seq);
             let value = serialize_etcd_oplog_value(entry)?;
-            c.kv_client()
+            if let Err(e) = c
+                .kv_client()
                 .put(key.as_bytes(), value.as_bytes(), None)
                 .await
-                .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog: {e}")))?;
+            {
+                metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
+                metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
+                return Err(HaError::InvalidBackend(format!("etcd put oplog: {e}")));
+            }
         }
         // Update latest pointer
         let max_seq = self.buffer.last().unwrap().seq;
         let latest_val = max_seq.to_string();
-        c.kv_client()
+        if let Err(e) = c
+            .kv_client()
             .put(self.latest_key().as_bytes(), latest_val.as_bytes(), None)
             .await
-            .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog latest: {e}")))?;
+        {
+            metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
+            metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
+            return Err(HaError::InvalidBackend(format!(
+                "etcd put oplog latest: {e}"
+            )));
+        }
 
         self.buffer.clear();
+        metrics::OPLOG_BATCH_COMMITS.inc();
+        metrics::OPLOG_SYNC_BATCH_COMMITS.inc();
+        metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
         Ok(())
     }
 }
@@ -1392,9 +1409,9 @@ impl EtcdOpLogStore {
         let mut entries = Vec::new();
         let c = self.client.clone();
 
-        // Range query: from seq_N to seq_MAX across the key prefix
+        // C++ ReadOpLogSinceWithRevision returns entries strictly after start_sequence_id.
         let range_end = self.entry_key(u64::MAX);
-        let range_start = self.entry_key(since_seq);
+        let range_start = self.entry_key(since_seq.saturating_add(1));
 
         let revision = match c
             .kv_client()
@@ -1427,7 +1444,7 @@ impl EtcdOpLogStore {
 
         // Supplement with buffered (not yet flushed) entries
         for entry in &self.buffer {
-            if entry.seq >= since_seq
+            if entry.seq > since_seq
                 && entries.len() < max_count
                 && !entries.iter().any(|e| e.seq == entry.seq)
             {
@@ -1528,7 +1545,7 @@ impl EtcdOpLogStore {
                 Ok((delivered_last_seq, read_revision)) => {
                     if delivered_last_seq > last_seq {
                         last_seq = delivered_last_seq;
-                        next_read_seq = last_seq.saturating_add(1);
+                        next_read_seq = last_seq;
                     }
                     if read_revision > 0 {
                         next_watch_revision = read_revision.saturating_add(1);
@@ -1562,6 +1579,7 @@ impl EtcdOpLogStore {
                 Ok(watch) => watch,
                 Err(e) => {
                     let err = HaError::InvalidBackend(format!("etcd watch oplog: {e}"));
+                    metrics::OPLOG_WATCH_DISCONNECTIONS.inc();
                     set_etcd_watch_health(&health, false);
                     on_error(err.clone());
                     consecutive_errors = consecutive_errors.saturating_add(1);
@@ -1601,6 +1619,7 @@ impl EtcdOpLogStore {
                                 "etcd watch canceled: {}",
                                 response.cancel_reason()
                             ));
+                            metrics::OPLOG_WATCH_DISCONNECTIONS.inc();
                             set_etcd_watch_health(&health, false);
                             on_error(err);
                             break;
@@ -1633,7 +1652,7 @@ impl EtcdOpLogStore {
                                 Ok(entry) => {
                                     if entry.seq > last_seq {
                                         last_seq = entry.seq;
-                                        next_read_seq = entry.seq.saturating_add(1);
+                                        next_read_seq = entry.seq;
                                         on_entry(entry);
                                     }
                                     consecutive_errors = 0;
@@ -1651,12 +1670,14 @@ impl EtcdOpLogStore {
                     }
                     Ok(None) => {
                         let err = HaError::InvalidBackend("etcd watch stream closed".to_string());
+                        metrics::OPLOG_WATCH_DISCONNECTIONS.inc();
                         set_etcd_watch_health(&health, false);
                         on_error(err);
                         break;
                     }
                     Err(e) => {
                         let err = HaError::InvalidBackend(format!("etcd watch stream: {e}"));
+                        metrics::OPLOG_WATCH_DISCONNECTIONS.inc();
                         set_etcd_watch_health(&health, false);
                         on_error(err);
                         break;
@@ -1699,7 +1720,7 @@ impl EtcdOpLogStore {
             for entry in historical {
                 if entry.seq > last_seq {
                     last_seq = entry.seq;
-                    read_seq = entry.seq.saturating_add(1);
+                    read_seq = entry.seq;
                     on_entry(entry);
                 }
             }

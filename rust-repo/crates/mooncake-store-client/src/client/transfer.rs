@@ -238,9 +238,17 @@ impl MooncakeClient {
         &mut self,
         key: &str,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        self.fetch_replicas_for_tenant(key, "").await
+    }
+
+    pub(crate) async fn fetch_replicas_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
         let request = proto::GetReplicaListRequest {
             key: key.to_string(),
-            tenant_id: String::new(),
+            tenant_id: tenant_id.to_string(),
         };
         let response = self
             .master
@@ -724,6 +732,15 @@ impl MooncakeClient {
         key: &str,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
+        self.read_from_replica_for_tenant(key, "", replica).await
+    }
+
+    pub(crate) async fn read_from_replica_for_tenant(
+        &self,
+        key: &str,
+        tenant_id: &str,
+        replica: &ReplicaDescriptor,
+    ) -> StoreResult<Vec<u8>> {
         tracing::info!(
             target: "te_debug",
             seg_name = %replica.segment_name,
@@ -742,7 +759,9 @@ impl MooncakeClient {
         if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
             && !self.is_local_replica(replica)
         {
-            return self.read_from_remote_local_disk(key, replica).await;
+            return self
+                .read_from_remote_local_disk(key, tenant_id, replica)
+                .await;
         }
 
         // Fast path: local segment — direct memcpy, no TE overhead.
@@ -942,88 +961,5 @@ impl MooncakeClient {
         self.engine.close_segment(segment_id)?;
         tracing::info!(target: "te_debug", transferred, "zero_copy_read: EXIT (success)");
         Ok(transferred as usize)
-    }
-
-    /// Read data from a remote LOCAL_DISK replica via P2P offload RPC.
-    ///
-    /// C++ equivalent: `RealClient::batch_get_into_offload_object_internal`
-    ///
-    /// 通过 P2P 卸载 RPC 从远端 LOCAL_DISK 副本读取数据。
-    async fn read_from_remote_local_disk(
-        &self,
-        key: &str,
-        replica: &ReplicaDescriptor,
-    ) -> StoreResult<Vec<u8>> {
-        let peer_addr = &replica.segment_name;
-        let size = replica.size as i64;
-
-        tracing::info!(
-            target: "te_debug",
-            peer_addr,
-            replica_size = replica.size,
-            "read_from_remote_local_disk: dispatching P2P offload read"
-        );
-
-        let result = crate::offload::client::batch_get_offload_objects(
-            peer_addr,
-            &[key.to_string()],
-            &[size],
-        )
-        .await
-        .map_err(|e| StoreError::Internal(format!("P2P offload read: {e}")))?;
-
-        // Read data from peer's TE buffer into our local_buffer.
-        let seg_id = self
-            .engine
-            .open_segment(&result.transfer_engine_addr)
-            .map_err(|e| StoreError::Internal(format!("open peer segment: {e}")))?;
-        let batch_id = match self.engine.allocate_batch_id(1) {
-            Ok(batch_id) => batch_id,
-            Err(e) => {
-                let _ = self.engine.close_segment(seg_id);
-                return Err(StoreError::Internal(format!("allocate batch: {e}")));
-            }
-        };
-
-        let read_len = replica.size as usize;
-        let request = TransferRequest {
-            opcode: Opcode::Read,
-            source: self.local_buffer.as_ptr() as *mut c_void,
-            target_id: seg_id,
-            target_offset: result.pointers[0],
-            length: read_len as u64,
-        };
-
-        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(seg_id);
-            return Err(StoreError::Internal(format!(
-                "submit offload transfer: {e}"
-            )));
-        }
-
-        if let Err(e) = self
-            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
-            .await
-        {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(seg_id);
-            return Err(StoreError::Internal(format!("poll offload transfer: {e}")));
-        }
-
-        if let Err(e) = self.engine.free_batch_id(batch_id) {
-            let _ = self.engine.close_segment(seg_id);
-            return Err(StoreError::Internal(format!("free offload batch: {e}")));
-        }
-        let _ = self.engine.close_segment(seg_id);
-
-        // Fire-and-forget: release remote buffer.
-        let release_addr = peer_addr.to_string();
-        tokio::spawn(async move {
-            crate::offload::client::release_offload_buffer(&release_addr, result.batch_id).await;
-        });
-
-        let data = self.local_buffer[..read_len].to_vec();
-        Ok(data)
     }
 }

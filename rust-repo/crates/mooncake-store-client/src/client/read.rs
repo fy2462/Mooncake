@@ -7,10 +7,19 @@
 
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use std::borrow::Cow;
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
 use super::{BufferHandle, MooncakeClient};
+
+fn scoped_cache_key<'a>(tenant_id: &str, key: &'a str) -> Cow<'a, str> {
+    if tenant_id.is_empty() {
+        Cow::Borrowed(key)
+    } else {
+        Cow::Owned(format!("{tenant_id}\0{key}"))
+    }
+}
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------
@@ -60,12 +69,21 @@ impl MooncakeClient {
     /// - `Err(KeyNotFound)` — key not in store and no remote source available.
     ///   key 不在存储中且没有可用的远程数据源。
     pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
+        self.get_for_tenant(key, "").await
+    }
+
+    pub(crate) async fn get_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+    ) -> StoreResult<Vec<u8>> {
         tracing::info!(target: "te_debug", %key, "get: ENTER");
+        let cache_key = scoped_cache_key(tenant_id, key);
 
         // Level 0: check local hot cache (fastest — no network)
         // 第 0 级：检查本地热缓存（最快 —— 零网络开销）
         if let Some(ref cache) = self.hot_cache {
-            if let Some(data) = cache.get(key) {
+            if let Some(data) = cache.get(cache_key.as_ref()) {
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: HIT hot cache");
                 return Ok(data);
             }
@@ -74,7 +92,7 @@ impl MooncakeClient {
         // Level 1: fetch from memory store (gRPC → RDMA)
         // 第 1 级：从内存存储获取（gRPC → RDMA）
         tracing::info!(target: "te_debug", %key, "get: fetching replicas from master");
-        let replicas = self.fetch_replicas(key).await?;
+        let replicas = self.fetch_replicas_for_tenant(key, tenant_id).await?;
         tracing::info!(target: "te_debug", %key, replica_count = replicas.len(), "get: replicas received");
 
         let replica = self.select_best_replica(&replicas);
@@ -86,11 +104,11 @@ impl MooncakeClient {
                     replica_type = ?r.replica_type,
                     "get: selected replica, calling read_from_replica"
                 );
-                let data = self.read_from_replica(key, r).await?;
+                let data = self.read_from_replica_for_tenant(key, tenant_id, r).await?;
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: read_from_replica success");
                 // Store in hot cache for future hits / 存入 hot_cache 以供将来命中
                 if let Some(ref cache) = self.hot_cache {
-                    cache.put(key, &data);
+                    cache.put(cache_key.as_ref(), &data);
                 }
                 Ok(data)
             }
@@ -104,7 +122,7 @@ impl MooncakeClient {
                             Ok(data) => {
                                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: remote source success");
                                 if let Some(ref cache) = self.hot_cache {
-                                    cache.put(key, &data);
+                                    cache.put(cache_key.as_ref(), &data);
                                 }
                                 Ok(data)
                             }

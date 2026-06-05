@@ -23,6 +23,8 @@ message BatchGetOffloadObjectRequest {
   repeated string keys = 1;
   // Total size (bytes) for each key.
   repeated int64 sizes = 2;
+  // Tenant IDs for each key. Empty or omitted means default/legacy tenant.
+  repeated string tenant_ids = 3;
 }
 
 // Response containing pointers to the data in the peer's TE buffers.
