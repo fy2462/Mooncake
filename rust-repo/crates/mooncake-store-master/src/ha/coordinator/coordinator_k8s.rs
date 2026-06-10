@@ -1,9 +1,13 @@
+use super::coordinator_common::{clear_active_owner_token_if_matches, validate_session};
 use super::*;
 use futures_util::{pin_mut, StreamExt};
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use kube::api::{PostParams, WatchEvent, WatchParams};
 use kube::{Api, Client, ResourceExt};
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
+use tracing::{error, info};
 
 const K8S_OPERATION_MAX_ATTEMPTS: usize = 5;
 const K8S_OPERATION_INITIAL_BACKOFF_MS: u64 = 50;
@@ -214,6 +218,41 @@ pub(super) async fn renew_k8s_lease(
     Err(HaError::InvalidBackend(format!(
         "k8s renew lease exhausted {K8S_OPERATION_MAX_ATTEMPTS} attempts"
     )))
+}
+
+pub(super) fn start_k8s_keepalive(
+    namespace: &str,
+    lease_name: &str,
+    session: &LeadershipSession,
+    role_tx: watch::Sender<LeaderRole>,
+    active_owner_token: Arc<Mutex<Option<String>>>,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), HaError> {
+    validate_session(session)?;
+    let owner_token = session.owner_token.clone();
+    let namespace = namespace.to_string();
+    let lease_name = lease_name.to_string();
+    let session = session.clone();
+    tokio::spawn(async move {
+        let sleep_for = std::cmp::max(Duration::from_secs(1), session.lease_ttl / 2);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(sleep_for) => {
+                    if let Err(e) = renew_k8s_lease(&namespace, &lease_name, &session).await {
+                        error!("K8s lease keepalive failed: {}, leadership lost", e);
+                        let _ = role_tx.send(LeaderRole::Standby);
+                        clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+                        return;
+                    }
+                }
+                _ = &mut cancel_rx => {
+                    info!("K8s leadership keepalive cancelled");
+                    return;
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 pub(super) async fn release_k8s_lease(

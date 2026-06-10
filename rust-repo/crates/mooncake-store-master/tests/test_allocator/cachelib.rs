@@ -346,4 +346,3 @@ fn test_cachelib_like_for_each_allocation_reports_slots_and_skips_releasing_slab
     assert_eq!(skipped_after, 1);
     a.abort_slab_release(&seg_id, &ctx).unwrap();
 }
-

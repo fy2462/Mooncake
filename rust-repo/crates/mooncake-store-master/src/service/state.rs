@@ -371,4 +371,3 @@ pub(crate) struct PromotionTaskEntry {
     /// 任务开始时间 / Task start time.
     pub(crate) start_time: Instant,
 }
-

@@ -314,9 +314,9 @@ impl OpLogStore for InMemoryOpLog {
 mod oplog_etcd;
 mod oplog_local;
 mod oplog_manager;
-#[cfg(test)]
-mod oplog_tests;
 mod oplog_wire;
+#[doc(hidden)]
+pub mod test_support;
 
 pub use oplog_etcd::EtcdOpLogStore;
 pub use oplog_local::LocalFsOpLogStore;

@@ -496,5 +496,4 @@ impl MasterServiceImpl {
             .collect();
         Ok(Response::new(proto::BatchUpsertRevokeResponse { statuses }))
     }
-
 }

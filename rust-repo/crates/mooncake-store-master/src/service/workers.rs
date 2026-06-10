@@ -30,8 +30,6 @@ use super::helpers::{
 use super::state::{MasterState, NoFHeartbeatState};
 
 mod nof_heartbeat;
-#[cfg(test)]
-mod workers_tests;
 pub(crate) use nof_heartbeat::NofHeartbeatWorker;
 
 /// 优雅卸载记录：segment 被标记为待卸载后不会立即移除，
@@ -438,4 +436,3 @@ impl DrainWorker {
         }
     }
 }
-

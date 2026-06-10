@@ -1,4 +1,12 @@
-use super::*;
+use clap::Parser;
+use mooncake_store_master::ha::{HABackendSpec, HABackendType, HaError};
+use mooncake_store_master::main_args::Args;
+use mooncake_store_master::main_config::{
+    build_ha_spec, build_master_service, build_runtime_config, create_coordinator,
+    snapshot_dir_for_cluster, validate_rpc_protocol,
+};
+use std::sync::Arc;
+use std::time::Duration;
 
 fn base_args() -> Args {
     Args {

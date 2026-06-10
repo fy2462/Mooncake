@@ -229,4 +229,3 @@ fn reap_client_tasks(state: &MasterState) {
         state.tasks.remove(&task_id);
     }
 }
-

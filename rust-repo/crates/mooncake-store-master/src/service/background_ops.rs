@@ -473,4 +473,3 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
         },
     );
 }
-
