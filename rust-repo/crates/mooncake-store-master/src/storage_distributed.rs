@@ -41,7 +41,6 @@ pub trait FileSystemAdapter: Send + Sync {
         Ok(result)
     }
 }
-
 #[derive(Debug, Default)]
 pub struct PosixFsAdapter;
 
@@ -50,15 +49,12 @@ impl FileSystemAdapter for PosixFsAdapter {
         fs::create_dir_all(mount_path)?;
         Ok(())
     }
-
     fn shutdown(&self) -> StorageResult<()> {
         Ok(())
     }
-
     fn name(&self) -> &'static str {
         "posix"
     }
-
     fn write_file(&self, path: &Path, data: &[u8]) -> StorageResult<usize> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -67,7 +63,6 @@ impl FileSystemAdapter for PosixFsAdapter {
         file.write_all(data)?;
         Ok(data.len())
     }
-
     fn read_file(&self, path: &Path) -> StorageResult<Vec<u8>> {
         Ok(fs::read(path)?)
     }

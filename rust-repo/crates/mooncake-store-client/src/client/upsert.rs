@@ -34,9 +34,10 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use super::{
-    determine_finalize_decision, MooncakeClient, ReplicaFinalizeDecision, ReplicaTransferSummary,
+    finalize::{determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary},
+    MooncakeClient,
 };
-use crate::client::batches::BatchUpsertEntry;
+use crate::client::batch_types::BatchUpsertEntry;
 use crate::proto;
 
 impl MooncakeClient {

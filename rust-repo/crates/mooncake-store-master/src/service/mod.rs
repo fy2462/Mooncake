@@ -10,8 +10,6 @@
 //! - Sub-modules for: objects CRUD, cluster management, replica replication,
 //!   task queue, batch operations, background workers, periodic ops, etc.
 //!
-//! ## 架构 / Architecture
-//!
 //! ```text
 //! MasterServiceImpl
 //!   ├── state: Arc<MasterState>      — 共享并发安全的全局状态
@@ -27,6 +25,9 @@ mod background_ops;
 pub mod cluster;
 mod grpc_batches;
 mod grpc_objects;
+mod grpc_objects_put;
+mod grpc_objects_query;
+mod grpc_objects_upsert;
 mod grpc_replication;
 mod grpc_tasks;
 mod grpc_trait;
