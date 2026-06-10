@@ -144,7 +144,12 @@ impl EventManager {
     /// 订阅单个服务：创建 ZMQ 客户端、事件处理器，并启动后台线程运行 ZMQ 事件循环。
     /// 通过 service key（instance_id + tenant_id + dp_rank）去重。
     fn subscribe_to_service(&self, svc: &ServiceConfig) -> Result<(), String> {
-        let svc_key = make_service_key(&svc.instance_id, &svc.tenant_id, svc.dp_rank);
+        let svc_key = make_service_key_for_endpoint(
+            &svc.instance_id,
+            &svc.endpoint,
+            &svc.tenant_id,
+            svc.dp_rank,
+        );
 
         // Already subscribed — skip. / 已订阅 —— 跳过。
         if self.subscribers.contains_key(&svc_key) {
@@ -187,6 +192,12 @@ impl EventManager {
 
         self.subscribers.insert(svc_key.clone(), client.clone());
         self.active_configs.insert(svc_key.clone(), svc.clone());
+        self.http_state
+            .subscribers
+            .insert(svc_key.clone(), client.clone());
+        self.http_state
+            .active_configs
+            .insert(svc_key.clone(), svc.clone());
 
         // Register instance in tenant → instance map for broadcast queries.
         // 在 tenant → instance 映射中注册实例，用于广播查询。

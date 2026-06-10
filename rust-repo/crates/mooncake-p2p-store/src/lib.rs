@@ -67,8 +67,11 @@
 //! - MetadataStore uses etcd transactions for atomic compare-and-swap updates.
 //!   MetadataStore 使用 etcd 事务进行原子比较并交换更新。
 
+mod catalog;
 pub mod error;
+mod memory;
 pub mod metadata;
+mod replica;
 pub mod store;
 
 pub use error::P2pStoreError;

@@ -362,9 +362,11 @@ fn test_metadata_key_prefix() {
 fn test_p2p_store_error_display_all() {
     let cases: Vec<(&str, P2pStoreError)> = vec![
         ("invalid arguments", P2pStoreError::InvalidArgument),
+        ("address overlapped", P2pStoreError::AddressOverlapped),
         ("payload already opened", P2pStoreError::PayloadOpened),
         ("payload not opened", P2pStoreError::PayloadNotOpened),
         ("payload not found", P2pStoreError::PayloadNotFound),
+        ("too many retries", P2pStoreError::TooManyRetries),
         ("transfer engine error", P2pStoreError::TransferEngine),
         (
             "metadata store error: etcd timeout",

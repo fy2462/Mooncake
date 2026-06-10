@@ -148,3 +148,21 @@ fn test_add_dp_size() {
     let view = table.get_global_view();
     assert!(view.context_count >= 1);
 }
+
+#[test]
+fn test_clear_model_context_removes_global_view_entry() {
+    let table = PrefixCacheTable::new();
+    let ctx = ModelContext {
+        model_name: "test-model".into(),
+        lora_name: "".into(),
+        block_size: 2,
+        additional_salt: "".into(),
+        tenant_id: "default".into(),
+    };
+
+    table.add_dp_size(&ctx, "instance-1", 0);
+    assert_eq!(table.get_global_view().context_count, 1);
+
+    table.clear_model_context("test-model", "", 2, "", "default");
+    assert_eq!(table.get_global_view().context_count, 0);
+}

@@ -11,6 +11,7 @@
 // 对应 Go conductor kvevent/event_manager.go 中的 HTTP 端点。
 // ============================================================================
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,8 +26,10 @@ use axum::{
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use crate::event_handler::KVEventHandler;
 use crate::prefix_index::{ModelContext, PrefixCacheTable};
 use crate::types::*;
+use crate::zmq_client::{self, ZmqClient, ZmqClientConfig};
 
 // ----------------------------------------------------------------------------
 // Shared application state / 共享应用状态
@@ -40,12 +43,15 @@ pub struct AppState {
     /// Shared prefix cache index. / 共享前缀缓存索引。
     pub indexer: Arc<PrefixCacheTable>,
     /// Active subscribers (for unregister). / 活跃的订阅者（用于注销）。
-    pub subscribers: dashmap::DashMap<String, ()>,
+    pub subscribers: dashmap::DashMap<String, Arc<ZmqClient>>,
     /// Active service configs (for unregister). / 活跃的服务配置（用于注销）。
     pub active_configs: dashmap::DashMap<String, ServiceConfig>,
     /// Tenant → instance_id set mapping for broadcast queries.
     /// 租户 → 实例 ID 集合映射，用于广播查询。
     pub tenant_instance_map: parking_lot::RwLock<HashMap<String, HashMap<String, ()>>>,
+    /// Background ZMQ event-loop threads started by dynamic registration.
+    /// 动态注册启动的后台 ZMQ event-loop 线程。
+    pub thread_handles: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl AppState {
@@ -55,6 +61,7 @@ impl AppState {
             subscribers: dashmap::DashMap::new(),
             active_configs: dashmap::DashMap::new(),
             tenant_instance_map: parking_lot::RwLock::new(HashMap::new()),
+            thread_handles: Mutex::new(Vec::new()),
         }
     }
 }
@@ -206,7 +213,8 @@ async fn register_handler(
         additional_salt: additional_salt.clone(),
     };
 
-    let svc_key = make_service_key(&svc.instance_id, &svc.tenant_id, svc.dp_rank);
+    let svc_key =
+        make_service_key_for_endpoint(&svc.instance_id, &svc.endpoint, &svc.tenant_id, svc.dp_rank);
 
     // Idempotent: if already registered, return success without side effects.
     // 幂等：如果已注册，无副作用返回成功。
@@ -217,7 +225,10 @@ async fn register_handler(
         })));
     }
 
-    state.active_configs.insert(svc_key, svc.clone());
+    let client = subscribe_dynamic_service(&state, &svc, &svc_key)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state.subscribers.insert(svc_key.clone(), client);
+    state.active_configs.insert(svc_key.clone(), svc.clone());
 
     // Register in tenant → instance map for broadcast queries.
     // 在 tenant → instance 映射中注册，用于广播查询。
@@ -259,16 +270,36 @@ async fn unregister_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let target_tenant = req.tenant_id.as_deref().unwrap_or("default").to_string();
     let target_key = make_service_key(&req.instance_id, &target_tenant, req.dp_rank);
+    let target_lora = req.lora_name.clone().unwrap_or_default();
 
-    if !state.active_configs.contains_key(&target_key) {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("service not found: {}", target_key),
-        ));
+    let resolved_key = if state.active_configs.contains_key(&target_key) {
+        target_key.clone()
+    } else {
+        state
+            .active_configs
+            .iter()
+            .find(|entry| {
+                let svc = entry.value();
+                svc.instance_id == req.instance_id
+                    && svc.tenant_id == target_tenant
+                    && svc.dp_rank == req.dp_rank
+                    && svc.service_type == req.service_type
+                    && svc.model_name == req.modelname
+                    && svc.lora_name == target_lora
+            })
+            .map(|entry| entry.key().clone())
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    format!("service not found: {}", target_key),
+                )
+            })?
+    };
+
+    if let Some((_, client)) = state.subscribers.remove(&resolved_key) {
+        client.stop();
     }
-
-    state.subscribers.remove(&target_key);
-    state.active_configs.remove(&target_key);
+    state.active_configs.remove(&resolved_key);
 
     // Clean up tenant instance map. / 清理租户实例映射。
     {
@@ -278,11 +309,55 @@ async fn unregister_handler(
         }
     }
 
-    info!("Dynamic unregister: key={}", target_key);
+    info!("Dynamic unregister: key={}", resolved_key);
     Ok(Json(json!({
         "status": "unregistered successfully",
-        "removed_instances": [target_key],
+        "removed_instances": [resolved_key],
     })))
+}
+
+struct HttpEventHandler(Arc<KVEventHandler>);
+
+impl zmq_client::EventHandler for HttpEventHandler {
+    fn handle_event(&self, event: &KVEventData, dp_rank: i64) {
+        self.0.handle_event(event, dp_rank);
+    }
+}
+
+fn subscribe_dynamic_service(
+    state: &Arc<AppState>,
+    svc: &ServiceConfig,
+    svc_key: &str,
+) -> Result<Arc<ZmqClient>, String> {
+    if svc.endpoint.is_empty() {
+        return Err("endpoint is required".into());
+    }
+    let handler = Arc::new(KVEventHandler {
+        instance_id: svc.instance_id.clone(),
+        model_name: svc.model_name.clone(),
+        lora_name: svc.lora_name.clone(),
+        block_size: svc.block_size,
+        additional_salt: svc.additional_salt.clone(),
+        tenant_id: svc.tenant_id.clone(),
+        indexer: state.indexer.clone(),
+    });
+    let zmq_handler: Arc<dyn zmq_client::EventHandler> = Arc::new(HttpEventHandler(handler));
+    let zmq_config = ZmqClientConfig {
+        cache_pool_key: svc_key.to_string(),
+        endpoint: svc.endpoint.clone(),
+        replay_endpoint: svc.replay_endpoint.clone(),
+        model_name: svc.model_name.clone(),
+        ..Default::default()
+    };
+    zmq_client::validate_config(&zmq_config)?;
+    let client = Arc::new(ZmqClient::new(zmq_config, zmq_handler)?);
+    client.start()?;
+    let client_for_thread = client.clone();
+    let handle = std::thread::spawn(move || {
+        client_for_thread.run_loop();
+    });
+    state.thread_handles.lock().push(handle);
+    Ok(client)
 }
 
 /// GET /global_view — diagnostic snapshot of all contexts.

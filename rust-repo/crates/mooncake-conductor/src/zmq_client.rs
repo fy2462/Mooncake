@@ -386,8 +386,11 @@ impl ZmqClient {
         // Set pod_name on each event for traceability.
         // 为每个事件设置 pod_name 以便追踪。
         for mut event in batch.events {
-            if let KVEventData::BlockStored(ref mut e) = event {
-                e.pod_name = self.config.cache_pool_key.clone();
+            match &mut event {
+                KVEventData::BlockStored(e) => e.pod_name = self.config.cache_pool_key.clone(),
+                KVEventData::BlockRemoved(e) => e.pod_name = self.config.cache_pool_key.clone(),
+                KVEventData::AllBlocksCleared(e) => e.pod_name = self.config.cache_pool_key.clone(),
+                KVEventData::BlockUpdate(e) => e.pod_name = self.config.cache_pool_key.clone(),
             }
             self.handler.handle_event(&event, batch.data_parallel_rank);
         }

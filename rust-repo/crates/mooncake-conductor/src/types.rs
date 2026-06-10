@@ -381,3 +381,17 @@ pub struct QueryRequest {
 pub fn make_service_key(instance_id: &str, tenant_id: &str, dp_rank: i64) -> String {
     format!("{}|{}|{}", instance_id, tenant_id, dp_rank)
 }
+
+pub fn make_service_key_for_endpoint(
+    instance_id: &str,
+    endpoint: &str,
+    tenant_id: &str,
+    dp_rank: i64,
+) -> String {
+    let id = if instance_id.is_empty() {
+        endpoint
+    } else {
+        instance_id
+    };
+    make_service_key(id, tenant_id, dp_rank)
+}

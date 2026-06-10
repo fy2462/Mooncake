@@ -88,3 +88,58 @@ fn test_decode_mooncake_invalid() {
     rmpv::encode::write_value(&mut buf, &batch).unwrap();
     assert!(decode_mooncake_event_batch(&buf).is_err());
 }
+
+#[test]
+fn test_decode_vllm_removed_and_cleared_events() {
+    let batch = Value::Array(vec![
+        Value::Integer(1700000000i64.into()),
+        Value::Array(vec![
+            Value::Array(vec![
+                Value::String("BlockRemoved".into()),
+                Value::Array(vec![Value::Integer(100u64.into())]),
+                Value::String("model-a".into()),
+                Value::String("pod-a".into()),
+            ]),
+            Value::Array(vec![
+                Value::String("AllBlocksCleared".into()),
+                Value::String("model-a".into()),
+                Value::String("pod-a".into()),
+            ]),
+        ]),
+        Value::Integer(0i64.into()),
+    ]);
+
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &batch).unwrap();
+
+    let result = decode_vllm_event_batch(&buf).unwrap();
+    assert_eq!(result.events.len(), 2);
+    assert_eq!(result.events[0].event_type(), EventType::BlockRemoved);
+    assert_eq!(result.events[1].event_type(), EventType::AllBlocksCleared);
+}
+
+#[test]
+fn test_decode_mooncake_block_update_event() {
+    let batch = Value::Array(vec![
+        Value::Integer(1700000000i64.into()),
+        Value::Array(vec![Value::Array(vec![
+            Value::String("BlockUpdateEvent".into()),
+            Value::Array(vec![Value::Integer(100u64.into())]),
+            Value::Integer(0u64.into()),
+            Value::Array(vec![
+                Value::Integer(1i64.into()),
+                Value::Integer(2i64.into()),
+            ]),
+            Value::Integer(2i64.into()),
+            Value::String("model-a".into()),
+            Value::String("pod-a".into()),
+        ])]),
+    ]);
+
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &batch).unwrap();
+
+    let result = decode_mooncake_event_batch(&buf).unwrap();
+    assert_eq!(result.events.len(), 1);
+    assert_eq!(result.events[0].event_type(), EventType::BlockUpdate);
+}

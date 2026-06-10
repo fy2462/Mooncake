@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::prefix_index::PrefixCacheTable;
 use crate::types::*;
@@ -58,7 +58,8 @@ impl KVEventHandler {
         match event {
             KVEventData::BlockStored(e) => self.handle_block_stored(e, dp_rank),
             KVEventData::BlockRemoved(e) => self.handle_block_removed(e, dp_rank),
-            _ => warn!("Unknown event type: {:?}", event.event_type()),
+            KVEventData::BlockUpdate(e) => self.handle_block_update(e, dp_rank),
+            KVEventData::AllBlocksCleared(e) => self.handle_all_blocks_cleared(e),
         }
     }
 
@@ -122,5 +123,43 @@ impl KVEventHandler {
         }
 
         debug!("handle_block_removed: removed_event={:?}", removed);
+    }
+
+    fn handle_block_update(&self, event: &BlockUpdateEvent, dp_rank: i64) {
+        let stored = StoredEvent {
+            block_hashes: event.block_hashes.clone(),
+            block_size: event.block_size,
+            model_name: choose_event_or_handler_model(&event.model_name, &self.model_name),
+            lora_name: self.lora_name.clone(),
+            instance_id: self.instance_id.clone(),
+            parent_block_hash: event.parent_block_hash,
+            token_ids: event.token_ids.clone(),
+            medium: "GPU".to_string(),
+        };
+        if let Err(e) = self
+            .indexer
+            .process_store_event(&stored, dp_rank, &self.instance_id)
+        {
+            error!("process block update failed: {}", e);
+        }
+    }
+
+    fn handle_all_blocks_cleared(&self, event: &AllBlocksClearedEvent) {
+        let model_name = choose_event_or_handler_model(&event.model_name, &self.model_name);
+        self.indexer.clear_model_context(
+            &model_name,
+            &self.lora_name,
+            self.block_size,
+            &self.additional_salt,
+            &self.tenant_id,
+        );
+    }
+}
+
+fn choose_event_or_handler_model(event_model: &str, handler_model: &str) -> String {
+    if event_model.is_empty() {
+        handler_model.to_string()
+    } else {
+        event_model.to_string()
     }
 }

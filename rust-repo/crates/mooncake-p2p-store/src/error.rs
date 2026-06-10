@@ -28,6 +28,11 @@ pub enum P2pStoreError {
     #[error("invalid arguments")]
     InvalidArgument,
 
+    /// Memory registration overlaps an existing registered range.
+    /// 内存注册范围与现有注册范围重叠。
+    #[error("address overlapped")]
+    AddressOverlapped,
+
     /// Attempted to register a payload that is already registered.
     /// A payload cannot be registered twice without first unregistering.
     /// 尝试注册一个已注册的负载。必须先取消注册再重新注册。
@@ -43,6 +48,11 @@ pub enum P2pStoreError {
     /// 在元数据存储（etcd）中未找到请求的负载。
     #[error("payload not found")]
     PayloadNotFound,
+
+    /// All source locations were tried and transfer still failed.
+    /// 所有源位置均已尝试但传输仍失败。
+    #[error("too many retries")]
+    TooManyRetries,
 
     /// The underlying Transfer Engine returned an error.
     /// This wraps all TransferEngine errors (memory registration, segment
