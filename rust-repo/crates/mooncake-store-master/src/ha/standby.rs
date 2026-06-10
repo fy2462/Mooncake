@@ -1,4 +1,8 @@
-use super::snapshot::LocalSnapshotProvider;
+use super::catalog_snapshot::create_catalog_backed_snapshot_provider;
+use super::snapshot::{
+    LoadedSnapshot, LocalSnapshotProvider, SnapshotCatalogStoreType, SnapshotObjectStoreType,
+    SnapshotProvider,
+};
 use super::types::{
     HABackendSpec, HABackendType, HaError, MasterRuntimeState, MasterView, RuntimeStateCallback,
     StandbyState, StandbySyncStatus,
@@ -30,6 +34,12 @@ pub struct MasterServiceSupervisorConfig {
     pub snapshot_backup_dir: Option<PathBuf>,
     /// Backend type for snapshot storage (e.g. JSON). / 快照存储的后端类型。
     pub snapshot_backend_type: Option<StorageBackendType>,
+    /// C++-compatible snapshot payload store. None preserves the legacy local provider.
+    pub snapshot_object_store_type: Option<SnapshotObjectStoreType>,
+    /// Catalog used to resolve the latest C++-compatible snapshot.
+    pub snapshot_catalog_store_type: SnapshotCatalogStoreType,
+    /// Optional catalog connection string; Redis falls back to the HA connection.
+    pub snapshot_catalog_store_connstring: Option<String>,
 }
 
 impl Default for MasterServiceSupervisorConfig {
@@ -40,7 +50,18 @@ impl Default for MasterServiceSupervisorConfig {
             enable_snapshot_restore: false,
             snapshot_backup_dir: None,
             snapshot_backend_type: None,
+            snapshot_object_store_type: None,
+            snapshot_catalog_store_type: SnapshotCatalogStoreType::Embedded,
+            snapshot_catalog_store_connstring: None,
         }
+    }
+}
+
+struct FailedSnapshotProvider(HaError);
+
+impl SnapshotProvider for FailedSnapshotProvider {
+    fn load_latest_snapshot(&self, _cluster_id: &str) -> Result<Option<LoadedSnapshot>, HaError> {
+        Err(self.0.clone())
     }
 }
 
@@ -265,7 +286,27 @@ impl CapabilityDrivenStandbyController {
         let mut service = HotStandbyService::new(state, service_config);
 
         if capabilities.has_snapshot_bootstrap {
-            if let (Some(dir), Some(backend_type)) =
+            if let Some(object_store_type) = config.snapshot_object_store_type {
+                let connstring = config
+                    .snapshot_catalog_store_connstring
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .or_else(|| {
+                        (!spec.connstring.trim().is_empty()).then_some(spec.connstring.as_str())
+                    });
+                match create_catalog_backed_snapshot_provider(
+                    config.cluster_id.clone(),
+                    object_store_type,
+                    config.snapshot_catalog_store_type,
+                    config.snapshot_backup_dir.clone(),
+                    connstring,
+                ) {
+                    Ok(provider) => service.set_snapshot_provider(Box::new(provider)),
+                    Err(error) => {
+                        service.set_snapshot_provider(Box::new(FailedSnapshotProvider(error)))
+                    }
+                }
+            } else if let (Some(dir), Some(backend_type)) =
                 (&config.snapshot_backup_dir, config.snapshot_backend_type)
             {
                 service.set_snapshot_provider(Box::new(LocalSnapshotProvider::new(

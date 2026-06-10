@@ -27,6 +27,7 @@
 //! | `storage_backend` | 快照持久化后端 (LocalDisk / HF3FS) |
 //! | `proto`       | 自动生成的 protobuf 代码 (tonic include) |
 
+pub mod admin_http;
 pub mod allocator;
 pub mod count_min_sketch;
 pub mod eviction;

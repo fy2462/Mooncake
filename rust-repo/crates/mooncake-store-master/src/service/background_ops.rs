@@ -21,7 +21,7 @@
 
 use crate::eviction::EvictionManager;
 use crate::proto;
-use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, TaskStatus};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::time::{Instant, SystemTime};
@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use super::helpers::{
     choose_drain_target_segment, client_id_by_segment_name, default_drain_target_segments,
-    is_lease_expired, memory_usage_ratio, release_replicas,
+    has_pending_task_capacity, is_lease_expired, memory_usage_ratio, release_replicas,
 };
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
@@ -104,6 +104,7 @@ pub(crate) fn release_staged_promotion_replica(
 pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
     let ttl = state.runtime_config.put_start_release_timeout;
     let system_now = SystemTime::now();
+    reap_client_tasks(state);
 
     // Reap expired PutStart objects. This mirrors C++ DiscardExpiredProcessingReplicas:
     // processing markers for complete/invalid objects are dropped, and timed-out
@@ -246,6 +247,50 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
     for key in stale_pulls {
         state.pending_remote_pulls.remove(&key);
         tracing::info!(key = %key, "reaped stale remote pull entry");
+    }
+}
+
+fn reap_client_tasks(state: &MasterState) {
+    let now = chrono::Utc::now();
+    let pending_timeout = state.runtime_config.pending_task_timeout;
+    let processing_timeout = state.runtime_config.processing_task_timeout;
+    for mut task in state.tasks.iter_mut() {
+        let (timeout, message) = match task.info.status {
+            TaskStatus::Pending if !pending_timeout.is_zero() => {
+                (pending_timeout, "pending timeout")
+            }
+            TaskStatus::Processing if !processing_timeout.is_zero() => {
+                (processing_timeout, "processing timeout")
+            }
+            _ => continue,
+        };
+        let elapsed = now
+            .signed_duration_since(if task.info.status == TaskStatus::Pending {
+                task.info.created_at
+            } else {
+                task.info.last_updated_at
+            })
+            .to_std()
+            .unwrap_or_default();
+        if elapsed > timeout {
+            task.info.status = TaskStatus::Failed;
+            task.info.message = message.to_string();
+            task.info.last_updated_at = now;
+        }
+    }
+
+    let mut finished = state
+        .tasks
+        .iter()
+        .filter(|task| matches!(task.info.status, TaskStatus::Success | TaskStatus::Failed))
+        .map(|task| (*task.key(), task.info.last_updated_at))
+        .collect::<Vec<_>>();
+    finished.sort_by_key(|(_, updated_at)| *updated_at);
+    let excess = finished
+        .len()
+        .saturating_sub(state.runtime_config.max_total_finished_tasks);
+    for (task_id, _) in finished.into_iter().take(excess) {
+        state.tasks.remove(&task_id);
     }
 }
 
@@ -880,6 +925,9 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             continue;
         };
         drop(object);
+        if !has_pending_task_capacity(state) {
+            break;
+        }
         let task_id = Uuid::new_v4();
         #[derive(Serialize)]
         struct ReplicaMovePayload {
@@ -909,7 +957,7 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
                 },
                 key: key.clone(),
                 payload,
-                max_retry_attempts: 3,
+                max_retry_attempts: state.runtime_config.max_task_retry_attempts,
             },
         );
         job.active_tasks.insert(

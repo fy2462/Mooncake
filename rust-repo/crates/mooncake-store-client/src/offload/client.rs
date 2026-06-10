@@ -9,7 +9,8 @@ use crate::offload_proto::{
 use tonic::transport::Channel;
 
 /// Result of a batch offload read from a peer.
-pub(crate) struct BatchOffloadResult {
+#[derive(Debug, Clone)]
+pub struct BatchOffloadResult {
     pub pointers: Vec<u64>,
     pub transfer_engine_addr: String,
     pub batch_id: u64,
@@ -18,7 +19,7 @@ pub(crate) struct BatchOffloadResult {
 /// Call a peer's OffloadReadService to read offloaded objects.
 ///
 /// C++ equivalent: `RealClient::batch_get_into_offload_object_internal` (RPC step).
-pub(crate) async fn batch_get_offload_objects(
+pub async fn batch_get_offload_objects(
     peer_addr: &str,
     keys: &[String],
     sizes: &[i64],
@@ -55,15 +56,16 @@ pub(crate) async fn batch_get_offload_objects(
 /// Release a batch on the peer (fire-and-forget).
 ///
 /// C++ equivalent: `ClientRequester::release_offload_buffer`
-pub(crate) async fn release_offload_buffer(peer_addr: &str, batch_id: u64) {
+pub async fn release_offload_buffer(peer_addr: &str, batch_id: u64) {
     let url = format!("http://{peer_addr}");
-    let channel = match Channel::from_shared(url)
-        .map_err(|e| format!("{e}"))
-        .and_then(|c| {
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async { c.connect().await.map_err(|e| format!("{e}")) })
-        }) {
-        Ok(c) => c,
+    let channel = match Channel::from_shared(url) {
+        Ok(channel) => match channel.connect().await {
+            Ok(channel) => channel,
+            Err(e) => {
+                tracing::warn!("release_offload_buffer: cannot connect to {peer_addr}: {e}");
+                return;
+            }
+        },
         Err(e) => {
             tracing::warn!("release_offload_buffer: cannot connect to {peer_addr}: {e}");
             return;

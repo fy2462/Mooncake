@@ -38,7 +38,6 @@ use crate::service::state::MasterState;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
-use uuid::Uuid;
 
 /// Configuration for the hot standby service.
 /// 热备服务的配置。
@@ -74,7 +73,19 @@ impl Default for HotStandbyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ha::SnapshotProvider;
     use crate::oplog::InMemoryOpLog;
+
+    struct FailingSnapshotProvider;
+
+    impl SnapshotProvider for FailingSnapshotProvider {
+        fn load_latest_snapshot(
+            &self,
+            _cluster_id: &str,
+        ) -> Result<Option<crate::ha::LoadedSnapshot>, HaError> {
+            Err(HaError::Snapshot("snapshot unavailable".into()))
+        }
+    }
 
     #[tokio::test]
     async fn test_oplog_following_applies_entries() {
@@ -102,6 +113,45 @@ mod tests {
         assert_eq!(status.primary_seq_id, 2);
         assert_eq!(status.lag_entries, 0);
 
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_only_bootstrap_propagates_snapshot_error() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(FailingSnapshotProvider));
+
+        assert!(matches!(
+            service.start().await,
+            Err(HaError::Snapshot(message)) if message == "snapshot unavailable"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_oplog_bootstrap_falls_back_when_snapshot_load_fails() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "cluster-a".to_string(),
+            },
+        );
+        service.set_snapshot_provider(Box::new(FailingSnapshotProvider));
+        service.set_oplog_store(Box::new(InMemoryOpLog::new(4)));
+
+        service.start().await.unwrap();
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
         service.stop();
     }
 }
@@ -239,69 +289,72 @@ impl HotStandbyService {
                 status.state = StandbyState::Recovering;
                 drop(status);
 
-                if let Ok(Some(snapshot)) = provider.load_latest_snapshot(&self.config.cluster_id) {
-                    // Restore memory segments into allocator
-                    // 恢复内存 segment 到分配器
-                    for seg in &snapshot.segments {
-                        let sid = seg.id;
-                        if !self.state.segments.contains_key(&sid) {
-                            self.state.segments.insert(
-                                sid,
-                                crate::service::SegmentEntry {
-                                    segment: seg.clone(),
-                                    status: crate::proto::SegmentStatus::Active,
-                                    used: 0,
-                                    client_id: Uuid::nil(),
-                                },
-                            );
-                            // Register with the memory allocator so future allocations work
-                            // 注册到内存分配器，以支持后续分配
-                            self.state
-                                .allocator
-                                .write()
-                                .add_segment(seg.clone(), 0, Uuid::nil());
+                match provider.load_latest_snapshot(&self.config.cluster_id) {
+                    Ok(Some(snapshot)) => {
+                        // Restore memory segments into allocator
+                        // 恢复内存 segment 到分配器
+                        for seg in &snapshot.segments {
+                            let sid = seg.segment.id;
+                            if !self.state.segments.contains_key(&sid) {
+                                self.state.segments.insert(sid, seg.clone());
+                                // Register with the memory allocator so future allocations work
+                                // 注册到内存分配器，以支持后续分配
+                                self.state.allocator.write().add_segment(
+                                    seg.segment.clone(),
+                                    seg.used,
+                                    seg.client_id,
+                                );
+                            }
                         }
-                    }
 
-                    // Restore NoF (file-based) segments into NoF allocator
-                    // 恢复 NoF（基于文件的）segment 到 NoF 分配器
-                    for nof in &snapshot.nof_segments {
-                        let sid = nof.segment.id;
-                        if !self.state.nof_segments.contains_key(&sid) {
-                            self.state.nof_segments.insert(sid, nof.clone());
-                            self.state.nof_allocator.write().add_segment(
-                                mooncake_store_core::Segment {
-                                    id: nof.segment.id,
-                                    name: nof.segment.name.clone(),
-                                    base: nof.segment.base,
-                                    size: nof.segment.size,
-                                    te_endpoint: nof.segment.te_endpoint.clone(),
-                                    protocol: String::new(),
-                                },
-                                nof.used,
-                                nof.segment.client_id,
-                            );
+                        // Restore NoF (file-based) segments into NoF allocator
+                        // 恢复 NoF（基于文件的）segment 到 NoF 分配器
+                        for nof in &snapshot.nof_segments {
+                            let sid = nof.segment.id;
+                            if !self.state.nof_segments.contains_key(&sid) {
+                                self.state.nof_segments.insert(sid, nof.clone());
+                                self.state.nof_allocator.write().add_segment(
+                                    mooncake_store_core::Segment {
+                                        id: nof.segment.id,
+                                        name: nof.segment.name.clone(),
+                                        base: nof.segment.base,
+                                        size: nof.segment.size,
+                                        te_endpoint: nof.segment.te_endpoint.clone(),
+                                        protocol: String::new(),
+                                    },
+                                    nof.used,
+                                    nof.segment.client_id,
+                                );
+                            }
                         }
-                    }
 
-                    // Restore objects and tasks
-                    // 恢复对象和任务
-                    for entry in &snapshot.objects {
-                        self.state.objects.insert(entry.0.clone(), entry.1.clone());
-                    }
-                    for task in &snapshot.tasks {
-                        self.state.tasks.insert(task.info.id, task.clone());
-                    }
+                        // Restore objects and tasks
+                        // 恢复对象和任务
+                        for entry in &snapshot.objects {
+                            self.state.objects.insert(entry.0.clone(), entry.1.clone());
+                        }
+                        for task in &snapshot.tasks {
+                            self.state.tasks.insert(task.info.id, task.clone());
+                        }
 
-                    let mut status = self.sync_status.write();
-                    status.applied_seq_id = snapshot.snapshot_sequence_id;
-                    baseline_seq_id = snapshot.snapshot_sequence_id;
-                    drop(status);
-                    info!(
-                        "Loaded snapshot with {} objects, {} segments",
-                        snapshot.objects.len(),
-                        snapshot.segments.len()
-                    );
+                        let mut status = self.sync_status.write();
+                        status.applied_seq_id = snapshot.snapshot_sequence_id;
+                        baseline_seq_id = snapshot.snapshot_sequence_id;
+                        drop(status);
+                        info!(
+                            "Loaded snapshot with {} objects, {} segments",
+                            snapshot.objects.len(),
+                            snapshot.segments.len()
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) if self.config.enable_oplog_following => {
+                        tracing::warn!(
+                            "Failed to load snapshot baseline, falling back to oplog-only bootstrap: {}",
+                            error
+                        );
+                    }
+                    Err(error) => return Err(error),
                 }
             }
         }

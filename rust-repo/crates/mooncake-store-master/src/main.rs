@@ -7,9 +7,12 @@
 //! between `run_standalone` (single-node) or `run_ha_loop` (HA leader/standby loop).
 
 use clap::Parser;
+use mooncake_store_master::admin_http::AdminRuntimeState;
 use mooncake_store_master::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use mooncake_store_master::ha::{
-    parse_ha_backend_type, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
+    create_catalog_backed_snapshot_provider, parse_ha_backend_type,
+    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
+    CatalogBackedSnapshotProvider, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
     LeadershipMonitorHandle, LeadershipSession, MasterServiceSupervisor,
     MasterServiceSupervisorConfig, MasterView,
 };
@@ -68,6 +71,18 @@ struct Args {
     #[arg(long, default_value_t = 5000)]
     default_kv_lease_ttl_ms: u64,
 
+    /// Client heartbeat TTL in seconds.
+    #[arg(
+        long,
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    client_ttl_secs: u64,
+
+    /// Root directory for storage backend paths returned to clients.
+    #[arg(long, default_value = "")]
+    root_fs_dir: String,
+
     /// 驱逐高水位比例 (0.0~1.0)，超过后触发自动驱逐
     /// Eviction high watermark ratio: auto-eviction triggers above this
     #[arg(long, default_value_t = 0.95)]
@@ -98,10 +113,74 @@ struct Args {
     #[arg(long)]
     offload_force_evict: bool,
 
+    /// Enable disk eviction feature for storage backend.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    enable_disk_eviction: bool,
+
+    /// Quota for storage backend in bytes; zero means client default.
+    #[arg(long, default_value_t = 0)]
+    quota_bytes: u64,
+
+    /// NoF heartbeat probe interval in seconds.
+    #[arg(
+        long,
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    nof_heartbeat_interval_sec: u64,
+
+    /// NoF heartbeat probe timeout in milliseconds.
+    #[arg(
+        long,
+        default_value_t = 1000,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    nof_heartbeat_probe_timeout_ms: u64,
+
+    /// Consecutive NoF heartbeat failures before unmounting a NoF segment.
+    #[arg(
+        long,
+        default_value_t = 3,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    nof_heartbeat_failures_threshold: u32,
+
+    /// Timeout for discarding uncompleted PutStart operations in seconds.
+    #[arg(long, default_value_t = 30)]
+    put_start_discard_timeout_sec: u64,
+
+    /// Timeout for releasing uncompleted PutStart allocations in seconds.
+    #[arg(long, default_value_t = 600)]
+    put_start_release_timeout_sec: u64,
+
     /// 每次 promotion heartbeat 返回给单个客户端的最大任务数
     /// Max promotion tasks returned to one client per heartbeat
     #[arg(long, default_value_t = 1)]
     promotion_max_per_heartbeat: usize,
+
+    /// Maximum number of completed client tasks retained by the master.
+    #[arg(long, default_value_t = 10_000)]
+    max_total_finished_tasks: usize,
+
+    /// Maximum number of pending client tasks.
+    #[arg(long, default_value_t = 10_000)]
+    max_total_pending_tasks: usize,
+
+    /// Maximum number of concurrently processing client tasks.
+    #[arg(long, default_value_t = 10_000)]
+    max_total_processing_tasks: usize,
+
+    /// Pending client task timeout in seconds; zero disables expiration.
+    #[arg(long, default_value_t = 300)]
+    pending_task_timeout_secs: u64,
+
+    /// Processing client task timeout in seconds; zero disables expiration.
+    #[arg(long, default_value_t = 300)]
+    processing_task_timeout_secs: u64,
+
+    /// Retry limit attached to newly submitted client tasks.
+    #[arg(long, default_value_t = 10)]
+    max_task_retry_attempts: u32,
 
     /// 是否启用高可用 (HA) 模式 / Enable High Availability (HA) mode
     #[arg(long)]
@@ -128,14 +207,54 @@ struct Args {
     #[arg(long)]
     cluster_id: Option<String>,
 
-    /// 快照后端类型: "local-disk"、"hf3fs" 或 "distributed"
-    /// Snapshot backend type: "local-disk", "hf3fs", or "distributed"
+    /// 快照后端类型: "local-disk"、"hf3fs"、"file-per-key"、"bucket"、"offset-allocator" 或 "distributed"
+    /// Snapshot backend type: "local-disk", "hf3fs", "file-per-key", "bucket", "offset-allocator", or "distributed"
     #[arg(long)]
     snapshot_backend_type: Option<String>,
 
     /// 快照备份目录路径 / Snapshot backup directory path
     #[arg(long)]
     snapshot_backup_dir: Option<String>,
+
+    /// Snapshot payload store used by the C++-compatible catalog provider: local or s3.
+    #[arg(long)]
+    snapshot_object_store_type: Option<String>,
+
+    /// Snapshot catalog used to resolve the latest C++-compatible snapshot.
+    #[arg(long, default_value = "embedded")]
+    snapshot_catalog_store_type: String,
+
+    /// Snapshot catalog connection string. Redis falls back to the HA connection string.
+    #[arg(long)]
+    snapshot_catalog_store_connstring: Option<String>,
+
+    /// Enable periodic snapshots.
+    #[arg(long)]
+    enable_snapshot: bool,
+
+    /// Periodic snapshot interval in seconds.
+    #[arg(
+        long,
+        default_value_t = 600,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    snapshot_interval_seconds: u64,
+
+    /// Timeout for one snapshot save task in seconds.
+    #[arg(
+        long,
+        default_value_t = 300,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    snapshot_child_timeout_seconds: u64,
+
+    /// Number of historical snapshot files to retain.
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    snapshot_retention_count: u64,
 
     /// HA lease TTL in seconds
     /// HA 租约 TTL，单位秒
@@ -197,14 +316,24 @@ async fn release_and_retry(
 async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let (snapshot_backend_type, snapshot_dir) = parse_snapshot_config(&args);
     let ha_spec = build_ha_spec(&args)?;
+    let snapshot_object_store_type = args
+        .snapshot_object_store_type
+        .as_deref()
+        .map(parse_snapshot_object_store_type)
+        .transpose()?;
+    let snapshot_catalog_store_type =
+        parse_snapshot_catalog_store_type(&args.snapshot_catalog_store_type)?;
     let cluster_id = ha_spec.cluster_namespace.clone();
     let runtime_config = build_runtime_config(&args)?;
     let supervisor_config = MasterServiceSupervisorConfig {
         local_hostname: format!("{}:{}", args.rpc_address, args.rpc_port),
         cluster_id,
-        enable_snapshot_restore: snapshot_dir.is_some(),
+        enable_snapshot_restore: snapshot_dir.is_some() || snapshot_object_store_type.is_some(),
         snapshot_backup_dir: snapshot_dir.clone(),
         snapshot_backend_type,
+        snapshot_object_store_type,
+        snapshot_catalog_store_type,
+        snapshot_catalog_store_connstring: args.snapshot_catalog_store_connstring.clone(),
     };
     let leader_addr = format!("{}:{}", args.rpc_address, args.rpc_port);
     info!("HA loop started");
@@ -363,7 +492,13 @@ async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let server_result = run_leader_server(service_arc.clone(), &args, shutdown_rx).await;
+            let server_result = run_leader_server(
+                service_arc.clone(),
+                &args,
+                shutdown_rx,
+                Some(session.view.clone()),
+            )
+            .await;
 
             match &server_result {
                 Ok(()) => info!("gRPC server exited cleanly"),
@@ -404,6 +539,12 @@ fn parse_snapshot_config(
             Some(mooncake_store_master::storage_backend::StorageBackendType::LocalDisk)
         } else if s == "hf3fs" {
             Some(mooncake_store_master::storage_backend::StorageBackendType::Hf3fs)
+        } else if s == "file-per-key" {
+            Some(mooncake_store_master::storage_backend::StorageBackendType::FilePerKey)
+        } else if s == "bucket" {
+            Some(mooncake_store_master::storage_backend::StorageBackendType::Bucket)
+        } else if s == "offset-allocator" {
+            Some(mooncake_store_master::storage_backend::StorageBackendType::OffsetAllocator)
         } else if s == "distributed" {
             Some(mooncake_store_master::storage_backend::StorageBackendType::Distributed)
         } else {
@@ -415,6 +556,51 @@ fn parse_snapshot_config(
         .clone()
         .map(std::path::PathBuf::from);
     (backend, dir)
+}
+
+fn build_catalog_snapshot_publisher(
+    args: &Args,
+    cluster_id: &str,
+) -> Result<Option<CatalogBackedSnapshotProvider>, Box<dyn std::error::Error>> {
+    let Some(object_store_type) = args
+        .snapshot_object_store_type
+        .as_deref()
+        .map(parse_snapshot_object_store_type)
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    let catalog_store_type = parse_snapshot_catalog_store_type(&args.snapshot_catalog_store_type)?;
+    Ok(Some(create_catalog_backed_snapshot_provider(
+        cluster_id.to_string(),
+        object_store_type,
+        catalog_store_type,
+        args.snapshot_backup_dir.clone().map(Into::into),
+        args.snapshot_catalog_store_connstring.as_deref(),
+    )?))
+}
+
+fn publish_catalog_snapshot(
+    service: &MasterServiceImpl,
+    publisher: &CatalogBackedSnapshotProvider,
+    producer_view_version: u64,
+    retention_count: usize,
+) {
+    let snapshot = service.capture_loaded_snapshot(String::new());
+    match publisher.publish_loaded_snapshot(&snapshot, producer_view_version) {
+        Ok(descriptor) => {
+            if let Err(error) = publisher.prune_snapshots(retention_count) {
+                warn!("Catalog snapshot retention prune failed: {}", error);
+            }
+            info!(
+                "Catalog snapshot published: id={}, seq={}, view={}",
+                descriptor.snapshot_id,
+                descriptor.last_included_seq,
+                descriptor.producer_view_version
+            );
+        }
+        Err(error) => warn!("Catalog snapshot publish failed: {}", error),
+    }
 }
 
 fn new_supervisor(
@@ -516,7 +702,10 @@ async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // --- Metrics HTTP server ---
     // Prometheus metrics HTTP 服务
     let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
-    tokio::spawn(metrics::serve_metrics_http(metrics_addr));
+    tokio::spawn(metrics::serve_metrics_http_with_admin(
+        metrics_addr,
+        AdminRuntimeState::serving(None),
+    ));
 
     // --- Master gRPC service ---
     // 构建 Master gRPC 服务
@@ -560,13 +749,19 @@ async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         service_arc.metadata_state(),
     ));
 
-    // Periodic snapshot — 定时快照（每 30 秒）
-    {
+    if args.enable_snapshot {
         let svc = service_arc.clone();
+        let interval = args.snapshot_interval_seconds;
+        let catalog_publisher =
+            build_catalog_snapshot_publisher(&args, &resolve_cluster_id(&args))?;
+        let retention_count = args.snapshot_retention_count as usize;
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
                 svc.save_snapshot();
+                if let Some(ref publisher) = catalog_publisher {
+                    publish_catalog_snapshot(&svc, publisher, 0, retention_count);
+                }
             }
         });
     }
@@ -603,11 +798,26 @@ mod tests {
             allocation_strategy: "random".to_string(),
             memory_allocator: "offset".to_string(),
             default_kv_lease_ttl_ms: 5000,
+            client_ttl_secs: 10,
+            root_fs_dir: String::new(),
             eviction_high_watermark_ratio: 0.95,
             eviction_ratio: 0.05,
             offload_on_evict: false,
             offload_force_evict: false,
+            enable_disk_eviction: true,
+            quota_bytes: 0,
+            nof_heartbeat_interval_sec: 10,
+            nof_heartbeat_probe_timeout_ms: 1000,
+            nof_heartbeat_failures_threshold: 3,
+            put_start_discard_timeout_sec: 30,
+            put_start_release_timeout_sec: 600,
             promotion_max_per_heartbeat: 1,
+            max_total_finished_tasks: 10_000,
+            max_total_pending_tasks: 10_000,
+            max_total_processing_tasks: 10_000,
+            pending_task_timeout_secs: 300,
+            processing_task_timeout_secs: 300,
+            max_task_retry_attempts: 10,
             enable_ha: true,
             etcd_endpoints: None,
             ha_backend_type: "etcd".to_string(),
@@ -615,6 +825,13 @@ mod tests {
             cluster_id: Some("cluster-a".to_string()),
             snapshot_backend_type: None,
             snapshot_backup_dir: None,
+            snapshot_object_store_type: None,
+            snapshot_catalog_store_type: "embedded".to_string(),
+            snapshot_catalog_store_connstring: None,
+            enable_snapshot: false,
+            snapshot_interval_seconds: 600,
+            snapshot_child_timeout_seconds: 300,
+            snapshot_retention_count: 2,
             ha_lease_ttl_secs: 30,
         }
     }
@@ -666,24 +883,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_create_coordinator_k8s_reports_unavailable() {
+    async fn test_create_coordinator_k8s_builds_lazy_coordinator() {
         let spec = HABackendSpec {
             backend_type: HABackendType::K8s,
             connstring: "ns-a/lease-a".to_string(),
             cluster_namespace: "cluster-a".to_string(),
         };
 
-        let err = match create_coordinator(&spec).await {
-            Ok(_) => panic!("k8s coordinator should be unavailable in the current Rust build"),
-            Err(err) => err,
-        };
-        let ha_error = err.downcast_ref::<HaError>().unwrap();
+        let coordinator = create_coordinator(&spec).await.unwrap();
 
         assert_eq!(
-            ha_error,
-            &HaError::UnavailableInCurrentMode(
-                "K8s HA backend is not implemented in Rust coordinator".into()
-            )
+            coordinator.wait_for_role().await.unwrap(),
+            mooncake_store_master::ha::LeaderRole::Standby
         );
     }
 
@@ -705,6 +916,61 @@ mod tests {
         let err = build_runtime_config(&args).unwrap_err();
 
         assert!(err.to_string().contains("not supported"));
+    }
+
+    #[test]
+    fn test_build_runtime_config_applies_task_manager_limits() {
+        let mut args = base_args();
+        args.client_ttl_secs = 9;
+        args.root_fs_dir = "/storage/root".to_string();
+        args.enable_disk_eviction = false;
+        args.quota_bytes = 4096;
+        args.nof_heartbeat_interval_sec = 17;
+        args.nof_heartbeat_probe_timeout_ms = 250;
+        args.nof_heartbeat_failures_threshold = 4;
+        args.put_start_discard_timeout_sec = 19;
+        args.put_start_release_timeout_sec = 23;
+        args.snapshot_child_timeout_seconds = 29;
+        args.snapshot_retention_count = 5;
+        args.max_total_finished_tasks = 11;
+        args.max_total_pending_tasks = 12;
+        args.max_total_processing_tasks = 13;
+        args.pending_task_timeout_secs = 14;
+        args.processing_task_timeout_secs = 15;
+        args.max_task_retry_attempts = 16;
+
+        let config = build_runtime_config(&args).unwrap();
+
+        assert_eq!(config.client_live_ttl, Duration::from_secs(9));
+        assert_eq!(config.storage_fs_dir, "/storage/root");
+        assert!(!config.enable_disk_eviction);
+        assert_eq!(config.quota_bytes, 4096);
+        assert_eq!(config.nof_heartbeat_interval, Duration::from_secs(17));
+        assert_eq!(
+            config.nof_heartbeat_probe_timeout,
+            Duration::from_millis(250)
+        );
+        assert_eq!(config.nof_heartbeat_failures_threshold, 4);
+        assert_eq!(config.put_start_discard_timeout, Duration::from_secs(19));
+        assert_eq!(config.put_start_release_timeout, Duration::from_secs(23));
+        assert_eq!(config.snapshot_child_timeout, Duration::from_secs(29));
+        assert_eq!(config.snapshot_retention_count, 5);
+        assert_eq!(config.max_total_finished_tasks, 11);
+        assert_eq!(config.max_total_pending_tasks, 12);
+        assert_eq!(config.max_total_processing_tasks, 13);
+        assert_eq!(config.pending_task_timeout, Duration::from_secs(14));
+        assert_eq!(config.processing_task_timeout, Duration::from_secs(15));
+        assert_eq!(config.max_task_retry_attempts, 16);
+    }
+
+    #[test]
+    fn test_cli_disk_eviction_defaults_true_and_accepts_false() {
+        let default_args = Args::try_parse_from(["mooncake-master"]).unwrap();
+        assert!(default_args.enable_disk_eviction);
+
+        let disabled =
+            Args::try_parse_from(["mooncake-master", "--enable-disk-eviction", "false"]).unwrap();
+        assert!(!disabled.enable_disk_eviction);
     }
 
     #[test]
@@ -749,13 +1015,30 @@ fn build_runtime_config(args: &Args) -> Result<MasterRuntimeConfig, Box<dyn std:
         memory_allocator_kind: MemoryAllocatorKind::parse(&args.memory_allocator)
             .ok_or("memory_allocator must be 'offset' or 'cachelib'")?,
         lease_ttl: Duration::from_millis(args.default_kv_lease_ttl_ms),
+        client_live_ttl: Duration::from_secs(args.client_ttl_secs),
+        storage_fs_dir: args.root_fs_dir.clone(),
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
         eviction_ratio: args.eviction_ratio,
         enable_offload: args.enable_offload,
         enable_nof: !args.disable_nof,
         offload_on_evict: args.offload_on_evict,
         offload_force_evict: args.offload_force_evict,
+        enable_disk_eviction: args.enable_disk_eviction,
+        quota_bytes: args.quota_bytes,
+        nof_heartbeat_interval: Duration::from_secs(args.nof_heartbeat_interval_sec),
+        nof_heartbeat_probe_timeout: Duration::from_millis(args.nof_heartbeat_probe_timeout_ms),
+        nof_heartbeat_failures_threshold: args.nof_heartbeat_failures_threshold,
+        snapshot_child_timeout: Duration::from_secs(args.snapshot_child_timeout_seconds),
+        snapshot_retention_count: args.snapshot_retention_count as usize,
+        put_start_discard_timeout: Duration::from_secs(args.put_start_discard_timeout_sec),
+        put_start_release_timeout: Duration::from_secs(args.put_start_release_timeout_sec),
         promotion_max_per_heartbeat: args.promotion_max_per_heartbeat,
+        max_total_finished_tasks: args.max_total_finished_tasks,
+        max_total_pending_tasks: args.max_total_pending_tasks,
+        max_total_processing_tasks: args.max_total_processing_tasks,
+        pending_task_timeout: Duration::from_secs(args.pending_task_timeout_secs),
+        processing_task_timeout: Duration::from_secs(args.processing_task_timeout_secs),
+        max_task_retry_attempts: args.max_task_retry_attempts,
         cluster_id: resolve_cluster_id(args),
         ..Default::default()
     })
@@ -784,9 +1067,7 @@ async fn create_coordinator(
         HABackendType::Redis => {
             Ok(LeaderCoordinator::new_redis(&spec.connstring, &spec.cluster_namespace).await?)
         }
-        HABackendType::K8s => Err(Box::new(HaError::UnavailableInCurrentMode(
-            "K8s HA backend is not implemented in Rust coordinator".into(),
-        ))),
+        HABackendType::K8s => Ok(LeaderCoordinator::new_k8s(&spec.connstring)?),
         HABackendType::Unknown => Err(Box::new(HaError::InvalidParams(
             "unknown HA backend type".into(),
         ))),
@@ -882,12 +1163,20 @@ async fn run_leader_server(
     service_arc: Arc<MasterServiceImpl>,
     args: &Args,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    leader_view: Option<MasterView>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut background_tasks = Vec::new();
+    let producer_view_version = leader_view
+        .as_ref()
+        .map(|view| view.view_version)
+        .unwrap_or(0);
 
     // Metrics HTTP server.
     let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
-    background_tasks.push(tokio::spawn(metrics::serve_metrics_http(metrics_addr)));
+    background_tasks.push(tokio::spawn(metrics::serve_metrics_http_with_admin(
+        metrics_addr,
+        AdminRuntimeState::serving(leader_view),
+    )));
 
     let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);
     let metadata_addr = SocketAddr::new(
@@ -905,15 +1194,20 @@ async fn run_leader_server(
         service_arc.metadata_state(),
     )));
 
-    // Periodic snapshot every 30s.
-    {
+    if args.enable_snapshot {
         let svc = service_arc.clone();
+        let interval = args.snapshot_interval_seconds;
         let mut snapshot_shutdown_rx = shutdown_rx.clone();
+        let catalog_publisher = build_catalog_snapshot_publisher(args, &resolve_cluster_id(args))?;
+        let retention_count = args.snapshot_retention_count as usize;
         background_tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
                         svc.save_snapshot();
+                        if let Some(ref publisher) = catalog_publisher {
+                            publish_catalog_snapshot(&svc, publisher, producer_view_version, retention_count);
+                        }
                     }
                     changed = snapshot_shutdown_rx.changed() => {
                         if changed.is_err() || *snapshot_shutdown_rx.borrow() {

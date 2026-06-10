@@ -19,7 +19,9 @@
 use crate::http_metadata::MetadataState;
 use crate::metrics;
 use chrono::Utc;
-use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig};
+use mooncake_store_core::{
+    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskStatus,
+};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -615,6 +617,26 @@ pub fn split_scoped_key(scoped: &str) -> (String, String) {
         .find(TENANT_SCOPE_DELIMITER)
         .map(|pos| (scoped[..pos].to_string(), scoped[pos + 1..].to_string()))
         .unwrap_or_else(|| (DEFAULT_TENANT.to_string(), scoped.to_string()))
+}
+
+pub(crate) fn task_count_with_status(state: &MasterState, status: TaskStatus) -> usize {
+    state
+        .tasks
+        .iter()
+        .filter(|task| task.info.status == status)
+        .count()
+}
+
+pub(crate) fn has_pending_task_capacity(state: &MasterState) -> bool {
+    task_count_with_status(state, TaskStatus::Pending)
+        < state.runtime_config.max_total_pending_tasks
+}
+
+pub(crate) fn processing_task_capacity(state: &MasterState) -> usize {
+    state
+        .runtime_config
+        .max_total_processing_tasks
+        .saturating_sub(task_count_with_status(state, TaskStatus::Processing))
 }
 
 /// Validate that a user key does not contain the tenant scope delimiter.

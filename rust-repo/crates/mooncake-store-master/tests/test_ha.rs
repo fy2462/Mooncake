@@ -7,13 +7,14 @@ use mooncake_store_master::ha::EmbeddedSnapshotCatalogStore;
 use mooncake_store_master::ha::{
     build_standby_runtime_capabilities, map_standby_runtime_state, parse_ha_backend_type,
     CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
-    LeaderRole, LeadershipSession, LocalSnapshotProvider, MasterRuntimeState,
-    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView, SnapshotCatalogStore,
-    SnapshotDescriptor, SnapshotProvider, StandbyController, StandbyRuntimeCapabilities,
-    StandbyState, StandbySyncStatus,
+    LeaderRole, LeadershipSession, LocalFileSnapshotObjectStore, LocalSnapshotProvider,
+    MasterRuntimeState, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    SnapshotCatalogStore, SnapshotDescriptor, SnapshotObjectStore, SnapshotProvider,
+    StandbyController, StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
+use std::sync::Arc;
 use std::time::SystemTime;
 use uuid::Uuid;
 
@@ -221,6 +222,9 @@ fn test_local_snapshot_provider_loads_snapshot() {
     let provider = LocalSnapshotProvider::new(root, StorageBackendType::LocalDisk);
     let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
     assert_eq!(snapshot.segments.len(), 1);
+    assert_eq!(snapshot.segments[0].used, 512);
+    assert_eq!(snapshot.segments[0].client_id, client_id);
+    assert_eq!(snapshot.segments[0].segment.protocol, "tcp");
     assert!(snapshot.nof_segments.is_empty());
     assert_eq!(snapshot.objects.len(), 1);
     assert_eq!(snapshot.objects[0].0, "ha-key");
@@ -290,6 +294,30 @@ fn test_embedded_snapshot_catalog_round_trip() {
 
     catalog.delete("20260603_120000_001").unwrap();
     assert!(catalog.get_latest().unwrap().is_none());
+}
+
+#[test]
+fn test_snapshot_catalog_uses_object_store_abstraction() {
+    let root = temp_dir();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.clone()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let mut descriptor = SnapshotDescriptor::new("20260603_120002_001");
+    descriptor.last_included_seq = 88;
+    descriptor.producer_view_version = 9;
+
+    catalog.publish(&descriptor).unwrap();
+
+    let descriptor_key = "mooncake_master_snapshot/20260603_120002_001/descriptor.txt";
+    let raw = object_store.download_string(descriptor_key).unwrap();
+    assert_eq!(
+        raw,
+        "88|9|1234".replace("1234", &descriptor.created_at_ms.to_string())
+    );
+
+    let listed = object_store
+        .list_objects_with_prefix("mooncake_master_snapshot")
+        .unwrap();
+    assert!(listed.iter().any(|key| key == descriptor_key));
 }
 
 #[test]

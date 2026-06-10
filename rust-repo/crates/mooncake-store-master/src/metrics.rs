@@ -28,6 +28,7 @@
 // 所有指标通过 lazy_static 延迟初始化，并在 register_metrics() 中
 // 显式重新注册，以处理 Prometheus 的重复注册策略。
 
+use crate::admin_http::{admin_router, AdminRuntimeState};
 use axum::{routing::get, Router};
 use lazy_static::lazy_static;
 use prometheus::{register_histogram, Encoder, Histogram, IntCounter, IntGauge, TextEncoder};
@@ -612,9 +613,15 @@ pub fn register_metrics() {
 /// 注册所有指标并在 GET /metrics 提供 Prometheus 文本格式。
 /// 此函数无限期阻塞 —— 在 spawned task 中调用。
 pub async fn serve_metrics_http(addr: SocketAddr) {
+    serve_metrics_http_with_admin(addr, AdminRuntimeState::serving(None)).await;
+}
+
+pub async fn serve_metrics_http_with_admin(addr: SocketAddr, admin_state: AdminRuntimeState) {
     register_metrics();
 
-    let app = Router::new().route("/metrics", get(metrics_handler));
+    let app = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .merge(admin_router(admin_state));
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();

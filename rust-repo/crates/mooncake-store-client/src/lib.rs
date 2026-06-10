@@ -58,7 +58,10 @@ pub mod local_storage_backend;
 pub mod offload;
 pub mod remote_source;
 
-pub use client::{BufferHandle, MooncakeClient, OffloadTaskItem, PromotionTaskItem};
+pub use client::{
+    BufferHandle, ClientBackgroundConfig, ClientBackgroundHandle, MooncakeClient, OffloadTaskItem,
+    PromotionTaskItem,
+};
 pub use dummy::{
     DummyIpcChannel, DummyMemoryPool, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
     INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST, IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE,

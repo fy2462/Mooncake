@@ -31,8 +31,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{TaskInfo, TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -54,9 +55,101 @@ pub enum StorageBackendType {
     /// File-per-key mode: each key is stored as a separate file.
     /// 每个 key 独立文件模式：每个 key 存储为单独的文件。
     FilePerKey,
+    /// Bucket mode: multiple keys are packed into bucket files.
+    /// Bucket 模式：多个 key 聚合写入 bucket 文件。
+    Bucket,
+    /// Offset allocator mode: values are appended into one data file with a
+    /// persistent key -> offset index.
+    /// Offset allocator 模式：值写入单个数据文件，并维护持久化 key -> offset 索引。
+    OffsetAllocator,
     /// Distributed filesystem mode: bucketed key files under a DFS root.
     /// 分布式文件系统模式：在 DFS 根目录下按 hash bucket 存储 key 文件。
     Distributed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BucketEvictionPolicy {
+    None,
+    Fifo,
+    Lru,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketBackendConfig {
+    pub bucket_size_limit: u64,
+    pub bucket_keys_limit: usize,
+    pub eviction_policy: BucketEvictionPolicy,
+    pub max_total_size: u64,
+}
+
+impl Default for BucketBackendConfig {
+    fn default() -> Self {
+        Self {
+            bucket_size_limit: 256 * 1024 * 1024,
+            bucket_keys_limit: 500,
+            eviction_policy: BucketEvictionPolicy::None,
+            max_total_size: 0,
+        }
+    }
+}
+
+impl BucketBackendConfig {
+    pub fn from_environment() -> Self {
+        let mut config = Self::default();
+        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_SIZE_LIMIT") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                config.bucket_size_limit = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_KEYS_LIMIT") {
+            if let Ok(parsed) = value.parse::<usize>() {
+                config.bucket_keys_limit = parsed;
+            }
+        }
+        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_EVICTION_POLICY") {
+            config.eviction_policy = match value.to_ascii_lowercase().as_str() {
+                "fifo" => BucketEvictionPolicy::Fifo,
+                "lru" => BucketEvictionPolicy::Lru,
+                _ => BucketEvictionPolicy::None,
+            };
+        }
+        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE") {
+            if let Ok(parsed) = value.parse::<u64>() {
+                config.max_total_size = parsed;
+            }
+        }
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.bucket_size_limit == 0 {
+            return Err("BucketBackendConfig: bucket_size_limit must be > 0".into());
+        }
+        if self.bucket_keys_limit == 0 {
+            return Err("BucketBackendConfig: bucket_keys_limit must be > 0".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BucketFile {
+    bucket_id: u64,
+    created_at_ms: i64,
+    last_access_ns: i64,
+    entries: Vec<(String, Vec<u8>)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OffsetIndexEntry {
+    offset: u64,
+    len: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct OffsetAllocatorIndex {
+    entries: HashMap<String, OffsetIndexEntry>,
+    next_offset: u64,
 }
 
 /// Configuration for the distributed storage backend.
@@ -165,6 +258,15 @@ fn parse_bool_env(value: &str) -> bool {
     )
 }
 
+fn invalid_snapshot_data(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into()).into()
+}
+
+fn parse_snapshot_uuid(value: &str, field: &str) -> Result<Uuid, Box<dyn std::error::Error>> {
+    Uuid::parse_str(value)
+        .map_err(|error| invalid_snapshot_data(format!("invalid {field} '{value}': {error}")))
+}
+
 // =============================================================================
 // Snapshot Serialization Types / 快照序列化类型
 // =============================================================================
@@ -176,7 +278,13 @@ fn parse_bool_env(value: &str) -> bool {
 struct SnapshotSegment {
     id: String,
     name: String,
+    #[serde(default)]
+    base: u64,
     size: u64,
+    #[serde(default)]
+    te_endpoint: String,
+    #[serde(default)]
+    protocol: String,
     used: u64,
     client_id: String,
     #[serde(default)]
@@ -262,6 +370,8 @@ impl BackendFile {
         let registration = match backend_type {
             StorageBackendType::LocalDisk
             | StorageBackendType::FilePerKey
+            | StorageBackendType::Bucket
+            | StorageBackendType::OffsetAllocator
             | StorageBackendType::Distributed => None,
             StorageBackendType::Hf3fs => Some(hf3fs::register_fd(file.as_raw_fd())?),
         };
@@ -281,6 +391,8 @@ impl BackendFile {
         let registration = match backend_type {
             StorageBackendType::LocalDisk
             | StorageBackendType::FilePerKey
+            | StorageBackendType::Bucket
+            | StorageBackendType::OffsetAllocator
             | StorageBackendType::Distributed => None,
             StorageBackendType::Hf3fs => Some(hf3fs::register_fd(file.as_raw_fd())?),
         };
@@ -412,7 +524,10 @@ impl StorageBackend {
                 .map(|entry| SnapshotSegment {
                     id: entry.segment.id.to_string(),
                     name: entry.segment.name.clone(),
+                    base: entry.segment.base,
                     size: entry.segment.size,
+                    te_endpoint: entry.segment.te_endpoint.clone(),
+                    protocol: entry.segment.protocol.clone(),
                     used: entry.used,
                     client_id: entry.client_id.to_string(),
                     status: entry.status as i32,
@@ -488,6 +603,59 @@ impl StorageBackend {
         Ok(())
     }
 
+    /// Copy the latest snapshot into a bounded history directory and prune old
+    /// retained files. Restore still reads `master_snapshot.msgpack`.
+    pub fn retain_latest_snapshot(
+        &self,
+        retention_count: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if retention_count == 0 {
+            return Ok(());
+        }
+
+        let latest = self.disk_dir.join("master_snapshot.msgpack");
+        if !latest.exists() {
+            return Ok(());
+        }
+
+        let history_dir = self.disk_dir.join("snapshots");
+        fs::create_dir_all(&history_dir)?;
+        let retained = history_dir.join(format!(
+            "master_snapshot_{}_{}.msgpack",
+            Utc::now().timestamp_millis(),
+            Uuid::new_v4()
+        ));
+        fs::copy(&latest, &retained)?;
+
+        let mut entries = fs::read_dir(&history_dir)?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let filename = path.file_name()?.to_str()?;
+                if !filename.starts_with("master_snapshot_") || !filename.ends_with(".msgpack") {
+                    return None;
+                }
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()?;
+                Some((modified, path))
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|(left_time, left_path), (right_time, right_path)| {
+            left_time
+                .cmp(right_time)
+                .then_with(|| left_path.cmp(right_path))
+        });
+
+        let remove_count = entries.len().saturating_sub(retention_count);
+        for (_modified, path) in entries.into_iter().take(remove_count) {
+            fs::remove_file(path)?;
+        }
+
+        Ok(())
+    }
+
     /// Convert deserialized Snapshot types back to domain types.
     /// 将反序列化的 Snapshot 转换为领域类型（SegmentEntry / NoFSegmentEntry / ObjectEntry / TaskEntry）。
     ///
@@ -500,61 +668,75 @@ impl StorageBackend {
         snap: Snapshot,
         backend_type: StorageBackendType,
         path: &Path,
-    ) -> (
-        Vec<crate::service::SegmentEntry>,
-        Vec<crate::service::NoFSegmentEntry>,
-        Vec<(String, crate::service::ObjectEntry)>,
-        Vec<crate::service::TaskEntry>,
-    ) {
+    ) -> Result<
+        (
+            Vec<crate::service::SegmentEntry>,
+            Vec<crate::service::NoFSegmentEntry>,
+            Vec<(String, crate::service::ObjectEntry)>,
+            Vec<crate::service::TaskEntry>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         // Deserialize memory segments
         let segments: Vec<crate::service::SegmentEntry> = snap
             .segments
             .into_iter()
-            .map(|s| {
+            .map(|s| -> Result<_, Box<dyn std::error::Error>> {
                 let status = match s.status {
-                    1 => crate::proto::SegmentStatus::Active,
+                    0 | 1 => crate::proto::SegmentStatus::Active,
                     2 => crate::proto::SegmentStatus::Draining,
                     3 => crate::proto::SegmentStatus::Unavailable,
-                    _ => crate::proto::SegmentStatus::Active,
+                    value => {
+                        return Err(invalid_snapshot_data(format!(
+                            "invalid memory segment status: {value}"
+                        )))
+                    }
                 };
-                crate::service::SegmentEntry {
+                Ok(crate::service::SegmentEntry {
                     segment: mooncake_store_core::Segment {
-                        id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
+                        id: parse_snapshot_uuid(&s.id, "memory segment id")?,
                         name: s.name,
-                        base: 0,
+                        base: s.base,
                         size: s.size,
-                        te_endpoint: String::new(),
-                        protocol: String::new(),
+                        te_endpoint: s.te_endpoint,
+                        protocol: s.protocol,
                     },
                     used: s.used,
-                    client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
+                    client_id: parse_snapshot_uuid(&s.client_id, "memory segment client id")?,
                     status,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Deserialize NoF (file) segments
         let nof_segments: Vec<crate::service::NoFSegmentEntry> = snap
             .nof_segments
             .into_iter()
-            .map(|s| crate::service::NoFSegmentEntry {
-                segment: mooncake_store_core::NoFSegment {
-                    id: Uuid::parse_str(&s.id).unwrap_or_else(|_| Uuid::new_v4()),
-                    name: s.name,
-                    base: s.base,
-                    size: s.size,
-                    te_endpoint: s.te_endpoint,
-                    client_id: Uuid::parse_str(&s.client_id).unwrap_or_else(|_| Uuid::new_v4()),
-                },
-                used: s.used,
-                status: match s.status {
-                    1 => crate::proto::SegmentStatus::Active,
+            .map(|s| -> Result<_, Box<dyn std::error::Error>> {
+                let status = match s.status {
+                    0 | 1 => crate::proto::SegmentStatus::Active,
                     2 => crate::proto::SegmentStatus::Draining,
                     3 => crate::proto::SegmentStatus::Unavailable,
-                    _ => crate::proto::SegmentStatus::Active,
-                },
+                    value => {
+                        return Err(invalid_snapshot_data(format!(
+                            "invalid NoF segment status: {value}"
+                        )))
+                    }
+                };
+                Ok(crate::service::NoFSegmentEntry {
+                    segment: mooncake_store_core::NoFSegment {
+                        id: parse_snapshot_uuid(&s.id, "NoF segment id")?,
+                        name: s.name,
+                        base: s.base,
+                        size: s.size,
+                        te_endpoint: s.te_endpoint,
+                        client_id: parse_snapshot_uuid(&s.client_id, "NoF segment client id")?,
+                    },
+                    used: s.used,
+                    status,
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         // Deserialize objects
         let objects: Vec<(String, crate::service::ObjectEntry)> = snap
@@ -567,32 +749,40 @@ impl StorageBackend {
         let tasks: Vec<crate::service::TaskEntry> = snap
             .tasks
             .into_iter()
-            .map(|(_id_str, t)| crate::service::TaskEntry {
-                info: TaskInfo {
-                    id: Uuid::parse_str(&t.id).unwrap_or_else(|_| Uuid::new_v4()),
-                    task_type: match t.task_type {
-                        1 => TaskType::ReplicaCopy,
-                        2 => TaskType::ReplicaMove,
-                        _ => TaskType::ReplicaCopy,
-                    },
-                    status: match t.status {
-                        1 => TaskStatus::Processing,
-                        2 => TaskStatus::Success,
-                        3 => TaskStatus::Failed,
-                        _ => TaskStatus::Pending,
-                    },
-                    created_at: chrono::DateTime::from_timestamp_millis(t.created_at_ms)
+            .map(|(_id_str, t)| -> Result<_, Box<dyn std::error::Error>> {
+                let assigned_client = t
+                    .assigned_client
+                    .map(|id| parse_snapshot_uuid(&id, "task assigned client id"))
+                    .transpose()?;
+                Ok(crate::service::TaskEntry {
+                    info: TaskInfo {
+                        id: parse_snapshot_uuid(&t.id, "task id")?,
+                        task_type: match t.task_type {
+                            1 => TaskType::ReplicaCopy,
+                            2 => TaskType::ReplicaMove,
+                            _ => TaskType::ReplicaCopy,
+                        },
+                        status: match t.status {
+                            1 => TaskStatus::Processing,
+                            2 => TaskStatus::Success,
+                            3 => TaskStatus::Failed,
+                            _ => TaskStatus::Pending,
+                        },
+                        created_at: chrono::DateTime::from_timestamp_millis(t.created_at_ms)
+                            .unwrap_or_else(Utc::now),
+                        last_updated_at: chrono::DateTime::from_timestamp_millis(
+                            t.last_updated_at_ms,
+                        )
                         .unwrap_or_else(Utc::now),
-                    last_updated_at: chrono::DateTime::from_timestamp_millis(t.last_updated_at_ms)
-                        .unwrap_or_else(Utc::now),
-                    assigned_client: t.assigned_client.and_then(|id| Uuid::parse_str(&id).ok()),
-                    message: t.message,
-                },
-                key: t.key,
-                payload: t.payload,
-                max_retry_attempts: 3,
+                        assigned_client,
+                        message: t.message,
+                    },
+                    key: t.key,
+                    payload: t.payload,
+                    max_retry_attempts: 3,
+                })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         tracing::info!(
             "Snapshot loaded from {} via {:?} ({} segments, {} objects, {} tasks)",
@@ -603,7 +793,7 @@ impl StorageBackend {
             tasks.len()
         );
 
-        (segments, nof_segments, objects, tasks)
+        Ok((segments, nof_segments, objects, tasks))
     }
 
     /// Load a snapshot from disk.
@@ -633,7 +823,7 @@ impl StorageBackend {
             let reader = BufReader::new(BackendFile::open(&msgpack_path, self.backend_type)?);
             let snap: Snapshot = rmp_serde::decode::from_read(reader)?;
             let (segments, nof_segments, objects, tasks) =
-                Self::build_loaded_state(snap, self.backend_type, &msgpack_path);
+                Self::build_loaded_state(snap, self.backend_type, &msgpack_path)?;
             return Ok(Some((segments, nof_segments, objects, tasks)));
         }
 
@@ -647,7 +837,7 @@ impl StorageBackend {
         let reader = BufReader::new(BackendFile::open(&json_path, self.backend_type)?);
         let snap: Snapshot = serde_json::from_reader(reader)?;
         let (segments, nof_segments, objects, tasks) =
-            Self::build_loaded_state(snap, self.backend_type, &json_path);
+            Self::build_loaded_state(snap, self.backend_type, &json_path)?;
         Ok(Some((segments, nof_segments, objects, tasks)))
     }
 
@@ -762,6 +952,13 @@ impl StorageBackend {
         &self,
         entries: &[(String, Vec<u8>)],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        match self.backend_type {
+            StorageBackendType::Bucket => return self.batch_offload_bucket(entries),
+            StorageBackendType::OffsetAllocator => {
+                return self.batch_offload_offset_allocator(entries)
+            }
+            _ => {}
+        }
         let dir = self.key_dir();
         if self.backend_type != StorageBackendType::Distributed {
             std::fs::create_dir_all(&dir)?;
@@ -790,6 +987,11 @@ impl StorageBackend {
         &self,
         keys: &[String],
     ) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+        match self.backend_type {
+            StorageBackendType::Bucket => return self.batch_load_bucket(keys),
+            StorageBackendType::OffsetAllocator => return self.batch_load_offset_allocator(keys),
+            _ => {}
+        }
         let mut results = Vec::new();
         for key in keys {
             let path = self.key_path(key);
@@ -810,6 +1012,11 @@ impl StorageBackend {
     /// Remove specific keys from disk.
     /// 从磁盘删除特定 key。
     pub fn remove_keys(&self, keys: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        match self.backend_type {
+            StorageBackendType::Bucket => return self.remove_keys_bucket(keys),
+            StorageBackendType::OffsetAllocator => return self.remove_keys_offset_allocator(keys),
+            _ => {}
+        }
         for key in keys {
             let path = self.key_path(key);
             if let Some(adapter) = self.distributed_adapter() {
@@ -826,6 +1033,11 @@ impl StorageBackend {
     /// Check if a key exists on disk.
     /// 检查 key 是否存在于磁盘上。
     pub fn is_exist(&self, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        match self.backend_type {
+            StorageBackendType::Bucket => return self.is_exist_bucket(key),
+            StorageBackendType::OffsetAllocator => return self.is_exist_offset_allocator(key),
+            _ => {}
+        }
         let path = self.key_path(key);
         if let Some(adapter) = self.distributed_adapter() {
             return adapter.file_exists(&path);
@@ -836,8 +1048,13 @@ impl StorageBackend {
     /// Remove all keys matching a regex pattern.
     /// 删除所有匹配正则表达式的 key。
     pub fn remove_by_regex(&self, pattern: &str) -> Result<usize, Box<dyn std::error::Error>> {
-        if self.backend_type == StorageBackendType::Distributed {
-            return self.remove_by_regex_distributed(pattern);
+        match self.backend_type {
+            StorageBackendType::Distributed => return self.remove_by_regex_distributed(pattern),
+            StorageBackendType::Bucket => return self.remove_by_regex_bucket(pattern),
+            StorageBackendType::OffsetAllocator => {
+                return self.remove_by_regex_offset_allocator(pattern)
+            }
+            _ => {}
         }
         let dir = self.key_dir();
         if !dir.exists() {
@@ -859,8 +1076,11 @@ impl StorageBackend {
     /// Remove all per-key files.
     /// 删除所有按 key 的文件。
     pub fn remove_all(&self) -> Result<usize, Box<dyn std::error::Error>> {
-        if self.backend_type == StorageBackendType::Distributed {
-            return self.remove_all_distributed();
+        match self.backend_type {
+            StorageBackendType::Distributed => return self.remove_all_distributed(),
+            StorageBackendType::Bucket => return self.remove_all_bucket(),
+            StorageBackendType::OffsetAllocator => return self.remove_all_offset_allocator(),
+            _ => {}
         }
         let dir = self.key_dir();
         if !dir.exists() {
@@ -875,8 +1095,11 @@ impl StorageBackend {
     /// Scan metadata for all per-key files: return (key, size) pairs.
     /// 扫描所有按 key 的文件的元数据：返回 (key, size) 对。
     pub fn scan_meta(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
-        if self.backend_type == StorageBackendType::Distributed {
-            return self.scan_meta_distributed();
+        match self.backend_type {
+            StorageBackendType::Distributed => return self.scan_meta_distributed(),
+            StorageBackendType::Bucket => return self.scan_meta_bucket(),
+            StorageBackendType::OffsetAllocator => return self.scan_meta_offset_allocator(),
+            _ => {}
         }
         let dir = self.key_dir();
         if !dir.exists() {
@@ -895,7 +1118,10 @@ impl StorageBackend {
     pub fn is_enable_offloading(&self) -> bool {
         matches!(
             self.backend_type,
-            StorageBackendType::FilePerKey | StorageBackendType::Distributed
+            StorageBackendType::FilePerKey
+                | StorageBackendType::Bucket
+                | StorageBackendType::OffsetAllocator
+                | StorageBackendType::Distributed
         )
     }
 
@@ -996,5 +1222,387 @@ impl StorageBackend {
             }
         }
         Ok(results)
+    }
+
+    fn bucket_dir(&self) -> PathBuf {
+        self.disk_dir.join("buckets")
+    }
+
+    fn bucket_path(&self, bucket_id: u64) -> PathBuf {
+        self.bucket_dir().join(format!("{bucket_id}.bucket"))
+    }
+
+    fn bucket_config(&self) -> BucketBackendConfig {
+        BucketBackendConfig::from_environment()
+    }
+
+    fn list_bucket_ids(&self) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+        let dir = self.bucket_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut ids = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".bucket") {
+                if let Ok(id) = stem.parse::<u64>() {
+                    ids.push(id);
+                }
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
+    fn read_bucket(&self, bucket_id: u64) -> Result<BucketFile, Box<dyn std::error::Error>> {
+        let reader = BufReader::new(std::fs::File::open(self.bucket_path(bucket_id))?);
+        Ok(rmp_serde::decode::from_read(reader)?)
+    }
+
+    fn write_bucket(&self, bucket: &BucketFile) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(self.bucket_dir())?;
+        let path = self.bucket_path(bucket.bucket_id);
+        let tmp = path.with_extension("bucket.tmp");
+        let mut writer = BufWriter::new(std::fs::File::create(&tmp)?);
+        rmp_serde::encode::write_named(&mut writer, bucket)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    fn remove_key_from_buckets(&self, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let mut removed = false;
+        for bucket_id in self.list_bucket_ids()? {
+            let mut bucket = self.read_bucket(bucket_id)?;
+            let original_len = bucket.entries.len();
+            bucket.entries.retain(|(stored_key, _)| stored_key != key);
+            if bucket.entries.len() == original_len {
+                continue;
+            }
+            removed = true;
+            if bucket.entries.is_empty() {
+                std::fs::remove_file(self.bucket_path(bucket_id))?;
+            } else {
+                self.write_bucket(&bucket)?;
+            }
+        }
+        Ok(removed)
+    }
+
+    fn batch_offload_bucket(
+        &self,
+        entries: &[(String, Vec<u8>)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let config = self.bucket_config();
+        config.validate()?;
+        std::fs::create_dir_all(self.bucket_dir())?;
+
+        for (key, _) in entries {
+            self.remove_key_from_buckets(key)?;
+        }
+
+        let mut next_bucket_id = self
+            .list_bucket_ids()?
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let now_ms = Utc::now().timestamp_millis();
+        let now_ns = Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap_or(now_ms * 1_000_000);
+        let mut bucket = BucketFile {
+            bucket_id: next_bucket_id,
+            created_at_ms: now_ms,
+            last_access_ns: now_ns,
+            entries: Vec::new(),
+        };
+        let mut bucket_size = 0u64;
+
+        for (key, value) in entries {
+            let value_len = value.len() as u64;
+            if !bucket.entries.is_empty()
+                && (bucket.entries.len() >= config.bucket_keys_limit
+                    || bucket_size.saturating_add(value_len) > config.bucket_size_limit)
+            {
+                self.write_bucket(&bucket)?;
+                next_bucket_id = next_bucket_id.saturating_add(1);
+                bucket = BucketFile {
+                    bucket_id: next_bucket_id,
+                    created_at_ms: now_ms,
+                    last_access_ns: now_ns,
+                    entries: Vec::new(),
+                };
+                bucket_size = 0;
+            }
+            bucket_size = bucket_size.saturating_add(value_len);
+            bucket.entries.push((key.clone(), value.clone()));
+        }
+        if !bucket.entries.is_empty() {
+            self.write_bucket(&bucket)?;
+        }
+        self.enforce_bucket_total_size(&config)?;
+        Ok(())
+    }
+
+    fn enforce_bucket_total_size(
+        &self,
+        config: &BucketBackendConfig,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if config.max_total_size == 0 || config.eviction_policy == BucketEvictionPolicy::None {
+            return Ok(());
+        }
+        let mut buckets = Vec::new();
+        let mut total = 0u64;
+        for bucket_id in self.list_bucket_ids()? {
+            let bucket = self.read_bucket(bucket_id)?;
+            let size = bucket
+                .entries
+                .iter()
+                .map(|(_, v)| v.len() as u64)
+                .sum::<u64>();
+            total = total.saturating_add(size);
+            buckets.push((bucket_id, bucket.created_at_ms, bucket.last_access_ns, size));
+        }
+        match config.eviction_policy {
+            BucketEvictionPolicy::Fifo => buckets.sort_by_key(|(_, created, _, _)| *created),
+            BucketEvictionPolicy::Lru => buckets.sort_by_key(|(_, _, last_access, _)| *last_access),
+            BucketEvictionPolicy::None => {}
+        }
+        for (bucket_id, _, _, size) in buckets {
+            if total <= config.max_total_size {
+                break;
+            }
+            let path = self.bucket_path(bucket_id);
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+            total = total.saturating_sub(size);
+        }
+        Ok(())
+    }
+
+    fn batch_load_bucket(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+        let wanted: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
+        let mut results = Vec::new();
+        for bucket_id in self.list_bucket_ids()? {
+            let mut bucket = self.read_bucket(bucket_id)?;
+            let mut touched = false;
+            for (key, value) in &bucket.entries {
+                if wanted.contains(key.as_str()) {
+                    results.push((key.clone(), value.clone()));
+                    touched = true;
+                }
+            }
+            if touched {
+                bucket.last_access_ns = Utc::now()
+                    .timestamp_nanos_opt()
+                    .unwrap_or_else(|| Utc::now().timestamp_millis() * 1_000_000);
+                self.write_bucket(&bucket)?;
+            }
+        }
+        Ok(results)
+    }
+
+    fn remove_keys_bucket(&self, keys: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        for key in keys {
+            self.remove_key_from_buckets(key)?;
+        }
+        Ok(())
+    }
+
+    fn is_exist_bucket(&self, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        for bucket_id in self.list_bucket_ids()? {
+            let bucket = self.read_bucket(bucket_id)?;
+            if bucket
+                .entries
+                .iter()
+                .any(|(stored_key, _)| stored_key == key)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn remove_by_regex_bucket(&self, pattern: &str) -> Result<usize, Box<dyn std::error::Error>> {
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+        let mut removed = 0usize;
+        for bucket_id in self.list_bucket_ids()? {
+            let mut bucket = self.read_bucket(bucket_id)?;
+            let original_len = bucket.entries.len();
+            bucket.entries.retain(|(key, _)| !re.is_match(key));
+            removed += original_len - bucket.entries.len();
+            if bucket.entries.is_empty() {
+                std::fs::remove_file(self.bucket_path(bucket_id))?;
+            } else if bucket.entries.len() != original_len {
+                self.write_bucket(&bucket)?;
+            }
+        }
+        Ok(removed)
+    }
+
+    fn remove_all_bucket(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut count = 0usize;
+        for bucket_id in self.list_bucket_ids()? {
+            count += self.read_bucket(bucket_id)?.entries.len();
+            std::fs::remove_file(self.bucket_path(bucket_id))?;
+        }
+        Ok(count)
+    }
+
+    fn scan_meta_bucket(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
+        let mut results = Vec::new();
+        for bucket_id in self.list_bucket_ids()? {
+            for (key, value) in self.read_bucket(bucket_id)?.entries {
+                results.push((key, value.len() as u64));
+            }
+        }
+        Ok(results)
+    }
+
+    fn offset_data_path(&self) -> PathBuf {
+        self.disk_dir.join("offset_allocator.data")
+    }
+
+    fn offset_index_path(&self) -> PathBuf {
+        self.disk_dir.join("offset_allocator.index.msgpack")
+    }
+
+    fn read_offset_index(&self) -> Result<OffsetAllocatorIndex, Box<dyn std::error::Error>> {
+        let path = self.offset_index_path();
+        if !path.exists() {
+            return Ok(OffsetAllocatorIndex::default());
+        }
+        let reader = BufReader::new(std::fs::File::open(path)?);
+        Ok(rmp_serde::decode::from_read(reader)?)
+    }
+
+    fn write_offset_index(
+        &self,
+        index: &OffsetAllocatorIndex,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(&self.disk_dir)?;
+        let path = self.offset_index_path();
+        let tmp = path.with_extension("index.tmp");
+        let mut writer = BufWriter::new(std::fs::File::create(&tmp)?);
+        rmp_serde::encode::write_named(&mut writer, index)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    fn batch_offload_offset_allocator(
+        &self,
+        entries: &[(String, Vec<u8>)],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&self.disk_dir)?;
+        let mut index = self.read_offset_index()?;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .read(true)
+            .open(self.offset_data_path())?;
+        let mut next_offset = file.seek(SeekFrom::End(0))?;
+        for (key, value) in entries {
+            file.write_all(value)?;
+            index.entries.insert(
+                key.clone(),
+                OffsetIndexEntry {
+                    offset: next_offset,
+                    len: value.len() as u64,
+                },
+            );
+            next_offset = next_offset.saturating_add(value.len() as u64);
+        }
+        file.sync_all()?;
+        index.next_offset = next_offset;
+        self.write_offset_index(&index)?;
+        Ok(())
+    }
+
+    fn batch_load_offset_allocator(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<(String, Vec<u8>)>, Box<dyn std::error::Error>> {
+        let index = self.read_offset_index()?;
+        let data_path = self.offset_data_path();
+        if !data_path.exists() {
+            return Ok(Vec::new());
+        }
+        let mut file = std::fs::File::open(data_path)?;
+        let mut results = Vec::new();
+        for key in keys {
+            let Some(entry) = index.entries.get(key) else {
+                continue;
+            };
+            file.seek(SeekFrom::Start(entry.offset))?;
+            let mut buf = vec![0u8; entry.len as usize];
+            file.read_exact(&mut buf)?;
+            results.push((key.clone(), buf));
+        }
+        Ok(results)
+    }
+
+    fn remove_keys_offset_allocator(
+        &self,
+        keys: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut index = self.read_offset_index()?;
+        for key in keys {
+            index.entries.remove(key);
+        }
+        self.write_offset_index(&index)?;
+        Ok(())
+    }
+
+    fn is_exist_offset_allocator(&self, key: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(self.read_offset_index()?.entries.contains_key(key))
+    }
+
+    fn remove_by_regex_offset_allocator(
+        &self,
+        pattern: &str,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let re = regex::Regex::new(pattern).map_err(|e| format!("invalid regex: {e}"))?;
+        let mut index = self.read_offset_index()?;
+        let original_len = index.entries.len();
+        index.entries.retain(|key, _| !re.is_match(key));
+        let removed = original_len - index.entries.len();
+        self.write_offset_index(&index)?;
+        Ok(removed)
+    }
+
+    fn remove_all_offset_allocator(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let count = self.read_offset_index()?.entries.len();
+        let data_path = self.offset_data_path();
+        let index_path = self.offset_index_path();
+        if data_path.exists() {
+            std::fs::remove_file(data_path)?;
+        }
+        if index_path.exists() {
+            std::fs::remove_file(index_path)?;
+        }
+        Ok(count)
+    }
+
+    fn scan_meta_offset_allocator(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
+        Ok(self
+            .read_offset_index()?
+            .entries
+            .into_iter()
+            .map(|(key, entry)| (key, entry.len))
+            .collect())
     }
 }

@@ -91,6 +91,7 @@ use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
 use mooncake_store_client::proto::StorageObjectMetadata;
 use mooncake_store_client::MooncakeClient;
+use mooncake_store_client::{LocalStorageBackend, LocalStorageConfig};
 use mooncake_store_core::NoFSegment;
 use parking_lot::Mutex;
 use pyo3::buffer::PyBuffer;
@@ -98,6 +99,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -719,6 +721,61 @@ impl PythonMooncakeClient {
         })
     }
 
+    /// Return the currently connected master address.
+    fn current_master_addr(&self) -> PyResult<String> {
+        match self.inner.lock().as_ref() {
+            Some(client) => Ok(client.current_master_addr()),
+            None => Err(to_py_err("client already closed")),
+        }
+    }
+
+    /// Replace the client-side master failover candidate list.
+    fn set_master_candidates(&self, candidates: Vec<String>) -> PyResult<()> {
+        match self.inner.lock().as_ref() {
+            Some(client) => client.set_master_candidates(candidates).map_err(to_py_err),
+            None => Err(to_py_err("client already closed")),
+        }
+    }
+
+    /// Return the configured master failover candidate list.
+    fn master_candidates(&self) -> PyResult<Vec<String>> {
+        match self.inner.lock().as_ref() {
+            Some(client) => Ok(client.master_candidates()),
+            None => Err(to_py_err("client already closed")),
+        }
+    }
+
+    /// Switch to a specific master address.
+    fn switch_master<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        master_addr: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.switch_master(&master_addr).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Try configured master candidates until one connects. Returns new address.
+    fn failover_master<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.failover_master().await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
     /// Tear down all resources: buffers, segments, metadata entries.
     /// 销毁所有资源：缓冲区、段、元数据条目。用于整个集群的清理。
     fn tear_down_all<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1332,22 +1389,9 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         let results = tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
-            let mut out = Vec::with_capacity(keys.len());
-            let mut error = None;
-            for key in &keys {
-                match client.get_replica_list(key).await {
-                    Ok(replicas) => out.push(replicas),
-                    Err(err) => {
-                        error = Some(err);
-                        break;
-                    }
-                }
-            }
+            let result = client.batch_get_replica_list(&keys).await;
             *inner.lock() = Some(client);
-            match error {
-                Some(err) => Err(to_py_err(err)),
-                None => Ok(out),
-            }
+            result.map_err(to_py_err)
         })?;
 
         let py = unsafe { Python::assume_attached() };
@@ -1825,6 +1869,150 @@ impl PythonMooncakeClient {
             let stats: HashMap<String, f64> = client.calc_cache_stats().await.map_err(to_py_err)?;
             *inner.lock() = Some(client);
             Ok(stats)
+        })
+    }
+
+    /// Query client transport addresses for multiple client UUID strings.
+    fn batch_query_ip<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        client_ids: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let ids = client_ids
+            .iter()
+            .map(|id| Uuid::parse_str(id).map_err(|e| to_py_err(format!("invalid UUID: {e}"))))
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.batch_query_ip(&ids).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Attach a local FilePerKey storage backend for offload/promotion.
+    #[pyo3(signature = (
+        root_dir,
+        fsdir = String::from("moon_file_per_key_dir"),
+        enable_eviction = true,
+        quota_bytes = 0,
+    ))]
+    fn attach_local_storage_backend(
+        &self,
+        root_dir: String,
+        fsdir: String,
+        enable_eviction: bool,
+        quota_bytes: u64,
+    ) -> PyResult<()> {
+        let backend = Arc::new(LocalStorageBackend::new(LocalStorageConfig {
+            root_dir: PathBuf::from(root_dir),
+            fsdir,
+            enable_eviction,
+            quota_bytes,
+        }));
+        backend.init().map_err(to_py_err)?;
+
+        let mut guard = self.inner.lock();
+        let client = guard
+            .take()
+            .ok_or_else(|| to_py_err("client already closed"))?;
+        *guard = Some(client.with_local_storage_backend(backend));
+        Ok(())
+    }
+
+    /// Start the local P2P offload read server. Returns its port.
+    fn start_offload_server<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let client = take_client(&inner)?;
+            let result = client.start_offload_server().await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Return the local P2P offload RPC address if the server is running.
+    fn offload_rpc_address(&self) -> PyResult<String> {
+        match self.inner.lock().as_ref() {
+            Some(client) => Ok(client.offload_rpc_address()),
+            None => Err(to_py_err("client already closed")),
+        }
+    }
+
+    /// Execute one complete offload heartbeat cycle.
+    fn offload_objects<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        enable_offloading: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.offload_objects(enable_offloading).await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Execute one complete promotion heartbeat cycle.
+    fn promote_objects<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client.promote_objects().await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// C++ ClientRequester-compatible P2P offload request.
+    #[staticmethod]
+    fn batch_get_offload_object<'py>(
+        py: Python<'py>,
+        peer_addr: String,
+        keys: Vec<String>,
+        sizes: Vec<i64>,
+        tenant_ids: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = mooncake_store_client::offload::client::batch_get_offload_objects(
+                &peer_addr,
+                &keys,
+                &sizes,
+                &tenant_ids,
+            )
+            .await
+            .map_err(to_py_err)?;
+            Ok((
+                result.batch_id,
+                result.pointers,
+                result.transfer_engine_addr,
+            ))
+        })
+    }
+
+    /// Release a peer offload batch buffer.
+    #[staticmethod]
+    fn release_offload_buffer<'py>(
+        py: Python<'py>,
+        peer_addr: String,
+        batch_id: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            mooncake_store_client::offload::client::release_offload_buffer(&peer_addr, batch_id)
+                .await;
+            Ok(())
         })
     }
 

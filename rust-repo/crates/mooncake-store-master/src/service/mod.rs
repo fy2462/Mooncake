@@ -31,6 +31,7 @@ mod grpc_replication;
 mod grpc_tasks;
 mod grpc_trait;
 pub(crate) mod helpers;
+pub(crate) mod nof_probe;
 mod proto_conv;
 pub(crate) mod state;
 mod workers;
@@ -39,6 +40,7 @@ use crate::allocator::{
     MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator, CACHELIB_SLAB_SIZE,
 };
 use crate::count_min_sketch::CountMinSketch;
+use crate::ha::LoadedSnapshot;
 use crate::http_metadata::MetadataState;
 use crate::metrics;
 use crate::proto;
@@ -69,12 +71,14 @@ use self::helpers::{
     addresses_for_client, allocate_nof_replicas, bump_view_version, choose_drain_target_segment,
     cleanup_stale_handles, client_id_by_nof_segment_name, client_id_by_replica_segment_name,
     client_id_by_segment_name, default_drain_target_segments, get_alive_clients_snapshot,
-    host_from_segment_name, is_lease_expired, make_tenant_scoped_key, normalize_tenant_id,
-    object_owner_client_id, register_metadata_segments, release_object_replicas, release_replicas,
+    has_pending_task_capacity, host_from_segment_name, is_lease_expired, make_tenant_scoped_key,
+    normalize_tenant_id, object_owner_client_id, processing_task_capacity,
+    register_metadata_segments, release_object_replicas, release_replicas,
     release_replicas_scheduled, split_scoped_key, storage_fs_dir_for_client, sync_client_segments,
     sync_nof_segment_usage, sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned,
     upsert_client_addresses, validate_user_key,
 };
+use self::nof_probe::probe_nof_endpoint;
 use self::proto_conv::{
     config_from_proto, nof_segment_from_proto, nof_segment_owner_to_proto, nof_segment_to_proto,
     replica_from_proto, replica_to_proto, replica_type_from_i32, task_status_from_proto,
@@ -210,12 +214,8 @@ impl MasterServiceImpl {
         let eviction_worker = EvictionWorker::new(state.clone());
         let client_monitor_worker = ClientMonitorWorker::new(state.clone());
         let drain_worker = DrainWorker::new(state.clone());
-        // NoF heartbeat: default probe function always succeeds (no-op probe).
-        // For production with SPDK, inject the real probe function via configuration.
-        let nof_heartbeat_worker = NofHeartbeatWorker::new(
-            state.clone(),
-            Box::new(|_te_endpoint: &str, _timeout: Duration| Ok(())),
-        );
+        let nof_heartbeat_worker =
+            NofHeartbeatWorker::new(state.clone(), Box::new(probe_nof_endpoint));
 
         // 如果提供了快照后端，尝试从快照恢复状态
         // If a snapshot backend is provided, try to restore from snapshot
@@ -326,24 +326,75 @@ impl MasterServiceImpl {
     /// Records success/failure counts and duration metrics for monitoring.
     pub fn save_snapshot(&self) {
         let state = self.state.clone();
-        tokio::task::spawn_blocking(move || {
-            let start = std::time::Instant::now();
-            let guard = state.storage_backend.read();
-            if let Some(ref backend) = *guard {
-                if let Err(e) = backend.save(
-                    &state.segments,
-                    &state.nof_segments,
-                    &state.objects,
-                    &state.tasks,
-                ) {
+        let timeout = state.runtime_config.snapshot_child_timeout;
+        let retention_count = state.runtime_config.snapshot_retention_count;
+        tokio::spawn(async move {
+            let save_task = tokio::task::spawn_blocking(move || {
+                let start = std::time::Instant::now();
+                let guard = state.storage_backend.read();
+                if let Some(ref backend) = *guard {
+                    if let Err(e) = backend.save(
+                        &state.segments,
+                        &state.nof_segments,
+                        &state.objects,
+                        &state.tasks,
+                    ) {
+                        metrics::SNAPSHOT_FAIL_COUNT.inc();
+                        tracing::error!("Failed to save snapshot: {}", e);
+                    } else if let Err(e) = backend.retain_latest_snapshot(retention_count) {
+                        metrics::SNAPSHOT_FAIL_COUNT.inc();
+                        tracing::error!("Failed to retain snapshot history: {}", e);
+                    } else {
+                        metrics::SNAPSHOT_DURATION_MS.set(start.elapsed().as_millis() as i64);
+                        metrics::SNAPSHOT_SUCCESS_COUNT.inc();
+                    }
+                }
+            });
+
+            match tokio::time::timeout(timeout, save_task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
                     metrics::SNAPSHOT_FAIL_COUNT.inc();
-                    tracing::error!("Failed to save snapshot: {}", e);
-                } else {
-                    metrics::SNAPSHOT_DURATION_MS.set(start.elapsed().as_millis() as i64);
-                    metrics::SNAPSHOT_SUCCESS_COUNT.inc();
+                    tracing::error!("Snapshot save task failed to join: {}", e);
+                }
+                Err(_) => {
+                    metrics::SNAPSHOT_FAIL_COUNT.inc();
+                    tracing::error!("Snapshot save timed out after {:?}", timeout);
                 }
             }
         });
+    }
+
+    pub fn capture_loaded_snapshot(&self, snapshot_id: impl Into<String>) -> LoadedSnapshot {
+        let snapshot_sequence_id = self.oplog_manager.lock().latest_sequence();
+        LoadedSnapshot {
+            snapshot_id: snapshot_id.into(),
+            snapshot_sequence_id,
+            segments: self
+                .state
+                .segments
+                .iter()
+                .map(|entry| entry.value().clone())
+                .collect(),
+            nof_segments: self
+                .state
+                .nof_segments
+                .iter()
+                .map(|entry| entry.value().clone())
+                .collect(),
+            objects: self
+                .state
+                .objects
+                .iter()
+                .map(|entry| (entry.key().clone(), entry.value().clone()))
+                .collect(),
+            tasks: self
+                .state
+                .tasks
+                .iter()
+                .map(|entry| entry.value().clone())
+                .collect(),
+        }
     }
 
     /// 获取 MetadataState 的克隆（HTTP metadata 服务使用）。

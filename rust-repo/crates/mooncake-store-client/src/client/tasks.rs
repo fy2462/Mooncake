@@ -26,10 +26,25 @@
 
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use super::MooncakeClient;
 use crate::proto;
+
+#[derive(Debug, Deserialize)]
+struct ReplicaCopyPayload {
+    key: String,
+    source: String,
+    targets: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReplicaMovePayload {
+    key: String,
+    source: String,
+    target: String,
+}
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------
@@ -200,5 +215,54 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
         Ok(())
+    }
+
+    /// Execute one fetched task and report its result to the master.
+    ///
+    /// C++ equivalent: `Client::ExecuteTask` in `client_service.cpp`.
+    pub async fn execute_task_assignment(
+        &mut self,
+        task: proto::TaskAssignment,
+    ) -> StoreResult<()> {
+        let task_id = task
+            .id
+            .map(|id| Uuid::from_u64_pair(id.high, id.low))
+            .ok_or_else(|| StoreError::InvalidParams("task assignment missing id".to_string()))?;
+
+        let result = match proto::TaskType::try_from(task.r#type) {
+            Ok(proto::TaskType::ReplicaCopy) => {
+                let payload: ReplicaCopyPayload =
+                    serde_json::from_str(&task.payload).map_err(|e| {
+                        StoreError::InvalidParams(format!("invalid replica copy payload: {e}"))
+                    })?;
+                self.copy(&payload.key, &payload.source, &payload.targets)
+                    .await
+            }
+            Ok(proto::TaskType::ReplicaMove) => {
+                let payload: ReplicaMovePayload =
+                    serde_json::from_str(&task.payload).map_err(|e| {
+                        StoreError::InvalidParams(format!("invalid replica move payload: {e}"))
+                    })?;
+                self.move_object(&payload.key, &payload.source, &payload.target)
+                    .await
+            }
+            Err(_) => Err(StoreError::InvalidParams(format!(
+                "unknown task type: {}",
+                task.r#type
+            ))),
+        };
+
+        match result {
+            Ok(()) => {
+                self.mark_task_to_complete(task_id, proto::TaskStatus::TaskSuccess, "")
+                    .await
+            }
+            Err(e) => {
+                let message = e.to_string();
+                self.mark_task_to_complete(task_id, proto::TaskStatus::TaskFailed, &message)
+                    .await?;
+                Err(e)
+            }
+        }
     }
 }

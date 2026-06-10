@@ -2,6 +2,7 @@ pub(crate) mod batches;
 pub(crate) mod offload_read;
 pub(crate) mod read;
 pub(crate) mod remove;
+pub(crate) mod replication;
 pub(crate) mod storage;
 pub(crate) mod tasks;
 pub(crate) mod transfer;
@@ -17,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
@@ -53,6 +55,47 @@ pub struct BufferHandle {
 pub(crate) const REPLICA_TYPE_MEMORY: i32 = ReplicaType::Memory as i32;
 pub(crate) const REPLICA_TYPE_NOF_SSD: i32 = ReplicaType::NoFSsd as i32;
 pub(crate) const REPLICA_TYPE_ALL: i32 = ReplicaType::All as i32;
+
+#[derive(Debug, Clone)]
+pub struct ClientBackgroundConfig {
+    pub health_interval: Duration,
+    pub storage_interval: Duration,
+    pub task_poll_interval: Duration,
+    pub task_batch_size: u32,
+    pub enable_offloading: bool,
+    pub enable_promotion: bool,
+    pub enable_task_poll: bool,
+    pub report_ssd_capacity: bool,
+}
+
+impl Default for ClientBackgroundConfig {
+    fn default() -> Self {
+        Self {
+            health_interval: Duration::from_secs(1),
+            storage_interval: Duration::from_secs(5),
+            task_poll_interval: Duration::from_millis(200),
+            task_batch_size: 16,
+            enable_offloading: true,
+            enable_promotion: true,
+            enable_task_poll: true,
+            report_ssd_capacity: true,
+        }
+    }
+}
+
+pub struct ClientBackgroundHandle {
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    join_handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl ClientBackgroundHandle {
+    pub async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(true);
+        for handle in self.join_handles {
+            let _ = handle.await;
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ReplicaTransferSummary {
@@ -344,6 +387,15 @@ pub struct MooncakeClient {
     /// P2P offload RPC address (`hostname:port`).
     /// C++ equivalent: `RealClient::local_rpc_addr`
     pub(crate) offload_rpc_addr: RwLock<String>,
+
+    /// Currently connected master address (`host:port`).
+    /// C++ equivalent: `Client::current_master_view_.leader_address`.
+    pub(crate) master_addr: RwLock<String>,
+
+    /// Candidate master addresses used for client-side failover.
+    /// This intentionally stores plain addresses rather than depending on the
+    /// master crate's HA coordinator types, keeping the client crate standalone.
+    pub(crate) master_candidates: RwLock<Vec<String>>,
 }
 
 impl MooncakeClient {
@@ -401,16 +453,78 @@ impl MooncakeClient {
         global_segment_size: u64,
         local_buffer_size: u64,
     ) -> StoreResult<Self> {
-        // Step 1: Connect to master via gRPC. / 通过 gRPC 连接 master。
-        let master_url = format!("http://{master_addr}");
-        let channel = Channel::from_shared(master_url)
-            .map_err(|e| StoreError::Internal(e.to_string()))?
-            .connect()
-            .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Self::create_with_master_candidates(
+            &[master_addr.to_string()],
+            metadata_conn_string,
+            local_host,
+            protocol,
+            device,
+            global_segment_size,
+            local_buffer_size,
+        )
+        .await
+    }
 
-        let mut master = proto::master_service_client::MasterServiceClient::new(channel);
+    /// Create a client by trying multiple master addresses in order.
+    ///
+    /// This covers the C++ client's HA bootstrap behavior at the store-client
+    /// level without coupling this crate to a specific HA backend. Callers that
+    /// watch etcd/Redis/K8s leader views can update the candidate set and call
+    /// [`switch_master`](Self::switch_master) or [`failover_master`](Self::failover_master).
+    pub async fn create_with_master_candidates(
+        master_addrs: &[String],
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+    ) -> StoreResult<Self> {
+        if master_addrs.is_empty() {
+            return Err(StoreError::InvalidParams(
+                "at least one master address is required".to_string(),
+            ));
+        }
 
+        let mut last_error = None;
+        for addr in master_addrs {
+            match Self::connect_master_addr(addr).await {
+                Ok(master) => {
+                    return Self::create_with_connected_master(
+                        addr,
+                        master_addrs,
+                        master,
+                        metadata_conn_string,
+                        local_host,
+                        protocol,
+                        device,
+                        global_segment_size,
+                        local_buffer_size,
+                    )
+                    .await;
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            StoreError::Internal("failed to connect to any master candidate".to_string())
+        }))
+    }
+
+    async fn create_with_connected_master(
+        selected_master_addr: &str,
+        master_candidates: &[String],
+        mut master: proto::master_service_client::MasterServiceClient<Channel>,
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+    ) -> StoreResult<Self> {
         // Step 2: Parse IP and port from local_host. / 从 local_host 解析 IP 和端口。
         let parts: Vec<&str> = local_host.split(':').collect();
         let ip = parts.first().copied().unwrap_or(local_host);
@@ -536,7 +650,37 @@ impl MooncakeClient {
             offload_server_handle: RwLock::new(None),
             offload_server_port: Arc::new(std::sync::atomic::AtomicU16::new(0)),
             offload_rpc_addr: RwLock::new(String::new()),
+            master_addr: RwLock::new(selected_master_addr.to_string()),
+            master_candidates: RwLock::new(master_candidates.to_vec()),
         })
+    }
+
+    async fn connect_master_addr(
+        master_addr: &str,
+    ) -> StoreResult<proto::master_service_client::MasterServiceClient<Channel>> {
+        let master_url = Self::normalize_master_url(master_addr)?;
+        let channel = Channel::from_shared(master_url)
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .connect()
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?;
+        Ok(proto::master_service_client::MasterServiceClient::new(
+            channel,
+        ))
+    }
+
+    fn normalize_master_url(master_addr: &str) -> StoreResult<String> {
+        let trimmed = master_addr.trim();
+        if trimmed.is_empty() {
+            return Err(StoreError::InvalidParams(
+                "master address must not be empty".to_string(),
+            ));
+        }
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            Ok(trimmed.to_string())
+        } else {
+            Ok(format!("http://{trimmed}"))
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -546,6 +690,68 @@ impl MooncakeClient {
     /// Return this node's hostname. / 返回本节点的主机名。
     pub fn get_hostname(&self) -> String {
         self.local_hostname.clone()
+    }
+
+    /// Return the currently connected master address.
+    pub fn current_master_addr(&self) -> String {
+        self.master_addr.read().clone()
+    }
+
+    /// Return the current client-side HA candidate list.
+    pub fn master_candidates(&self) -> Vec<String> {
+        self.master_candidates.read().clone()
+    }
+
+    /// Replace the client-side HA candidate list.
+    pub fn set_master_candidates(&self, candidates: Vec<String>) -> StoreResult<()> {
+        if candidates.is_empty() {
+            return Err(StoreError::InvalidParams(
+                "at least one master candidate is required".to_string(),
+            ));
+        }
+        if candidates.iter().any(|addr| addr.trim().is_empty()) {
+            return Err(StoreError::InvalidParams(
+                "master candidate address must not be empty".to_string(),
+            ));
+        }
+        *self.master_candidates.write() = candidates;
+        Ok(())
+    }
+
+    /// Switch this client to a new master address.
+    ///
+    /// This is the Rust equivalent of C++ `Client::SwitchLeader`: stale or
+    /// duplicate views are filtered by the caller, while this method performs
+    /// the actual channel swap atomically from the client's perspective.
+    pub async fn switch_master(&mut self, master_addr: &str) -> StoreResult<()> {
+        let next_master = Self::connect_master_addr(master_addr).await?;
+        self.master = next_master;
+        *self.master_addr.write() = master_addr.trim().to_string();
+        self.last_ping_success.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Try every configured master candidate except the current one until one
+    /// connects. Returns the connected address.
+    pub async fn failover_master(&mut self) -> StoreResult<String> {
+        let current = self.current_master_addr();
+        let mut candidates = self.master_candidates();
+        candidates.sort();
+        candidates.dedup();
+
+        let mut last_error = None;
+        for addr in candidates {
+            if addr == current {
+                continue;
+            }
+            match self.switch_master(&addr).await {
+                Ok(()) => return Ok(addr),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            StoreError::Internal("no alternate master candidate connected".to_string())
+        }))
     }
 
     /// Send a ping to the master. If the master returns NeedRemount, trigger an
@@ -559,15 +765,27 @@ impl MooncakeClient {
             mounted_segments: vec![],
             tenant_id: String::new(),
         };
-        let response = self
-            .master
-            .ping(request)
-            .await
-            .map_err(|e| {
+        let response = match self.master.ping(request).await {
+            Ok(response) => response,
+            Err(first_error) => {
                 self.last_ping_success.store(false, Ordering::SeqCst);
-                StoreError::Internal(e.to_string())
-            })?
-            .into_inner();
+                self.failover_master().await?;
+                self.master
+                    .ping(proto::PingRequest {
+                        client_id: Some(self.client_id_proto()),
+                        mounted_segments: vec![],
+                        tenant_id: String::new(),
+                    })
+                    .await
+                    .map_err(|second_error| {
+                        self.last_ping_success.store(false, Ordering::SeqCst);
+                        StoreError::Internal(format!(
+                            "ping failed before failover ({first_error}); after failover: {second_error}"
+                        ))
+                    })?
+            }
+        }
+        .into_inner();
 
         self.last_ping_success.store(true, Ordering::SeqCst);
 
@@ -793,6 +1011,142 @@ impl MooncakeClient {
         self.try_trigger_remount();
     }
 
+    /// Start C++-style client background workers.
+    ///
+    /// The workers periodically run health/remount checks, storage
+    /// offload/promotion heartbeats, and replica copy/move task polling.
+    /// The client is passed behind a Tokio mutex so all existing `&mut self`
+    /// APIs can be reused without making the whole client cloneable.
+    pub fn start_background_workers(
+        client: Arc<tokio::sync::Mutex<Self>>,
+        config: ClientBackgroundConfig,
+    ) -> ClientBackgroundHandle {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut join_handles = Vec::new();
+
+        join_handles.push(tokio::spawn(Self::health_worker_loop(
+            Arc::clone(&client),
+            config.health_interval,
+            shutdown_rx.clone(),
+        )));
+
+        if config.enable_offloading || config.enable_promotion || config.report_ssd_capacity {
+            join_handles.push(tokio::spawn(Self::storage_worker_loop(
+                Arc::clone(&client),
+                config.clone(),
+                shutdown_rx.clone(),
+            )));
+        }
+
+        if config.enable_task_poll {
+            join_handles.push(tokio::spawn(Self::task_worker_loop(
+                client,
+                config.task_poll_interval,
+                config.task_batch_size,
+                shutdown_rx,
+            )));
+        }
+
+        ClientBackgroundHandle {
+            shutdown_tx,
+            join_handles,
+        }
+    }
+
+    async fn health_worker_loop(
+        client: Arc<tokio::sync::Mutex<Self>>,
+        interval: Duration,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let result = client.lock().await.health_check().await;
+                    if let Err(e) = result {
+                        tracing::warn!(target: "client_background", %e, "health_check worker iteration failed");
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn storage_worker_loop(
+        client: Arc<tokio::sync::Mutex<Self>>,
+        config: ClientBackgroundConfig,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let mut ticker = tokio::time::interval(config.storage_interval);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let mut guard = client.lock().await;
+                    if config.report_ssd_capacity {
+                        if let Some(storage) = guard.local_storage.as_ref() {
+                            let (_, total) = storage.space_usage();
+                            if let Err(e) = guard.report_ssd_capacity(total as i64).await {
+                                tracing::warn!(target: "client_background", %e, "report_ssd_capacity worker iteration failed");
+                            }
+                        }
+                    }
+                    if config.enable_offloading && guard.local_storage.is_some() {
+                        if let Err(e) = guard.offload_objects(config.enable_offloading).await {
+                            tracing::warn!(target: "client_background", %e, "offload worker iteration failed");
+                        }
+                    }
+                    if config.enable_promotion && guard.local_storage.is_some() {
+                        if let Err(e) = guard.promote_objects().await {
+                            tracing::warn!(target: "client_background", %e, "promotion worker iteration failed");
+                        }
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn task_worker_loop(
+        client: Arc<tokio::sync::Mutex<Self>>,
+        interval: Duration,
+        batch_size: u32,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let mut guard = client.lock().await;
+                    let tasks = match guard.fetch_tasks(batch_size).await {
+                        Ok(tasks) => tasks,
+                        Err(e) => {
+                            tracing::warn!(target: "client_background", %e, "fetch_tasks worker iteration failed");
+                            continue;
+                        }
+                    };
+                    for task in tasks {
+                        if let Err(e) = guard.execute_task_assignment(task).await {
+                            tracing::warn!(target: "client_background", %e, "execute_task_assignment failed");
+                        }
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     /// Query the master for the list of replicas hosting a given key,
     /// without fetching the data. Returns an empty vector if the key is
     /// not found.
@@ -803,6 +1157,17 @@ impl MooncakeClient {
     /// 如果 key 未找到则返回空向量。
     pub async fn get_replica_list(&mut self, key: &str) -> StoreResult<Vec<ReplicaDescriptor>> {
         self.fetch_replicas(key).await
+    }
+
+    /// Query replica lists for multiple keys using one BatchGetReplicaList RPC.
+    pub async fn batch_get_replica_list(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<Vec<ReplicaDescriptor>>> {
+        self.fetch_batch_replicas(keys)
+            .await?
+            .into_iter()
+            .collect::<StoreResult<Vec<_>>>()
     }
 
     /// Returns `true` if the client has been torn down. / 如果客户端已关闭则返回 true。
@@ -853,10 +1218,41 @@ impl MooncakeClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary,
-        REPLICA_TYPE_ALL, REPLICA_TYPE_MEMORY, REPLICA_TYPE_NOF_SSD,
+        determine_finalize_decision, ClientBackgroundConfig, MooncakeClient,
+        ReplicaFinalizeDecision, ReplicaTransferSummary, REPLICA_TYPE_ALL, REPLICA_TYPE_MEMORY,
+        REPLICA_TYPE_NOF_SSD,
     };
-    use mooncake_store_core::ReplicateConfig;
+    use mooncake_store_core::{ReplicateConfig, StoreError};
+    use std::time::Duration;
+
+    #[test]
+    fn normalize_master_url_accepts_plain_and_url_forms() {
+        assert_eq!(
+            MooncakeClient::normalize_master_url("127.0.0.1:50051").unwrap(),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(
+            MooncakeClient::normalize_master_url("http://leader:50051").unwrap(),
+            "http://leader:50051"
+        );
+        assert_eq!(
+            MooncakeClient::normalize_master_url("https://leader:50051").unwrap(),
+            "https://leader:50051"
+        );
+    }
+
+    #[test]
+    fn normalize_master_url_rejects_empty_values() {
+        let err = MooncakeClient::normalize_master_url("  ").unwrap_err();
+        assert!(matches!(err, StoreError::InvalidParams(_)));
+    }
+
+    #[test]
+    fn background_config_default_keeps_short_task_poll_interval() {
+        let cfg = ClientBackgroundConfig::default();
+        assert!(cfg.enable_task_poll);
+        assert!(cfg.task_poll_interval <= Duration::from_millis(250));
+    }
 
     #[test]
     fn finalize_decision_reliable_memory_nof_requires_all_transfers() {

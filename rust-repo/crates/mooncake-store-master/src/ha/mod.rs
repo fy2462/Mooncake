@@ -37,6 +37,8 @@
 // C++ equivalent: ha_service.* / master_ha.cpp
 // ============================================================================
 
+pub mod catalog_snapshot;
+mod catalog_task;
 pub mod coordinator;
 pub mod oplog_applier;
 pub mod snapshot;
@@ -47,10 +49,16 @@ pub mod types;
 
 // Re-export all public items to preserve the original `pub mod ha` API surface.
 // 重新导出所有 public 项，以保持原始 `pub mod ha` 的 API 表面。
+pub use catalog_snapshot::{
+    create_catalog_backed_snapshot_provider, CatalogBackedSnapshotProvider,
+};
 pub use coordinator::LeaderCoordinator;
 pub use snapshot::{
-    EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalSnapshotProvider, NoopSnapshotProvider,
-    SnapshotCatalogStore, SnapshotDescriptor, SnapshotProvider,
+    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
+    EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalFileSnapshotObjectStore,
+    LocalSnapshotProvider, NoopSnapshotProvider, RedisSnapshotCatalogStore, S3SnapshotObjectStore,
+    SnapshotCatalogStore, SnapshotCatalogStoreType, SnapshotDescriptor, SnapshotObjectStore,
+    SnapshotObjectStoreType, SnapshotProvider,
 };
 pub use standby::{
     build_standby_runtime_capabilities, map_standby_runtime_state,

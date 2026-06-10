@@ -281,6 +281,9 @@ impl MasterServiceImpl {
                 continue;
             };
             drop(object);
+            if !has_pending_task_capacity(&self.state) {
+                break;
+            }
             let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
             let task_id = Uuid::new_v4();
             job.active_tasks.insert(
@@ -320,7 +323,7 @@ impl MasterServiceImpl {
                     },
                     key: key.clone(),
                     payload,
-                    max_retry_attempts: 3,
+                    max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
                 },
             );
         }

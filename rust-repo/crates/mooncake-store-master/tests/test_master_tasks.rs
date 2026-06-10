@@ -1,12 +1,17 @@
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
-use mooncake_store_master::MasterServiceImpl;
+use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
 #[tokio::test]
 async fn test_create_and_query_task_returns_real_state() {
-    let service = MasterServiceImpl::default();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        pending_task_timeout: Duration::from_millis(50),
+        reaper_interval: Duration::from_millis(5),
+        ..Default::default()
+    });
     let client_id = Uuid::new_v4();
     let target_client_id = Uuid::new_v4();
 
@@ -88,7 +93,7 @@ async fn test_create_and_query_task_returns_real_state() {
     let task = MasterService::query_task(
         &service,
         Request::new(proto::QueryTaskRequest {
-            task_id: Some(task_id),
+            task_id: Some(task_id.clone()),
         }),
     )
     .await
@@ -100,11 +105,27 @@ async fn test_create_and_query_task_returns_real_state() {
     assert!(task.created_at_ms_epoch > 0);
     assert!(task.message.contains("task-key"));
     assert!(task.assigned_client.is_some());
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let expired = MasterService::query_task(
+        &service,
+        Request::new(proto::QueryTaskRequest {
+            task_id: Some(task_id),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(expired.status, proto::TaskStatus::TaskFailed as i32);
+    assert_eq!(expired.message, "pending timeout");
 }
 
 #[tokio::test]
 async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
-    let service = MasterServiceImpl::default();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        max_total_processing_tasks: 1,
+        ..Default::default()
+    });
     let source_client_id = Uuid::new_v4();
     let target_client_id = Uuid::new_v4();
 
@@ -216,6 +237,38 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
     assert_eq!(first_batch.tasks.len(), 1);
     let first_id = first_batch.tasks[0].id.clone().unwrap();
 
+    let blocked_batch = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            batch_size: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(blocked_batch.tasks.is_empty());
+
+    MasterService::mark_task_to_complete(
+        &service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(first_id.clone()),
+                status: proto::TaskStatus::TaskSuccess as i32,
+                message: "done".into(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
     let second_batch = MasterService::fetch_tasks(
         &service,
         Request::new(proto::FetchTasksRequest {
@@ -263,7 +316,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
     .await
     .unwrap()
     .into_inner();
-    assert_eq!(task.status, proto::TaskStatus::TaskProcessing as i32);
+    assert_eq!(task.status, proto::TaskStatus::TaskSuccess as i32);
 }
 
 #[tokio::test]
@@ -378,6 +431,23 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
     )
     .await;
     assert!(wrong_client.is_err());
+
+    let nonterminal_status = MasterService::mark_task_to_complete(
+        &service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(task_id.clone()),
+                status: proto::TaskStatus::TaskProcessing as i32,
+                message: "still-processing".into(),
+            }),
+        }),
+    )
+    .await;
+    assert!(nonterminal_status.is_err());
 
     MasterService::mark_task_to_complete(
         &service,

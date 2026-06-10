@@ -107,11 +107,11 @@ fn test_storage_backend_save_and_load() {
                 id: sid,
                 name: "node1:12345".into(),
                 size: 1024 * 1024,
-                base: 0,
-                te_endpoint: String::new(),
-                protocol: "tcp".into(),
+                base: 0x200000000,
+                te_endpoint: "node1:12346".into(),
+                protocol: "rdma".into(),
             },
-            used: 0,
+            used: 4096,
             client_id: cid,
             status: ProtoSegmentStatus::Active,
         },
@@ -131,11 +131,15 @@ fn test_storage_backend_save_and_load() {
 
     let (loaded_segs, loaded_nof_segs, loaded_objs, _loaded_tasks) =
         backend.load().unwrap().unwrap();
-    let loaded_segs: Vec<_> = loaded_segs.into_iter().map(|s| s.segment).collect();
     assert_eq!(loaded_segs.len(), 1);
     assert!(loaded_nof_segs.is_empty());
-    assert_eq!(loaded_segs[0].name, "node1:12345");
-    assert_eq!(loaded_segs[0].size, 1024 * 1024);
+    assert_eq!(loaded_segs[0].segment.name, "node1:12345");
+    assert_eq!(loaded_segs[0].segment.base, 0x200000000);
+    assert_eq!(loaded_segs[0].segment.size, 1024 * 1024);
+    assert_eq!(loaded_segs[0].segment.te_endpoint, "node1:12346");
+    assert_eq!(loaded_segs[0].segment.protocol, "rdma");
+    assert_eq!(loaded_segs[0].used, 4096);
+    assert_eq!(loaded_segs[0].client_id, cid);
     assert_eq!(loaded_objs.len(), 1);
     assert_eq!(loaded_objs[0].0, "key1");
     assert_eq!(loaded_objs[0].1.replicas.len(), 1);
@@ -319,6 +323,35 @@ fn test_storage_backend_load_falls_back_to_json() {
     assert_eq!(segments[0].segment.size, 4096);
 }
 
+#[test]
+fn test_storage_backend_rejects_invalid_snapshot_uuid() {
+    use std::fs;
+
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let snap = serde_json::json!({
+        "segments": [{
+            "id": "not-a-uuid",
+            "name": "corrupt-seg",
+            "size": 4096u64,
+            "used": 0u64,
+            "client_id": "00000000-0000-0000-0000-000000000002",
+            "status": 1i32
+        }],
+        "nof_segments": [],
+        "objects": [],
+        "tasks": []
+    });
+    fs::write(
+        tmp.join("master_snapshot.json"),
+        serde_json::to_string_pretty(&snap).unwrap(),
+    )
+    .unwrap();
+
+    let error = backend.load().unwrap_err().to_string();
+    assert!(error.contains("invalid memory segment id"));
+}
+
 /// Verify `clear()` removes both msgpack and legacy JSON files.
 #[test]
 fn test_storage_backend_clear_removes_both_formats() {
@@ -345,6 +378,37 @@ fn test_storage_backend_clear_removes_both_formats() {
 
     assert!(!tmp.join("master_snapshot.msgpack").exists());
     assert!(!json_path.exists());
+}
+
+#[test]
+fn test_storage_backend_retains_bounded_snapshot_history() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+
+    let segments: DashMap<Uuid, SegmentEntry> = DashMap::new();
+    let nof_segments: DashMap<Uuid, NoFSegmentEntry> = DashMap::new();
+    let tasks: DashMap<Uuid, TaskEntry> = DashMap::new();
+    let objects: DashMap<String, ObjectEntry> = DashMap::new();
+
+    for _ in 0..3 {
+        backend
+            .save(&segments, &nof_segments, &objects, &tasks)
+            .unwrap();
+        backend.retain_latest_snapshot(2).unwrap();
+    }
+
+    assert!(tmp.join("master_snapshot.msgpack").exists());
+    let history_count = std::fs::read_dir(tmp.join("snapshots"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("master_snapshot_"))
+        })
+        .count();
+    assert_eq!(history_count, 2);
 }
 
 #[test]
@@ -396,4 +460,84 @@ fn test_distributed_storage_filename_codec_matches_cpp_rules() {
     let escaped = StorageBackend::escape_distributed_filename(key);
     assert_eq!(escaped, "a%40b%3ac%2fd%5ce%25f%0a%e2%98%83");
     assert_eq!(StorageBackend::unescape_distributed_filename(&escaped), key);
+}
+
+#[test]
+fn test_bucket_storage_backend_offload_load_scan_and_remove() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::Bucket, &tmp);
+
+    backend
+        .batch_offload(&[
+            ("alpha".to_string(), b"one".to_vec()),
+            ("beta".to_string(), b"two-two".to_vec()),
+        ])
+        .unwrap();
+    backend
+        .batch_offload(&[("alpha".to_string(), b"updated".to_vec())])
+        .unwrap();
+
+    assert!(backend.is_enable_offloading());
+    assert!(backend.is_exist("alpha").unwrap());
+    assert!(!backend.is_exist("missing").unwrap());
+
+    let loaded = backend
+        .batch_load(&["alpha".to_string(), "beta".to_string()])
+        .unwrap();
+    assert_eq!(
+        loaded,
+        vec![
+            ("beta".to_string(), b"two-two".to_vec()),
+            ("alpha".to_string(), b"updated".to_vec()),
+        ]
+    );
+
+    let mut meta = backend.scan_meta().unwrap();
+    meta.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        meta,
+        vec![("alpha".to_string(), 7), ("beta".to_string(), 7)]
+    );
+
+    assert_eq!(backend.remove_by_regex("alp.*").unwrap(), 1);
+    assert!(!backend.is_exist("alpha").unwrap());
+    assert_eq!(backend.remove_all().unwrap(), 1);
+}
+
+#[test]
+fn test_offset_allocator_storage_backend_offload_load_scan_and_remove() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::OffsetAllocator, &tmp);
+
+    backend
+        .batch_offload(&[
+            ("k1".to_string(), b"payload-one".to_vec()),
+            ("k2".to_string(), b"payload-two".to_vec()),
+        ])
+        .unwrap();
+    backend
+        .batch_offload(&[("k1".to_string(), b"replacement".to_vec())])
+        .unwrap();
+
+    assert!(backend.is_enable_offloading());
+    assert!(backend.is_exist("k1").unwrap());
+
+    let loaded = backend
+        .batch_load(&["k1".to_string(), "k2".to_string(), "missing".to_string()])
+        .unwrap();
+    assert_eq!(
+        loaded,
+        vec![
+            ("k1".to_string(), b"replacement".to_vec()),
+            ("k2".to_string(), b"payload-two".to_vec()),
+        ]
+    );
+
+    let mut meta = backend.scan_meta().unwrap();
+    meta.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(meta, vec![("k1".to_string(), 11), ("k2".to_string(), 11)]);
+
+    backend.remove_keys(&["k2".to_string()]).unwrap();
+    assert!(!backend.is_exist("k2").unwrap());
+    assert_eq!(backend.remove_all().unwrap(), 1);
 }

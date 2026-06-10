@@ -1,4 +1,6 @@
+use mooncake_store_client::ClientBackgroundConfig;
 use mooncake_store_core::{ReplicateConfig, StoreError};
+use std::time::Duration;
 
 /// Test that a fresh client can be created (without real backend — just struct init).
 #[test]
@@ -91,4 +93,16 @@ fn test_store_error_variants() {
 
     let err: StoreError = std::io::Error::new(std::io::ErrorKind::Other, "io fail").into();
     assert!(err.to_string().contains("io fail"));
+}
+
+#[test]
+fn test_client_background_config_defaults_are_cxx_like() {
+    let cfg = ClientBackgroundConfig::default();
+    assert!(cfg.enable_offloading);
+    assert!(cfg.enable_promotion);
+    assert!(cfg.enable_task_poll);
+    assert!(cfg.report_ssd_capacity);
+    assert!(cfg.health_interval <= Duration::from_secs(1));
+    assert!(cfg.task_poll_interval <= Duration::from_millis(250));
+    assert!(cfg.task_batch_size > 0);
 }

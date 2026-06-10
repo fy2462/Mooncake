@@ -458,6 +458,22 @@ pub struct MasterRuntimeConfig {
     pub nof_heartbeat_probe_timeout: Duration,
     /// NoF 心跳连续失败阈值，超过后卸载 segment / NoF heartbeat consecutive failure threshold; unmounts segment when exceeded.
     pub nof_heartbeat_failures_threshold: u32,
+    /// Timeout for a single asynchronous snapshot save task.
+    pub snapshot_child_timeout: Duration,
+    /// Number of historical snapshots retained after successful saves.
+    pub snapshot_retention_count: usize,
+    /// Maximum retained finished client tasks.
+    pub max_total_finished_tasks: usize,
+    /// Maximum pending client tasks.
+    pub max_total_pending_tasks: usize,
+    /// Maximum concurrently processing client tasks.
+    pub max_total_processing_tasks: usize,
+    /// Pending task timeout; zero disables expiration.
+    pub pending_task_timeout: Duration,
+    /// Processing task timeout; zero disables expiration.
+    pub processing_task_timeout: Duration,
+    /// Retry limit copied into newly submitted tasks.
+    pub max_task_retry_attempts: u32,
 }
 
 /// 默认运行时配置：生产环境建议通过 CLI 参数覆盖这些值。
@@ -483,17 +499,25 @@ impl Default for MasterRuntimeConfig {
             enable_nof: true,
             offload_on_evict: false,
             offload_force_evict: false,
-            client_live_ttl: Duration::from_secs(30),
+            client_live_ttl: Duration::from_secs(10),
             client_monitor_interval: Duration::from_secs(1),
             storage_fs_dir: String::new(),
             cluster_id: "mooncake".to_string(),
-            enable_disk_eviction: false,
+            enable_disk_eviction: true,
             quota_bytes: 0,
             remote_source_enabled: false,
             remote_pull_ttl: Duration::from_secs(60),
             nof_heartbeat_interval: Duration::from_secs(10),
             nof_heartbeat_probe_timeout: Duration::from_secs(1),
             nof_heartbeat_failures_threshold: 3,
+            snapshot_child_timeout: Duration::from_secs(300),
+            snapshot_retention_count: 2,
+            max_total_finished_tasks: 10_000,
+            max_total_pending_tasks: 10_000,
+            max_total_processing_tasks: 10_000,
+            pending_task_timeout: Duration::from_secs(300),
+            processing_task_timeout: Duration::from_secs(300),
+            max_task_retry_attempts: 10,
         }
     }
 }

@@ -102,6 +102,9 @@ impl MasterServiceImpl {
         if !self.state.objects.contains_key(&scoped_key) {
             return Err(Status::not_found("key not found"));
         }
+        if !has_pending_task_capacity(&self.state) {
+            return Err(Status::resource_exhausted("pending task limit reached"));
+        }
 
         // Create and store the task entry.
         // 创建并存储任务条目。
@@ -121,7 +124,7 @@ impl MasterServiceImpl {
                 },
                 key: task_key,
                 payload: task_payload,
-                max_retry_attempts: 0, // no retry limit by default / 默认无重试限制
+                max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
             },
         );
         Ok(Response::new(proto::CreateCopyTaskResponse {
@@ -198,6 +201,9 @@ impl MasterServiceImpl {
         .map_err(|e| Status::internal(format!("serialize task payload: {e}")))?;
 
         drop(object);
+        if !has_pending_task_capacity(&self.state) {
+            return Err(Status::resource_exhausted("pending task limit reached"));
+        }
 
         // Create and store the move task. / 创建并存储移动任务。
         let task_id = Uuid::new_v4();
@@ -216,7 +222,7 @@ impl MasterServiceImpl {
                 },
                 key: task_key,
                 payload: task_payload,
-                max_retry_attempts: 0,
+                max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
             },
         );
         Ok(Response::new(proto::CreateMoveTaskResponse {
@@ -292,11 +298,12 @@ impl MasterServiceImpl {
         );
 
         // batch_size == 0 → unlimited. / batch_size == 0 → 无限制。
-        let batch_size = if req.batch_size == 0 {
+        let requested_batch_size = if req.batch_size == 0 {
             usize::MAX
         } else {
             req.batch_size as usize
         };
+        let batch_size = requested_batch_size.min(processing_task_capacity(&self.state));
 
         // Collect pending tasks for this client, sorted by creation time (FIFO).
         // 收集此客户端的待处理任务，按创建时间排序（FIFO）。
@@ -391,7 +398,13 @@ impl MasterServiceImpl {
         //
         // 更新状态和消息。实际的副作用（例如成功移动后的副本列表更新）
         // 由 workers.rs 中的后台任务完成 worker 处理。
-        task.info.status = task_status_from_proto(task_req.status);
+        let status = task_status_from_proto(task_req.status);
+        if !matches!(status, TaskStatus::Success | TaskStatus::Failed) {
+            return Err(Status::invalid_argument(
+                "task completion status must be success or failed",
+            ));
+        }
+        task.info.status = status;
         task.info.message = task_req.message.clone();
         task.info.last_updated_at = Utc::now();
         Ok(Response::new(proto::MarkTaskToCompleteResponse {}))
