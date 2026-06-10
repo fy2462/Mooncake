@@ -1,6 +1,8 @@
+use super::CachedQueryResultResponse;
 use super::MooncakeClient;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
@@ -43,6 +45,43 @@ impl MooncakeClient {
         src_offsets: &[Vec<Vec<usize>>],
         sizes: &[Vec<Vec<usize>>],
     ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
+        self.get_into_ranges_internal(buffers, keys, dst_offsets, src_offsets, sizes, None)
+            .await
+    }
+
+    /// Same as [`get_into_ranges`](Self::get_into_ranges), but reuses cached
+    /// query results produced by [`batch_get_query_results`](Self::batch_get_query_results).
+    ///
+    /// C++ equivalent: `RealClient::get_into_ranges(..., QueryResultCache*)`.
+    pub async unsafe fn get_into_ranges_with_query_cache(
+        &mut self,
+        buffers: &[*mut c_void],
+        keys: &[Vec<String>],
+        dst_offsets: &[Vec<Vec<usize>>],
+        src_offsets: &[Vec<Vec<usize>>],
+        sizes: &[Vec<Vec<usize>>],
+        query_result_cache: &HashMap<String, CachedQueryResultResponse>,
+    ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
+        self.get_into_ranges_internal(
+            buffers,
+            keys,
+            dst_offsets,
+            src_offsets,
+            sizes,
+            Some(query_result_cache),
+        )
+        .await
+    }
+
+    async unsafe fn get_into_ranges_internal(
+        &mut self,
+        buffers: &[*mut c_void],
+        keys: &[Vec<String>],
+        dst_offsets: &[Vec<Vec<usize>>],
+        src_offsets: &[Vec<Vec<usize>>],
+        sizes: &[Vec<Vec<usize>>],
+        query_result_cache: Option<&HashMap<String, CachedQueryResultResponse>>,
+    ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
         if buffers.len() != keys.len()
             || buffers.len() != dst_offsets.len()
             || buffers.len() != src_offsets.len()
@@ -81,9 +120,22 @@ impl MooncakeClient {
             let mut buf_results = vec![];
             for (key_idx, key) in keys[buf_idx].iter().enumerate() {
                 let range_count = sizes[buf_idx][key_idx].len();
-                // Fetch replicas and select the best one.
-                // 获取副本列表并选择最优副本。
-                let replicas = self.fetch_replicas(key).await?;
+                let replicas = match query_result_cache.and_then(|cache| cache.get(key)) {
+                    Some(cached) if cached.success && !cached.is_lease_expired() => {
+                        cached.replicas.clone()
+                    }
+                    Some(cached) if !cached.success => {
+                        tracing::warn!(
+                            key = %key,
+                            status = cached.error_status,
+                            error = %cached.error_message,
+                            "cached query result is an error"
+                        );
+                        buf_results.push(vec![-1; range_count]);
+                        continue;
+                    }
+                    _ => self.fetch_replicas(key).await?,
+                };
                 let replica = match self.select_best_replica(&replicas) {
                     Some(r) => r,
                     None => {
@@ -100,8 +152,12 @@ impl MooncakeClient {
                     .enumerate()
                     .filter_map(|(ri, &sz)| {
                         let src_end = src_offsets[buf_idx][key_idx][ri].checked_add(sz)?;
-                        let _dst_end = dst_offsets[buf_idx][key_idx][ri].checked_add(sz)?;
-                        (src_end as u64 <= replica.size).then_some(ri)
+                        let dst = dst_offsets[buf_idx][key_idx][ri];
+                        let _dst_end = dst.checked_add(sz)?;
+                        let target = unsafe { buffers[buf_idx].byte_add(dst) };
+                        (src_end as u64 <= replica.size
+                            && self.resolve_writable_buffer_region(target, sz).is_ok())
+                        .then_some(ri)
                     })
                     .collect();
                 if valid_ranges.is_empty() {
@@ -131,7 +187,9 @@ impl MooncakeClient {
                         let sz = sizes[buf_idx][key_idx][ri];
                         TransferRequest {
                             opcode: Opcode::Read,
-                            source: buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri]),
+                            source: unsafe {
+                                buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri])
+                            },
                             target_id: seg,
                             target_offset: replica.base_addr
                                 + replica.offset

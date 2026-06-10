@@ -5,6 +5,8 @@ from mooncake_store._mooncake_store import (
     EngramStore,
     EngramStoreConfig,
     P2pStore,
+    BufferPool,
+    RegisteredBufferPool,
     S3Config,
     RemoteSourceConfig,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "EngramStore",
     "EngramStoreConfig",
     "P2pStore",
+    "BufferPool",
+    "RegisteredBufferPool",
     "S3Config",
     "RemoteSourceConfig",
 ]

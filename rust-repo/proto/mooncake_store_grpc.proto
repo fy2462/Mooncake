@@ -35,6 +35,7 @@ service MasterService {
   rpc GetAllSegments(GetAllSegmentsRequest) returns (GetAllSegmentsResponse);
   rpc GetAllNoFSegments(GetAllNoFSegmentsRequest) returns (GetAllNoFSegmentsResponse);
   rpc GetNoFSegmentsByName(GetNoFSegmentsByNameRequest) returns (GetNoFSegmentsByNameResponse);
+  rpc GetSegmentsDetail(GetSegmentsDetailRequest) returns (GetSegmentsDetailResponse);
 
   // Put workflow: start → client writes data → end
   rpc PutStart(PutStartRequest) returns (PutStartResponse);

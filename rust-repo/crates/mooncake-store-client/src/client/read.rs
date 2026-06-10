@@ -176,6 +176,7 @@ impl MooncakeClient {
                 "buffer too small for key {key}: required={object_size}, available={size}"
             )));
         }
+        self.resolve_writable_buffer_region(buffer, object_size)?;
         if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
             && !self.local_endpoints.read().contains(&replica.segment_name)
         {

@@ -117,6 +117,14 @@ impl MooncakeClient {
                 "keys, buffers, and sizes length mismatch".to_string(),
             ));
         }
+        for (i, (&buffer, &size)) in buffers.iter().zip(sizes.iter()).enumerate() {
+            self.resolve_writable_buffer_region(buffer, size)
+                .map_err(|err| {
+                    StoreError::InvalidParams(format!(
+                        "invalid writable buffer for key index {i}: {err}"
+                    ))
+                })?;
+        }
         let mut results = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
             match self.get_into(key, buffers[i], sizes[i]).await {
@@ -159,6 +167,14 @@ impl MooncakeClient {
                 return Err(StoreError::InvalidParams(format!(
                     "buffers and sizes length mismatch for key index {idx}"
                 )));
+            }
+            for (buffer_idx, (&buffer, &size)) in buffers.iter().zip(sizes.iter()).enumerate() {
+                self.resolve_writable_buffer_region(buffer, size)
+                    .map_err(|err| {
+                        StoreError::InvalidParams(format!(
+                            "invalid writable buffer for key index {idx}, buffer index {buffer_idx}: {err}"
+                        ))
+                    })?;
             }
         }
 

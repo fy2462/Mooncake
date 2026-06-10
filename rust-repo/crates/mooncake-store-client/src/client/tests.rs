@@ -3,8 +3,8 @@ use super::finalize::{
     determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary, REPLICA_TYPE_ALL,
     REPLICA_TYPE_MEMORY, REPLICA_TYPE_NOF_SSD,
 };
-use super::MooncakeClient;
-use mooncake_store_core::{ReplicateConfig, StoreError};
+use super::{CachedQueryResultResponse, MooncakeClient};
+use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use std::time::Duration;
 
 #[test]
@@ -100,4 +100,46 @@ fn finalize_decision_flexible_dual_can_keep_one_successful_side() {
             success: true,
         }
     );
+}
+
+#[test]
+fn nof_endpoint_builder_defaults_invalid_transport_to_rdma() {
+    let endpoint = MooncakeClient::build_nof_te_endpoint_with_trtype(
+        "nqn.test",
+        1,
+        "10.0.0.1",
+        4420,
+        Some("bad"),
+    );
+    assert_eq!(
+        endpoint,
+        "traddr:10.0.0.1 trsvcid:4420 subnqn:nqn.test trtype:RDMA adrfam:IPv4 ns:1"
+    );
+}
+
+#[test]
+fn nof_endpoint_builder_honors_tcp_transport() {
+    let endpoint = MooncakeClient::build_nof_te_endpoint_with_trtype(
+        "nqn.test",
+        7,
+        "127.0.0.1",
+        8009,
+        Some("tcp"),
+    );
+    assert!(endpoint.contains("trtype:TCP"));
+    assert!(endpoint.contains("ns:7"));
+}
+
+#[test]
+fn cached_query_result_tracks_lease_expiry() {
+    let fresh = CachedQueryResultResponse::success(Vec::<ReplicaDescriptor>::new(), 1000);
+    assert!(!fresh.is_lease_expired());
+
+    let expired = CachedQueryResultResponse::success(Vec::<ReplicaDescriptor>::new(), 0);
+    assert!(expired.is_lease_expired());
+
+    let failure = CachedQueryResultResponse::failure(-1, "missing");
+    assert!(!failure.success);
+    assert_eq!(failure.error_status, -1);
+    assert_eq!(failure.error_message, "missing");
 }

@@ -72,12 +72,14 @@ mod ffi {
 mod error;
 mod segment;
 mod transfer;
+mod transport_hint;
 
 pub use error::{TransferEngineError, TransferEngineResult};
 pub use segment::{SegmentDesc, SegmentId};
 pub use transfer::{
     BatchId, NotifyMsg, NotifyMsgBuf, Opcode, TransferRequest, TransferStatus, TransferStatusEnum,
 };
+pub use transport_hint::{HintedTransferRequest, TransportHint};
 
 use std::ffi::{c_void, CStr, CString};
 use std::ptr::NonNull;

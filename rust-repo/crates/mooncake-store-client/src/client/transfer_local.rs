@@ -4,6 +4,36 @@ use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
 
 impl MooncakeClient {
+    pub(crate) fn resolve_writable_buffer_region(
+        &self,
+        buffer: *mut c_void,
+        requested_size: usize,
+    ) -> StoreResult<usize> {
+        let target = buffer as usize;
+        for (&base, &(size, _)) in self.registered_buffers.read().iter() {
+            if target >= base {
+                let offset = target - base;
+                if offset < size && offset.saturating_add(requested_size) <= size {
+                    return Ok(offset);
+                }
+            }
+        }
+
+        let base = self.local_buffer.as_ptr() as usize;
+        if target >= base {
+            let offset = target - base;
+            if offset < self.local_buffer.len()
+                && offset.saturating_add(requested_size) <= self.local_buffer.len()
+            {
+                return Ok(offset);
+            }
+        }
+
+        Err(StoreError::InvalidParams(
+            "buffer is not within Store-managed writable memory".to_string(),
+        ))
+    }
+
     // -----------------------------------------------------------------------
     // LOCAL_MEMCPY — bypass TE for same-node transfers (matches C++ strategy)
     // 本地内存拷贝 —— 同节点传输绕过 TE（与 C++ 策略一致）

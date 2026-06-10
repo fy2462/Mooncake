@@ -178,6 +178,13 @@ impl MasterService for MasterServiceImpl {
         MasterServiceImpl::get_nof_segments_by_name_impl(self, request).await
     }
 
+    async fn get_segments_detail(
+        &self,
+        request: Request<proto::GetSegmentsDetailRequest>,
+    ) -> Result<Response<proto::GetSegmentsDetailResponse>, Status> {
+        MasterServiceImpl::get_segments_detail_impl(self, request).await
+    }
+
     async fn service_ready(
         &self,
         request: Request<proto::ServiceReadyRequest>,

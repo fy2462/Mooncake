@@ -280,6 +280,78 @@ async fn test_remount_segment_is_idempotent_per_client_and_name() {
 }
 
 #[tokio::test]
+async fn test_get_segments_detail_includes_memory_and_nof_segments() {
+    let service = MasterServiceImpl::default();
+    let memory_client_id = Uuid::new_v4();
+    let nof_client_id = Uuid::new_v4();
+    let nof_segment_id = Uuid::new_v4();
+
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(memory_client_id)),
+            segment_name: "detail-host:1234".into(),
+            size: 8192,
+            base_addr: 0x100000000,
+            te_endpoint: "tcp://detail-host".into(),
+            protocol: "tcp".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    MasterService::mount_no_f_segment(
+        &service,
+        Request::new(proto::MountNoFSegmentRequest {
+            client_id: Some(proto_uuid(nof_client_id)),
+            segment: Some(proto::NoFSegment {
+                id: Some(proto_uuid(nof_segment_id)),
+                name: "traddr:10.1.1.8 trsvcid:4420 subnqn:nqn.test trtype:TCP adrfam:IPv4 ns:1"
+                    .into(),
+                base: 0x200000000,
+                size: 16384,
+                te_endpoint:
+                    "traddr:10.1.1.8 trsvcid:4420 subnqn:nqn.test trtype:TCP adrfam:IPv4 ns:1"
+                        .into(),
+                client_id: Some(proto_uuid(nof_client_id)),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let response = MasterService::get_segments_detail(
+        &service,
+        Request::new(proto::GetSegmentsDetailRequest {}),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    let memory = response
+        .segments
+        .iter()
+        .find(|segment| segment.segment_name == "detail-host:1234")
+        .expect("memory segment detail");
+    assert!(!memory.nof);
+    assert_eq!(memory.protocol, "tcp");
+    assert_eq!(memory.size_bytes, 8192);
+    assert_eq!(memory.allocator_capacity_bytes, 8192);
+    assert_eq!(memory.status, proto::SegmentStatus::Active as i32);
+
+    let nof = response
+        .segments
+        .iter()
+        .find(|segment| segment.segment_id == Some(proto_uuid(nof_segment_id)))
+        .expect("NoF segment detail");
+    assert!(nof.nof);
+    assert_eq!(nof.protocol, "nof");
+    assert_eq!(nof.client_id, Some(proto_uuid(nof_client_id)));
+    assert_eq!(nof.base_address, 0x200000000);
+    assert_eq!(nof.allocator_capacity_bytes, 16384);
+}
+
+#[tokio::test]
 async fn test_graceful_unmount_segment_removes_after_delay() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();

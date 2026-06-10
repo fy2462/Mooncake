@@ -135,7 +135,7 @@ pub(crate) struct PythonMooncakeClient {
 ///
 /// Supports any Python object that implements the buffer protocol:
 /// bytearray, memoryview, array.array, numpy arrays, etc.
-fn get_buffer_ptr(obj: &Bound<'_, PyAny>) -> PyResult<(*mut c_void, usize)> {
+pub(crate) fn get_buffer_ptr(obj: &Bound<'_, PyAny>) -> PyResult<(*mut c_void, usize)> {
     let buf = PyBuffer::<u8>::get(obj)?;
     Ok((buf.buf_ptr() as *mut c_void, buf.item_count()))
 }
@@ -196,7 +196,7 @@ pub(crate) fn replicas_to_py(replicas: Vec<mooncake_store_core::ReplicaDescripto
         .unbind()
 }
 
-fn parse_uuid(id: &str) -> PyResult<Uuid> {
+pub(crate) fn parse_uuid(id: &str) -> PyResult<Uuid> {
     Uuid::parse_str(id).map_err(|e| to_py_err(format!("invalid UUID: {e}")))
 }
 
@@ -2233,5 +2233,79 @@ impl PythonMooncakeClient {
             *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (nqn, nsid, traddr, trsvcid, trtype = None))]
+    fn build_nof_te_endpoint(
+        nqn: String,
+        nsid: u64,
+        traddr: String,
+        trsvcid: u64,
+        trtype: Option<String>,
+    ) -> String {
+        crate::client_ext::build_nof_te_endpoint(nqn, nsid, traddr, trsvcid, trtype)
+    }
+
+    #[pyo3(signature = (nqn, nsid, traddr, trsvcid, base, size, trtype = None))]
+    fn register_nof_ssd<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        nqn: String,
+        nsid: u64,
+        traddr: String,
+        trsvcid: u64,
+        base: u64,
+        size: u64,
+        trtype: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::client_ext::register_nof_ssd(slf, py, nqn, nsid, traddr, trsvcid, base, size, trtype)
+    }
+
+    #[pyo3(signature = (nqn, nsid, traddr, trsvcid, trtype = None))]
+    fn unregister_nof_ssd_by_endpoint<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        nqn: String,
+        nsid: u64,
+        traddr: String,
+        trsvcid: u64,
+        trtype: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::client_ext::unregister_nof_ssd_by_endpoint(
+            slf, py, nqn, nsid, traddr, trsvcid, trtype,
+        )
+    }
+
+    fn batch_get_query_results(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        crate::client_ext::batch_get_query_results(slf, keys)
+    }
+
+    fn get_segments_detail<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        crate::client_ext::get_segments_detail(slf, py)
+    }
+
+    fn get_into_ranges_cached(
+        slf: &Bound<'_, Self>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        all_keys: Vec<Vec<String>>,
+        all_dst_offsets: Vec<Vec<Vec<usize>>>,
+        all_src_offsets: Vec<Vec<Vec<usize>>>,
+        all_sizes: Vec<Vec<Vec<usize>>>,
+    ) -> PyResult<Vec<Vec<Vec<i64>>>> {
+        crate::client_ext::get_into_ranges_cached(
+            slf,
+            buffers,
+            all_keys,
+            all_dst_offsets,
+            all_src_offsets,
+            all_sizes,
+        )
     }
 }

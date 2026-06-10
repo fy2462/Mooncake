@@ -35,6 +35,21 @@ pub struct SegmentUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentDetail {
+    pub segment_name: String,
+    pub segment_id: Uuid,
+    pub client_id: Uuid,
+    pub base_address: u64,
+    pub size_bytes: u64,
+    pub te_endpoint: String,
+    pub protocol: String,
+    pub status: i32,
+    pub allocator_used_bytes: u64,
+    pub allocator_capacity_bytes: u64,
+    pub nof: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageConfig {
     pub fs_dir: String,
     pub enable_disk_eviction: bool,
@@ -267,6 +282,43 @@ impl MooncakeClient {
             total_size: response.total_size,
             used_size: response.used_size,
         })
+    }
+
+    /// Query detailed metadata and allocator usage for all memory and NoF segments.
+    ///
+    /// C++ equivalent: `MasterClient::GetSegmentsDetail()`.
+    pub async fn get_segments_detail(&mut self) -> StoreResult<Vec<SegmentDetail>> {
+        let response = self
+            .master
+            .get_segments_detail(proto::GetSegmentsDetailRequest {})
+            .await
+            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .into_inner();
+        Ok(response
+            .segments
+            .into_iter()
+            .map(|segment| SegmentDetail {
+                segment_name: segment.segment_name,
+                segment_id: segment
+                    .segment_id
+                    .as_ref()
+                    .map(Self::uuid_from_proto_uuid)
+                    .unwrap_or_else(Uuid::nil),
+                client_id: segment
+                    .client_id
+                    .as_ref()
+                    .map(Self::uuid_from_proto_uuid)
+                    .unwrap_or_else(Uuid::nil),
+                base_address: segment.base_address,
+                size_bytes: segment.size_bytes,
+                te_endpoint: segment.te_endpoint,
+                protocol: segment.protocol,
+                status: segment.status,
+                allocator_used_bytes: segment.allocator_used_bytes,
+                allocator_capacity_bytes: segment.allocator_capacity_bytes,
+                nof: segment.nof,
+            })
+            .collect())
     }
 
     /// Query the storage configuration advertised by the master.

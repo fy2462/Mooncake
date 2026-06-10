@@ -6,6 +6,7 @@ pub(crate) mod batches;
 pub(crate) mod finalize;
 pub(crate) mod ha;
 pub(crate) mod lifecycle;
+pub(crate) mod nof_register;
 pub(crate) mod offload_read;
 pub(crate) mod read;
 pub(crate) mod read_batch;
@@ -33,8 +34,8 @@ pub(crate) mod write_parts;
 
 pub use background::{ClientBackgroundConfig, ClientBackgroundHandle};
 pub use batch_types::{BatchPutStartResult, BatchUpsertEntry};
-pub use storage::{OffloadTaskItem, PromotionTaskItem};
-pub use types::BufferHandle;
+pub use storage::{OffloadTaskItem, PromotionTaskItem, SegmentDetail};
+pub use types::{BufferHandle, CachedQueryResultResponse};
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};

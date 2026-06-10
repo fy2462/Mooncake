@@ -19,3 +19,47 @@ pub struct BufferHandle {
     /// Byte length of the payload (== data.len()). / 负载的字节长度。
     pub size: usize,
 }
+
+/// Cached response for a replica-list query.
+///
+/// This mirrors the C++ `CachedQueryResultResponse`: callers can batch-query
+/// placement metadata once, then pass the cache into ranged reads to avoid
+/// repeated master RPCs while the lease is still valid.
+#[derive(Debug, Clone)]
+pub struct CachedQueryResultResponse {
+    pub success: bool,
+    pub replicas: Vec<mooncake_store_core::ReplicaDescriptor>,
+    pub lease_valid_until: std::time::Instant,
+    pub error_status: i32,
+    pub error_message: String,
+}
+
+impl CachedQueryResultResponse {
+    pub fn success(
+        replicas: Vec<mooncake_store_core::ReplicaDescriptor>,
+        lease_ttl_ms: u64,
+    ) -> Self {
+        Self {
+            success: true,
+            replicas,
+            lease_valid_until: std::time::Instant::now()
+                + std::time::Duration::from_millis(lease_ttl_ms),
+            error_status: 0,
+            error_message: String::new(),
+        }
+    }
+
+    pub fn failure(error_status: i32, error_message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            replicas: Vec::new(),
+            lease_valid_until: std::time::Instant::now(),
+            error_status,
+            error_message: error_message.into(),
+        }
+    }
+
+    pub fn is_lease_expired(&self) -> bool {
+        std::time::Instant::now() >= self.lease_valid_until
+    }
+}

@@ -59,8 +59,8 @@ pub mod offload;
 pub mod remote_source;
 
 pub use client::{
-    BufferHandle, ClientBackgroundConfig, ClientBackgroundHandle, MooncakeClient, OffloadTaskItem,
-    PromotionTaskItem,
+    BufferHandle, CachedQueryResultResponse, ClientBackgroundConfig, ClientBackgroundHandle,
+    MooncakeClient, OffloadTaskItem, PromotionTaskItem, SegmentDetail,
 };
 pub use dummy::{
     DummyIpcChannel, DummyMemoryPool, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,

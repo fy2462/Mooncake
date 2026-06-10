@@ -58,6 +58,28 @@ impl MooncakeClient {
         &mut self,
         keys: &[String],
     ) -> StoreResult<Vec<StoreResult<Vec<ReplicaDescriptor>>>> {
+        let responses = self.fetch_batch_query_responses(keys).await?;
+        Ok(responses
+            .into_iter()
+            .zip(keys.iter())
+            .map(|(result, key)| {
+                if result.success {
+                    Ok(result.replicas)
+                } else {
+                    match result.error_status {
+                        -1 => Err(StoreError::KeyNotFound(key.clone())),
+                        -5 => Err(StoreError::ReplicaNotReady),
+                        _ => Err(StoreError::Internal(result.error_message)),
+                    }
+                }
+            })
+            .collect())
+    }
+
+    pub(crate) async fn fetch_batch_query_responses(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<super::CachedQueryResultResponse>> {
         let request = proto::BatchGetReplicaListRequest {
             keys: keys.to_vec(),
             tenant_id: String::new(),
@@ -79,17 +101,18 @@ impl MooncakeClient {
         let results = response
             .results
             .into_iter()
-            .zip(keys.iter())
-            .map(|(result, key)| match result.status {
-                0 => result
-                    .response
-                    .map(|response| self.replicas_from_proto(&response.replicas))
-                    .ok_or_else(|| {
-                        StoreError::Internal(format!("missing replica response for {key}"))
-                    }),
-                -1 => Err(StoreError::KeyNotFound(key.clone())),
-                -5 => Err(StoreError::ReplicaNotReady),
-                _ => Err(StoreError::Internal(result.error_message)),
+            .map(|result| match result.status {
+                0 => match result.response {
+                    Some(response) => super::CachedQueryResultResponse::success(
+                        self.replicas_from_proto(&response.replicas),
+                        response.lease_ttl_ms,
+                    ),
+                    None => super::CachedQueryResultResponse::failure(
+                        -2,
+                        "missing replica response for successful query",
+                    ),
+                },
+                status => super::CachedQueryResultResponse::failure(status, result.error_message),
             })
             .collect();
         Ok(results)

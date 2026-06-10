@@ -11,7 +11,9 @@
 // PyO3 根据下面的 #[pyclass] / #[pyfunction] / #[pymodule] 注解自动生成
 // CPython 胶水代码。
 
+mod buffer_pool;
 mod client;
+mod client_ext;
 mod dummy_client;
 mod dummy_ipc;
 mod engram;
@@ -139,6 +141,8 @@ fn enable_te_debug_tracing() {
 #[pymodule]
 fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<client::PythonMooncakeClient>()?;
+    m.add_class::<buffer_pool::BufferPoolPy>()?;
+    m.add_class::<buffer_pool::RegisteredBufferPoolPy>()?;
     m.add_class::<dummy_client::PythonMooncakeDummyClient>()?;
     m.add_class::<dummy_ipc::PythonMooncakeDummyIpcChannel>()?;
     m.add_class::<replicate_config::ReplicateConfigPy>()?;

@@ -28,6 +28,16 @@ impl MooncakeClient {
             .collect::<StoreResult<Vec<_>>>()
     }
 
+    /// Batch-query replica placement metadata and preserve lease TTL.
+    ///
+    /// C++ equivalent: `RealClient::batch_get_query_results`.
+    pub async fn batch_get_query_results(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<super::CachedQueryResultResponse>> {
+        self.fetch_batch_query_responses(keys).await
+    }
+
     /// Returns `true` if the client has been torn down. / 如果客户端已关闭则返回 true。
     pub fn is_closed(&self) -> bool {
         *self.tear_down.read()
