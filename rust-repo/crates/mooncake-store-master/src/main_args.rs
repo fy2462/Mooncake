@@ -97,6 +97,18 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     pub quota_bytes: u64,
 
+    /// Enable per-tenant quota admission and accounting.
+    #[arg(long)]
+    pub enable_tenant_quota: bool,
+
+    /// Default requested quota bytes for tenants without explicit policy.
+    #[arg(long, default_value_t = 0)]
+    pub default_tenant_quota_bytes: u64,
+
+    /// Capacity used for effective tenant quota allocation. Zero means memory capacity.
+    #[arg(long, default_value_t = 0)]
+    pub tenant_quota_pool_capacity_bytes: u64,
+
     /// NoF heartbeat probe interval in seconds.
     #[arg(
         long,

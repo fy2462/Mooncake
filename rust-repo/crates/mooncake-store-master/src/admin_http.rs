@@ -1,12 +1,23 @@
 use crate::ha::{MasterRuntimeState, MasterView};
-use axum::{routing::get, Json, Router};
+use crate::MasterServiceImpl;
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    routing::get,
+    Json, Router,
+};
+use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tonic::Code;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AdminRuntimeState {
     pub state: MasterRuntimeState,
     pub leader_view: Option<MasterView>,
     pub service_ready: bool,
+    pub service: Option<Arc<MasterServiceImpl>>,
 }
 
 impl AdminRuntimeState {
@@ -15,6 +26,17 @@ impl AdminRuntimeState {
             state: MasterRuntimeState::Serving,
             leader_view,
             service_ready: true,
+            service: None,
+        }
+    }
+
+    pub fn serving_with_service(
+        leader_view: Option<MasterView>,
+        service: Arc<MasterServiceImpl>,
+    ) -> Self {
+        Self {
+            service: Some(service),
+            ..Self::serving(leader_view)
         }
     }
 }
@@ -26,6 +48,16 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
         .route("/role", get(role_handler))
         .route("/ha_status", get(ha_status_handler))
         .route("/leader", get(leader_handler))
+        .route(
+            "/api/v1/tenant_quotas",
+            get(get_tenant_quotas_handler)
+                .put(upsert_tenant_quota_handler)
+                .delete(delete_tenant_quota_handler),
+        )
+        .route(
+            "/api/v1/tenant_quotas/default",
+            get(get_default_tenant_quota_handler).put(set_default_tenant_quota_handler),
+        )
         .with_state(state)
 }
 
@@ -57,6 +89,147 @@ async fn leader_handler(
     axum::extract::State(state): axum::extract::State<AdminRuntimeState>,
 ) -> Json<Value> {
     Json(build_leader_json(&state))
+}
+
+#[derive(Debug, Deserialize)]
+struct TenantQuotaPolicyRequest {
+    requested_quota_bytes: u64,
+}
+
+fn service_or_unavailable(
+    state: &AdminRuntimeState,
+) -> Result<Arc<MasterServiceImpl>, (StatusCode, Json<Value>)> {
+    state.service.clone().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "error_code": Code::Unavailable as i32,
+                "error_message": "master service unavailable"
+            })),
+        )
+    })
+}
+
+fn tenant_id_from_query(
+    query: &HashMap<String, String>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let Some(tenant_id) = query.get("tenant_id") else {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "Missing or invalid tenant_id",
+        ));
+    };
+    if tenant_id.trim().is_empty() || tenant_id.starts_with('_') {
+        return Err(json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"));
+    }
+    Ok(tenant_id.clone())
+}
+
+fn json_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "success": false,
+            "error": message
+        })),
+    )
+}
+
+fn status_error(status: tonic::Status) -> (StatusCode, Json<Value>) {
+    let http_status = match status.code() {
+        Code::InvalidArgument => StatusCode::BAD_REQUEST,
+        Code::NotFound => StatusCode::NOT_FOUND,
+        Code::FailedPrecondition => StatusCode::CONFLICT,
+        Code::ResourceExhausted => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        http_status,
+        Json(json!({
+            "success": false,
+            "error_code": status.code() as i32,
+            "error_message": status.message()
+        })),
+    )
+}
+
+async fn get_tenant_quotas_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    if let Some(tenant_id) = query.get("tenant_id") {
+        if tenant_id.trim().is_empty() || tenant_id.starts_with('_') {
+            return Err(json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"));
+        }
+        let snapshot = service
+            .get_tenant_quota_snapshot(tenant_id)
+            .map_err(status_error)?
+            .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "tenant quota not found"))?;
+        Ok(Json(json!({ "success": true, "data": snapshot })))
+    } else {
+        let snapshots = service
+            .list_tenant_quota_snapshots()
+            .map_err(status_error)?;
+        Ok(Json(json!({ "success": true, "data": snapshots })))
+    }
+}
+
+async fn upsert_tenant_quota_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+    Json(body): Json<TenantQuotaPolicyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let tenant_id = tenant_id_from_query(&query)?;
+    if body.requested_quota_bytes == 0 {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "Tenant quota must be positive",
+        ));
+    }
+    let snapshot = service
+        .upsert_tenant_quota_policy(&tenant_id, body.requested_quota_bytes)
+        .map_err(status_error)?;
+    Ok(Json(json!({ "success": true, "data": snapshot })))
+}
+
+async fn delete_tenant_quota_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let tenant_id = tenant_id_from_query(&query)?;
+    let snapshot = service
+        .delete_tenant_quota_policy(&tenant_id)
+        .map_err(status_error)?;
+    Ok(Json(json!({ "success": true, "data": snapshot })))
+}
+
+async fn get_default_tenant_quota_handler(
+    State(state): State<AdminRuntimeState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let requested = service
+        .get_default_tenant_quota_policy()
+        .map_err(status_error)?;
+    Ok(Json(
+        json!({ "success": true, "requested_quota_bytes": requested }),
+    ))
+}
+
+async fn set_default_tenant_quota_handler(
+    State(state): State<AdminRuntimeState>,
+    Json(body): Json<TenantQuotaPolicyRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let requested = service
+        .set_default_tenant_quota_policy(body.requested_quota_bytes)
+        .map_err(status_error)?;
+    Ok(Json(
+        json!({ "success": true, "requested_quota_bytes": requested }),
+    ))
 }
 
 fn build_metrics_summary_text(state: &AdminRuntimeState) -> String {

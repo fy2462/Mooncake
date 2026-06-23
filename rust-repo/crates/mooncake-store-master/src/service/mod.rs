@@ -47,6 +47,7 @@ use crate::metrics;
 use crate::proto;
 use crate::proto::master_service_server::MasterService;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
+use crate::tenant_quota::{TenantQuotaError, TenantQuotaSnapshot, TenantQuotaTable};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{
@@ -69,15 +70,15 @@ use self::background_ops::{
     try_push_promotion_queue,
 };
 use self::helpers::{
-    addresses_for_client, allocate_nof_replicas, bump_view_version, choose_drain_target_segment,
-    cleanup_stale_handles, client_id_by_nof_segment_name, client_id_by_replica_segment_name,
-    client_id_by_segment_name, default_drain_target_segments, get_alive_clients_snapshot,
-    has_pending_task_capacity, host_from_segment_name, is_lease_expired, make_tenant_scoped_key,
-    normalize_tenant_id, object_owner_client_id, processing_task_capacity,
-    register_metadata_segments, release_object_replicas, release_replicas,
-    release_replicas_scheduled, split_scoped_key, storage_fs_dir_for_client, sync_client_segments,
-    sync_nof_segment_usage, sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned,
-    upsert_client_addresses, validate_user_key,
+    account_removed_object_quota, addresses_for_client, allocate_nof_replicas, bump_view_version,
+    choose_drain_target_segment, cleanup_stale_handles, client_id_by_nof_segment_name,
+    client_id_by_replica_segment_name, client_id_by_segment_name, default_drain_target_segments,
+    get_alive_clients_snapshot, has_pending_task_capacity, host_from_segment_name,
+    is_lease_expired, make_tenant_scoped_key, normalize_tenant_id, object_owner_client_id,
+    processing_task_capacity, register_metadata_segments, release_object_replicas,
+    release_replicas, release_replicas_scheduled, split_scoped_key, storage_fs_dir_for_client,
+    sync_client_segments, sync_nof_segment_usage, sync_segment_usage, unmount_nof_segment_owned,
+    unmount_segment_owned, upsert_client_addresses, validate_user_key,
 };
 use self::nof_probe::probe_nof_endpoint;
 use self::proto_conv::{
@@ -137,6 +138,126 @@ struct ReplicaMovePayload<'a> {
 }
 
 impl MasterServiceImpl {
+    fn tenant_quota_capacity_bytes(&self) -> u64 {
+        let configured = self.state.runtime_config.tenant_quota_pool_capacity_bytes;
+        if configured > 0 {
+            configured
+        } else {
+            self.state.allocator.read().usage_totals().0
+        }
+    }
+
+    fn tenant_quota_status(error: TenantQuotaError) -> Status {
+        match error {
+            TenantQuotaError::QuotaExceeded => Status::resource_exhausted("tenant quota exceeded"),
+            TenantQuotaError::InvalidArgument => Status::invalid_argument("invalid tenant quota"),
+            TenantQuotaError::AccountingMismatch => {
+                Status::failed_precondition("tenant quota accounting mismatch")
+            }
+        }
+    }
+
+    pub(crate) fn reserve_tenant_quota(&self, tenant_id: &str, bytes: u64) -> Result<(), Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Ok(());
+        }
+        let capacity = self.tenant_quota_capacity_bytes();
+        let mut quotas = self.state.tenant_quotas.write();
+        quotas.ensure_tenant(tenant_id);
+        quotas.recompute_effective_quotas(capacity);
+        quotas
+            .reserve(tenant_id, bytes)
+            .map_err(Self::tenant_quota_status)
+    }
+
+    pub(crate) fn commit_tenant_quota(&self, tenant_id: &str, bytes: u64) -> Result<(), Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Ok(());
+        }
+        self.state
+            .tenant_quotas
+            .write()
+            .commit(tenant_id, bytes)
+            .map_err(Self::tenant_quota_status)
+    }
+
+    pub(crate) fn abort_tenant_quota(&self, tenant_id: &str, bytes: u64) {
+        if self.state.runtime_config.enable_tenant_quota {
+            let _ = self.state.tenant_quotas.write().abort(tenant_id, bytes);
+        }
+    }
+
+    pub(crate) fn account_removed_object_quota(&self, object: &ObjectEntry) {
+        account_removed_object_quota(&self.state, object);
+    }
+
+    pub fn list_tenant_quota_snapshots(&self) -> Result<Vec<TenantQuotaSnapshot>, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Err(Status::failed_precondition("tenant quota is disabled"));
+        }
+        Ok(self.state.tenant_quotas.read().list_snapshots())
+    }
+
+    pub fn get_tenant_quota_snapshot(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TenantQuotaSnapshot>, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Err(Status::failed_precondition("tenant quota is disabled"));
+        }
+        Ok(self.state.tenant_quotas.read().get_snapshot(tenant_id))
+    }
+
+    pub fn upsert_tenant_quota_policy(
+        &self,
+        tenant_id: &str,
+        requested_quota_bytes: u64,
+    ) -> Result<TenantQuotaSnapshot, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Err(Status::failed_precondition("tenant quota is disabled"));
+        }
+        let capacity = self.tenant_quota_capacity_bytes();
+        self.state
+            .tenant_quotas
+            .write()
+            .upsert_policy(tenant_id, requested_quota_bytes, capacity)
+            .map_err(Self::tenant_quota_status)
+    }
+
+    pub fn delete_tenant_quota_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TenantQuotaSnapshot>, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Err(Status::failed_precondition("tenant quota is disabled"));
+        }
+        let capacity = self.tenant_quota_capacity_bytes();
+        Ok(self
+            .state
+            .tenant_quotas
+            .write()
+            .erase_policy(tenant_id, capacity))
+    }
+
+    pub fn get_default_tenant_quota_policy(&self) -> Result<u64, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Err(Status::failed_precondition("tenant quota is disabled"));
+        }
+        Ok(self.state.tenant_quotas.read().default_requested_quota())
+    }
+
+    pub fn set_default_tenant_quota_policy(&self, bytes: u64) -> Result<u64, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Err(Status::failed_precondition("tenant quota is disabled"));
+        }
+        let capacity = self.tenant_quota_capacity_bytes();
+        self.state
+            .tenant_quotas
+            .write()
+            .set_default_requested_quota(bytes, capacity);
+        Ok(bytes)
+    }
+
     /// 简化构造函数，使用默认运行时配置 / Simple constructor with default runtime config.
     pub fn new(backend_type: Option<StorageBackendType>, backup_dir: Option<PathBuf>) -> Self {
         Self::new_with_runtime_config(backend_type, backup_dir, MasterRuntimeConfig::default())
@@ -205,6 +326,9 @@ impl MasterServiceImpl {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: AtomicI64::new(0),
             runtime_config: runtime_config.clone(),
+            tenant_quotas: RwLock::new(TenantQuotaTable::new(
+                runtime_config.default_tenant_quota_bytes,
+            )),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
         });

@@ -55,7 +55,9 @@ impl MasterServiceImpl {
                 // 所有有效副本已被清理（handle 失效或客户端死亡），删除对象并允许新 PutStart
                 // All valid replicas cleaned (stale handle or dead client); delete object and allow new PutStart
                 let old_replicas = existing.replicas.clone();
-                self.state.objects.remove(&scoped_key);
+                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                    self.account_removed_object_quota(&removed);
+                }
                 self.state.processing_keys.remove(&scoped_key);
                 self.state.replication_tasks.remove(&scoped_key);
                 drop(existing);
@@ -82,7 +84,9 @@ impl MasterServiceImpl {
                                 .filter(|r| r.status == ReplicaStatus::Allocating)
                                 .cloned()
                                 .collect::<Vec<_>>();
-                            self.state.objects.remove(&scoped_key);
+                            if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                                self.account_removed_object_quota(&removed);
+                            }
                             self.state.processing_keys.remove(&scoped_key);
                             self.state.replication_tasks.remove(&scoped_key);
                             drop(existing);
@@ -132,6 +136,7 @@ impl MasterServiceImpl {
         }
         let group_id = Self::group_id_for_key(&config, 1, 0)?;
         let replica_count = config.replica_num as usize;
+        self.reserve_tenant_quota(&tenant_id, req.slice_length)?;
 
         // 分配 Memory 副本 / Allocate Memory replicas
         let mut replicas = if replica_count > 0 {
@@ -148,6 +153,7 @@ impl MasterServiceImpl {
         };
         if replicas.len() != replica_count {
             release_replicas(&self.state, &replicas);
+            self.abort_tenant_quota(&tenant_id, req.slice_length);
             return Err(Status::resource_exhausted(format!(
                 "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                 PUT_NO_SPACE_HELPER_STR,
@@ -166,6 +172,7 @@ impl MasterServiceImpl {
                 Ok(replicas) => replicas,
                 Err(status) => {
                     release_replicas(&self.state, &replicas);
+                    self.abort_tenant_quota(&tenant_id, req.slice_length);
                     return Err(status);
                 }
             };
@@ -196,6 +203,7 @@ impl MasterServiceImpl {
                 },
                 tenant_id,
                 group_id,
+                quota_committed: false,
                 user_key,
             },
         );
@@ -290,6 +298,7 @@ impl MasterServiceImpl {
                     soft_pin_timeout: None,
                     tenant_id,
                     group_id: String::new(),
+                    quota_committed: false,
                     user_key: req.key.clone(),
                 },
             );

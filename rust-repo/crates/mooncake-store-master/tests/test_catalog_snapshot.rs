@@ -282,6 +282,7 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
                 soft_pin_timeout: None,
                 tenant_id: "tenant-a".to_string(),
                 group_id: "group-a".to_string(),
+                quota_committed: true,
                 user_key: "key-a".to_string(),
             },
         )],

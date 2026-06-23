@@ -77,7 +77,9 @@ impl MasterServiceImpl {
             let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
             if should_remove {
                 drop(existing);
-                self.state.objects.remove(&scoped_key);
+                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                    self.account_removed_object_quota(&removed);
+                }
             } else {
                 if existing.replicas.iter().any(|r| r.refcnt > 0) {
                     return Err(Status::failed_precondition("object replica busy"));
@@ -116,7 +118,9 @@ impl MasterServiceImpl {
                 let previous_hard_pin = existing.hard_pinned;
                 let old_replicas = existing.replicas.clone();
                 drop(existing);
-                self.state.objects.remove(&scoped_key);
+                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                    self.account_removed_object_quota(&removed);
+                }
                 self.schedule_delayed_release(old_replicas);
 
                 let mut merged_config = config.clone();
@@ -166,6 +170,7 @@ impl MasterServiceImpl {
         hard_pinned: bool,
         group_id: String,
     ) -> Result<Vec<ReplicaDescriptor>, Status> {
+        self.reserve_tenant_quota(tenant_id, slice_length)?;
         let mut replicas = if replica_count > 0 {
             self.state.allocator.write().allocate_for_client(
                 scoped_key,
@@ -179,6 +184,7 @@ impl MasterServiceImpl {
         };
         if replicas.len() != replica_count {
             release_replicas(&self.state, &replicas);
+            self.abort_tenant_quota(tenant_id, slice_length);
             return Err(Status::resource_exhausted(format!(
                 "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                 PUT_NO_SPACE_HELPER_STR,
@@ -195,6 +201,7 @@ impl MasterServiceImpl {
                 Ok(replicas) => replicas,
                 Err(status) => {
                     release_replicas(&self.state, &replicas);
+                    self.abort_tenant_quota(tenant_id, slice_length);
                     return Err(status);
                 }
             };
@@ -225,6 +232,7 @@ impl MasterServiceImpl {
                 soft_pin_timeout,
                 tenant_id: tenant_id.to_string(),
                 group_id,
+                quota_committed: false,
                 user_key: user_key.to_string(),
             },
         );

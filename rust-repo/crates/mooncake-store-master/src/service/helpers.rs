@@ -445,6 +445,27 @@ pub(crate) fn release_object_replicas(
     release_replicas(state, replicas);
 }
 
+pub(crate) fn account_removed_object_quota(state: &MasterState, object: &ObjectEntry) {
+    if !state.runtime_config.enable_tenant_quota {
+        return;
+    }
+    let mut quotas = state.tenant_quotas.write();
+    let result = if object.quota_committed {
+        quotas.release(&object.tenant_id, object.size)
+    } else {
+        quotas.abort(&object.tenant_id, object.size)
+    };
+    if let Err(error) = result {
+        tracing::warn!(
+            tenant_id = %object.tenant_id,
+            size = object.size,
+            quota_committed = object.quota_committed,
+            ?error,
+            "tenant quota accounting failed while removing object"
+        );
+    }
+}
+
 /// 检查对象的 lease 是否已过期（或从未设置），用于决定是否允许删除/驱逐等操作。
 /// Check whether an object's lease has expired (or was never set).
 /// Used to decide whether delete/evict operations are allowed.
@@ -557,7 +578,9 @@ pub(crate) fn clear_invalid_handles(state: &MasterState, alive_clients: &HashSet
     }
 
     for key in remove_keys {
-        state.objects.remove(&key);
+        if let Some((_, object)) = state.objects.remove(&key) {
+            account_removed_object_quota(state, &object);
+        }
         state.processing_keys.remove(&key);
         state.replication_tasks.remove(&key);
         clear_offloading_task(state, &key);

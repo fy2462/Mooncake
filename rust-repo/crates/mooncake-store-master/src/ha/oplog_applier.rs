@@ -183,6 +183,7 @@ impl OpLogApplier {
                             soft_pin_timeout: None,
                             tenant_id,
                             group_id: v["group_id"].as_str().unwrap_or_default().to_string(),
+                            quota_committed: true,
                             user_key,
                         },
                     );
@@ -259,6 +260,7 @@ mod tests {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: std::sync::atomic::AtomicI64::new(0),
             runtime_config: crate::service::state::MasterRuntimeConfig::default(),
+            tenant_quotas: RwLock::new(crate::tenant_quota::TenantQuotaTable::new(0)),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
         })
@@ -366,6 +368,7 @@ mod tests {
                 soft_pin_timeout: None,
                 tenant_id: "default".to_string(),
                 group_id: String::new(),
+                quota_committed: false,
                 user_key: "k1".to_string(),
             },
         );
@@ -428,6 +431,7 @@ mod tests {
                 soft_pin_timeout: None,
                 tenant_id: "default".to_string(),
                 group_id: String::new(),
+                quota_committed: false,
                 user_key: "k1".to_string(),
             },
         );

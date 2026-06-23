@@ -164,6 +164,7 @@ impl MasterServiceImpl {
                         soft_pin_timeout: None,
                         tenant_id: t_id,
                         group_id: String::new(),
+                        quota_committed: false,
                         user_key: u_key,
                     },
                 );

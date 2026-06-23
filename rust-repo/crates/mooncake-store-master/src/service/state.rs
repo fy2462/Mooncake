@@ -36,6 +36,7 @@
 use crate::allocator::{AllocationStrategy, MemoryAllocatorKind, SegmentAllocator};
 use crate::count_min_sketch::CountMinSketch;
 use crate::storage_backend::StorageBackend;
+use crate::tenant_quota::TenantQuotaTable;
 use dashmap::DashMap;
 use mooncake_store_core::{NoFSegment, ObjectDataType, ReplicaDescriptor, TaskInfo};
 use parking_lot::RwLock;
@@ -99,6 +100,8 @@ pub(crate) struct MasterState {
     pub(crate) view_version: AtomicI64,
     /// 运行时配置 / Runtime configuration: all tunable parameters.
     pub(crate) runtime_config: MasterRuntimeConfig,
+    /// Per-tenant quota admission/accounting table.
+    pub(crate) tenant_quotas: RwLock<TenantQuotaTable>,
     /// Tracks in-flight remote source pulls so only one node fetches a given key.
     /// 远端回源协调表：确保同一 key 只有一个节点从远端（如 S3）拉取数据。
     pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
@@ -134,6 +137,7 @@ impl MasterState {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: AtomicI64::new(0),
             runtime_config: MasterRuntimeConfig::default(),
+            tenant_quotas: RwLock::new(TenantQuotaTable::new(0)),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
         }
@@ -198,6 +202,9 @@ pub struct ObjectEntry {
     /// 分组租约/路由语义使用的可选 group id。
     #[serde(default)]
     pub group_id: String,
+    /// Whether this object has already moved from reserved quota to used quota.
+    #[serde(default)]
+    pub quota_committed: bool,
     /// 用户提供的原始 key（不包含租户作用域前缀）。
     /// Original user-provided key (without tenant scope prefix).
     /// C++ equivalent: ObjectMetadata::user_key

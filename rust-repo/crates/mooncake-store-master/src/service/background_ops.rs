@@ -28,8 +28,9 @@ use std::time::{Instant, SystemTime};
 use uuid::Uuid;
 
 use super::helpers::{
-    choose_drain_target_segment, client_id_by_segment_name, default_drain_target_segments,
-    has_pending_task_capacity, is_lease_expired, memory_usage_ratio, release_replicas,
+    account_removed_object_quota, choose_drain_target_segment, client_id_by_segment_name,
+    default_drain_target_segments, has_pending_task_capacity, is_lease_expired, memory_usage_ratio,
+    release_replicas,
 };
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
@@ -325,7 +326,9 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
                 evicted.push(user_key.clone());
             }
             if became_empty {
-                state.objects.remove(&key);
+                if let Some((_, removed_object)) = state.objects.remove(&key) {
+                    account_removed_object_quota(state, &removed_object);
+                }
                 // Clean up per-client object index / 清理每个客户端的对象索引
                 for mut entry in state.client_objects.iter_mut() {
                     entry.value_mut().remove(&key);

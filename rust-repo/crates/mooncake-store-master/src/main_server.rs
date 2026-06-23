@@ -5,14 +5,6 @@ use super::*;
 // 单机模式（非 HA）路径 — 保留原有行为
 // ---------------------------------------------------------------------------
 pub(super) async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    // --- Metrics HTTP server ---
-    // Prometheus metrics HTTP 服务
-    let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
-    tokio::spawn(metrics::serve_metrics_http_with_admin(
-        metrics_addr,
-        AdminRuntimeState::serving(None),
-    ));
-
     // --- Master gRPC service ---
     // 构建 Master gRPC 服务
     let snapshot_backend_type = args.snapshot_backend_type.as_deref().and_then(|s| {
@@ -44,6 +36,11 @@ pub(super) async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error:
         runtime_config,
     );
     let service_arc = std::sync::Arc::new(service);
+    let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
+    tokio::spawn(metrics::serve_metrics_http_with_admin(
+        metrics_addr,
+        AdminRuntimeState::serving_with_service(None, service_arc.clone()),
+    ));
     service_arc
         .metadata_state()
         .set_master_addr(format!("http://{}", rpc_addr))
@@ -108,7 +105,7 @@ pub(super) async fn run_leader_server(
     let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
     background_tasks.push(tokio::spawn(metrics::serve_metrics_http_with_admin(
         metrics_addr,
-        AdminRuntimeState::serving(leader_view),
+        AdminRuntimeState::serving_with_service(leader_view, service_arc.clone()),
     )));
 
     let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);

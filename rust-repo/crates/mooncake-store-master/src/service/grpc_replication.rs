@@ -186,7 +186,9 @@ impl MasterServiceImpl {
                     "failed to persist put_revoke oplog: {e}"
                 )));
             }
-            self.state.objects.remove(&scoped_key);
+            if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
+                account_removed_object_quota(&self.state, &object);
+            }
             self.state.processing_keys.remove(&scoped_key);
         }
         release_object_replicas(&self.state, &scoped_key, &removed);
@@ -493,7 +495,9 @@ impl MasterServiceImpl {
         }
         release_object_replicas(&self.state, &key, &removed);
         if remove_object {
-            self.state.objects.remove(&key);
+            if let Some((_, object)) = self.state.objects.remove(&key) {
+                account_removed_object_quota(&self.state, &object);
+            }
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&key) {
@@ -720,7 +724,9 @@ impl MasterServiceImpl {
         }
 
         if remove_object {
-            self.state.objects.remove(&key);
+            if let Some((_, object)) = self.state.objects.remove(&key) {
+                account_removed_object_quota(&self.state, &object);
+            }
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&key) {

@@ -223,6 +223,7 @@ fn test_object_entry_creation() {
         tenant_id: "default".to_string(),
         user_key: String::new(),
         group_id: String::new(),
+        quota_committed: false,
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");

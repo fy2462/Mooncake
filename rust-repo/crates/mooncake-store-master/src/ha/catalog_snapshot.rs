@@ -601,6 +601,7 @@ fn decode_object(
         }
         .to_string(),
         group_id,
+        quota_committed: true,
         user_key: user_key.to_string(),
     }))
 }

@@ -90,7 +90,9 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
             release_replicas(state, &removed);
         }
         if remove_object {
-            state.objects.remove(&key);
+            if let Some((_, object)) = state.objects.remove(&key) {
+                account_removed_object_quota(state, &object);
+            }
             clear_offloading_task(state, &key);
             clear_promotion_task(state, &key);
         }
@@ -134,7 +136,9 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
             release_replicas(state, &removed_targets);
         }
         if remove_object {
-            state.objects.remove(&key);
+            if let Some((_, object)) = state.objects.remove(&key) {
+                account_removed_object_quota(state, &object);
+            }
             state.processing_keys.remove(&key);
             clear_offloading_task(state, &key);
             clear_promotion_task(state, &key);

@@ -29,6 +29,9 @@ fn base_args() -> Args {
         offload_force_evict: false,
         enable_disk_eviction: true,
         quota_bytes: 0,
+        enable_tenant_quota: false,
+        default_tenant_quota_bytes: 0,
+        tenant_quota_pool_capacity_bytes: 0,
         nof_heartbeat_interval_sec: 10,
         nof_heartbeat_probe_timeout_ms: 1000,
         nof_heartbeat_failures_threshold: 3,
@@ -148,6 +151,9 @@ fn test_build_runtime_config_applies_task_manager_limits() {
     args.root_fs_dir = "/storage/root".to_string();
     args.enable_disk_eviction = false;
     args.quota_bytes = 4096;
+    args.enable_tenant_quota = true;
+    args.default_tenant_quota_bytes = 2048;
+    args.tenant_quota_pool_capacity_bytes = 8192;
     args.nof_heartbeat_interval_sec = 17;
     args.nof_heartbeat_probe_timeout_ms = 250;
     args.nof_heartbeat_failures_threshold = 4;
@@ -168,6 +174,9 @@ fn test_build_runtime_config_applies_task_manager_limits() {
     assert_eq!(config.storage_fs_dir, "/storage/root");
     assert!(!config.enable_disk_eviction);
     assert_eq!(config.quota_bytes, 4096);
+    assert!(config.enable_tenant_quota);
+    assert_eq!(config.default_tenant_quota_bytes, 2048);
+    assert_eq!(config.tenant_quota_pool_capacity_bytes, 8192);
     assert_eq!(config.nof_heartbeat_interval, Duration::from_secs(17));
     assert_eq!(
         config.nof_heartbeat_probe_timeout,

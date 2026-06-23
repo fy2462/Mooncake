@@ -190,7 +190,9 @@ impl MasterServiceImpl {
                 clear_promotion_task(&self.state, &key);
                 release_replicas(&self.state, &removed_replicas);
                 if remove_entire_object {
-                    self.state.objects.remove(&key);
+                    if let Some((_, object)) = self.state.objects.remove(&key) {
+                        account_removed_object_quota(&self.state, &object);
+                    }
                 }
                 cleared.push(raw_key.clone());
             }
@@ -286,7 +288,9 @@ impl MasterServiceImpl {
                     drop(object);
                     release_object_replicas(&self.state, &key, &removed);
                     if remove_object {
-                        self.state.objects.remove(&key);
+                        if let Some((_, removed_object)) = self.state.objects.remove(&key) {
+                            account_removed_object_quota(&self.state, &removed_object);
+                        }
                         self.state.processing_keys.remove(&key);
                         self.oplog_manager.lock().record_put_revoke(&key);
                     }
@@ -331,6 +335,7 @@ impl MasterServiceImpl {
                 if let Some((_, object)) = self.state.objects.remove(&key) {
                     clear_offloading_task(&self.state, &key);
                     clear_promotion_task(&self.state, &key);
+                    account_removed_object_quota(&self.state, &object);
                     release_replicas(&self.state, &object.replicas);
                     self.oplog_manager.lock().record_remove(&key);
                     BatchStatus::Success.into()
@@ -487,7 +492,9 @@ impl MasterServiceImpl {
                 drop(object);
                 release_object_replicas(&self.state, &scoped_key, &removed);
                 if remove_object {
-                    self.state.objects.remove(&scoped_key);
+                    if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
+                        account_removed_object_quota(&self.state, &object);
+                    }
                     self.state.processing_keys.remove(&scoped_key);
                     self.oplog_manager.lock().record_put_revoke(&scoped_key);
                 }

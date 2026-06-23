@@ -28,6 +28,7 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         tenant_id: "default".to_string(),
         user_key: String::new(),
         group_id: String::new(),
+        quota_committed: false,
     }
 }
 

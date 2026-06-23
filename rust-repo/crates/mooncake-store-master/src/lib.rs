@@ -42,6 +42,7 @@ pub mod oplog;
 pub mod service;
 pub mod storage_backend;
 pub mod storage_distributed;
+pub mod tenant_quota;
 
 pub use service::{MasterRuntimeConfig, MasterServiceImpl};
 // Re-export tenant helpers for integration test use

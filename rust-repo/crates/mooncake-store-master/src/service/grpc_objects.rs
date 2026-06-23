@@ -95,6 +95,7 @@ impl MasterServiceImpl {
         for mut entry in self.state.client_objects.iter_mut() {
             entry.value_mut().remove(scoped_key);
         }
+        self.account_removed_object_quota(object);
         self.state.processing_keys.remove(scoped_key);
         self.state.replication_tasks.remove(scoped_key);
         clear_offloading_task(&self.state, scoped_key);
@@ -149,9 +150,19 @@ impl MasterServiceImpl {
                 .iter()
                 .all(|r| r.status == ReplicaStatus::Complete);
             let size = entry.size;
+            let tenant_id = entry.tenant_id.clone();
+            let should_commit_quota = all_complete
+                && !entry.quota_committed
+                && self.state.processing_keys.contains_key(scoped_key);
+            if should_commit_quota {
+                entry.quota_committed = true;
+            }
             let offload_enabled = !self.state.runtime_config.offload_on_evict;
             drop(entry);
 
+            if should_commit_quota {
+                self.commit_tenant_quota(&tenant_id, size)?;
+            }
             if offload_enabled {
                 push_offloading_queue(&self.state, client_id, scoped_key, size);
             }

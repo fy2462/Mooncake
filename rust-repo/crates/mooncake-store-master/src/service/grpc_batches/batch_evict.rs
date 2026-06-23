@@ -32,7 +32,9 @@ impl MasterServiceImpl {
             let remove_object = entry.replicas.is_empty();
             drop(entry);
             if remove_object {
-                self.state.objects.remove(&key);
+                if let Some((_, object)) = self.state.objects.remove(&key) {
+                    account_removed_object_quota(&self.state, &object);
+                }
             }
         } else {
             return Err(Status::not_found("key not found"));
@@ -72,7 +74,9 @@ impl MasterServiceImpl {
                 let remove_object = entry.replicas.is_empty();
                 drop(entry);
                 if remove_object {
-                    self.state.objects.remove(&key);
+                    if let Some((_, object)) = self.state.objects.remove(&key) {
+                        account_removed_object_quota(&self.state, &object);
+                    }
                 }
             }
         }

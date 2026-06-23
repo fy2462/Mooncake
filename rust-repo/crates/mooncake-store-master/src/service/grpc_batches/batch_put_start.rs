@@ -64,6 +64,7 @@ impl MasterServiceImpl {
                 continue;
             }
             let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+            let tenant_id = normalize_tenant_id(&req.tenant_id);
             let group_id = Self::group_id_for_key(&config, req.keys.len(), idx)
                 .map_err(|_| Status::invalid_argument("invalid group_ids"))?;
             if self.state.objects.contains_key(&key) {
@@ -72,6 +73,15 @@ impl MasterServiceImpl {
                     replicas: vec![],
                     status: BatchStatus::ObjectAlreadyExists.into(),
                     tenant_id: normalize_tenant_id(&req.tenant_id),
+                });
+                continue;
+            }
+            if self.reserve_tenant_quota(&tenant_id, *slice_len).is_err() {
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id,
                 });
                 continue;
             }
@@ -87,6 +97,7 @@ impl MasterServiceImpl {
             };
             if replicas.len() != memory_replica_count {
                 release_replicas(&self.state, &replicas);
+                self.abort_tenant_quota(&tenant_id, *slice_len);
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
@@ -106,6 +117,7 @@ impl MasterServiceImpl {
                     Ok(nof_replicas) => replicas.extend(nof_replicas),
                     Err(_) => {
                         release_replicas(&self.state, &replicas);
+                        self.abort_tenant_quota(&tenant_id, *slice_len);
                         results.push(proto::BatchStartEntryResult {
                             key: raw_key.clone(),
                             replicas: vec![],
@@ -153,6 +165,7 @@ impl MasterServiceImpl {
                         },
                         tenant_id: t_id,
                         group_id,
+                        quota_committed: false,
                         user_key: u_key,
                     },
                 );
@@ -166,6 +179,7 @@ impl MasterServiceImpl {
                 });
             } else {
                 release_replicas(&self.state, &replicas);
+                self.abort_tenant_quota(&tenant_id, *slice_len);
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
