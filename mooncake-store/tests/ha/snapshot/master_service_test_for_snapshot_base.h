@@ -54,6 +54,7 @@ class MasterServiceSnapshotTestBase : public ::testing::Test {
         // eviction behavior inconsistency and snapshot comparison failures
         MasterMetricManager::instance().reset_allocated_mem_size();
         MasterMetricManager::instance().reset_total_mem_capacity();
+        MasterMetricManager::instance().reset_cache_total_nums();
 
         // Create a unique temporary directory for this test
         namespace fs = std::filesystem;
@@ -165,6 +166,18 @@ class MasterServiceSnapshotTestBase : public ::testing::Test {
         return service->PersistState(snapshot_id);
     }
 
+    static void EnsureSnapshotStores(MasterService* service) {
+        if (!service->snapshot_object_store_) {
+            service->snapshot_object_store_ = SnapshotObjectStore::Create(
+                SnapshotObjectStoreType::LOCAL_FILE);
+        }
+        if (!service->snapshot_catalog_store_ &&
+            service->snapshot_object_store_) {
+            service->snapshot_catalog_store_ =
+                service->CreateSnapshotCatalogStore();
+        }
+    }
+
     // Generate unique snapshot ID (timestamp format)
     std::string GenerateSnapshotId() const {
         auto now = std::chrono::system_clock::now();
@@ -188,7 +201,10 @@ class MasterServiceSnapshotTestBase : public ::testing::Test {
 
     // Get msgpack snapshot directory path
     std::string GetSnapshotDir(const std::string& snapshot_id) const {
-        return tmp_dir() + "/mooncake_master_snapshot/" + snapshot_id + "/";
+        return tmp_dir() + "/" +
+               ha::snapshot_catalog_store_detail::BuildSnapshotRoot(
+                   DEFAULT_CLUSTER_ID) +
+               snapshot_id + "/";
     }
 
     // Get backup directory path
@@ -789,19 +805,10 @@ class MasterServiceSnapshotTestBase : public ::testing::Test {
             << "Use 'service_.reset(new MasterService(...))' instead of "
                "'std::unique_ptr<MasterService> service_(...)'";
 
-        // Ensure snapshot_object_store_ is initialized for PersistState
         // Some test configs may not enable snapshot/restore, so the backend
         // is not created in the constructor. We create it here for TearDown
         // validation.
-        if (!service_->snapshot_object_store_) {
-            service_->snapshot_object_store_ = SnapshotObjectStore::Create(
-                SnapshotObjectStoreType::LOCAL_FILE);
-        }
-        if (!service_->snapshot_catalog_store_ &&
-            service_->snapshot_object_store_) {
-            service_->snapshot_catalog_store_ =
-                service_->CreateSnapshotCatalogStore();
-        }
+        EnsureSnapshotStores(service_.get());
 
         // Test snapshot and restore functionality for all test cases
         TestSnapshotAndRestore(service_);
