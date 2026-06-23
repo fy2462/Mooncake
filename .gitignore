@@ -6,6 +6,7 @@
 .agents
 .mcp.json
 .swarm
+.wolf
 ruvector.db
 agentdb.rvf*
 build
