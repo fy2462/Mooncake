@@ -74,10 +74,10 @@ pub struct Args {
     #[arg(long)]
     pub enable_offload: bool,
 
-    /// 是否禁用 NoF (NVMe-oF) 功能
-    /// Disable NoF (NVMe-oF) workflows
-    #[arg(long)]
-    pub disable_nof: bool,
+    /// 是否启用 NoF (NVMe-oF) 功能
+    /// Enable NoF (NVMe-oF) workflows
+    #[arg(long, default_value_t = true)]
+    pub enable_nof: bool,
 
     /// 驱逐时是否触发 offload（下沉到本地磁盘）
     /// Whether to offload to local disk on eviction

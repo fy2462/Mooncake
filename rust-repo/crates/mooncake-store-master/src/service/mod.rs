@@ -58,7 +58,7 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
@@ -189,6 +189,16 @@ impl MasterServiceImpl {
 
     pub(crate) fn account_removed_object_quota(&self, object: &ObjectEntry) {
         account_removed_object_quota(&self.state, object);
+    }
+
+    pub fn set_service_available(&self, available: bool) {
+        self.state
+            .service_available
+            .store(available, Ordering::Release);
+    }
+
+    pub fn is_service_available(&self) -> bool {
+        self.state.service_available.load(Ordering::Acquire)
     }
 
     pub fn list_tenant_quota_snapshots(&self) -> Result<Vec<TenantQuotaSnapshot>, Status> {
@@ -326,6 +336,7 @@ impl MasterServiceImpl {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: AtomicI64::new(0),
             runtime_config: runtime_config.clone(),
+            service_available: AtomicBool::new(true),
             tenant_quotas: RwLock::new(TenantQuotaTable::new(
                 runtime_config.default_tenant_quota_bytes,
             )),

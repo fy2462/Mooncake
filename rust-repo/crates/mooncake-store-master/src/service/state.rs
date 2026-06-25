@@ -42,7 +42,7 @@ use mooncake_store_core::{NoFSegment, ObjectDataType, ReplicaDescriptor, TaskInf
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
@@ -100,6 +100,8 @@ pub(crate) struct MasterState {
     pub(crate) view_version: AtomicI64,
     /// 运行时配置 / Runtime configuration: all tunable parameters.
     pub(crate) runtime_config: MasterRuntimeConfig,
+    /// Whether the service plane should accept client/admin traffic.
+    pub(crate) service_available: AtomicBool,
     /// Per-tenant quota admission/accounting table.
     pub(crate) tenant_quotas: RwLock<TenantQuotaTable>,
     /// Tracks in-flight remote source pulls so only one node fetches a given key.
@@ -115,7 +117,7 @@ impl MasterState {
         use crate::allocator::SegmentAllocator;
         use crate::count_min_sketch::CountMinSketch;
         use parking_lot::RwLock;
-        use std::sync::atomic::{AtomicI64, AtomicUsize};
+        use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
         Self {
             clients: DashMap::new(),
             ok_clients: DashMap::new(),
@@ -137,6 +139,7 @@ impl MasterState {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: AtomicI64::new(0),
             runtime_config: MasterRuntimeConfig::default(),
+            service_available: AtomicBool::new(true),
             tenant_quotas: RwLock::new(TenantQuotaTable::new(0)),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),

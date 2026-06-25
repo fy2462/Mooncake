@@ -75,6 +75,7 @@ pub(super) async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Er
             snapshot_dir_for_cluster(snapshot_dir.clone(), &ha_spec.cluster_namespace),
             runtime_config.clone(),
         );
+        service_arc.set_service_available(false);
         let mut supervisor = new_supervisor(&ha_spec, &supervisor_config, service_arc.clone());
         if let Err(e) = supervisor.enter_standby_mode(None) {
             warn!("enter_standby_mode failed: {}, retrying in 1s", e);
@@ -119,8 +120,17 @@ pub(super) async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Er
                 .await
             {
                 Ok(r) if r.acquired => r,
-                Ok(_) => {
-                    info!("Not acquired, waiting");
+                Ok(r) => {
+                    let observed_view = r.view.clone();
+                    info!(
+                        "Not acquired, waiting for view change from version {:?}",
+                        observed_view.as_ref().map(|view| view.view_version)
+                    );
+                    supervisor.update_observed_leader(observed_view.clone());
+                    if let Err(e) = supervisor.enter_standby_mode(observed_view.clone()) {
+                        warn!("enter_standby_mode after acquire contention failed: {}", e);
+                    }
+                    wait_and_continue(&coordinator, &observed_view).await;
                     continue;
                 }
                 Err(e) => {
@@ -195,8 +205,6 @@ pub(super) async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Er
                 break;
             }
 
-            supervisor.activate_serving_state();
-
             // LeadershipMonitor + server. Monitor MUST exist (fallback: dummy tx).
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let monitor = match start_leadership_monitor(&coordinator, &session, shutdown_tx).await
@@ -209,6 +217,9 @@ pub(super) async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Er
                     break;
                 }
             };
+
+            supervisor.activate_serving_state();
+            service_arc.set_service_available(true);
 
             let server_result = super::main_server::run_leader_server(
                 service_arc.clone(),
@@ -224,6 +235,7 @@ pub(super) async fn run_ha_loop(args: Args) -> Result<(), Box<dyn std::error::Er
             }
 
             // Cleanup.
+            service_arc.set_service_available(false);
             drop(monitor);
             drop(keepalive_handle);
             supervisor.deactivate_serving_state();

@@ -128,39 +128,88 @@ pub fn build_runtime_config(
         return Err("allocation_strategy 'cxl' is not supported by the Rust master yet".into());
     }
     Ok(MasterRuntimeConfig {
+        // ── 分配策略 / allocation strategy ──
+        // 段选择：random（随机）或 free_ratio_first（空闲率优先）
         allocation_strategy: AllocationStrategy::parse(&args.allocation_strategy)
             .ok_or("allocation_strategy must be 'random' or 'free_ratio_first'")?,
+        // 段内分配器：offset（连续分配）或 cachelib（slab + class）
         memory_allocator_kind: MemoryAllocatorKind::parse(&args.memory_allocator)
             .ok_or("memory_allocator must be 'offset' or 'cachelib'")?,
+
+        // ── 租约 & 超时 / lease & timeout ──
+        // KV 对象默认 lease TTL：PutEnd/GetReplicaList 加时，超时后允许驱逐
         lease_ttl: Duration::from_millis(args.default_kv_lease_ttl_ms),
+        // 客户端心跳 TTL：超时未 ping 视为下线，后台清理其 segment 和副本
         client_live_ttl: Duration::from_secs(args.client_ttl_secs),
-        storage_fs_dir: args.root_fs_dir.clone(),
+        // 未完成 PutStart 超时，新同 key PutStart 可抢占
+        put_start_discard_timeout: Duration::from_secs(args.put_start_discard_timeout_sec),
+        // 副本延迟释放时间（600s），防止 RDMA 还在传输时回收内存
+        put_start_release_timeout: Duration::from_secs(args.put_start_release_timeout_sec),
+
+        // ── 淘汰 / eviction ──
+        // 内存使用率超过此水位（0.95）触发驱逐
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
+        // 每次驱逐释放的内存比例（0.05 = 5%）
         eviction_ratio: args.eviction_ratio,
-        enable_offload: args.enable_offload,
-        enable_nof: !args.disable_nof,
+        // 淘汰时先把数据下沉到本地磁盘再驱逐内存
         offload_on_evict: args.offload_on_evict,
+        // 强制驱逐（即使 offload 还没写完）
         offload_force_evict: args.offload_force_evict,
+        // 透传给客户端：是否启用磁盘层淘汰
         enable_disk_eviction: args.enable_disk_eviction,
+        // 透传给客户端：存储配额上限（字节）
         quota_bytes: args.quota_bytes,
+
+        // ── Offload / Promotion 开关 ──
+        // 全局 offload 开关：关闭后不可注册本地磁盘 offload segment
+        enable_offload: args.enable_offload,
+        // 全局 NoF 开关：关闭后拒绝 NoF segment 和 NoF replica
+        enable_nof: args.enable_nof,
+
+        // ── 租户配额 / tenant quota ──
         enable_tenant_quota: args.enable_tenant_quota,
         default_tenant_quota_bytes: args.default_tenant_quota_bytes,
+        // 计算有效配额的容量池（0 = 用内存总容量）
         tenant_quota_pool_capacity_bytes: args.tenant_quota_pool_capacity_bytes,
-        nof_heartbeat_interval: Duration::from_secs(args.nof_heartbeat_interval_sec),
-        nof_heartbeat_probe_timeout: Duration::from_millis(args.nof_heartbeat_probe_timeout_ms),
-        nof_heartbeat_failures_threshold: args.nof_heartbeat_failures_threshold,
+
+        // ── HA 快照 / snapshot ──
+        // 快照数据目录
+        storage_fs_dir: args.root_fs_dir.clone(),
+        // 单次异步快照保存超时
         snapshot_child_timeout: Duration::from_secs(args.snapshot_child_timeout_seconds),
+        // 保留的历史快照数量
         snapshot_retention_count: args.snapshot_retention_count as usize,
-        put_start_discard_timeout: Duration::from_secs(args.put_start_discard_timeout_sec),
-        put_start_release_timeout: Duration::from_secs(args.put_start_release_timeout_sec),
-        promotion_max_per_heartbeat: args.promotion_max_per_heartbeat,
-        max_total_finished_tasks: args.max_total_finished_tasks,
-        max_total_pending_tasks: args.max_total_pending_tasks,
-        max_total_processing_tasks: args.max_total_processing_tasks,
-        pending_task_timeout: Duration::from_secs(args.pending_task_timeout_secs),
-        processing_task_timeout: Duration::from_secs(args.processing_task_timeout_secs),
-        max_task_retry_attempts: args.max_task_retry_attempts,
+        // 集群标识符，追加到 storage_fs_dir 末尾作为子目录
         cluster_id: resolve_cluster_id(args),
+
+        // ── Promotion / 热数据升温 ──
+        // 单次心跳最多返回给一个客户端的 promotion 任务数
+        promotion_max_per_heartbeat: args.promotion_max_per_heartbeat,
+
+        // ── 任务队列容量 / task queue capacity ──
+        // 已完成的 client task 保留上限（超过后淘汰最旧的）
+        max_total_finished_tasks: args.max_total_finished_tasks,
+        // 待处理任务上限
+        max_total_pending_tasks: args.max_total_pending_tasks,
+        // 并发处理中任务上限
+        max_total_processing_tasks: args.max_total_processing_tasks,
+        // Pending 任务超时（0 = 禁用过期）
+        pending_task_timeout: Duration::from_secs(args.pending_task_timeout_secs),
+        // Processing 任务超时（0 = 禁用过期）
+        processing_task_timeout: Duration::from_secs(args.processing_task_timeout_secs),
+        // 新创建任务的默认重试次数
+        max_task_retry_attempts: args.max_task_retry_attempts,
+
+        // ── NoF 心跳探测 / NoF heartbeat probe ──
+        // 探测间隔
+        nof_heartbeat_interval: Duration::from_secs(args.nof_heartbeat_interval_sec),
+        // 单次探测超时
+        nof_heartbeat_probe_timeout: Duration::from_millis(args.nof_heartbeat_probe_timeout_ms),
+        // 连续失败超过此值则卸载 NoF segment
+        nof_heartbeat_failures_threshold: args.nof_heartbeat_failures_threshold,
+
+        // 其余字段使用默认值（soft_pin_ttl、eviction_interval、reaper_interval 等）
+        // remaining fields use defaults (soft_pin_ttl, eviction_interval, reaper_interval, etc.)
         ..Default::default()
     })
 }

@@ -99,7 +99,7 @@ struct TenantQuotaPolicyRequest {
 fn service_or_unavailable(
     state: &AdminRuntimeState,
 ) -> Result<Arc<MasterServiceImpl>, (StatusCode, Json<Value>)> {
-    state.service.clone().ok_or_else(|| {
+    let service = state.service.clone().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -108,7 +108,18 @@ fn service_or_unavailable(
                 "error_message": "master service unavailable"
             })),
         )
-    })
+    })?;
+    if !service.is_service_available() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "error_code": Code::Unavailable as i32,
+                "error_message": "service plane is not active"
+            })),
+        ));
+    }
+    Ok(service)
 }
 
 fn tenant_id_from_query(
@@ -233,11 +244,12 @@ async fn set_default_tenant_quota_handler(
 }
 
 fn build_metrics_summary_text(state: &AdminRuntimeState) -> String {
+    let service_ready = effective_service_ready(state);
     let mut summary = format!(
         "role={}, state={}, service_ready={}",
         state.state.role(),
         state.state.as_str(),
-        state.service_ready
+        service_ready
     );
     if let Some(view) = &state.leader_view {
         summary.push_str(&format!(
@@ -249,11 +261,12 @@ fn build_metrics_summary_text(state: &AdminRuntimeState) -> String {
 }
 
 fn build_health_json(state: &AdminRuntimeState) -> Value {
+    let service_ready = effective_service_ready(state);
     let mut value = json!({
         "status": "ok",
         "role": state.state.role(),
         "ha_state": state.state.as_str(),
-        "service_ready": state.service_ready,
+        "service_ready": service_ready,
     });
     if let (Value::Object(map), Some(view)) = (&mut value, &state.leader_view) {
         map.insert(
@@ -263,6 +276,14 @@ fn build_health_json(state: &AdminRuntimeState) -> Value {
         map.insert("view_version".to_string(), json!(view.view_version));
     }
     value
+}
+
+fn effective_service_ready(state: &AdminRuntimeState) -> bool {
+    state.service_ready
+        && state
+            .service
+            .as_ref()
+            .map_or(true, |service| service.is_service_available())
 }
 
 fn build_leader_json(state: &AdminRuntimeState) -> Value {
@@ -315,5 +336,18 @@ mod tests {
         assert!(summary.contains("service_ready=true"));
         assert!(summary.contains("leader=127.0.0.1:50051"));
         assert!(summary.contains("view_version=7"));
+    }
+
+    #[test]
+    fn test_admin_health_reflects_service_gate() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        service.set_service_available(false);
+        let state = AdminRuntimeState::serving_with_service(None, service);
+
+        let health = build_health_json(&state);
+        let summary = build_metrics_summary_text(&state);
+
+        assert_eq!(health["service_ready"], false);
+        assert!(summary.contains("service_ready=false"));
     }
 }

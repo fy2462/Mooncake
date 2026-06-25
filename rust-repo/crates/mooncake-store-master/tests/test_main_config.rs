@@ -17,7 +17,7 @@ fn base_args() -> Args {
         http_metadata_server_port: 8080,
         metrics_port: 9003,
         rpc_thread_num: 4,
-        disable_nof: false,
+        enable_nof: true,
         allocation_strategy: "random".to_string(),
         memory_allocator: "offset".to_string(),
         default_kv_lease_ttl_ms: 5000,

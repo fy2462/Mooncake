@@ -152,14 +152,24 @@ pub(super) async fn run_leader_server(
     info!("Mooncake Master (HA leader) starting on {}", rpc_addr);
     ensure_supported_rpc_protocol()?;
 
+    let gate = service_arc.clone();
+    let master_service =
+        mooncake_store_master::proto::master_service_server::MasterServiceServer::from_arc(
+            service_arc,
+        );
+    let master_service =
+        tonic::service::interceptor::InterceptedService::new(master_service, move |request| {
+            if gate.is_service_available() {
+                Ok(request)
+            } else {
+                Err(tonic::Status::unavailable("master service is not serving"))
+            }
+        });
+
     // Serve with shutdown signal — LeadershipMonitor triggers graceful stop on lease loss.
     // C++ equivalent: LeadershipMonitor callback calls server.stop().
     let serve_future = tonic::transport::Server::builder()
-        .add_service(
-            mooncake_store_master::proto::master_service_server::MasterServiceServer::from_arc(
-                service_arc,
-            ),
-        )
+        .add_service(master_service)
         .serve_with_shutdown(rpc_addr, async move {
             loop {
                 if shutdown_rx.changed().await.is_err() || *shutdown_rx.borrow() {

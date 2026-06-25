@@ -236,7 +236,7 @@ mod tests {
     use crate::ha::OpLogRecord;
     use dashmap::DashMap;
     use parking_lot::RwLock;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn make_state() -> Arc<MasterState> {
         Arc::new(MasterState {
@@ -260,6 +260,7 @@ mod tests {
             promotion_in_flight: AtomicUsize::new(0),
             view_version: std::sync::atomic::AtomicI64::new(0),
             runtime_config: crate::service::state::MasterRuntimeConfig::default(),
+            service_available: AtomicBool::new(true),
             tenant_quotas: RwLock::new(crate::tenant_quota::TenantQuotaTable::new(0)),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
