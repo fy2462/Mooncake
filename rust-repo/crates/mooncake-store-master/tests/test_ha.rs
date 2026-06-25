@@ -74,6 +74,7 @@ fn test_build_standby_runtime_capabilities() {
         backend_type: HABackendType::Etcd,
         connstring: "http://127.0.0.1:2379".into(),
         cluster_namespace: "cluster-a".into(),
+        pod_identity: None,
     };
     let config = MasterServiceSupervisorConfig {
         enable_snapshot_restore: true,
@@ -365,6 +366,7 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
         backend_type: HABackendType::Redis,
         connstring: "redis://127.0.0.1:6379".into(),
         cluster_namespace: cluster_id.into(),
+        pod_identity: None,
     };
     let config = MasterServiceSupervisorConfig {
         cluster_id: cluster_id.into(),

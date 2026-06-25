@@ -76,8 +76,8 @@ pub enum LeaderRole {
 //
 // Etcd: distributed lease + campaign / 分布式租约 + campaign
 // Redis: SET NX PX for leader key / SET NX PX 抢 leader key
-// K8s: recognized for config parity; current Rust coordinator reports unavailable.
-// K8s: 为保持配置面一致而识别；当前 Rust coordinator 会返回不可用。
+// K8s: Kubernetes Lease-backed leader election.
+// K8s: 基于 Kubernetes Lease 的 leader 选举。
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +121,15 @@ pub struct HABackendSpec {
     pub connstring: String,
     /// Cluster namespace for isolation. / 集群命名空间，用于隔离。
     pub cluster_namespace: String,
+    /// Pod identity used by the K8s backend to maintain leader routing labels.
+    pub pod_identity: Option<K8sPodIdentity>,
+}
+
+/// Kubernetes pod identity used for leader label reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct K8sPodIdentity {
+    pub namespace: String,
+    pub pod_name: String,
 }
 
 /// The master's view of the cluster leader (who is currently the leader).

@@ -248,4 +248,12 @@ pub struct Args {
     /// HA 租约 TTL，单位秒
     #[arg(long, default_value_t = 30)]
     pub ha_lease_ttl_secs: i64,
+
+    /// Pod name for K8s label-based leader routing. Defaults to POD_NAME.
+    #[arg(long)]
+    pub pod_name: Option<String>,
+
+    /// Pod namespace for K8s label-based leader routing. Defaults to POD_NAMESPACE.
+    #[arg(long)]
+    pub pod_namespace: Option<String>,
 }

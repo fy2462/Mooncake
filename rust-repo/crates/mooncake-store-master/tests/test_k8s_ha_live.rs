@@ -138,9 +138,9 @@ async fn test_k8s_ha_live_rbac_watch_backoff_e2e() {
     let api: Api<Lease> = Api::namespaced(client, &namespace);
     cleanup_lease(&api, &lease_name).await;
 
-    let coordinator_a = LeaderCoordinator::new_k8s(&connstring).unwrap();
-    let coordinator_b = LeaderCoordinator::new_k8s(&connstring).unwrap();
-    let coordinator_watch = LeaderCoordinator::new_k8s(&connstring).unwrap();
+    let coordinator_a = LeaderCoordinator::new_k8s(&connstring, None).unwrap();
+    let coordinator_b = LeaderCoordinator::new_k8s(&connstring, None).unwrap();
+    let coordinator_watch = LeaderCoordinator::new_k8s(&connstring, None).unwrap();
 
     let acquired_a = coordinator_a
         .try_acquire_leadership("leader-a", 2)

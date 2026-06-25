@@ -1,5 +1,6 @@
 use super::types::{
-    AcquireLeadershipResult, HaError, LeaderRole, LeadershipHandle, LeadershipSession, MasterView,
+    AcquireLeadershipResult, HaError, K8sPodIdentity, LeaderRole, LeadershipHandle,
+    LeadershipSession, MasterView,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,7 +17,8 @@ pub mod test_support;
 use coordinator_common::{resolve_cluster_namespace, validate_session};
 use coordinator_k8s::{
     acquire_k8s_lease, parse_k8s_lease_connstring, read_k8s_view, release_k8s_lease,
-    renew_k8s_lease, start_k8s_keepalive, wait_for_k8s_view_change,
+    renew_k8s_lease, set_k8s_leader_label, start_k8s_keepalive, wait_for_k8s_view_change,
+    K8sLeaderLabelReconciler,
 };
 
 // LeaderCoordinator —— 核心选举基础设施（C++: ha_service.h）。
@@ -50,6 +52,7 @@ enum CoordinatorBackend {
     K8s {
         namespace: String,
         lease_name: String,
+        label_reconciler: Option<K8sLeaderLabelReconciler>,
     },
     /// Manual mode: leadership is externally controlled via the watch channel.
     /// 手动模式：leadership 通过 watch channel 外部控制。
@@ -103,12 +106,16 @@ impl LeaderCoordinator {
     /// Create a Kubernetes Lease-backed coordinator. The Kubernetes client is
     /// loaded lazily by each operation so construction remains testable without
     /// a kubeconfig or in-cluster environment.
-    pub fn new_k8s(connstring: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_k8s(
+        connstring: &str,
+        pod_identity: Option<K8sPodIdentity>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (namespace, lease_name) = parse_k8s_lease_connstring(connstring)?;
         Ok(Self::with_backend(
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
+                label_reconciler: pod_identity.map(K8sLeaderLabelReconciler::new),
             },
             LeaderRole::Standby,
         ))
@@ -148,6 +155,7 @@ impl LeaderCoordinator {
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
+                label_reconciler: _,
             } => read_k8s_view(namespace, lease_name).await,
             CoordinatorBackend::Manual => Ok(None),
         }
@@ -205,6 +213,7 @@ impl LeaderCoordinator {
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
+                label_reconciler: _,
             } => {
                 let acquired =
                     acquire_k8s_lease(namespace, lease_name, leader_address, lease_ttl_secs)
@@ -280,6 +289,7 @@ impl LeaderCoordinator {
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
+                label_reconciler,
             } => {
                 let owner_token = session.owner_token.clone();
                 self.set_active_owner_token(Some(owner_token.clone()));
@@ -289,6 +299,7 @@ impl LeaderCoordinator {
                     session,
                     self.role_tx.clone(),
                     self.active_owner_token.clone(),
+                    label_reconciler.clone(),
                     cancel_rx,
                 )?;
             }
@@ -318,6 +329,7 @@ impl LeaderCoordinator {
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
+                label_reconciler: _,
             } => renew_k8s_lease(namespace, lease_name, session).await,
             CoordinatorBackend::Manual => Ok(()),
         }
@@ -349,8 +361,10 @@ impl LeaderCoordinator {
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
+                label_reconciler,
             } => {
                 validate_session(session)?;
+                set_k8s_leader_label(label_reconciler, false);
                 release_k8s_lease(namespace, lease_name, session).await?;
                 let _ = self.role_tx.send(LeaderRole::Standby);
                 self.set_active_owner_token(None);
@@ -378,6 +392,7 @@ impl LeaderCoordinator {
         if let CoordinatorBackend::K8s {
             namespace,
             lease_name,
+            label_reconciler: _,
         } = &self.backend
         {
             return wait_for_k8s_view_change(namespace, lease_name, known_version, timeout).await;
@@ -434,6 +449,17 @@ impl LeaderCoordinator {
                 Ok(*self.role_rx.borrow())
             }
             CoordinatorBackend::Manual => Ok(*self.role_rx.borrow()),
+        }
+    }
+
+    /// Update the K8s leader pod label when label reconciliation is enabled.
+    /// Non-K8s backends and K8s deployments without pod identity ignore this.
+    pub fn set_k8s_leader_label(&self, desired: bool) {
+        if let CoordinatorBackend::K8s {
+            label_reconciler, ..
+        } = &self.backend
+        {
+            set_k8s_leader_label(label_reconciler, desired);
         }
     }
 

@@ -342,6 +342,7 @@ impl CapabilityDrivenStandbyController {
                 backend_type: HABackendType::Unknown,
                 connstring: String::new(),
                 cluster_namespace: config.cluster_id.clone(),
+                pod_identity: None,
             },
             config,
             capabilities,

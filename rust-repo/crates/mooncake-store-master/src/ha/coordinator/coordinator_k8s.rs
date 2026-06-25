@@ -1,17 +1,49 @@
 use super::coordinator_common::{clear_active_owner_token_if_matches, validate_session};
 use super::*;
+use crate::ha::types::K8sPodIdentity;
 use futures_util::{pin_mut, StreamExt};
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
-use kube::api::{PostParams, WatchEvent, WatchParams};
+use kube::api::{Patch, PatchParams, PostParams, WatchEvent, WatchParams};
 use kube::{Api, Client, ResourceExt};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const K8S_OPERATION_MAX_ATTEMPTS: usize = 5;
 const K8S_OPERATION_INITIAL_BACKOFF_MS: u64 = 50;
 const K8S_OPERATION_MAX_BACKOFF_MS: u64 = 500;
+const K8S_LEADER_LABEL_KEY: &str = "mooncake.io/store-role";
+const K8S_LEADER_LABEL_VALUE: &str = "leader";
+const K8S_LABEL_RECONCILE_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone)]
+pub(super) struct K8sLeaderLabelReconciler {
+    desired_tx: watch::Sender<bool>,
+}
+
+impl K8sLeaderLabelReconciler {
+    pub(super) fn new(pod_identity: K8sPodIdentity) -> Self {
+        let (desired_tx, desired_rx) = watch::channel(false);
+        tokio::spawn(run_k8s_label_reconciler(pod_identity, desired_rx));
+        Self { desired_tx }
+    }
+
+    pub(super) fn set_leader(&self, desired: bool) {
+        let _ = self.desired_tx.send(desired);
+    }
+}
+
+pub(super) fn set_k8s_leader_label(
+    label_reconciler: &Option<K8sLeaderLabelReconciler>,
+    desired: bool,
+) {
+    if let Some(label_reconciler) = label_reconciler {
+        label_reconciler.set_leader(desired);
+    }
+}
 
 pub(super) fn parse_k8s_lease_connstring(connstring: &str) -> Result<(String, String), HaError> {
     let trimmed = connstring.trim();
@@ -42,6 +74,88 @@ pub(super) async fn k8s_lease_api(namespace: &str) -> Result<Api<Lease>, HaError
         .await
         .map_err(|e| HaError::InvalidBackend(format!("k8s client config: {e}")))?;
     Ok(Api::namespaced(client, namespace))
+}
+
+pub(super) async fn k8s_pod_api(namespace: &str) -> Result<Api<Pod>, HaError> {
+    let client = Client::try_default()
+        .await
+        .map_err(|e| HaError::InvalidBackend(format!("k8s client config: {e}")))?;
+    Ok(Api::namespaced(client, namespace))
+}
+
+async fn run_k8s_label_reconciler(
+    pod_identity: K8sPodIdentity,
+    mut desired_rx: watch::Receiver<bool>,
+) {
+    // Drive the pod label toward the latest desired state. Transient K8s
+    // failures keep `applied` unset so the worker retries every second.
+    let mut applied: Option<bool> = None;
+    loop {
+        let desired = *desired_rx.borrow();
+        if applied != Some(desired) {
+            match apply_k8s_leader_label(&pod_identity, desired).await {
+                Ok(()) => {
+                    applied = Some(desired);
+                    continue;
+                }
+                Err(e) => {
+                    applied = None;
+                    warn!(
+                        "Failed to {} K8s leader pod label: {}",
+                        if desired { "set" } else { "clear" },
+                        e
+                    );
+                }
+            }
+        }
+
+        tokio::select! {
+            changed = desired_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(K8S_LABEL_RECONCILE_INTERVAL), if applied.is_none() => {}
+        }
+    }
+}
+
+async fn apply_k8s_leader_label(
+    pod_identity: &K8sPodIdentity,
+    desired: bool,
+) -> Result<(), HaError> {
+    let value = if desired {
+        json!(K8S_LEADER_LABEL_VALUE)
+    } else {
+        serde_json::Value::Null
+    };
+    patch_k8s_pod_label(
+        &pod_identity.namespace,
+        &pod_identity.pod_name,
+        K8S_LEADER_LABEL_KEY,
+        value,
+    )
+    .await
+}
+
+async fn patch_k8s_pod_label(
+    namespace: &str,
+    pod_name: &str,
+    label_key: &str,
+    value: serde_json::Value,
+) -> Result<(), HaError> {
+    let api = k8s_pod_api(namespace).await?;
+    let patch = json!({
+        "metadata": {
+            "labels": {
+                label_key: value,
+            },
+        },
+    });
+    api.patch(pod_name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await
+        .map_err(|e| HaError::InvalidBackend(format!("k8s patch pod label: {e}")))?;
+    Ok(())
 }
 
 pub(super) async fn read_k8s_view(
@@ -226,6 +340,7 @@ pub(super) fn start_k8s_keepalive(
     session: &LeadershipSession,
     role_tx: watch::Sender<LeaderRole>,
     active_owner_token: Arc<Mutex<Option<String>>>,
+    label_reconciler: Option<K8sLeaderLabelReconciler>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), HaError> {
     validate_session(session)?;
@@ -240,6 +355,7 @@ pub(super) fn start_k8s_keepalive(
                 _ = tokio::time::sleep(sleep_for) => {
                     if let Err(e) = renew_k8s_lease(&namespace, &lease_name, &session).await {
                         error!("K8s lease keepalive failed: {}, leadership lost", e);
+                        set_k8s_leader_label(&label_reconciler, false);
                         let _ = role_tx.send(LeaderRole::Standby);
                         clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
                         return;

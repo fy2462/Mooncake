@@ -2,8 +2,8 @@ use crate::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use crate::ha::{
     create_catalog_backed_snapshot_provider, parse_ha_backend_type,
     parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
-    CatalogBackedSnapshotProvider, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
-    MasterServiceSupervisor, MasterServiceSupervisorConfig,
+    CatalogBackedSnapshotProvider, HABackendSpec, HABackendType, HaError, K8sPodIdentity,
+    LeaderCoordinator, MasterServiceSupervisor, MasterServiceSupervisorConfig,
 };
 use crate::main_args::Args;
 use crate::{MasterRuntimeConfig, MasterServiceImpl};
@@ -235,7 +235,10 @@ pub async fn create_coordinator(
         HABackendType::Redis => {
             Ok(LeaderCoordinator::new_redis(&spec.connstring, &spec.cluster_namespace).await?)
         }
-        HABackendType::K8s => Ok(LeaderCoordinator::new_k8s(&spec.connstring)?),
+        HABackendType::K8s => Ok(LeaderCoordinator::new_k8s(
+            &spec.connstring,
+            spec.pod_identity.clone(),
+        )?),
         HABackendType::Unknown => Err(Box::new(HaError::InvalidParams(
             "unknown HA backend type".into(),
         ))),
@@ -269,7 +272,34 @@ pub fn build_ha_spec(args: &Args) -> Result<HABackendSpec, HaError> {
         backend_type,
         connstring,
         cluster_namespace,
+        pod_identity: build_k8s_pod_identity(args, backend_type),
     })
+}
+
+fn build_k8s_pod_identity(args: &Args, backend_type: HABackendType) -> Option<K8sPodIdentity> {
+    if backend_type != HABackendType::K8s {
+        return None;
+    }
+    let pod_name = resolve_optional_arg_or_env(&args.pod_name, "POD_NAME")?;
+    let namespace = resolve_optional_arg_or_env(&args.pod_namespace, "POD_NAMESPACE")?;
+    Some(K8sPodIdentity {
+        namespace,
+        pod_name,
+    })
+}
+
+fn resolve_optional_arg_or_env(value: &Option<String>, env_key: &str) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var(env_key)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
 }
 
 pub fn resolve_cluster_id(args: &Args) -> String {

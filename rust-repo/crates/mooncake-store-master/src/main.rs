@@ -19,6 +19,7 @@ use mooncake_store_master::MasterServiceImpl;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 use mooncake_store_master::main_args::Args;
@@ -45,24 +46,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     if args.enable_ha {
-        main_ha::run_ha_loop(args).await
+        main_ha::run_ha_loop(args, shutdown_signal()).await
     } else {
         main_server::run_standalone(args).await
     }
 }
 
-async fn wait_and_continue(coordinator: &LeaderCoordinator, current_view: &Option<MasterView>) {
+fn shutdown_signal() -> watch::Receiver<bool> {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        wait_for_process_shutdown().await;
+        info!("Process shutdown signal received");
+        let _ = shutdown_tx.send(true);
+    });
+    shutdown_rx
+}
+
+// One writer broadcasts process shutdown to many async wait points. Each
+// consumer clones the receiver and waits inside its own tokio::select!.
+#[cfg(unix)]
+async fn wait_for_process_shutdown() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_process_shutdown() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+async fn wait_and_continue(
+    coordinator: &LeaderCoordinator,
+    current_view: &Option<MasterView>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> bool {
     let version = current_view.as_ref().map(|v| v.view_version).unwrap_or(0);
-    match coordinator
-        .wait_for_view_change(version, Duration::from_secs(1))
-        .await
-    {
-        Ok(Some(v)) => info!(
-            "View changed: leader={}, version={}",
-            v.leader_address, v.view_version
-        ),
-        Ok(None) => {}
-        Err(e) => warn!("View wait error: {}", e),
+    tokio::select! {
+        result = coordinator.wait_for_view_change(version, Duration::from_secs(1)) => {
+            match result {
+                Ok(Some(v)) => info!(
+                    "View changed: leader={}, version={}",
+                    v.leader_address, v.view_version
+                ),
+                Ok(None) => {}
+                Err(e) => warn!("View wait error: {}", e),
+            }
+            false
+        }
+        changed = shutdown_rx.changed() => {
+            changed.is_err() || *shutdown_rx.borrow()
+        }
     }
 }
 
@@ -70,6 +107,7 @@ async fn warmup_with_renewal(
     coordinator: &LeaderCoordinator,
     session: &LeadershipSession,
     ttl_secs: i64,
+    mut shutdown_rx: watch::Receiver<bool>,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(ttl_secs as u64);
     info!("Warmup {}s, renewing each second", ttl_secs);
@@ -78,7 +116,15 @@ async fn warmup_with_renewal(
             warn!("Warmup renewal failed");
             return false;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    info!("Warmup interrupted by shutdown");
+                    return false;
+                }
+            }
+        }
     }
     info!("Warmup complete");
     true

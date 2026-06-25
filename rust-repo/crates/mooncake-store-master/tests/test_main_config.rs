@@ -59,6 +59,8 @@ fn base_args() -> Args {
         snapshot_child_timeout_seconds: 300,
         snapshot_retention_count: 2,
         ha_lease_ttl_secs: 30,
+        pod_name: None,
+        pod_namespace: None,
     }
 }
 
@@ -99,6 +101,21 @@ fn test_build_ha_spec_k8s_uses_explicit_connstring() {
 }
 
 #[test]
+fn test_build_ha_spec_k8s_uses_pod_identity() {
+    let mut args = base_args();
+    args.ha_backend_type = "k8s".to_string();
+    args.ha_backend_connstring = Some("ns-a/lease-a".to_string());
+    args.pod_name = Some("pod-a".to_string());
+    args.pod_namespace = Some("pod-ns".to_string());
+
+    let spec = build_ha_spec(&args).unwrap();
+    let identity = spec.pod_identity.expect("k8s pod identity");
+
+    assert_eq!(identity.pod_name, "pod-a");
+    assert_eq!(identity.namespace, "pod-ns");
+}
+
+#[test]
 fn test_build_ha_spec_k8s_requires_connstring() {
     let mut args = base_args();
     args.ha_backend_type = "k8s".to_string();
@@ -114,6 +131,7 @@ async fn test_create_coordinator_k8s_builds_lazy_coordinator() {
         backend_type: HABackendType::K8s,
         connstring: "ns-a/lease-a".to_string(),
         cluster_namespace: "cluster-a".to_string(),
+        pod_identity: None,
     };
 
     let coordinator = create_coordinator(&spec).await.unwrap();
