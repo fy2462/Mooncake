@@ -101,6 +101,18 @@ impl MetadataState {
         );
     }
 
+    /// Remove a node's metadata entry.
+    /// 删除节点的元数据条目。
+    pub async fn remove_node(&self, hostname: &str) -> Option<MetadataNodeInfo> {
+        self.nodes.write().await.remove(hostname)
+    }
+
+    /// Blocking variant for background worker threads.
+    /// 后台 worker 线程使用的阻塞删除接口。
+    pub fn remove_node_blocking(&self, hostname: &str) -> Option<MetadataNodeInfo> {
+        self.nodes.blocking_write().remove(hostname)
+    }
+
     /// Update the master address.
     /// 更新 master 地址。
     pub async fn set_master_addr(&self, master_addr: impl Into<String>) {

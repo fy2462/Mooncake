@@ -24,10 +24,11 @@ use uuid::Uuid;
 
 use super::background_ops::{reap_expired_background_tasks, run_automatic_eviction_once};
 use super::helpers::{
-    clear_invalid_handles, get_alive_clients_snapshot, sync_client_segments,
-    unmount_nof_segment_owned, unmount_segment_owned,
+    clear_invalid_handles, get_alive_clients_snapshot, host_from_segment_name,
+    sync_client_segments, unmount_nof_segment_owned, unmount_segment_owned,
 };
 use super::state::{MasterState, NoFHeartbeatState};
+use crate::http_metadata::MetadataState;
 
 mod nof_heartbeat;
 pub(crate) use nof_heartbeat::NofHeartbeatWorker;
@@ -304,7 +305,7 @@ impl EvictionWorker {
 /// delete its tasks, clean offload/promotion queues, and finally remove from client list.
 /// Prefers O(N_keys) index lookup via client_objects;
 /// falls back to full scan only when the index is missing (legacy client compatibility).
-fn purge_expired_client(state: &MasterState, client_id: Uuid) {
+fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, client_id: Uuid) {
     state.client_objects.remove(&client_id);
 
     // 移除该 client 的所有待处理任务 / Remove all pending tasks assigned to this client
@@ -336,10 +337,11 @@ fn purge_expired_client(state: &MasterState, client_id: Uuid) {
         .segments
         .iter()
         .filter(|entry| entry.client_id == client_id)
-        .map(|entry| entry.segment.id)
+        .map(|entry| (entry.segment.id, entry.segment.name.clone()))
         .collect::<Vec<_>>();
-    for segment_id in segment_ids {
+    for (segment_id, segment_name) in segment_ids {
         unmount_segment_owned(state, segment_id, client_id);
+        metadata_state.remove_node_blocking(&host_from_segment_name(&segment_name));
     }
     state.clients.remove(&client_id);
     let alive_clients = get_alive_clients_snapshot(state);
@@ -355,7 +357,7 @@ impl ClientMonitorWorker {
     /// Start client liveness monitor thread; scans all clients at client_monitor_interval,
     /// marks clients exceeding client_live_ttl without heartbeat as expired and runs
     /// purge_expired_client cleanup. Uses mpsc channel for stoppable periodic loop.
-    pub(crate) fn new(state: Arc<MasterState>) -> Self {
+    pub(crate) fn new(state: Arc<MasterState>, metadata_state: MetadataState) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.client_monitor_interval;
         let ttl = state.runtime_config.client_live_ttl;
@@ -375,7 +377,7 @@ impl ClientMonitorWorker {
                         })
                         .collect::<Vec<_>>();
                     for client_id in expired {
-                        purge_expired_client(&state, client_id);
+                        purge_expired_client(&state, &metadata_state, client_id);
                     }
                 }
             }

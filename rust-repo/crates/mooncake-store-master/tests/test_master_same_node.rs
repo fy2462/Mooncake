@@ -194,6 +194,8 @@ async fn test_client_monitor_reaps_expired_clients() {
     )
     .await
     .unwrap();
+    let metadata_state = service.metadata_state();
+    assert!(metadata_state.nodes.read().await.contains_key("ttl"));
 
     MasterService::put_start(
         &service,
@@ -253,6 +255,7 @@ async fn test_client_monitor_reaps_expired_clients() {
     )
     .await
     .is_err());
+    assert!(!metadata_state.nodes.read().await.contains_key("ttl"));
     assert!(MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {

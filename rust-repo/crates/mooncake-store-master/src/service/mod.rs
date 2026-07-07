@@ -422,7 +422,7 @@ impl MasterServiceImpl {
         let graceful_unmount_scheduler = GracefulUnmountScheduler::new(state.clone());
         let processing_reaper = ProcessingReaper::new(state.clone());
         let eviction_worker = EvictionWorker::new(state.clone());
-        let client_monitor_worker = ClientMonitorWorker::new(state.clone());
+        let client_monitor_worker = ClientMonitorWorker::new(state.clone(), metadata_state.clone());
         let drain_worker = DrainWorker::new(state.clone());
         let nof_heartbeat_worker =
             NofHeartbeatWorker::new(state.clone(), Box::new(probe_nof_endpoint));
