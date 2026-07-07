@@ -1,8 +1,11 @@
 use crate::normalize_tenant_id;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantQuotaPolicySnapshot {
@@ -58,7 +61,59 @@ fn save_file_policy(path: &str, snapshot: &TenantQuotaPolicySnapshot) -> Result<
         }
     }
     let yaml = format_tenant_quota_policy_yaml(snapshot);
-    fs::write(path, yaml).map_err(|e| format!("failed to write {path}: {e}"))
+    write_atomic_file(path, yaml.as_bytes())
+}
+
+fn write_atomic_file(path: &str, contents: &[u8]) -> Result<(), String> {
+    let target = Path::new(path);
+    let parent = target
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let tmp_path = make_temp_path(target);
+    let mut tmp = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+        .map_err(|e| format!("failed to open {}: {e}", tmp_path.display()))?;
+
+    if let Err(error) = tmp.write_all(contents).and_then(|_| tmp.sync_all()) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("failed to write {}: {error}", tmp_path.display()));
+    }
+    drop(tmp);
+
+    if let Err(error) = fs::rename(&tmp_path, target) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!(
+            "failed to rename {} to {path}: {error}",
+            tmp_path.display()
+        ));
+    }
+
+    if let Some(parent) = parent {
+        let _ = File::open(parent).and_then(|dir| dir.sync_all());
+    }
+    Ok(())
+}
+
+fn make_temp_path(target: &Path) -> PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    let thread_hash = hasher.finish();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tenant_quota_policy");
+    target.with_file_name(format!(
+        "{file_name}.tmp.{}.{}.{}",
+        std::process::id(),
+        thread_hash,
+        now
+    ))
 }
 
 fn parse_tenant_quota_policy_yaml(contents: &str) -> Result<TenantQuotaPolicySnapshot, String> {
@@ -305,5 +360,30 @@ tenant_quotas:
         .unwrap();
 
         assert_eq!(snapshot.tenant_quotas["tenant-a"], 4096);
+    }
+
+    #[test]
+    fn file_save_uses_cpp_yaml_and_cleans_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tenant-policy.yaml");
+        let path_str = path.to_string_lossy();
+        let snapshot = TenantQuotaPolicySnapshot {
+            tenant_quotas: BTreeMap::from([("tenant-a".to_string(), 4096)]),
+        };
+
+        save_file_policy(&path_str, &snapshot).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            "version: 1\n\ntenants:\n  - name: \"tenant-a\"\n    quota: 4096\n"
+        );
+        assert_eq!(load_file_policy(&path_str).unwrap(), snapshot);
+        let leftovers = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }
