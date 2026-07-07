@@ -45,6 +45,17 @@ fn validate_local_buffer_size_matches_cpp_config_rules() {
 }
 
 #[test]
+fn validate_global_segment_size_matches_cpp_config_rules() {
+    assert!(MooncakeClient::validate_global_segment_size(0).is_ok());
+    assert!(MooncakeClient::validate_global_segment_size(1024).is_ok());
+    assert!(MooncakeClient::validate_global_segment_size(1024 * 1024 * 1024 * 1024).is_ok());
+    assert!(MooncakeClient::validate_global_segment_size(1024 * 1024 * 1024 * 1024 + 1).is_ok());
+
+    let too_small = MooncakeClient::validate_global_segment_size(1023).unwrap_err();
+    assert!(matches!(too_small, StoreError::InvalidParams(_)));
+}
+
+#[test]
 fn resolve_auto_discover_matches_cpp_env_rules() {
     assert!(MooncakeClient::resolve_auto_discover("rdma", "", None));
     assert!(MooncakeClient::resolve_auto_discover("efa", "   ", None));

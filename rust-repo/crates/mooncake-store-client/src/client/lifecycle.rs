@@ -174,6 +174,7 @@ impl MooncakeClient {
                 "at least one master address is required".to_string(),
             ));
         }
+        Self::validate_global_segment_size(global_segment_size)?;
         Self::validate_local_buffer_size(local_buffer_size)?;
 
         let mut last_error = None;
@@ -244,11 +245,14 @@ impl MooncakeClient {
         let engine = Arc::new(engine);
 
         // Step 6: Allocate and register the scratch local_buffer. / 分配并注册 local_buffer。
-        let local_buffer = vec![0u8; local_buffer_size as usize];
+        let local_buffer_size_usize = usize::try_from(local_buffer_size).map_err(|_| {
+            StoreError::InvalidParams("local_buffer_size exceeds addressable memory".to_string())
+        })?;
+        let local_buffer = vec![0u8; local_buffer_size_usize];
         unsafe {
             engine.register_local_memory(
                 local_buffer.as_ptr() as *mut c_void,
-                local_buffer_size as usize,
+                local_buffer_size_usize,
                 "cpu:0",
                 true,
             )?;
@@ -264,16 +268,21 @@ impl MooncakeClient {
         // 如果本节点是存储节点（global_segment_size > 0），分配、注册、打开并挂载 segment。
         let mut segment_buffer: Option<Vec<u8>> = None;
         if global_segment_size > 0 {
+            let global_segment_size_usize = usize::try_from(global_segment_size).map_err(|_| {
+                StoreError::InvalidParams(
+                    "global_segment_size exceeds addressable memory".to_string(),
+                )
+            })?;
             // Allocate and register segment memory with the TE so that
             // remote nodes can read from / write to this segment via RDMA/TCP.
             //
             // 分配 segment 内存并向 TE 注册，使远端节点可以通过 RDMA/TCP 读写此 segment。
-            let seg_buf = vec![0u8; global_segment_size as usize];
+            let seg_buf = vec![0u8; global_segment_size_usize];
             let base_addr = seg_buf.as_ptr() as u64;
             unsafe {
                 engine.register_local_memory(
                     seg_buf.as_ptr() as *mut c_void,
-                    global_segment_size as usize,
+                    global_segment_size_usize,
                     "cpu:0",
                     true,
                 )?;
@@ -380,6 +389,15 @@ impl MooncakeClient {
         } else {
             Ok(format!("http://{trimmed}"))
         }
+    }
+
+    pub(super) fn validate_global_segment_size(global_segment_size: u64) -> StoreResult<()> {
+        if global_segment_size == 0 || global_segment_size >= MIN_SEGMENT_SIZE {
+            return Ok(());
+        }
+        Err(StoreError::InvalidParams(format!(
+            "global_segment_size must be 0 or at least {MIN_SEGMENT_SIZE}"
+        )))
     }
 
     pub(super) fn validate_local_buffer_size(local_buffer_size: u64) -> StoreResult<()> {
