@@ -1,4 +1,4 @@
-use super::storage::local_storage_key;
+use super::storage::{local_storage_key, OffloadTaskItem};
 use super::MooncakeClient;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
@@ -36,17 +36,23 @@ impl MooncakeClient {
         }
 
         if self.offload_rpc_address().is_empty() {
-            let _ = self.start_offload_server().await?;
+            if let Err(error) = self.start_offload_server().await {
+                self.notify_offload_failure_tasks(tasks).await?;
+                return Err(error);
+            }
         }
         let transport_endpoint = self.offload_rpc_address();
 
-        let storage = self.local_storage.as_ref().ok_or_else(|| {
-            StoreError::Internal("no local storage backend configured".to_string())
-        })?;
+        let Some(storage) = self.local_storage.as_ref() else {
+            self.notify_offload_failure_tasks(tasks).await?;
+            return Err(StoreError::Internal(
+                "no local storage backend configured".to_string(),
+            ));
+        };
         let storage = Arc::clone(storage);
 
         let mut offloaded = 0usize;
-        let mut success_tasks = Vec::with_capacity(tasks.len());
+        let mut notify_tasks = Vec::with_capacity(tasks.len());
         let mut metadatas = Vec::with_capacity(tasks.len());
 
         for task in &tasks {
@@ -54,6 +60,8 @@ impl MooncakeClient {
             let tenant_id = task.tenant_id.as_str();
             if task.size < 0 {
                 tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "offload: invalid negative task size");
+                notify_tasks.push(task.clone());
+                metadatas.push(failed_offload_metadata());
                 continue;
             }
             // Read object data from memory.
@@ -61,6 +69,8 @@ impl MooncakeClient {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "offload: failed to get object from memory, skipping");
+                    notify_tasks.push(task.clone());
+                    metadatas.push(failed_offload_metadata());
                     continue;
                 }
             };
@@ -68,10 +78,25 @@ impl MooncakeClient {
             // Write to local disk (blocking I/O).
             let key_owned = local_storage_key(tenant_id, key);
             let s = Arc::clone(&storage);
-            let write_result =
-                tokio::task::spawn_blocking(move || s.write_object(&key_owned, &data))
-                    .await
-                    .map_err(|e| StoreError::Internal(e.to_string()))??;
+            let write_result = match tokio::task::spawn_blocking(move || {
+                s.write_object(&key_owned, &data)
+            })
+            .await
+            {
+                Ok(Ok(write_result)) => write_result,
+                Ok(Err(e)) => {
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "offload: failed to write object to local storage");
+                    notify_tasks.push(task.clone());
+                    metadatas.push(failed_offload_metadata());
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "offload: local storage write task failed");
+                    notify_tasks.push(task.clone());
+                    metadatas.push(failed_offload_metadata());
+                    continue;
+                }
+            };
 
             // Log any evicted keys.
             for evicted_key in &write_result {
@@ -79,7 +104,7 @@ impl MooncakeClient {
             }
 
             offloaded += 1;
-            success_tasks.push(task.clone());
+            notify_tasks.push(task.clone());
             metadatas.push(proto::StorageObjectMetadata {
                 bucket_id: 0,
                 offset: 0,
@@ -89,12 +114,23 @@ impl MooncakeClient {
             });
         }
 
-        if !success_tasks.is_empty() {
-            self.notify_offload_success_tasks(success_tasks, metadatas)
+        if !notify_tasks.is_empty() {
+            self.notify_offload_success_tasks(notify_tasks, metadatas)
                 .await?;
         }
 
         Ok(offloaded)
+    }
+
+    async fn notify_offload_failure_tasks(
+        &mut self,
+        tasks: Vec<OffloadTaskItem>,
+    ) -> StoreResult<()> {
+        if tasks.is_empty() {
+            return Ok(());
+        }
+        let metadatas = tasks.iter().map(|_| failed_offload_metadata()).collect();
+        self.notify_offload_success_tasks(tasks, metadatas).await
     }
 
     /// Execute a complete promotion cycle:
@@ -290,5 +326,27 @@ impl MooncakeClient {
         self.mounted_segment_ids.write().remove(segment_name);
         self.unregister_local_endpoint(segment_name);
         Ok(())
+    }
+}
+
+fn failed_offload_metadata() -> proto::StorageObjectMetadata {
+    proto::StorageObjectMetadata {
+        bucket_id: -1,
+        offset: 0,
+        key_size: 0,
+        data_size: -1,
+        transport_endpoint: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_offload_metadata_uses_negative_size_sentinel() {
+        let metadata = failed_offload_metadata();
+        assert_eq!(metadata.data_size, -1);
+        assert_eq!(metadata.bucket_id, -1);
     }
 }
