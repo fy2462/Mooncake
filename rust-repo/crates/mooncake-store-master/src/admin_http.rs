@@ -1,4 +1,5 @@
 use crate::ha::{MasterRuntimeState, MasterView};
+use crate::proto;
 use crate::MasterServiceImpl;
 use axum::{
     extract::{Query, State},
@@ -48,6 +49,8 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
         .route("/role", get(role_handler))
         .route("/ha_status", get(ha_status_handler))
         .route("/leader", get(leader_handler))
+        .route("/get_all_keys", get(get_all_keys_handler))
+        .route("/batch_query_keys", get(batch_query_keys_handler))
         .route(
             "/api/v1/tenant_quotas",
             get(get_tenant_quotas_handler)
@@ -85,6 +88,40 @@ async fn leader_handler(
     axum::extract::State(state): axum::extract::State<AdminRuntimeState>,
 ) -> Json<Value> {
     Json(build_leader_json(&state))
+}
+
+async fn get_all_keys_handler(
+    State(state): State<AdminRuntimeState>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    Ok(service.all_keys_for_admin().join("\n"))
+}
+
+async fn batch_query_keys_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let keys_param = query.get("keys").ok_or_else(|| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "No keys provided. Use ?keys=key1,key2,...",
+        )
+    })?;
+    let keys: Vec<String> = if keys_param.is_empty() {
+        Vec::new()
+    } else {
+        keys_param.split(',').map(ToOwned::to_owned).collect()
+    };
+    if keys.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "No keys provided. Use ?keys=key1,key2,...",
+        ));
+    }
+
+    let results = service.batch_get_replica_list_for_admin(&keys, "default");
+    Ok(Json(build_batch_query_keys_json(&keys, &results)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +311,94 @@ fn build_leader_json(state: &AdminRuntimeState) -> Value {
     }
 }
 
+fn build_batch_query_keys_json(
+    keys: &[String],
+    results: &[proto::BatchGetReplicaListResult],
+) -> Value {
+    let mut data = serde_json::Map::new();
+    for (key, result) in keys.iter().zip(results.iter()) {
+        if result.status != 0 {
+            data.insert(
+                key.clone(),
+                json!({
+                    "ok": false,
+                    "error": result.error_message,
+                }),
+            );
+            continue;
+        }
+
+        let mut item = serde_json::Map::new();
+        item.insert("ok".to_string(), json!(true));
+        item.insert("values".to_string(), json!([]));
+
+        if let Some(response) = &result.response {
+            let mut memory_values = Vec::new();
+            let mut disk_values = Vec::new();
+            let mut local_disk_values = Vec::new();
+            let mut nof_values = Vec::new();
+            for replica in &response.replicas {
+                match proto::replica_descriptor::ReplicaType::try_from(replica.replica_type) {
+                    Ok(proto::replica_descriptor::ReplicaType::Memory) => {
+                        memory_values.push(buffer_descriptor_json(replica));
+                    }
+                    Ok(proto::replica_descriptor::ReplicaType::Disk) => {
+                        disk_values.push(json!({
+                            "file_path": replica.file_path,
+                            "object_size": replica.object_size,
+                        }));
+                    }
+                    Ok(proto::replica_descriptor::ReplicaType::LocalDisk) => {
+                        local_disk_values.push(json!({
+                            "client_id": uuid_json_string(replica.local_disk_client_id.as_ref()),
+                            "object_size": replica.object_size,
+                            "transport_endpoint": replica.transport_endpoint,
+                        }));
+                    }
+                    Ok(proto::replica_descriptor::ReplicaType::NofSsd) => {
+                        nof_values.push(buffer_descriptor_json(replica));
+                    }
+                    _ => {}
+                }
+            }
+
+            item.insert("values".to_string(), json!(memory_values));
+            if !disk_values.is_empty() {
+                item.insert("disk_values".to_string(), json!(disk_values));
+            }
+            if !local_disk_values.is_empty() {
+                item.insert("local_disk_values".to_string(), json!(local_disk_values));
+            }
+            if !nof_values.is_empty() {
+                item.insert("nof_values".to_string(), json!(nof_values));
+            }
+        }
+
+        data.insert(key.clone(), Value::Object(item));
+    }
+
+    json!({
+        "success": true,
+        "data": data,
+    })
+}
+
+fn buffer_descriptor_json(replica: &proto::ReplicaDescriptor) -> Value {
+    json!({
+        "segment_id": uuid_json_string(replica.segment_id.as_ref()),
+        "segment_name": replica.segment_name,
+        "offset": replica.offset,
+        "size": replica.size,
+        "base_addr": replica.base_addr,
+        "transport_endpoint": replica.transport_endpoint,
+    })
+}
+
+fn uuid_json_string(uuid: Option<&proto::Uuid>) -> String {
+    uuid.map(|uuid| format!("{:016x}-{:016x}", uuid.high, uuid.low))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +451,44 @@ mod tests {
 
         assert_eq!(health["service_ready"], false);
         assert!(summary.contains("service_ready=false"));
+    }
+
+    #[test]
+    fn test_batch_query_keys_formats_local_disk_values() {
+        let key = "disk-key".to_string();
+        let client_id = proto::Uuid { high: 1, low: 2 };
+        let payload = build_batch_query_keys_json(
+            std::slice::from_ref(&key),
+            &[proto::BatchGetReplicaListResult {
+                status: 0,
+                response: Some(proto::GetReplicaListResponse {
+                    replicas: vec![proto::ReplicaDescriptor {
+                        segment_id: Some(proto::Uuid { high: 0, low: 0 }),
+                        segment_name: "127.0.0.1:9999".to_string(),
+                        slice_key_hash: vec![],
+                        offset: 0,
+                        status: proto::replica_descriptor::ReplicaStatus::Complete as i32,
+                        replica_type: proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+                        size: 2048,
+                        holder_client_id: Some(client_id.clone()),
+                        transport_endpoint: "127.0.0.1:9999".to_string(),
+                        file_path: String::new(),
+                        object_size: 2048,
+                        local_disk_client_id: Some(client_id),
+                        base_addr: 0,
+                    }],
+                    lease_ttl_ms: 5000,
+                }),
+                error_message: String::new(),
+            }],
+        );
+
+        assert_eq!(payload["success"], true);
+        assert_eq!(payload["data"][&key]["ok"], true);
+        assert_eq!(payload["data"][&key]["values"], json!([]));
+        assert_eq!(
+            payload["data"][&key]["local_disk_values"][0]["transport_endpoint"],
+            "127.0.0.1:9999"
+        );
     }
 }

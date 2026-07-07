@@ -82,6 +82,57 @@ impl MasterServiceImpl {
         })
     }
 
+    pub(crate) fn replica_list_for_key_for_admin(
+        &self,
+        tenant_id: &str,
+        key: &str,
+    ) -> Result<proto::GetReplicaListResponse, Status> {
+        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        let completed_replicas = match self.state.objects.get(&scoped_key) {
+            Some(entry) => {
+                let replicas: Vec<_> = entry
+                    .replicas
+                    .iter()
+                    .filter(|r| r.status == ReplicaStatus::Complete)
+                    .map(replica_to_proto)
+                    .collect();
+                if replicas.is_empty() {
+                    return Err(Status::failed_precondition("replica is not ready"));
+                }
+                replicas
+            }
+            None => return Err(Status::not_found(format!("key not found: {key}"))),
+        };
+
+        Ok(proto::GetReplicaListResponse {
+            replicas: completed_replicas,
+            lease_ttl_ms: self.state.runtime_config.lease_ttl.as_millis() as u64,
+        })
+    }
+
+    pub fn batch_get_replica_list_for_admin(
+        &self,
+        keys: &[String],
+        tenant_id: &str,
+    ) -> Vec<proto::BatchGetReplicaListResult> {
+        keys.iter()
+            .map(
+                |key| match self.replica_list_for_key_for_admin(tenant_id, key) {
+                    Ok(response) => proto::BatchGetReplicaListResult {
+                        status: 0,
+                        response: Some(response),
+                        error_message: String::new(),
+                    },
+                    Err(status) => proto::BatchGetReplicaListResult {
+                        status: admin_query_status_code(&status),
+                        response: None,
+                        error_message: status.message().to_string(),
+                    },
+                },
+            )
+            .collect()
+    }
+
     // ---- GetReplicaListByRegex ----
     // 按正则表达式批量获取对象的 Complete 副本列表。过滤掉无 Complete 副本的匹配 key。
     // Batch fetch Complete replica lists by regex; filters out matching keys with no Complete replicas.
@@ -318,5 +369,14 @@ impl MasterServiceImpl {
         } else {
             Ok(Response::new(proto::QueryIpResponse { addresses }))
         }
+    }
+}
+
+fn admin_query_status_code(status: &Status) -> i32 {
+    match status.code() {
+        tonic::Code::NotFound => -1,
+        tonic::Code::FailedPrecondition => -5,
+        tonic::Code::PermissionDenied => -3,
+        _ => -6,
     }
 }

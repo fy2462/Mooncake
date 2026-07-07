@@ -1,12 +1,6 @@
 //! # Batch Operations — 批量操作 / Batch Operations
-//!
-//! 本模块实现所有 gRPC 批量操作接口，用于在单次 RPC 调用中处理多个 key，
-//! 减少网络往返开销。每个 batch 方法独立处理各 key，互不影响。
-//!
-//! This module implements all gRPC batch operation interfaces, processing
-//! multiple keys in a single RPC call to reduce network round-trips.
-//! Each batch method processes keys independently.
-//!
+//! 单次 RPC 处理多个 key；每个 key 独立返回状态，避免局部失败放大为整批失败。
+//! Process multiple keys per RPC with independent per-key status.
 //! | RPC | 功能 / Function | 返回码 / Return Codes |
 //! |-----|----------------|----------------------|
 //! | `BatchExistKey` | 批量检查 key 是否存在 / Batch key existence check | `Vec<bool>` |

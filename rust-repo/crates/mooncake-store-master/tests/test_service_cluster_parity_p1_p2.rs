@@ -63,6 +63,39 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
     .unwrap();
 }
 
+async fn mount_local_disk_and_notify_success(
+    service: &MasterServiceImpl,
+    holder_id: Uuid,
+    key: &str,
+) {
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::notify_offload_success(
+        service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            keys: vec![key.into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: key.len() as i64,
+                data_size: 128,
+                transport_endpoint: "holder".into(),
+            }],
+            tasks: vec![],
+        }),
+    )
+    .await
+    .unwrap();
+}
+
 async fn put_complete(
     service: &MasterServiceImpl,
     client_id: Uuid,
@@ -211,33 +244,7 @@ async fn test_promotion_queue_respects_memory_high_watermark() {
     let holder_id = Uuid::new_v4();
     let dram_id = Uuid::new_v4();
     mount_memory_segment(&service, dram_id, "promo-watermark:1", 4096).await;
-
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto_uuid(holder_id)),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
-    MasterService::notify_offload_success(
-        &service,
-        Request::new(proto::NotifyOffloadSuccessRequest {
-            client_id: Some(proto_uuid(holder_id)),
-            keys: vec!["disk-hot".into()],
-            metadatas: vec![proto::StorageObjectMetadata {
-                bucket_id: 0,
-                offset: 0,
-                key_size: "disk-hot".len() as i64,
-                data_size: 128,
-                transport_endpoint: "holder".into(),
-            }],
-            tasks: vec![],
-        }),
-    )
-    .await
-    .unwrap();
+    mount_local_disk_and_notify_success(&service, holder_id, "disk-hot").await;
 
     MasterService::get_replica_list(
         &service,
@@ -258,6 +265,61 @@ async fn test_promotion_queue_respects_memory_high_watermark() {
     .unwrap()
     .into_inner();
     assert!(heartbeat.objects.is_empty());
+}
+
+#[tokio::test]
+async fn test_admin_batch_get_replica_list_does_not_trigger_promotion() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        promotion_on_hit: true,
+        promotion_admission_threshold: 1,
+        promotion_max_per_heartbeat: 2,
+        ..Default::default()
+    });
+    let holder_id = Uuid::new_v4();
+    mount_local_disk_and_notify_success(&service, holder_id, "admin-disk-hot").await;
+
+    let admin_results =
+        service.batch_get_replica_list_for_admin(&["admin-disk-hot".to_string()], "");
+    assert_eq!(admin_results.len(), 1);
+    assert_eq!(admin_results[0].status, 0);
+    assert_eq!(
+        admin_results[0].response.as_ref().unwrap().replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::LocalDisk as i32
+    );
+
+    let admin_heartbeat = MasterService::promotion_object_heartbeat(
+        &service,
+        Request::new(proto::PromotionObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(holder_id)),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(admin_heartbeat.tasks.is_empty());
+    assert!(admin_heartbeat.objects.is_empty());
+
+    MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "admin-disk-hot".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let client_heartbeat = MasterService::promotion_object_heartbeat(
+        &service,
+        Request::new(proto::PromotionObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(holder_id)),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(client_heartbeat.tasks.len(), 1);
+    assert_eq!(client_heartbeat.tasks[0].key, "admin-disk-hot");
 }
 
 #[tokio::test]

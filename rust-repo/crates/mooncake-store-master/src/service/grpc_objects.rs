@@ -358,13 +358,16 @@ impl MasterServiceImpl {
         &self,
         _request: Request<proto::GetAllKeysForAdminRequest>,
     ) -> Result<Response<proto::GetAllKeysForAdminResponse>, Status> {
-        let keys = self
-            .state
+        let keys = self.all_keys_for_admin();
+        Ok(Response::new(proto::GetAllKeysForAdminResponse { keys }))
+    }
+
+    pub(crate) fn all_keys_for_admin(&self) -> Vec<String> {
+        self.state
             .objects
             .iter()
             .map(|entry| entry.user_key.clone())
-            .collect();
-        Ok(Response::new(proto::GetAllKeysForAdminResponse { keys }))
+            .collect()
     }
 
     pub(super) async fn get_all_segments_for_admin_impl(
