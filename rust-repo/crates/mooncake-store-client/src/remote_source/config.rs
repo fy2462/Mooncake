@@ -75,6 +75,7 @@ pub struct RemoteSourceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3Config {
     /// S3 存储桶名称 (S3 bucket name)
+    #[serde(default)]
     pub bucket: String,
 
     /// AWS 区域，如 `"us-east-1"` (AWS region, e.g. "us-east-1")
@@ -96,6 +97,22 @@ pub struct S3Config {
     /// AWS 密钥，缺省时使用默认凭证链 (optional AWS secret access key; falls back to default credential chain)
     #[serde(default)]
     pub secret_access_key: Option<String>,
+
+    /// Whether to use virtual-hosted-style addressing. False forces path-style access.
+    #[serde(default = "default_use_virtual_addressing")]
+    pub use_virtual_addressing: bool,
+
+    /// Per-request timeout in milliseconds.
+    #[serde(default = "default_request_timeout_ms")]
+    pub request_timeout_ms: u64,
+
+    /// TCP connect timeout in milliseconds. Retained for C++ config parity.
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+
+    /// Prefer HTTPS for AWS endpoints. Custom endpoints should include their own scheme.
+    #[serde(default = "default_use_https")]
+    pub use_https: bool,
 }
 
 /// `max_concurrent_fetches` 的默认值。
@@ -110,6 +127,77 @@ fn default_region() -> String {
     "us-east-1".to_string()
 }
 
+fn default_use_virtual_addressing() -> bool {
+    true
+}
+
+fn default_request_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_use_https() -> bool {
+    true
+}
+
+impl S3Config {
+    pub fn with_mooncake_env_fallbacks(&self) -> Self {
+        let mut config = self.clone();
+        config.region = choose_string(&config.region, "MOONCAKE_AWS_REGION", default_region());
+        config.endpoint = choose_option(&config.endpoint, "MOONCAKE_AWS_S3_ENDPOINT");
+        config.bucket = choose_string(&config.bucket, "MOONCAKE_AWS_BUCKET_NAME", String::new());
+        config.access_key_id = choose_option(&config.access_key_id, "MOONCAKE_AWS_ACCESS_KEY_ID");
+        config.secret_access_key =
+            choose_option(&config.secret_access_key, "MOONCAKE_AWS_SECRET_ACCESS_KEY");
+        config.use_virtual_addressing = choose_bool(
+            config.use_virtual_addressing,
+            "MOONCAKE_AWS_USE_VIRTUAL_ADDRESSING",
+        );
+        config.use_https = choose_bool(config.use_https, "MOONCAKE_AWS_USE_HTTPS");
+        config.request_timeout_ms =
+            choose_u64(config.request_timeout_ms, "MOONCAKE_AWS_REQUEST_TIMEOUT_MS");
+        config.connect_timeout_ms =
+            choose_u64(config.connect_timeout_ms, "MOONCAKE_AWS_CONNECT_TIMEOUT_MS");
+        config
+    }
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn choose_string(current: &str, env_name: &str, default_value: String) -> String {
+    if current != default_value && !current.is_empty() {
+        current.to_string()
+    } else {
+        env_nonempty(env_name).unwrap_or_else(|| current.to_string())
+    }
+}
+
+fn choose_option(current: &Option<String>, env_name: &str) -> Option<String> {
+    current.clone().or_else(|| env_nonempty(env_name))
+}
+
+fn choose_bool(current: bool, env_name: &str) -> bool {
+    let Some(value) = env_nonempty(env_name) else {
+        return current;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => current,
+    }
+}
+
+fn choose_u64(current: u64, env_name: &str) -> u64 {
+    env_nonempty(env_name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(current)
+}
+
 impl Default for RemoteSourceConfig {
     /// 默认配置：远程源禁用，最大 16 并发，无 S3。
     /// (Default: remote source disabled, max 16 concurrent fetches, no S3.)
@@ -118,6 +206,23 @@ impl Default for RemoteSourceConfig {
             enabled: false,
             max_concurrent_fetches: default_max_concurrent_fetches(),
             s3: None,
+        }
+    }
+}
+
+impl Default for S3Config {
+    fn default() -> Self {
+        Self {
+            bucket: String::new(),
+            region: default_region(),
+            endpoint: None,
+            prefix: String::new(),
+            access_key_id: None,
+            secret_access_key: None,
+            use_virtual_addressing: default_use_virtual_addressing(),
+            request_timeout_ms: default_request_timeout_ms(),
+            connect_timeout_ms: default_connect_timeout_ms(),
+            use_https: default_use_https(),
         }
     }
 }

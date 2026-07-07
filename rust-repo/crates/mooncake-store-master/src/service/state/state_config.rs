@@ -79,10 +79,14 @@ pub struct MasterRuntimeConfig {
     /// 透传给客户端的存储配额（字节），master 端暂未实现配额限流。
     /// Storage quota in bytes forwarded to clients; Master does not currently enforce quota.
     pub quota_bytes: u64,
-    /// Enables per-tenant quota admission and accounting.
+    /// Enables strict multi-tenant quota admission and accounting.
     pub enable_tenant_quota: bool,
-    /// Default requested quota for tenants without an explicit policy.
+    /// Deprecated compatibility field; strict mode ignores default tenant quotas.
     pub default_tenant_quota_bytes: u64,
+    /// Tenant quota policy connector type.
+    pub tenant_quota_connector_type: String,
+    /// Tenant quota policy connector URI.
+    pub tenant_quota_connector_uri: String,
     /// Capacity used to compute effective tenant quotas. Zero means memory capacity.
     pub tenant_quota_pool_capacity_bytes: u64,
     /// Enable remote source (S3) fallback for cache misses.
@@ -146,6 +150,8 @@ impl Default for MasterRuntimeConfig {
             quota_bytes: 0,
             enable_tenant_quota: false,
             default_tenant_quota_bytes: 0,
+            tenant_quota_connector_type: "file".to_string(),
+            tenant_quota_connector_uri: String::new(),
             tenant_quota_pool_capacity_bytes: 0,
             remote_source_enabled: false,
             remote_pull_ttl: Duration::from_secs(60),

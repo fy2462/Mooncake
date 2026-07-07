@@ -62,6 +62,7 @@ impl S3RemoteSource {
     /// - 若提供了 `endpoint`，使用自定义端点 URL + path-style 访问（适配 MinIO）
     /// - 否则使用 AWS SDK 默认凭证链
     pub async fn new(config: &S3Config) -> RemoteSourceResult<Self> {
+        let config = config.with_mooncake_env_fallbacks();
         let region = Region::new(config.region.clone());
 
         let mut sdk_config =
@@ -82,16 +83,13 @@ impl S3RemoteSource {
 
         // Custom endpoint for S3-compatible stores (e.g. MinIO, Ceph RGW)
         // 自定义端点用于 MinIO / Ceph RGW 等兼容存储
-        let is_custom_endpoint = config.endpoint.is_some();
         if let Some(ref endpoint) = config.endpoint {
             sdk_config = sdk_config.endpoint_url(endpoint);
         }
 
         let sdk_config = sdk_config.load().await;
         let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
-        if is_custom_endpoint {
-            // 非 AWS 端点通常需要 path-style 访问（而非 virtual-hosted style）
-            // Non-AWS endpoints typically require path-style access
+        if !config.use_virtual_addressing {
             s3_config_builder = s3_config_builder.force_path_style(true);
         }
         let client = aws_sdk_s3::Client::from_conf(s3_config_builder.build());
@@ -100,7 +98,7 @@ impl S3RemoteSource {
             client,
             bucket: config.bucket.clone(),
             prefix: config.prefix.clone(),
-            request_timeout: Duration::from_secs(30),
+            request_timeout: Duration::from_millis(config.request_timeout_ms),
         })
     }
 

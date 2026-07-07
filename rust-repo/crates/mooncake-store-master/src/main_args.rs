@@ -97,13 +97,25 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     pub quota_bytes: u64,
 
-    /// Enable per-tenant quota admission and accounting.
+    /// Enable strict multi-tenant namespace and quota admission.
+    #[arg(long)]
+    pub enable_multi_tenants: bool,
+
+    /// Deprecated alias for --enable-multi-tenants.
     #[arg(long)]
     pub enable_tenant_quota: bool,
 
-    /// Default requested quota bytes for tenants without explicit policy.
+    /// Deprecated compatibility knob; strict mode ignores default tenant quotas.
     #[arg(long, default_value_t = 0)]
     pub default_tenant_quota_bytes: u64,
+
+    /// Tenant quota policy connector type: "file" is supported by Rust master.
+    #[arg(long, default_value = "file")]
+    pub tenant_quota_connector_type: String,
+
+    /// Tenant quota policy connector URI, usually a YAML file path.
+    #[arg(long, default_value = "")]
+    pub tenant_quota_connector_uri: String,
 
     /// Capacity used for effective tenant quota allocation. Zero means memory capacity.
     #[arg(long, default_value_t = 0)]

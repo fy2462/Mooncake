@@ -167,8 +167,10 @@ pub fn build_runtime_config(
         enable_nof: args.enable_nof,
 
         // ── 租户配额 / tenant quota ──
-        enable_tenant_quota: args.enable_tenant_quota,
+        enable_tenant_quota: args.enable_multi_tenants || args.enable_tenant_quota,
         default_tenant_quota_bytes: args.default_tenant_quota_bytes,
+        tenant_quota_connector_type: args.tenant_quota_connector_type.clone(),
+        tenant_quota_connector_uri: args.tenant_quota_connector_uri.clone(),
         // 计算有效配额的容量池（0 = 用内存总容量）
         tenant_quota_pool_capacity_bytes: args.tenant_quota_pool_capacity_bytes,
 

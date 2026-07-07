@@ -103,6 +103,7 @@ impl PyS3Config {
             prefix: self.prefix.clone(),
             access_key_id: self.access_key_id.clone(),
             secret_access_key: self.secret_access_key.clone(),
+            ..Default::default()
         }
     }
 }

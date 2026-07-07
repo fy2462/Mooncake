@@ -10,6 +10,7 @@ pub struct TenantQuotaSnapshot {
     pub used_bytes: u64,
     pub reserved_bytes: u64,
     pub committed_count: u64,
+    pub metadata_object_count: u64,
     pub over_quota: bool,
     pub has_explicit_policy: bool,
 }
@@ -19,6 +20,7 @@ pub enum TenantQuotaError {
     QuotaExceeded,
     InvalidArgument,
     AccountingMismatch,
+    TenantNotEmpty,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -28,43 +30,21 @@ struct TenantQuotaState {
     used_bytes: u64,
     reserved_bytes: u64,
     committed_count: u64,
+    metadata_object_count: u64,
     has_explicit_policy: bool,
     over_quota: bool,
-    active: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct TenantQuotaTable {
-    default_requested_quota_bytes: u64,
     tenants: BTreeMap<String, TenantQuotaState>,
 }
 
 impl TenantQuotaTable {
-    pub fn new(default_requested_quota_bytes: u64) -> Self {
+    pub fn new(_default_requested_quota_bytes: u64) -> Self {
         Self {
-            default_requested_quota_bytes,
             tenants: BTreeMap::new(),
         }
-    }
-
-    pub fn default_requested_quota(&self) -> u64 {
-        self.default_requested_quota_bytes
-    }
-
-    pub fn ensure_tenant(&mut self, tenant_id: &str) {
-        let tenant_id = normalize_tenant_id(tenant_id);
-        let default_quota = self.default_requested_quota_bytes;
-        self.get_or_create_state(&tenant_id, default_quota).active = true;
-    }
-
-    pub fn set_default_requested_quota(&mut self, bytes: u64, capacity: u64) {
-        self.default_requested_quota_bytes = bytes;
-        for state in self.tenants.values_mut() {
-            if !state.has_explicit_policy {
-                state.requested_quota_bytes = bytes;
-            }
-        }
-        self.recompute_effective_quotas(capacity);
     }
 
     pub fn upsert_policy(
@@ -77,25 +57,38 @@ impl TenantQuotaTable {
             return Err(TenantQuotaError::InvalidArgument);
         }
         let tenant_id = normalize_admin_tenant_id(tenant_id)?;
-        let default_quota = self.default_requested_quota_bytes;
-        let state = self.get_or_create_state(&tenant_id, default_quota);
+        let state = self.get_or_create_state(&tenant_id);
         state.requested_quota_bytes = requested_quota_bytes;
         state.has_explicit_policy = true;
         self.recompute_effective_quotas(capacity);
         Ok(self.snapshot_for_existing(&tenant_id))
     }
 
-    pub fn erase_policy(&mut self, tenant_id: &str, capacity: u64) -> Option<TenantQuotaSnapshot> {
-        let tenant_id = normalize_tenant_id(tenant_id);
-        let default_quota = self.default_requested_quota_bytes;
-        let state = self.tenants.get_mut(&tenant_id)?;
-        state.requested_quota_bytes = default_quota;
+    pub fn erase_policy(
+        &mut self,
+        tenant_id: &str,
+        capacity: u64,
+    ) -> Result<Option<TenantQuotaSnapshot>, TenantQuotaError> {
+        let tenant_id = normalize_admin_tenant_id(tenant_id)?;
+        let Some(state) = self.tenants.get_mut(&tenant_id) else {
+            return Ok(None);
+        };
+        if state.metadata_object_count > 0
+            || state.used_bytes > 0
+            || state.reserved_bytes > 0
+            || state.committed_count > 0
+        {
+            return Err(TenantQuotaError::TenantNotEmpty);
+        }
+        state.requested_quota_bytes = 0;
+        state.effective_quota_bytes = 0;
         state.has_explicit_policy = false;
         self.recompute_effective_quotas(capacity);
-        self.tenants
+        Ok(self
+            .tenants
             .get(&tenant_id)
             .filter(|state| !is_lazy_empty(state))
-            .map(|_| self.snapshot_for_existing(&tenant_id))
+            .map(|_| self.snapshot_for_existing(&tenant_id)))
     }
 
     pub fn get_snapshot(&self, tenant_id: &str) -> Option<TenantQuotaSnapshot> {
@@ -115,34 +108,31 @@ impl TenantQuotaTable {
 
     pub fn recompute_effective_quotas(&mut self, capacity: u64) {
         for state in self.tenants.values_mut() {
-            if !state.has_explicit_policy {
-                state.requested_quota_bytes = self.default_requested_quota_bytes;
-            }
             state.effective_quota_bytes = 0;
         }
 
-        for (tenant_id, quota) in build_effective_quota_assignments(
-            &self.tenants,
-            self.default_requested_quota_bytes,
-            capacity,
-        ) {
+        for (tenant_id, quota) in build_effective_quota_assignments(&self.tenants, capacity) {
             if let Some(state) = self.tenants.get_mut(&tenant_id) {
                 state.effective_quota_bytes = quota;
-                refresh_over_quota(state);
             }
+        }
+        for state in self.tenants.values_mut() {
+            refresh_over_quota(state);
         }
     }
 
     pub fn reserve(&mut self, tenant_id: &str, bytes: u64) -> Result<(), TenantQuotaError> {
         let tenant_id = normalize_tenant_id(tenant_id);
         if bytes == 0 {
-            let default_quota = self.default_requested_quota_bytes;
-            self.get_or_create_state(&tenant_id, default_quota);
+            self.get_or_create_state(&tenant_id);
             return Ok(());
         }
         let Some(state) = self.tenants.get_mut(&tenant_id) else {
             return Err(TenantQuotaError::QuotaExceeded);
         };
+        if !state.has_explicit_policy {
+            return Err(TenantQuotaError::QuotaExceeded);
+        }
         let next = state.used_bytes as u128 + state.reserved_bytes as u128 + bytes as u128;
         if next > state.effective_quota_bytes as u128 {
             return Err(TenantQuotaError::QuotaExceeded);
@@ -154,8 +144,7 @@ impl TenantQuotaTable {
 
     pub fn commit(&mut self, tenant_id: &str, bytes: u64) -> Result<(), TenantQuotaError> {
         let tenant_id = normalize_tenant_id(tenant_id);
-        let default_quota = self.default_requested_quota_bytes;
-        let state = self.get_or_create_state(&tenant_id, default_quota);
+        let state = self.get_or_create_state(&tenant_id);
         if bytes == 0 {
             return Ok(());
         }
@@ -165,14 +154,14 @@ impl TenantQuotaTable {
         state.reserved_bytes -= bytes;
         state.used_bytes = state.used_bytes.saturating_add(bytes);
         state.committed_count = state.committed_count.saturating_add(1);
+        state.metadata_object_count = state.metadata_object_count.saturating_add(1);
         refresh_over_quota(state);
         Ok(())
     }
 
     pub fn abort(&mut self, tenant_id: &str, bytes: u64) -> Result<(), TenantQuotaError> {
         let tenant_id = normalize_tenant_id(tenant_id);
-        let default_quota = self.default_requested_quota_bytes;
-        let state = self.get_or_create_state(&tenant_id, default_quota);
+        let state = self.get_or_create_state(&tenant_id);
         if state.reserved_bytes < bytes {
             return Err(TenantQuotaError::AccountingMismatch);
         }
@@ -183,8 +172,7 @@ impl TenantQuotaTable {
 
     pub fn release(&mut self, tenant_id: &str, bytes: u64) -> Result<(), TenantQuotaError> {
         let tenant_id = normalize_tenant_id(tenant_id);
-        let default_quota = self.default_requested_quota_bytes;
-        let state = self.get_or_create_state(&tenant_id, default_quota);
+        let state = self.get_or_create_state(&tenant_id);
         if state.used_bytes < bytes {
             return Err(TenantQuotaError::AccountingMismatch);
         }
@@ -192,21 +180,17 @@ impl TenantQuotaTable {
         if state.committed_count > 0 {
             state.committed_count -= 1;
         }
+        if state.metadata_object_count > 0 {
+            state.metadata_object_count -= 1;
+        }
         refresh_over_quota(state);
         Ok(())
     }
 
-    fn get_or_create_state(
-        &mut self,
-        tenant_id: &str,
-        default_quota: u64,
-    ) -> &mut TenantQuotaState {
+    fn get_or_create_state(&mut self, tenant_id: &str) -> &mut TenantQuotaState {
         self.tenants
             .entry(tenant_id.to_string())
-            .or_insert_with(|| TenantQuotaState {
-                requested_quota_bytes: default_quota,
-                ..Default::default()
-            })
+            .or_insert_with(TenantQuotaState::default)
     }
 
     fn snapshot_for_existing(&self, tenant_id: &str) -> TenantQuotaSnapshot {
@@ -224,6 +208,7 @@ impl TenantQuotaTable {
             used_bytes: state.used_bytes,
             reserved_bytes: state.reserved_bytes,
             committed_count: state.committed_count,
+            metadata_object_count: state.metadata_object_count,
             over_quota: state.over_quota,
             has_explicit_policy: state.has_explicit_policy,
         }
@@ -232,7 +217,10 @@ impl TenantQuotaTable {
 
 fn normalize_admin_tenant_id(tenant_id: &str) -> Result<String, TenantQuotaError> {
     let tenant_id = normalize_tenant_id(tenant_id);
-    if tenant_id.is_empty() || tenant_id.starts_with('_') {
+    if tenant_id.is_empty()
+        || tenant_id.starts_with('_')
+        || tenant_id.bytes().any(|c| c < 0x20 || c == 0x7f)
+    {
         return Err(TenantQuotaError::InvalidArgument);
     }
     Ok(tenant_id)
@@ -240,30 +228,24 @@ fn normalize_admin_tenant_id(tenant_id: &str) -> Result<String, TenantQuotaError
 
 fn is_lazy_empty(state: &TenantQuotaState) -> bool {
     !state.has_explicit_policy
-        && !state.active
         && state.used_bytes == 0
         && state.reserved_bytes == 0
         && state.committed_count == 0
+        && state.metadata_object_count == 0
 }
 
 fn refresh_over_quota(state: &mut TenantQuotaState) {
-    state.over_quota =
-        state.used_bytes.saturating_add(state.reserved_bytes) > state.effective_quota_bytes;
+    state.over_quota = (!state.has_explicit_policy && state.metadata_object_count > 0)
+        || state.used_bytes.saturating_add(state.reserved_bytes) > state.effective_quota_bytes;
 }
 
 fn build_effective_quota_assignments(
     tenants: &BTreeMap<String, TenantQuotaState>,
-    _default_requested_quota_bytes: u64,
     capacity: u64,
 ) -> Vec<(String, u64)> {
     let explicit: Vec<_> = tenants
         .iter()
         .filter(|(_, state)| state.has_explicit_policy)
-        .map(|(tenant_id, _)| tenant_id.clone())
-        .collect();
-    let defaulted: Vec<_> = tenants
-        .iter()
-        .filter(|(_, state)| !state.has_explicit_policy && !is_lazy_empty(state))
         .map(|(tenant_id, _)| tenant_id.clone())
         .collect();
     let explicit_sum = explicit.iter().fold(0u128, |sum, tenant_id| {
@@ -278,8 +260,6 @@ fn build_effective_quota_assignments(
         for tenant_id in &explicit {
             assigned.insert(tenant_id.clone(), tenants[tenant_id].requested_quota_bytes);
         }
-        let remaining = capacity.saturating_sub(explicit_sum as u64);
-        distribute(&mut assigned, tenants, &defaulted, remaining, false);
     } else {
         distribute(&mut assigned, tenants, &explicit, capacity, true);
     }

@@ -169,6 +169,7 @@ mod s3_tests {
             prefix: String::new(),
             access_key_id: Some("fake".to_string()),
             secret_access_key: Some("fake".to_string()),
+            ..Default::default()
         }
     }
 
@@ -254,6 +255,7 @@ mod s3_tests {
             prefix: "prefix_".to_string(),
             access_key_id: Some("fake".to_string()),
             secret_access_key: Some("fake".to_string()),
+            ..Default::default()
         };
         let source = S3RemoteSource::new(&config).await.unwrap();
         let data = source.get("hello").await.unwrap();

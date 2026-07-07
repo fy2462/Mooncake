@@ -48,6 +48,9 @@ use crate::proto;
 use crate::proto::master_service_server::MasterService;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use crate::tenant_quota::{TenantQuotaError, TenantQuotaSnapshot, TenantQuotaTable};
+use crate::tenant_quota_policy_store::{
+    load_tenant_quota_policy, save_tenant_quota_policy, TenantQuotaPolicySnapshot,
+};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{
@@ -154,6 +157,7 @@ impl MasterServiceImpl {
             TenantQuotaError::AccountingMismatch => {
                 Status::failed_precondition("tenant quota accounting mismatch")
             }
+            TenantQuotaError::TenantNotEmpty => Status::failed_precondition("tenant not empty"),
         }
     }
 
@@ -163,7 +167,6 @@ impl MasterServiceImpl {
         }
         let capacity = self.tenant_quota_capacity_bytes();
         let mut quotas = self.state.tenant_quotas.write();
-        quotas.ensure_tenant(tenant_id);
         quotas.recompute_effective_quotas(capacity);
         quotas
             .reserve(tenant_id, bytes)
@@ -231,7 +234,14 @@ impl MasterServiceImpl {
             .tenant_quotas
             .write()
             .upsert_policy(tenant_id, requested_quota_bytes, capacity)
-            .map_err(Self::tenant_quota_status)
+            .map_err(Self::tenant_quota_status)?;
+        self.save_tenant_quota_policies()?;
+        Ok(self
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(tenant_id)
+            .expect("tenant policy exists after upsert"))
     }
 
     pub fn delete_tenant_quota_policy(
@@ -242,30 +252,34 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("tenant quota is disabled"));
         }
         let capacity = self.tenant_quota_capacity_bytes();
-        Ok(self
+        let deleted = self
             .state
             .tenant_quotas
             .write()
-            .erase_policy(tenant_id, capacity))
+            .erase_policy(tenant_id, capacity)
+            .map_err(Self::tenant_quota_status)?;
+        self.save_tenant_quota_policies()?;
+        Ok(deleted)
     }
 
-    pub fn get_default_tenant_quota_policy(&self) -> Result<u64, Status> {
-        if !self.state.runtime_config.enable_tenant_quota {
-            return Err(Status::failed_precondition("tenant quota is disabled"));
-        }
-        Ok(self.state.tenant_quotas.read().default_requested_quota())
-    }
-
-    pub fn set_default_tenant_quota_policy(&self, bytes: u64) -> Result<u64, Status> {
-        if !self.state.runtime_config.enable_tenant_quota {
-            return Err(Status::failed_precondition("tenant quota is disabled"));
-        }
-        let capacity = self.tenant_quota_capacity_bytes();
-        self.state
-            .tenant_quotas
-            .write()
-            .set_default_requested_quota(bytes, capacity);
-        Ok(bytes)
+    fn save_tenant_quota_policies(&self) -> Result<(), Status> {
+        let snapshot = TenantQuotaPolicySnapshot {
+            tenant_quotas: self
+                .state
+                .tenant_quotas
+                .read()
+                .list_snapshots()
+                .into_iter()
+                .filter(|s| s.has_explicit_policy)
+                .map(|s| (s.tenant_id, s.requested_quota_bytes))
+                .collect(),
+        };
+        save_tenant_quota_policy(
+            &self.state.runtime_config.tenant_quota_connector_type,
+            &self.state.runtime_config.tenant_quota_connector_uri,
+            &snapshot,
+        )
+        .map_err(Status::internal)
     }
 
     /// 简化构造函数，使用默认运行时配置 / Simple constructor with default runtime config.
@@ -304,6 +318,25 @@ impl MasterServiceImpl {
             (Some(btype), Some(dir)) => RwLock::new(Some(StorageBackend::new(btype, &dir))),
             _ => RwLock::new(None),
         };
+        let mut tenant_quotas = TenantQuotaTable::new(runtime_config.default_tenant_quota_bytes);
+        if runtime_config.enable_tenant_quota {
+            let policy_snapshot = load_tenant_quota_policy(
+                &runtime_config.tenant_quota_connector_type,
+                &runtime_config.tenant_quota_connector_uri,
+            )
+            .unwrap_or_else(|e| panic!("failed to load tenant quota policy: {e}"));
+            for (tenant_id, quota) in policy_snapshot.tenant_quotas {
+                tenant_quotas
+                    .upsert_policy(
+                        &tenant_id,
+                        quota,
+                        runtime_config.tenant_quota_pool_capacity_bytes,
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("invalid tenant quota policy for {tenant_id}: {e:?}")
+                    });
+            }
+        }
 
         // 初始化所有 DashMap 存储 — 每个表负责一类数据的并发读写
         // Initialize all DashMap stores — each table handles one category of concurrent read/write
@@ -376,9 +409,7 @@ impl MasterServiceImpl {
             // 服务可用性门控：HA 模式 standby 时为 false，晋升 leader 后置 true
             service_available: AtomicBool::new(true),
             // 租户配额表：per-tenant 存储配额分配与追踪
-            tenant_quotas: RwLock::new(TenantQuotaTable::new(
-                runtime_config.default_tenant_quota_bytes,
-            )),
+            tenant_quotas: RwLock::new(tenant_quotas),
 
             // ── 远端回源 / remote pull ──
             // key → PendingRemotePullEntry：缓存未命中时从 S3 等远端回拉数据的追踪状态

@@ -2567,6 +2567,7 @@ dependencies = [
  "rustls 0.23.40",
  "serde",
  "serde_json",
+ "serde_yaml",
  "spdk-io",
  "tempfile",
  "thiserror 2.0.18",

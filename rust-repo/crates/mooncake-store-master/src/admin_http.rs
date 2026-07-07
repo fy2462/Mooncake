@@ -54,10 +54,6 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
                 .put(upsert_tenant_quota_handler)
                 .delete(delete_tenant_quota_handler),
         )
-        .route(
-            "/api/v1/tenant_quotas/default",
-            get(get_default_tenant_quota_handler).put(set_default_tenant_quota_handler),
-        )
         .with_state(state)
 }
 
@@ -131,7 +127,10 @@ fn tenant_id_from_query(
             "Missing or invalid tenant_id",
         ));
     };
-    if tenant_id.trim().is_empty() || tenant_id.starts_with('_') {
+    if tenant_id.trim().is_empty()
+        || tenant_id.starts_with('_')
+        || tenant_id.bytes().any(|c| c < 0x20 || c == 0x7f)
+    {
         return Err(json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"));
     }
     Ok(tenant_id.clone())
@@ -171,7 +170,10 @@ async fn get_tenant_quotas_handler(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let service = service_or_unavailable(&state)?;
     if let Some(tenant_id) = query.get("tenant_id") {
-        if tenant_id.trim().is_empty() || tenant_id.starts_with('_') {
+        if tenant_id.trim().is_empty()
+            || tenant_id.starts_with('_')
+            || tenant_id.bytes().any(|c| c < 0x20 || c == 0x7f)
+        {
             return Err(json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"));
         }
         let snapshot = service
@@ -216,31 +218,6 @@ async fn delete_tenant_quota_handler(
         .delete_tenant_quota_policy(&tenant_id)
         .map_err(status_error)?;
     Ok(Json(json!({ "success": true, "data": snapshot })))
-}
-
-async fn get_default_tenant_quota_handler(
-    State(state): State<AdminRuntimeState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let service = service_or_unavailable(&state)?;
-    let requested = service
-        .get_default_tenant_quota_policy()
-        .map_err(status_error)?;
-    Ok(Json(
-        json!({ "success": true, "requested_quota_bytes": requested }),
-    ))
-}
-
-async fn set_default_tenant_quota_handler(
-    State(state): State<AdminRuntimeState>,
-    Json(body): Json<TenantQuotaPolicyRequest>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let service = service_or_unavailable(&state)?;
-    let requested = service
-        .set_default_tenant_quota_policy(body.requested_quota_bytes)
-        .map_err(status_error)?;
-    Ok(Json(
-        json!({ "success": true, "requested_quota_bytes": requested }),
-    ))
 }
 
 fn build_metrics_summary_text(state: &AdminRuntimeState) -> String {
