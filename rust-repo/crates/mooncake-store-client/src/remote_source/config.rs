@@ -113,6 +113,14 @@ pub struct S3Config {
     /// Prefer HTTPS for AWS endpoints. Custom endpoints should include their own scheme.
     #[serde(default = "default_use_https")]
     pub use_https: bool,
+
+    /// AWS SDK request checksum calculation mode: `when_supported` or `when_required`.
+    #[serde(default)]
+    pub request_checksum_calculation: Option<String>,
+
+    /// AWS SDK response checksum validation mode: `when_supported` or `when_required`.
+    #[serde(default)]
+    pub response_checksum_validation: Option<String>,
 }
 
 /// `max_concurrent_fetches` 的默认值。
@@ -161,6 +169,14 @@ impl S3Config {
             choose_u64(config.request_timeout_ms, "MOONCAKE_AWS_REQUEST_TIMEOUT_MS");
         config.connect_timeout_ms =
             choose_u64(config.connect_timeout_ms, "MOONCAKE_AWS_CONNECT_TIMEOUT_MS");
+        config.request_checksum_calculation = choose_option(
+            &config.request_checksum_calculation,
+            "MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION",
+        );
+        config.response_checksum_validation = choose_option(
+            &config.response_checksum_validation,
+            "MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION",
+        );
         config
     }
 }
@@ -223,6 +239,8 @@ impl Default for S3Config {
             request_timeout_ms: default_request_timeout_ms(),
             connect_timeout_ms: default_connect_timeout_ms(),
             use_https: default_use_https(),
+            request_checksum_calculation: None,
+            response_checksum_validation: None,
         }
     }
 }

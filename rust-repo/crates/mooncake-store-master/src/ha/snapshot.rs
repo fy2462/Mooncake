@@ -4,7 +4,9 @@ use crate::service::ObjectEntry;
 use crate::service::SegmentEntry;
 use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
-use aws_sdk_s3::config::{Credentials, Region};
+use aws_sdk_s3::config::{
+    Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -225,6 +227,16 @@ impl S3SnapshotObjectStore {
             .map(|value| !parse_bool_like(&value))
             .unwrap_or(endpoint.is_some());
         let prefix = std::env::var("MOONCAKE_AWS_S3_PREFIX").unwrap_or_default();
+        let request_checksum = parse_request_checksum_calculation(
+            std::env::var("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION")
+                .ok()
+                .as_deref(),
+        );
+        let response_checksum = parse_response_checksum_validation(
+            std::env::var("MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION")
+                .ok()
+                .as_deref(),
+        );
 
         let client = run_async_sync(async move {
             let mut sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -245,6 +257,12 @@ impl S3SnapshotObjectStore {
             let mut builder = aws_sdk_s3::config::Builder::from(&sdk_config);
             if force_path_style {
                 builder = builder.force_path_style(true);
+            }
+            if let Some(mode) = request_checksum {
+                builder = builder.request_checksum_calculation(mode);
+            }
+            if let Some(mode) = response_checksum {
+                builder = builder.response_checksum_validation(mode);
             }
             Ok(aws_sdk_s3::Client::from_conf(builder.build()))
         })?;
@@ -615,6 +633,50 @@ fn parse_bool_like(value: &str) -> bool {
         value.to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "y" | "on"
     )
+}
+
+fn parse_request_checksum_calculation(value: Option<&str>) -> Option<RequestChecksumCalculation> {
+    match value?.to_ascii_lowercase().as_str() {
+        "when_supported" => Some(RequestChecksumCalculation::WhenSupported),
+        "when_required" => Some(RequestChecksumCalculation::WhenRequired),
+        _ => None,
+    }
+}
+
+fn parse_response_checksum_validation(value: Option<&str>) -> Option<ResponseChecksumValidation> {
+    match value?.to_ascii_lowercase().as_str() {
+        "when_supported" => Some(ResponseChecksumValidation::WhenSupported),
+        "when_required" => Some(ResponseChecksumValidation::WhenRequired),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_s3_checksum_mode_parsing_matches_cpp_values() {
+        assert_eq!(
+            parse_request_checksum_calculation(Some("when_supported")),
+            Some(RequestChecksumCalculation::WhenSupported)
+        );
+        assert_eq!(
+            parse_request_checksum_calculation(Some("WHEN_REQUIRED")),
+            Some(RequestChecksumCalculation::WhenRequired)
+        );
+        assert_eq!(parse_request_checksum_calculation(Some("invalid")), None);
+
+        assert_eq!(
+            parse_response_checksum_validation(Some("when_supported")),
+            Some(ResponseChecksumValidation::WhenSupported)
+        );
+        assert_eq!(
+            parse_response_checksum_validation(Some("WHEN_REQUIRED")),
+            Some(ResponseChecksumValidation::WhenRequired)
+        );
+        assert_eq!(parse_response_checksum_validation(Some("invalid")), None);
+    }
 }
 
 fn sanitize_redis_hash_tag(value: &str) -> String {

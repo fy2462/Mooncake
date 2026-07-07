@@ -15,6 +15,7 @@ mod s3_tests {
     use std::sync::Arc;
 
     const TEST_BUCKET: &str = "test-bucket";
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     // -------------------------------------------------------------------
     // In-memory S3 mock (single catch-all handler)
@@ -171,6 +172,30 @@ mod s3_tests {
             secret_access_key: Some("fake".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_s3_config_env_fallbacks_include_checksum_modes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION", "when_required");
+        std::env::set_var(
+            "MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION",
+            "when_supported",
+        );
+
+        let config = S3Config::default().with_mooncake_env_fallbacks();
+
+        std::env::remove_var("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION");
+        std::env::remove_var("MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION");
+
+        assert_eq!(
+            config.request_checksum_calculation.as_deref(),
+            Some("when_required")
+        );
+        assert_eq!(
+            config.response_checksum_validation.as_deref(),
+            Some("when_supported")
+        );
     }
 
     // -------------------------------------------------------------------

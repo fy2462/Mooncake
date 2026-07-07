@@ -23,7 +23,9 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use aws_sdk_s3::config::{Credentials, Region};
+use aws_sdk_s3::config::{
+    Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+};
 
 use super::config::S3Config;
 use super::{RemoteSource, RemoteSourceError, RemoteSourceResult};
@@ -92,6 +94,16 @@ impl S3RemoteSource {
         if !config.use_virtual_addressing {
             s3_config_builder = s3_config_builder.force_path_style(true);
         }
+        if let Some(mode) =
+            parse_request_checksum_calculation(config.request_checksum_calculation.as_deref())
+        {
+            s3_config_builder = s3_config_builder.request_checksum_calculation(mode);
+        }
+        if let Some(mode) =
+            parse_response_checksum_validation(config.response_checksum_validation.as_deref())
+        {
+            s3_config_builder = s3_config_builder.response_checksum_validation(mode);
+        }
         let client = aws_sdk_s3::Client::from_conf(s3_config_builder.build());
 
         Ok(Self {
@@ -129,6 +141,22 @@ impl S3RemoteSource {
             RemoteSourceError::Internal(format!("failed to read S3 response body: {e}"))
         })?;
         Ok(data.to_vec())
+    }
+}
+
+fn parse_request_checksum_calculation(value: Option<&str>) -> Option<RequestChecksumCalculation> {
+    match value?.to_ascii_lowercase().as_str() {
+        "when_supported" => Some(RequestChecksumCalculation::WhenSupported),
+        "when_required" => Some(RequestChecksumCalculation::WhenRequired),
+        _ => None,
+    }
+}
+
+fn parse_response_checksum_validation(value: Option<&str>) -> Option<ResponseChecksumValidation> {
+    match value?.to_ascii_lowercase().as_str() {
+        "when_supported" => Some(ResponseChecksumValidation::WhenSupported),
+        "when_required" => Some(ResponseChecksumValidation::WhenRequired),
+        _ => None,
     }
 }
 
