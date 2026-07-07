@@ -83,6 +83,43 @@ fn resolve_auto_discover_matches_cpp_env_rules() {
 }
 
 #[test]
+fn transport_topology_matrix_matches_cpp_protocol_rules() {
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("rdma", "mlx5_0"),
+        Some("mlx5_0")
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("efa", "efa0"),
+        Some("efa0")
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("ub", "bonding_dev_0"),
+        Some("bonding_dev_0")
+    );
+
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("cxi", "ignored"),
+        None
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("cxl", "ignored"),
+        None
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("ascend", "ignored"),
+        None
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("ubshmem", "ignored"),
+        None
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix("tcp", "ignored"),
+        None
+    );
+}
+
+#[test]
 fn background_config_default_keeps_short_task_poll_interval() {
     let cfg = ClientBackgroundConfig::default();
     assert!(cfg.enable_task_poll);

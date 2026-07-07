@@ -31,11 +31,9 @@ impl MooncakeClient {
     ///    创建 TransferEngine —— 使用 metadata_conn_string（etcd/redis）和本地主机信息
     ///    初始化数据面引擎。C++ 等价：`TransferEngine::Create(...)`。
     ///
-    /// 4. **Install transport** — if protocol is not "tcp", install an RDMA-capable
-    ///    transport (e.g. "rdma", "nvmeof") with the given device; otherwise
-    ///    install plain TCP.
-    ///    安装传输层 —— 如果协议不是 "tcp"，安装支持 RDMA 的传输层（如 "rdma"、"nvmeof"）
-    ///    并指定设备；否则安装纯 TCP。
+    /// 4. **Install transport** — install the requested protocol and pass a
+    ///    device/topology matrix only for protocols that use one.
+    ///    安装传输层 —— 安装请求的协议，仅对需要设备/拓扑矩阵的协议传入该参数。
     ///
     /// 5. **Discover topology** — let the TE discover the cluster topology
     ///    (available devices, NICs, peer nodes).
@@ -234,7 +232,8 @@ impl MooncakeClient {
 
         // Step 4: Install the appropriate transport. / 安装合适的传输层。
         if protocol != "tcp" {
-            engine.install_transport(protocol, Some(device))?;
+            engine
+                .install_transport(protocol, Self::transport_topology_matrix(protocol, device))?;
         } else {
             engine.install_transport("tcp", None)?;
         }
@@ -426,5 +425,15 @@ impl MooncakeClient {
         }
 
         matches!(protocol, "rdma" | "efa") && device.trim().is_empty()
+    }
+
+    pub(super) fn transport_topology_matrix<'a>(
+        protocol: &str,
+        device: &'a str,
+    ) -> Option<&'a str> {
+        match protocol {
+            "rdma" | "efa" | "ub" => Some(device),
+            _ => None,
+        }
     }
 }
