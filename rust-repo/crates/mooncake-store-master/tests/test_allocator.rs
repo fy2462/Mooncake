@@ -269,3 +269,33 @@ fn test_free_ratio_first_aggregates_allocators_with_same_segment_name() {
     assert_eq!(repls.len(), 1);
     assert_eq!(repls[0].segment_name, "other:1");
 }
+
+#[test]
+fn test_local_first_prefers_writer_client_host_for_single_replica() {
+    let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::LocalFirst);
+    let writer = Uuid::new_v4();
+    let remote = Uuid::new_v4();
+    a.add_segment(make_seg("host-a:1", 1000), 0, remote);
+    a.add_segment(make_seg("host-b:1", 1000), 0, writer);
+    a.add_segment(make_seg("host-c:1", 1000), 0, remote);
+
+    let repls = a.allocate_for_client("k", Some(writer), 100, 1, &ReplicateConfig::default());
+
+    assert_eq!(repls.len(), 1);
+    assert_eq!(repls[0].segment_name, "host-b:1");
+}
+
+#[test]
+fn test_local_first_falls_back_when_writer_host_is_full() {
+    let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::LocalFirst);
+    let writer = Uuid::new_v4();
+    let remote = Uuid::new_v4();
+    a.add_segment(make_seg("host-a:1", 1000), 0, remote);
+    a.add_segment(make_seg("host-b:1", 1000), 1000, writer);
+    a.add_segment(make_seg("host-c:1", 1000), 0, remote);
+
+    let repls = a.allocate_for_client("k", Some(writer), 100, 1, &ReplicateConfig::default());
+
+    assert_eq!(repls.len(), 1);
+    assert_ne!(repls[0].segment_name, "host-b:1");
+}

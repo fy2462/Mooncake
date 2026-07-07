@@ -100,6 +100,7 @@ struct SegmentState {
     segment: Segment,
     used: u64,
     layout: SegmentLayout,
+    client_id: Uuid,
 }
 
 // =============================================================================
@@ -175,7 +176,7 @@ impl SegmentAllocator {
     ///   CachelibLike：按 slab 粒度分片，预留已用空间对应的 slab，
     ///   创建剩余未预留 slab，并分配默认 "main" 池。
     ///   剩余归入默认池。
-    pub fn add_segment(&mut self, segment: Segment, used: u64, _client_id: Uuid) {
+    pub fn add_segment(&mut self, segment: Segment, used: u64, client_id: Uuid) {
         let (layout, effective_used) = match self.memory_allocator_kind {
             MemoryAllocatorKind::Offset => {
                 let tail_free = segment.size.saturating_sub(used);
@@ -232,6 +233,7 @@ impl SegmentAllocator {
                 segment,
                 used: effective_used,
                 layout,
+                client_id,
             },
         );
     }
@@ -276,15 +278,15 @@ impl SegmentAllocator {
     ///    每个副本从候选 segment 中按顺序取空闲空间，创建 Allocating 状态的 ReplicaDescriptor。
     pub fn allocate_for_client(
         &mut self,
-        _key: &str,
-        _client_id: Option<Uuid>,
+        key: &str,
+        client_id: Option<Uuid>,
         slice_size: u64,
         replica_count: usize,
         config: &ReplicateConfig,
     ) -> Vec<ReplicaDescriptor> {
         self.allocate_for_client_excluding(
-            _key,
-            _client_id,
+            key,
+            client_id,
             slice_size,
             replica_count,
             config,
@@ -338,8 +340,8 @@ impl SegmentAllocator {
 
     fn allocate_for_client_excluding(
         &mut self,
-        _key: &str,
-        _client_id: Option<Uuid>,
+        key: &str,
+        client_id: Option<Uuid>,
         slice_size: u64,
         replica_count: usize,
         config: &ReplicateConfig,
@@ -385,6 +387,17 @@ impl SegmentAllocator {
             }
             AllocationStrategy::FreeRatioFirst => {
                 self.allocate_free_ratio_remaining(
+                    slice_size,
+                    replica_count,
+                    &mut replicas,
+                    &mut used_segment_names,
+                    excluded_segments,
+                );
+            }
+            AllocationStrategy::LocalFirst => {
+                self.allocate_local_first_remaining(
+                    key,
+                    client_id,
                     slice_size,
                     replica_count,
                     &mut replicas,

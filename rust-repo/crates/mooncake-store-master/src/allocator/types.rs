@@ -138,6 +138,8 @@ pub struct CachelibAllocationVisit {
 ///   随机打乱候选 segment，然后用稳定排序按亲和性（同节点 > 首选 segment）排序。
 /// - FreeRatioFirst: Composite sort: same node > preferred segment > highest free ratio.
 ///   复合排序：同节点 > 首选 segment > 空闲率从高到低。
+/// - LocalFirst: Prefer writer-local host for single-replica writes, then ordered remote fallback.
+///   LocalFirst：单副本写入优先 writer 本机 host，再按 host 顺序回退。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationStrategy {
     /// Randomize candidates with affinity boosting (same node / preferred segment).
@@ -146,16 +148,20 @@ pub enum AllocationStrategy {
     /// Deterministic sort: same node > preferred > highest free ratio first.
     /// 确定排序：同节点 > 首选 segment > 空闲率高者优先。
     FreeRatioFirst,
+    /// Writer-local host first, then ordered remote fallback.
+    /// writer 本机 host 优先，然后有序远端回退。
+    LocalFirst,
 }
 
 impl AllocationStrategy {
     /// Parse allocation strategy from a string value.
     /// 从字符串解析分配策略。
-    /// "random" -> Random, "free_ratio_first" -> FreeRatioFirst.
+    /// "random" -> Random, "free_ratio_first" -> FreeRatioFirst, "local_first" -> LocalFirst.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "random" => Some(Self::Random),
             "free_ratio_first" => Some(Self::FreeRatioFirst),
+            "local_first" => Some(Self::LocalFirst),
             _ => None,
         }
     }

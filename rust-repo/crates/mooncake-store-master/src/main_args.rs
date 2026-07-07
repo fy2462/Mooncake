@@ -33,8 +33,8 @@ pub struct Args {
     #[arg(long, default_value_t = 4)]
     pub rpc_thread_num: usize,
 
-    /// Segment 分配策略: "random" 或 "free_ratio_first"；"cxl" 当前会明确拒绝
-    /// Segment allocation strategy: "random" or "free_ratio_first"; "cxl" is explicitly unsupported
+    /// Segment 分配策略: "random", "free_ratio_first" 或 "local_first"；"cxl" 当前会明确拒绝
+    /// Segment allocation strategy: "random", "free_ratio_first", or "local_first"; "cxl" is explicitly unsupported
     #[arg(long, default_value = "random")]
     pub allocation_strategy: String,
 

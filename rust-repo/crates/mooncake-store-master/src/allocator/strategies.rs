@@ -3,6 +3,8 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use rand::Rng;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 impl SegmentAllocator {
     pub(super) fn allocate_random_remaining(
@@ -99,6 +101,54 @@ impl SegmentAllocator {
         }
     }
 
+    pub(super) fn allocate_local_first_remaining(
+        &mut self,
+        key: &str,
+        client_id: Option<Uuid>,
+        slice_size: u64,
+        replica_count: usize,
+        replicas: &mut Vec<ReplicaDescriptor>,
+        used_segment_names: &mut HashSet<String>,
+        excluded_segments: &HashSet<String>,
+    ) {
+        if replica_count != 1 {
+            self.allocate_random_remaining(
+                slice_size,
+                replica_count,
+                replicas,
+                used_segment_names,
+                excluded_segments,
+            );
+            return;
+        }
+
+        for segment_name in self.host_ordered_segment_names(client_id, key) {
+            if replicas.len() >= replica_count {
+                return;
+            }
+            if excluded_segments.contains(&segment_name)
+                || used_segment_names.contains(&segment_name)
+            {
+                continue;
+            }
+            if let Some(replica) = self.allocate_from_segment_name(&segment_name, slice_size) {
+                used_segment_names.insert(replica.segment_name.clone());
+                replicas.push(replica);
+                return;
+            }
+        }
+
+        if replicas.len() < replica_count {
+            self.allocate_random_remaining(
+                slice_size,
+                replica_count,
+                replicas,
+                used_segment_names,
+                excluded_segments,
+            );
+        }
+    }
+
     fn segment_names(&self) -> Vec<String> {
         let mut seen = HashSet::new();
         self.segments
@@ -125,6 +175,58 @@ impl SegmentAllocator {
                 )
             });
         offset_layout::free_ratio(total, used)
+    }
+
+    fn host_ordered_segment_names(&self, client_id: Option<Uuid>, key: &str) -> Vec<String> {
+        let Some(client_id) = client_id else {
+            return Vec::new();
+        };
+        let Some(writer_host) = self.host_for_client(client_id) else {
+            return Vec::new();
+        };
+
+        let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for name in self.segment_names() {
+            by_host
+                .entry(host_from_segment_name(&name))
+                .or_default()
+                .push(name);
+        }
+        if by_host.is_empty() {
+            return Vec::new();
+        }
+
+        let hosts = by_host.keys().cloned().collect::<Vec<_>>();
+        let start_idx = hosts
+            .iter()
+            .position(|host| host == &writer_host)
+            .unwrap_or_else(|| {
+                hosts
+                    .iter()
+                    .position(|host| host >= &writer_host)
+                    .unwrap_or(0)
+            });
+
+        let mut ordered = Vec::new();
+        for idx in 0..hosts.len() {
+            let host = &hosts[(start_idx + idx) % hosts.len()];
+            let Some(names) = by_host.get_mut(host) else {
+                continue;
+            };
+            names.sort();
+            let start = stable_key_hash(key) % names.len();
+            for name_idx in 0..names.len() {
+                ordered.push(names[(start + name_idx) % names.len()].clone());
+            }
+        }
+        ordered
+    }
+
+    fn host_for_client(&self, client_id: Uuid) -> Option<String> {
+        self.segments
+            .values()
+            .find(|state| state.client_id == client_id)
+            .map(|state| host_from_segment_name(&state.segment.name))
     }
 
     pub(super) fn allocate_from_segment_name(
@@ -168,4 +270,14 @@ impl SegmentAllocator {
             base_addr: state.segment.base,
         })
     }
+}
+
+fn host_from_segment_name(name: &str) -> String {
+    name.split(':').next().unwrap_or(name).to_string()
+}
+
+fn stable_key_hash(key: &str) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish() as usize
 }
