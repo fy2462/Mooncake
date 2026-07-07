@@ -45,6 +45,33 @@ fn validate_local_buffer_size_matches_cpp_config_rules() {
 }
 
 #[test]
+fn resolve_auto_discover_matches_cpp_env_rules() {
+    assert!(MooncakeClient::resolve_auto_discover("rdma", "", None));
+    assert!(MooncakeClient::resolve_auto_discover("efa", "   ", None));
+    assert!(!MooncakeClient::resolve_auto_discover(
+        "rdma", "mlx5_0", None
+    ));
+    assert!(!MooncakeClient::resolve_auto_discover("tcp", "", None));
+
+    assert!(MooncakeClient::resolve_auto_discover("tcp", "", Some("1")));
+    assert!(!MooncakeClient::resolve_auto_discover(
+        "rdma",
+        "",
+        Some("0")
+    ));
+    assert!(MooncakeClient::resolve_auto_discover(
+        "rdma",
+        "",
+        Some("not-a-number")
+    ));
+    assert!(!MooncakeClient::resolve_auto_discover(
+        "tcp",
+        "",
+        Some("not-a-number")
+    ));
+}
+
+#[test]
 fn background_config_default_keeps_short_task_poll_interval() {
     let cfg = ClientBackgroundConfig::default();
     assert!(cfg.enable_task_poll);

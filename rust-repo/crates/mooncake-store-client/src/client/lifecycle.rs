@@ -223,7 +223,13 @@ impl MooncakeClient {
         let port: u64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
 
         // Step 3: Create TransferEngine. / 创建 TransferEngine。
-        let engine = TransferEngine::create(metadata_conn_string, local_host, ip, port, true)?;
+        let auto_discover = Self::resolve_auto_discover(
+            protocol,
+            device,
+            std::env::var("MC_MS_AUTO_DISC").ok().as_deref(),
+        );
+        let engine =
+            TransferEngine::create(metadata_conn_string, local_host, ip, port, auto_discover)?;
 
         // Step 4: Install the appropriate transport. / 安装合适的传输层。
         if protocol != "tcp" {
@@ -386,5 +392,21 @@ impl MooncakeClient {
             )));
         }
         Ok(())
+    }
+
+    pub(super) fn resolve_auto_discover(
+        protocol: &str,
+        device: &str,
+        env_value: Option<&str>,
+    ) -> bool {
+        if let Some(value) = env_value {
+            match value.parse::<i32>() {
+                Ok(1) => return true,
+                Ok(0) => return false,
+                _ => {}
+            }
+        }
+
+        matches!(protocol, "rdma" | "efa") && device.trim().is_empty()
     }
 }
