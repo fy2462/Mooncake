@@ -94,6 +94,27 @@ fn test_bucket_storage_backend_offload_load_scan_and_remove() {
 }
 
 #[test]
+fn test_bucket_storage_backend_skips_non_numeric_bucket_files() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::Bucket, &tmp);
+
+    backend
+        .batch_offload(&[("alpha".to_string(), b"one".to_vec())])
+        .unwrap();
+    let bucket_dir = tmp.join("buckets");
+    std::fs::write(bucket_dir.join("backup.bucket"), b"not-a-bucket").unwrap();
+
+    assert!(backend.is_exist("alpha").unwrap());
+    assert_eq!(
+        backend.batch_load(&["alpha".to_string()]).unwrap(),
+        vec![("alpha".to_string(), b"one".to_vec())]
+    );
+    assert_eq!(backend.scan_meta().unwrap(), vec![("alpha".to_string(), 3)]);
+    assert_eq!(backend.remove_all().unwrap(), 1);
+    assert!(bucket_dir.join("backup.bucket").exists());
+}
+
+#[test]
 fn test_offset_allocator_storage_backend_offload_load_scan_and_remove() {
     let tmp = temp_dir();
     let backend = StorageBackend::new(StorageBackendType::OffsetAllocator, &tmp);
