@@ -11,6 +11,9 @@ use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
 
+const MIN_SEGMENT_SIZE: u64 = 1024;
+const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
+
 impl MooncakeClient {
     /// Create a new Mooncake client, bootstrapping the TransferEngine,
     /// registering memory, and mounting a segment if needed.
@@ -171,6 +174,7 @@ impl MooncakeClient {
                 "at least one master address is required".to_string(),
             ));
         }
+        Self::validate_local_buffer_size(local_buffer_size)?;
 
         let mut last_error = None;
         for addr in master_addrs {
@@ -370,5 +374,17 @@ impl MooncakeClient {
         } else {
             Ok(format!("http://{trimmed}"))
         }
+    }
+
+    pub(super) fn validate_local_buffer_size(local_buffer_size: u64) -> StoreResult<()> {
+        if local_buffer_size == 0 {
+            return Ok(());
+        }
+        if !(MIN_SEGMENT_SIZE..=MAX_SEGMENT_SIZE).contains(&local_buffer_size) {
+            return Err(StoreError::InvalidParams(format!(
+                "local_buffer_size must be 0 or between {MIN_SEGMENT_SIZE} and {MAX_SEGMENT_SIZE}"
+            )));
+        }
+        Ok(())
     }
 }

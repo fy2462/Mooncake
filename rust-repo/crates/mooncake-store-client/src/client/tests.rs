@@ -31,6 +31,20 @@ fn normalize_master_url_rejects_empty_values() {
 }
 
 #[test]
+fn validate_local_buffer_size_matches_cpp_config_rules() {
+    assert!(MooncakeClient::validate_local_buffer_size(0).is_ok());
+    assert!(MooncakeClient::validate_local_buffer_size(1024).is_ok());
+    assert!(MooncakeClient::validate_local_buffer_size(1024 * 1024 * 1024 * 1024).is_ok());
+
+    let too_small = MooncakeClient::validate_local_buffer_size(1023).unwrap_err();
+    assert!(matches!(too_small, StoreError::InvalidParams(_)));
+
+    let too_large =
+        MooncakeClient::validate_local_buffer_size(1024 * 1024 * 1024 * 1024 + 1).unwrap_err();
+    assert!(matches!(too_large, StoreError::InvalidParams(_)));
+}
+
+#[test]
 fn background_config_default_keeps_short_task_poll_interval() {
     let cfg = ClientBackgroundConfig::default();
     assert!(cfg.enable_task_poll);
