@@ -390,11 +390,16 @@ impl MasterServiceImpl {
                 .find(|r| same_replica(r, &task.source))
             {
                 Some(source_replica) => {
-                    if !source_replica.handle_valid {
+                    if !source_replica.handle_valid
+                        || source_replica.status != ReplicaStatus::Complete
+                    {
                         source_invalid = true;
                     }
                 }
-                None => all_present = false,
+                None => {
+                    all_present = false;
+                    source_invalid = true;
+                }
             }
             if !source_invalid {
                 for target in &task.targets {
@@ -629,6 +634,7 @@ impl MasterServiceImpl {
         // C++ master_service.cpp:2238-2243 MoveEnd 时检查 source/target 的 handle 有效性
         // 若 source handle 已失效，撤销 target 并返回错误
         let mut source_invalid = false;
+        let mut source_present = false;
         let remove_object;
         if let Some(mut object) = self.state.objects.get_mut(&key) {
             // C++ master_service.cpp:2238-2240 检查 source replica handle 是否仍然有效
@@ -637,9 +643,13 @@ impl MasterServiceImpl {
                 .iter()
                 .find(|r| same_replica(r, &task.source))
             {
-                if !source_replica.handle_valid {
+                source_present = true;
+                if !source_replica.handle_valid || source_replica.status != ReplicaStatus::Complete
+                {
                     source_invalid = true;
                 }
+            } else {
+                source_invalid = true;
             }
             if !source_invalid {
                 for target in &task.targets {
@@ -653,19 +663,60 @@ impl MasterServiceImpl {
                         }
                     }
                 }
-            }
-            object.replicas.retain(|replica| {
-                let matched = same_replica(replica, &task.source);
-                if matched {
-                    removed_source.push(replica.clone());
+                let mut idx = 0;
+                while idx < object.replicas.len() {
+                    if same_replica(&object.replicas[idx], &task.source) {
+                        object.replicas[idx].dec_refcnt();
+                        removed_source.push(object.replicas.remove(idx));
+                    } else {
+                        idx += 1;
+                    }
                 }
-                !matched
-            });
+            }
             remove_object = object.replicas.is_empty();
         } else {
             return Err(Status::not_found("key not found"));
         }
 
+        if source_invalid {
+            // C++ master_service.cpp:2240-2243 source handle 失效时撤销 target replicas
+            let mut removed_targets = Vec::new();
+            if let Some(mut object) = self.state.objects.get_mut(&key) {
+                object.replicas.retain(|replica| {
+                    let matched = task
+                        .targets
+                        .iter()
+                        .any(|target| same_replica(replica, target));
+                    if matched {
+                        removed_targets.push(replica.clone());
+                    }
+                    !matched
+                });
+            }
+            release_object_replicas(&self.state, &key, &removed_targets);
+            // Release source replica refcnt
+            if source_present {
+                if let Some(mut object) = self.state.objects.get_mut(&key) {
+                    if let Some(src) = object
+                        .replicas
+                        .iter_mut()
+                        .find(|r| same_replica(r, &task.source))
+                    {
+                        src.dec_refcnt();
+                    }
+                }
+            }
+            self.state.replication_tasks.remove(&key);
+            return Err(Status::failed_precondition(
+                "source replica handle became invalid during move",
+            ));
+        }
+
+        if remove_object {
+            if let Some((_, object)) = self.state.objects.remove(&key) {
+                account_removed_object_quota(&self.state, &object);
+            }
+        }
         // C++ master_service.cpp:2238-2243 使用 discarded_replicas_ 延迟释放源 replica
         // 防止 RDMA in-flight 冲突，避免源 replica 的缓冲区在 transfer 仍在进行时被重用
         // C++ puts the source replica into discarded_replicas_ with a timeout
@@ -690,54 +741,6 @@ impl MasterServiceImpl {
                 source_replicas.len(),
             );
         });
-
-        if source_invalid {
-            // C++ master_service.cpp:2240-2243 source handle 失效时撤销 target replicas
-            let mut removed_targets = Vec::new();
-            if let Some(mut object) = self.state.objects.get_mut(&key) {
-                object.replicas.retain(|replica| {
-                    let matched = task
-                        .targets
-                        .iter()
-                        .any(|target| same_replica(replica, target));
-                    if matched {
-                        removed_targets.push(replica.clone());
-                    }
-                    !matched
-                });
-            }
-            release_object_replicas(&self.state, &key, &removed_targets);
-            // Release source replica refcnt
-            if let Some(mut object) = self.state.objects.get_mut(&key) {
-                if let Some(src) = object
-                    .replicas
-                    .iter_mut()
-                    .find(|r| same_replica(r, &task.source))
-                {
-                    src.dec_refcnt();
-                }
-            }
-            self.state.replication_tasks.remove(&key);
-            return Err(Status::failed_precondition(
-                "source replica handle became invalid during move",
-            ));
-        }
-
-        if remove_object {
-            if let Some((_, object)) = self.state.objects.remove(&key) {
-                account_removed_object_quota(&self.state, &object);
-            }
-        }
-        // Release source replica refcnt
-        if let Some(mut object) = self.state.objects.get_mut(&key) {
-            if let Some(src) = object
-                .replicas
-                .iter_mut()
-                .find(|r| same_replica(r, &task.source))
-            {
-                src.dec_refcnt();
-            }
-        }
         self.state.replication_tasks.remove(&key);
         Ok(Response::new(proto::MoveEndResponse {}))
     }

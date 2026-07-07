@@ -645,6 +645,29 @@ impl MasterServiceImpl {
     }
 
     #[doc(hidden)]
+    pub fn set_replica_handle_valid_for_test(
+        &self,
+        key: &str,
+        segment_name: &str,
+        tenant_id: &str,
+        handle_valid: bool,
+    ) -> bool {
+        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
+            return false;
+        };
+        let Some(replica) = object
+            .replicas
+            .iter_mut()
+            .find(|replica| replica.segment_name == segment_name)
+        else {
+            return false;
+        };
+        replica.handle_valid = handle_valid;
+        true
+    }
+
+    #[doc(hidden)]
     pub fn drain_task_for_test(&self, job_id: Uuid) -> Option<TaskEntry> {
         let job = self.state.drain_jobs.get(&job_id)?;
         let task_id = *job.active_tasks.keys().next()?;
