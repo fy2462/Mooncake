@@ -5,7 +5,10 @@ use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_CLUSTER_ID: &str = "mooncake_cluster";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantQuotaPolicySnapshot {
@@ -16,13 +19,14 @@ pub struct TenantQuotaPolicySnapshot {
 pub fn load_tenant_quota_policy(
     connector_type: &str,
     connector_uri: &str,
+    cluster_id: &str,
 ) -> Result<TenantQuotaPolicySnapshot, String> {
     if connector_uri.trim().is_empty() {
         return Ok(TenantQuotaPolicySnapshot::default());
     }
     match connector_type {
         "file" => load_file_policy(connector_uri),
-        "etcd" => Err("Rust master tenant quota etcd connector is not implemented yet".to_string()),
+        "etcd" => load_etcd_policy(connector_uri, cluster_id),
         other => Err(format!("unsupported tenant quota connector type: {other}")),
     }
 }
@@ -30,6 +34,7 @@ pub fn load_tenant_quota_policy(
 pub fn save_tenant_quota_policy(
     connector_type: &str,
     connector_uri: &str,
+    cluster_id: &str,
     snapshot: &TenantQuotaPolicySnapshot,
 ) -> Result<(), String> {
     if connector_uri.trim().is_empty() {
@@ -37,7 +42,7 @@ pub fn save_tenant_quota_policy(
     }
     match connector_type {
         "file" => save_file_policy(connector_uri, snapshot),
-        "etcd" => Err("Rust master tenant quota etcd connector is not implemented yet".to_string()),
+        "etcd" => save_etcd_policy(connector_uri, cluster_id, snapshot),
         other => Err(format!("unsupported tenant quota connector type: {other}")),
     }
 }
@@ -62,6 +67,115 @@ fn save_file_policy(path: &str, snapshot: &TenantQuotaPolicySnapshot) -> Result<
     }
     let yaml = format_tenant_quota_policy_yaml(snapshot);
     write_atomic_file(path, yaml.as_bytes())
+}
+
+fn load_etcd_policy(
+    endpoints: &str,
+    cluster_id: &str,
+) -> Result<TenantQuotaPolicySnapshot, String> {
+    let key = build_tenant_quota_etcd_key(cluster_id)?;
+    let endpoints = parse_etcd_endpoints(endpoints)?;
+    let content = run_etcd_blocking(move || async move {
+        let mut client = etcd_client::Client::connect(endpoints, None)
+            .await
+            .map_err(|e| format!("failed to connect tenant quota etcd store: {e}"))?;
+        let response = client.get(key.as_bytes(), None).await.map_err(|e| {
+            format!("failed to load tenant quota policy from etcd key '{key}': {e}")
+        })?;
+        Ok(response
+            .kvs()
+            .first()
+            .map(|kv| String::from_utf8_lossy(kv.value()).into_owned()))
+    })?;
+    match content {
+        Some(content) => parse_tenant_quota_policy_yaml(&content),
+        None => Ok(TenantQuotaPolicySnapshot::default()),
+    }
+}
+
+fn save_etcd_policy(
+    endpoints: &str,
+    cluster_id: &str,
+    snapshot: &TenantQuotaPolicySnapshot,
+) -> Result<(), String> {
+    let key = build_tenant_quota_etcd_key(cluster_id)?;
+    let endpoints = parse_etcd_endpoints(endpoints)?;
+    let content = format_tenant_quota_policy_yaml(snapshot);
+    run_etcd_blocking(move || async move {
+        let mut client = etcd_client::Client::connect(endpoints, None)
+            .await
+            .map_err(|e| format!("failed to connect tenant quota etcd store: {e}"))?;
+        client
+            .put(key.as_bytes(), content.as_bytes(), None)
+            .await
+            .map_err(|e| format!("failed to save tenant quota policy to etcd key '{key}': {e}"))?;
+        Ok(())
+    })
+}
+
+fn run_etcd_blocking<F, Fut, T>(operation: F) -> Result<T, String>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, String>> + Send + 'static,
+    T: Send + 'static,
+{
+    thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("failed to create tenant quota etcd runtime: {e}"))?
+            .block_on(operation())
+    })
+    .join()
+    .map_err(|_| "tenant quota etcd worker panicked".to_string())?
+}
+
+fn parse_etcd_endpoints(endpoints: &str) -> Result<Vec<String>, String> {
+    let endpoints = endpoints
+        .split(';')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if endpoints.is_empty() {
+        return Err("tenant quota etcd connector requires a non-empty uri".to_string());
+    }
+    Ok(endpoints)
+}
+
+fn build_tenant_quota_etcd_key(cluster_id: &str) -> Result<String, String> {
+    Ok(format!(
+        "mooncake-store/{}/tenant_quota_policy",
+        normalize_cluster_id_for_etcd_key(cluster_id)?
+    ))
+}
+
+fn normalize_cluster_id_for_etcd_key(cluster_id: &str) -> Result<String, String> {
+    let mut normalized = if cluster_id.is_empty() {
+        DEFAULT_CLUSTER_ID.to_string()
+    } else {
+        cluster_id.to_string()
+    };
+    while normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if normalized.is_empty() {
+        normalized = DEFAULT_CLUSTER_ID.to_string();
+    }
+    if !is_valid_cluster_id_component(&normalized) {
+        return Err(format!(
+            "invalid tenant quota etcd cluster_id '{cluster_id}'"
+        ));
+    }
+    Ok(normalized)
+}
+
+fn is_valid_cluster_id_component(cluster_id: &str) -> bool {
+    !cluster_id.is_empty()
+        && cluster_id.len() <= 128
+        && cluster_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 fn write_atomic_file(path: &str, contents: &[u8]) -> Result<(), String> {
@@ -385,5 +499,38 @@ tenant_quotas:
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn builds_cpp_compatible_tenant_quota_etcd_key() {
+        assert_eq!(
+            build_tenant_quota_etcd_key("cluster-a").unwrap(),
+            "mooncake-store/cluster-a/tenant_quota_policy"
+        );
+        assert_eq!(
+            build_tenant_quota_etcd_key("cluster-a///").unwrap(),
+            "mooncake-store/cluster-a/tenant_quota_policy"
+        );
+        assert_eq!(
+            build_tenant_quota_etcd_key("").unwrap(),
+            "mooncake-store/mooncake_cluster/tenant_quota_policy"
+        );
+        assert!(build_tenant_quota_etcd_key("../bad").is_err());
+        assert!(build_tenant_quota_etcd_key("bad/cluster").is_err());
+    }
+
+    #[test]
+    fn parses_tenant_quota_etcd_endpoints() {
+        assert_eq!(
+            parse_etcd_endpoints("127.0.0.1:2379; http://etcd:2379 ;").unwrap(),
+            vec!["127.0.0.1:2379", "http://etcd:2379"]
+        );
+        assert!(parse_etcd_endpoints(" ; ").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_etcd_cluster_id_before_connecting() {
+        let err = load_tenant_quota_policy("etcd", "127.0.0.1:2379", "bad/cluster").unwrap_err();
+        assert!(err.contains("invalid tenant quota etcd cluster_id"));
     }
 }

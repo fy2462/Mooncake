@@ -277,6 +277,7 @@ impl MasterServiceImpl {
         save_tenant_quota_policy(
             &self.state.runtime_config.tenant_quota_connector_type,
             &self.state.runtime_config.tenant_quota_connector_uri,
+            &self.state.runtime_config.cluster_id,
             &snapshot,
         )
         .map_err(Status::internal)
@@ -323,6 +324,7 @@ impl MasterServiceImpl {
             let policy_snapshot = load_tenant_quota_policy(
                 &runtime_config.tenant_quota_connector_type,
                 &runtime_config.tenant_quota_connector_uri,
+                &runtime_config.cluster_id,
             )
             .unwrap_or_else(|e| panic!("failed to load tenant quota policy: {e}"));
             for (tenant_id, quota) in policy_snapshot.tenant_quotas {
