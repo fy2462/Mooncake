@@ -17,13 +17,14 @@ impl MooncakeClient {
         config: Option<ReplicateConfig>,
     ) -> StoreResult<()> {
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
 
         // Phase 1: put_start / 阶段 1：put_start
         let request = proto::PutStartRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
             slice_length: size as u64,
-            tenant_id: String::new(),
+            tenant_id: tenant_id.clone(),
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
                 nof_replica_num: cfg.nof_replica_num,
@@ -74,7 +75,7 @@ impl MooncakeClient {
 
         // Phase 3: put_end / put_revoke according to C++ finalize decision.
         let decision = determine_finalize_decision(&cfg, &transfer_summary);
-        self.finalize_put_for_key(key, decision, "").await?;
+        self.finalize_put_for_key(key, decision, &tenant_id).await?;
         if !decision.success {
             return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
         }
@@ -113,6 +114,7 @@ impl MooncakeClient {
         config: Option<ReplicateConfig>,
     ) -> StoreResult<()> {
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
         let total_len: usize = values.iter().map(|v| v.len()).sum();
         if total_len > self.local_buffer.len() {
             return Err(StoreError::InvalidParams(format!(
@@ -127,7 +129,7 @@ impl MooncakeClient {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
             slice_length: total_len as u64,
-            tenant_id: String::new(),
+            tenant_id: tenant_id.clone(),
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
                 nof_replica_num: cfg.nof_replica_num,
@@ -261,7 +263,7 @@ impl MooncakeClient {
 
         // Phase 3: put_end / put_revoke according to C++ finalize decision.
         let decision = determine_finalize_decision(&cfg, &transfer_summary);
-        self.finalize_put_for_key(key, decision, "").await?;
+        self.finalize_put_for_key(key, decision, &tenant_id).await?;
         if !decision.success {
             return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
         }

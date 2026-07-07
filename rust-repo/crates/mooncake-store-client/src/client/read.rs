@@ -12,7 +12,7 @@ use std::ffi::c_void;
 
 use super::MooncakeClient;
 
-fn scoped_cache_key<'a>(tenant_id: &str, key: &'a str) -> Cow<'a, str> {
+pub(super) fn scoped_cache_key<'a>(tenant_id: &str, key: &'a str) -> Cow<'a, str> {
     if tenant_id.is_empty() {
         Cow::Borrowed(key)
     } else {
@@ -68,7 +68,8 @@ impl MooncakeClient {
     /// - `Err(KeyNotFound)` — key not in store and no remote source available.
     ///   key 不在存储中且没有可用的远程数据源。
     pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
-        self.get_for_tenant(key, "").await
+        let tenant_id = self.tenant_id.clone();
+        self.get_for_tenant(key, &tenant_id).await
     }
 
     pub(crate) async fn get_for_tenant(
@@ -166,6 +167,7 @@ impl MooncakeClient {
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<usize> {
+        let tenant_id = self.tenant_id.clone();
         let replicas = self.fetch_replicas(key).await?;
         let replica = self
             .select_best_replica(&replicas)
@@ -180,7 +182,9 @@ impl MooncakeClient {
         if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
             && !self.local_endpoints.read().contains(&replica.segment_name)
         {
-            let data = self.read_from_replica(key, replica).await?;
+            let data = self
+                .read_from_replica_for_tenant(key, &tenant_id, replica)
+                .await?;
             unsafe {
                 std::ptr::copy_nonoverlapping(data.as_ptr(), buffer as *mut u8, data.len());
             }

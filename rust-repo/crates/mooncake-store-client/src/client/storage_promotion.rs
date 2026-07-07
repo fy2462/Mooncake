@@ -69,7 +69,8 @@ impl MooncakeClient {
         size: u64,
         preferred_segments: Vec<String>,
     ) -> StoreResult<ReplicaDescriptor> {
-        self.promotion_alloc_start_for_tenant(key, "", size, preferred_segments)
+        let tenant_id = self.tenant_id.clone();
+        self.promotion_alloc_start_for_tenant(key, &tenant_id, size, preferred_segments)
             .await
     }
 
@@ -108,7 +109,9 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::NotifyPromotionSuccess(key)`
     pub async fn notify_promotion_success(&mut self, key: &str) -> StoreResult<()> {
-        self.notify_promotion_success_for_tenant(key, "").await
+        let tenant_id = self.tenant_id.clone();
+        self.notify_promotion_success_for_tenant(key, &tenant_id)
+            .await
     }
 
     pub async fn notify_promotion_success_for_tenant(
@@ -134,7 +137,9 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::NotifyPromotionFailure(key)`
     pub async fn notify_promotion_failure(&mut self, key: &str) -> StoreResult<()> {
-        self.notify_promotion_failure_for_tenant(key, "").await
+        let tenant_id = self.tenant_id.clone();
+        self.notify_promotion_failure_for_tenant(key, &tenant_id)
+            .await
     }
 
     pub async fn notify_promotion_failure_for_tenant(

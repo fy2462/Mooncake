@@ -26,7 +26,8 @@ impl MooncakeClient {
         &mut self,
         key: &str,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
-        self.fetch_replicas_for_tenant(key, "").await
+        let tenant_id = self.tenant_id.clone();
+        self.fetch_replicas_for_tenant(key, &tenant_id).await
     }
 
     pub(crate) async fn fetch_replicas_for_tenant(
@@ -82,7 +83,7 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<super::CachedQueryResultResponse>> {
         let request = proto::BatchGetReplicaListRequest {
             keys: keys.to_vec(),
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master

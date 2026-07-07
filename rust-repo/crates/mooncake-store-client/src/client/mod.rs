@@ -231,4 +231,8 @@ pub struct MooncakeClient {
     /// This intentionally stores plain addresses rather than depending on the
     /// master crate's HA coordinator types, keeping the client crate standalone.
     pub(crate) master_candidates: RwLock<Vec<String>>,
+
+    /// Default tenant used by convenience APIs that do not take an explicit
+    /// tenant parameter. Empty string preserves the legacy/default namespace.
+    pub(crate) tenant_id: String,
 }

@@ -269,14 +269,16 @@ impl MooncakeClient {
     /// - `source` — source segment name. / 源 segment 名称。
     /// - `targets` — target segment names. / 目标 segment 名称列表。
     pub async fn copy(&mut self, key: &str, source: &str, targets: &[String]) -> StoreResult<()> {
+        let tenant_id = self.tenant_id.clone();
         // Phase 1: CopyStart — allocate targets + pin source.
         // 阶段 1：CopyStart —— 分配目标 + 固定源。
-        let (source_replica, target_replicas) = self.copy_start(key, source, targets, "").await?;
+        let (source_replica, target_replicas) =
+            self.copy_start(key, source, targets, &tenant_id).await?;
 
         if target_replicas.is_empty() {
             // Targets already exist — just finalize.
             // 目标已存在 —— 直接完成。
-            return self.copy_end(key, "").await;
+            return self.copy_end(key, &tenant_id).await;
         }
 
         // Phase 2: read source data, then write to each target.
@@ -287,11 +289,11 @@ impl MooncakeClient {
             .await
         {
             Ok(()) => {
-                self.copy_end(&key_owned, "").await?;
+                self.copy_end(&key_owned, &tenant_id).await?;
                 Ok(())
             }
             Err(e) => {
-                self.copy_revoke(&key_owned, "").await.ok();
+                self.copy_revoke(&key_owned, &tenant_id).await.ok();
                 Err(e)
             }
         }
@@ -318,14 +320,15 @@ impl MooncakeClient {
     /// - `source` — source segment name. / 源 segment 名称。
     /// - `target` — target segment name. / 目标 segment 名称。
     pub async fn move_object(&mut self, key: &str, source: &str, target: &str) -> StoreResult<()> {
+        let tenant_id = self.tenant_id.clone();
         // Phase 1: MoveStart — allocate/reuse target + pin source.
         // 阶段 1：MoveStart —— 分配/复用目标 + 固定源。
-        let (source_replica, target_opt) = self.move_start(key, source, target, "").await?;
+        let (source_replica, target_opt) = self.move_start(key, source, target, &tenant_id).await?;
 
         let Some(target_replica) = target_opt else {
             // Target already exists — just finalize.
             // 目标已存在 —— 直接完成。
-            return self.move_end(key, "").await;
+            return self.move_end(key, &tenant_id).await;
         };
 
         // Phase 2: read source data, then write to target.
@@ -336,11 +339,11 @@ impl MooncakeClient {
             .await
         {
             Ok(()) => {
-                self.move_end(&key_owned, "").await?;
+                self.move_end(&key_owned, &tenant_id).await?;
                 Ok(())
             }
             Err(e) => {
-                self.move_revoke(&key_owned, "").await.ok();
+                self.move_revoke(&key_owned, &tenant_id).await.ok();
                 Err(e)
             }
         }

@@ -3,6 +3,7 @@ use super::finalize::{
     determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary, REPLICA_TYPE_ALL,
     REPLICA_TYPE_MEMORY, REPLICA_TYPE_NOF_SSD,
 };
+use super::read::scoped_cache_key;
 use super::{CachedQueryResultResponse, MooncakeClient};
 use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use std::time::Duration;
@@ -142,4 +143,13 @@ fn cached_query_result_tracks_lease_expiry() {
     assert!(!failure.success);
     assert_eq!(failure.error_status, -1);
     assert_eq!(failure.error_message, "missing");
+}
+
+#[test]
+fn tenant_scoped_cache_key_preserves_legacy_empty_tenant() {
+    assert_eq!(scoped_cache_key("", "shared").as_ref(), "shared");
+    assert_eq!(
+        scoped_cache_key("tenant-a", "shared").as_ref(),
+        "tenant-a\0shared"
+    );
 }

@@ -1,4 +1,4 @@
-use super::MooncakeClient;
+use super::{read::scoped_cache_key, MooncakeClient};
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
 use std::ffi::c_void;
@@ -27,12 +27,14 @@ impl MooncakeClient {
     ///
     pub async fn batch_get(&mut self, keys: &[String]) -> StoreResult<Vec<Option<Vec<u8>>>> {
         tracing::info!(target: "te_debug", key_count = keys.len(), "batch_get: ENTER");
+        let tenant_id = self.tenant_id.clone();
         let mut results = vec![None; keys.len()];
         let mut pending = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let cache_key = scoped_cache_key(&tenant_id, key);
             if let Some(ref cache) = self.hot_cache {
-                if let Some(data) = cache.get(key) {
+                if let Some(data) = cache.get(cache_key.as_ref()) {
                     tracing::info!(target: "te_debug", index = i, %key, data_len = data.len(), "batch_get: HIT hot cache");
                     results[i] = Some(data);
                     continue;
@@ -71,7 +73,8 @@ impl MooncakeClient {
                 Ok(data) => {
                     tracing::info!(target: "te_debug", index = i, %key, data_len = data.len(), "batch_get: key OK");
                     if let Some(ref cache) = self.hot_cache {
-                        cache.put(&key, &data);
+                        let cache_key = scoped_cache_key(&tenant_id, &key);
+                        cache.put(cache_key.as_ref(), &data);
                     }
                     results[i] = Some(data);
                 }
@@ -81,7 +84,8 @@ impl MooncakeClient {
                         if handler.is_enabled() {
                             if let Ok(data) = handler.handle_miss(&key).await {
                                 if let Some(ref cache) = self.hot_cache {
-                                    cache.put(&key, &data);
+                                    let cache_key = scoped_cache_key(&tenant_id, &key);
+                                    cache.put(cache_key.as_ref(), &data);
                                 }
                                 results[i] = Some(data);
                             }

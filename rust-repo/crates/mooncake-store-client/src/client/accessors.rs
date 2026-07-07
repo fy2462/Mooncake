@@ -48,6 +48,11 @@ impl MooncakeClient {
         self.client_id
     }
 
+    /// Return the default tenant used by convenience APIs.
+    pub fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+
     /// Tear down the client: set the shutdown flag, unregister the local buffer
     /// and all user-registered buffers from the TransferEngine.
     ///

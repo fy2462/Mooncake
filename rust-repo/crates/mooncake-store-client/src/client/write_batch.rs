@@ -24,10 +24,11 @@ impl MooncakeClient {
         }
 
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
         // Phase 1: BatchPutStart — allocate replicas for all keys in one RPC.
         let slice_lengths: Vec<u64> = values.iter().map(|v| v.len() as u64).collect();
         let start_results = match self
-            .batch_put_start_results(keys, &slice_lengths, &cfg, "")
+            .batch_put_start_results(keys, &slice_lengths, &cfg, &tenant_id)
             .await
         {
             Ok(r) => r,
@@ -79,7 +80,7 @@ impl MooncakeClient {
         }
 
         // Phase 3: BatchPutEnd / BatchPutRevoke.
-        self.finalize_batch_put_groups(keys, &decisions, &mut statuses, "")
+        self.finalize_batch_put_groups(keys, &decisions, &mut statuses, &tenant_id)
             .await;
 
         Ok(statuses)
@@ -203,13 +204,14 @@ impl MooncakeClient {
         }
 
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
         let slice_lengths: Vec<u64> = all_sizes
             .iter()
             .map(|sizes| sizes.iter().map(|&size| size as u64).sum())
             .collect();
 
         let start_results = match self
-            .batch_put_start_results(keys, &slice_lengths, &cfg, "")
+            .batch_put_start_results(keys, &slice_lengths, &cfg, &tenant_id)
             .await
         {
             Ok(results) => results,
@@ -260,7 +262,7 @@ impl MooncakeClient {
             decisions.push((idx, decision));
         }
 
-        self.finalize_batch_put_groups(keys, &decisions, &mut statuses, "")
+        self.finalize_batch_put_groups(keys, &decisions, &mut statuses, &tenant_id)
             .await;
 
         Ok(statuses)

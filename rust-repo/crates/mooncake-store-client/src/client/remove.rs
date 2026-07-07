@@ -38,7 +38,7 @@ impl MooncakeClient {
         let request = proto::RemoveRequest {
             key: key.to_string(),
             force,
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         self.master
             .remove(request)
@@ -55,7 +55,7 @@ impl MooncakeClient {
     pub async fn exists(&mut self, key: &str) -> StoreResult<bool> {
         let request = proto::ExistKeyRequest {
             key: key.to_string(),
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master
@@ -84,7 +84,7 @@ impl MooncakeClient {
         let request = proto::BatchRemoveRequest {
             keys: keys.to_vec(),
             force,
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master
@@ -106,7 +106,7 @@ impl MooncakeClient {
     pub async fn batch_is_exist(&mut self, keys: &[String]) -> StoreResult<Vec<bool>> {
         let request = proto::BatchExistKeyRequest {
             keys: keys.to_vec(),
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master
@@ -138,7 +138,7 @@ impl MooncakeClient {
         let request = proto::RemoveByRegexRequest {
             pattern: pattern.to_string(),
             force,
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master
@@ -161,7 +161,7 @@ impl MooncakeClient {
     pub async fn remove_all(&mut self, force: bool) -> StoreResult<i64> {
         let request = proto::RemoveAllRequest {
             force,
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master

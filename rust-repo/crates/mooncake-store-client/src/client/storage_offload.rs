@@ -93,7 +93,7 @@ impl MooncakeClient {
         let tasks = keys
             .into_iter()
             .map(|key| OffloadTaskItem {
-                tenant_id: String::new(),
+                tenant_id: self.tenant_id.clone(),
                 key,
                 size: 0,
             })

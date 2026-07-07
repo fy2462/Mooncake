@@ -91,7 +91,7 @@ impl MooncakeClient {
         let request = proto::PingRequest {
             client_id: Some(self.client_id_proto()),
             mounted_segments: vec![],
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = match self.master.ping(request).await {
             Ok(response) => response,
@@ -102,7 +102,7 @@ impl MooncakeClient {
                     .ping(proto::PingRequest {
                         client_id: Some(self.client_id_proto()),
                         mounted_segments: vec![],
-                        tenant_id: String::new(),
+                        tenant_id: self.tenant_id.clone(),
                     })
                     .await
                     .map_err(|second_error| {

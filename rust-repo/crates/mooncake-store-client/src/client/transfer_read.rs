@@ -25,7 +25,8 @@ impl MooncakeClient {
         key: &str,
         replica: &ReplicaDescriptor,
     ) -> StoreResult<Vec<u8>> {
-        self.read_from_replica_for_tenant(key, "", replica).await
+        self.read_from_replica_for_tenant(key, &self.tenant_id, replica)
+            .await
     }
 
     pub(crate) async fn read_from_replica_for_tenant(

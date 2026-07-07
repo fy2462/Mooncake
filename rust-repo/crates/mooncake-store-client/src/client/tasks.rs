@@ -66,7 +66,7 @@ impl MooncakeClient {
         let request = proto::CreateCopyTaskRequest {
             key: key.to_string(),
             targets: targets.to_vec(),
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master
@@ -99,7 +99,7 @@ impl MooncakeClient {
             key: key.to_string(),
             source: source.to_string(),
             target: target.to_string(),
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
         let response = self
             .master

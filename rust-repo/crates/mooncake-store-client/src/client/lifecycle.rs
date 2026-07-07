@@ -66,6 +66,29 @@ impl MooncakeClient {
         global_segment_size: u64,
         local_buffer_size: u64,
     ) -> StoreResult<Self> {
+        Self::create_for_tenant(
+            master_addr,
+            metadata_conn_string,
+            local_host,
+            protocol,
+            device,
+            global_segment_size,
+            local_buffer_size,
+            "",
+        )
+        .await
+    }
+
+    pub async fn create_for_tenant(
+        master_addr: &str,
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+        tenant_id: &str,
+    ) -> StoreResult<Self> {
         Self::create_with_master_candidates(
             &[master_addr.to_string()],
             metadata_conn_string,
@@ -74,6 +97,33 @@ impl MooncakeClient {
             device,
             global_segment_size,
             local_buffer_size,
+        )
+        .await
+        .map(|mut client| {
+            client.tenant_id = tenant_id.to_string();
+            client
+        })
+    }
+
+    pub async fn create_with_master_candidates_for_tenant(
+        master_addrs: &[String],
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+        tenant_id: &str,
+    ) -> StoreResult<Self> {
+        Self::create_with_master_candidates_inner(
+            master_addrs,
+            metadata_conn_string,
+            local_host,
+            protocol,
+            device,
+            global_segment_size,
+            local_buffer_size,
+            tenant_id,
         )
         .await
     }
@@ -92,6 +142,29 @@ impl MooncakeClient {
         device: &str,
         global_segment_size: u64,
         local_buffer_size: u64,
+    ) -> StoreResult<Self> {
+        Self::create_with_master_candidates_inner(
+            master_addrs,
+            metadata_conn_string,
+            local_host,
+            protocol,
+            device,
+            global_segment_size,
+            local_buffer_size,
+            "",
+        )
+        .await
+    }
+
+    async fn create_with_master_candidates_inner(
+        master_addrs: &[String],
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+        tenant_id: &str,
     ) -> StoreResult<Self> {
         if master_addrs.is_empty() {
             return Err(StoreError::InvalidParams(
@@ -113,6 +186,7 @@ impl MooncakeClient {
                         device,
                         global_segment_size,
                         local_buffer_size,
+                        tenant_id,
                     )
                     .await;
                 }
@@ -137,6 +211,7 @@ impl MooncakeClient {
         device: &str,
         global_segment_size: u64,
         local_buffer_size: u64,
+        tenant_id: &str,
     ) -> StoreResult<Self> {
         // Step 2: Parse IP and port from local_host. / 从 local_host 解析 IP 和端口。
         let parts: Vec<&str> = local_host.split(':').collect();
@@ -265,6 +340,7 @@ impl MooncakeClient {
             offload_rpc_addr: RwLock::new(String::new()),
             master_addr: RwLock::new(selected_master_addr.to_string()),
             master_candidates: RwLock::new(master_candidates.to_vec()),
+            tenant_id: tenant_id.to_string(),
         })
     }
 

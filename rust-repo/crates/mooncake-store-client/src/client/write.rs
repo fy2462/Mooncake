@@ -295,6 +295,7 @@ impl MooncakeClient {
             ));
         }
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
 
         // Phase 1: put_start — allocate replicas on master.
         // 阶段 1：put_start —— 在 master 上分配副本。
@@ -302,7 +303,7 @@ impl MooncakeClient {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
             slice_length: value.len() as u64,
-            tenant_id: String::new(),
+            tenant_id: tenant_id.clone(),
             config: Some(proto::ReplicateConfig {
                 replica_num: cfg.replica_num,
                 nof_replica_num: cfg.nof_replica_num,
@@ -371,7 +372,7 @@ impl MooncakeClient {
         // 阶段 3：按 C++ 策略提交或撤销副本。
         tracing::info!(target: "te_debug", %key, "put: calling put_end");
         let decision = determine_finalize_decision(&cfg, &transfer_summary);
-        self.finalize_put_for_key(key, decision, "").await?;
+        self.finalize_put_for_key(key, decision, &tenant_id).await?;
         if !decision.success {
             return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
         }

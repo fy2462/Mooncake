@@ -58,9 +58,10 @@ impl MooncakeClient {
         }
 
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
         let slice_lengths: Vec<u64> = sizes.iter().map(|&size| size as u64).collect();
         let start_results = match self
-            .batch_upsert_start_results(keys, &slice_lengths, &cfg, "")
+            .batch_upsert_start_results(keys, &slice_lengths, &cfg, &tenant_id)
             .await
         {
             Ok(results) => results,
@@ -109,8 +110,15 @@ impl MooncakeClient {
             decisions.push((idx, decision));
         }
 
-        self.finalize_batch_upsert_groups(keys, &cfg, &decisions, &mut statuses, &mut descriptors)
-            .await;
+        self.finalize_batch_upsert_groups(
+            keys,
+            &cfg,
+            &decisions,
+            &mut statuses,
+            &mut descriptors,
+            &tenant_id,
+        )
+        .await;
 
         Ok((statuses, descriptors))
     }
@@ -122,6 +130,7 @@ impl MooncakeClient {
         decisions: &[(usize, ReplicaFinalizeDecision)],
         statuses: &mut [i32],
         descriptors: &mut [Vec<ReplicaDescriptor>],
+        tenant_id: &str,
     ) {
         let mut end_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
         let mut revoke_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
@@ -149,7 +158,7 @@ impl MooncakeClient {
                     slice_length: 0,
                     config: cfg.clone(),
                     replica_type,
-                    tenant_id: "",
+                    tenant_id,
                 })
                 .collect();
             match self.batch_upsert_end(&entries).await {
@@ -179,7 +188,7 @@ impl MooncakeClient {
                     slice_length: 0,
                     config: cfg.clone(),
                     replica_type,
-                    tenant_id: "",
+                    tenant_id,
                 })
                 .collect();
             match self.batch_upsert_revoke(&entries).await {
@@ -235,6 +244,7 @@ impl MooncakeClient {
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
 
         // Phase 1: request master to upsert (allocates or updates replicas).
         // 阶段 1：请求 master 进行 upsert（分配或更新副本）。
@@ -254,7 +264,7 @@ impl MooncakeClient {
                 data_type: cfg.data_type as i32,
                 group_ids: cfg.group_ids.clone(),
             }),
-            tenant_id: String::new(),
+            tenant_id: tenant_id.clone(),
         };
 
         let response = self
@@ -275,7 +285,7 @@ impl MooncakeClient {
                     client_id: Some(self.client_id_proto()),
                     key: key.to_string(),
                     replica_type: 0,
-                    tenant_id: String::new(),
+                    tenant_id: tenant_id.clone(),
                 };
                 let _ = self.master.put_revoke(revoke_req).await;
                 return Err(e);
@@ -293,7 +303,7 @@ impl MooncakeClient {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 replica_type: 0, // MEMORY
-                tenant_id: String::new(),
+                tenant_id: tenant_id.clone(),
             }],
         };
         self.master
@@ -329,6 +339,7 @@ impl MooncakeClient {
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
         let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
 
         // Phase 1: upsert start. / 阶段 1：upsert 开始。
         let request = proto::UpsertRequest {
@@ -347,7 +358,7 @@ impl MooncakeClient {
                 data_type: cfg.data_type as i32,
                 group_ids: cfg.group_ids.clone(),
             }),
-            tenant_id: String::new(),
+            tenant_id: tenant_id.clone(),
         };
 
         let response = self
@@ -367,7 +378,7 @@ impl MooncakeClient {
                     client_id: Some(self.client_id_proto()),
                     key: key.to_string(),
                     replica_type: 0,
-                    tenant_id: String::new(),
+                    tenant_id: tenant_id.clone(),
                 };
                 let _ = self.master.put_revoke(revoke_req).await;
                 return Err(e);
@@ -380,7 +391,7 @@ impl MooncakeClient {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 replica_type: 0, // MEMORY
-                tenant_id: String::new(),
+                tenant_id: tenant_id.clone(),
             }],
         };
         self.master
