@@ -1,10 +1,13 @@
 use super::*;
 
 // ---------------------------------------------------------------------------
-// Standalone (non-HA) path — existing behaviour preserved
-// 单机模式（非 HA）路径 — 保留原有行为
+// Standalone (non-HA) path.
+// 单机模式（非 HA）路径。
 // ---------------------------------------------------------------------------
-pub(super) async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+pub(super) async fn run_standalone(
+    args: Args,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // --- Master gRPC service ---
     // 构建 Master gRPC 服务
     let snapshot_backend_type = args.snapshot_backend_type.as_deref().and_then(|s| {
@@ -55,15 +58,24 @@ pub(super) async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error:
     if args.enable_snapshot {
         let svc = service_arc.clone();
         let interval = args.snapshot_interval_seconds;
+        let mut snapshot_shutdown_rx = shutdown_rx.clone();
         let catalog_publisher =
             build_catalog_snapshot_publisher(&args, &resolve_cluster_id(&args))?;
         let retention_count = args.snapshot_retention_count as usize;
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
-                svc.save_snapshot();
-                if let Some(ref publisher) = catalog_publisher {
-                    publish_catalog_snapshot(&svc, publisher, 0, retention_count);
+                tokio::select! {
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
+                        svc.save_snapshot();
+                        if let Some(ref publisher) = catalog_publisher {
+                            publish_catalog_snapshot(&svc, publisher, 0, retention_count);
+                        }
+                    }
+                    changed = snapshot_shutdown_rx.changed() => {
+                        if changed.is_err() || *snapshot_shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -78,7 +90,16 @@ pub(super) async fn run_standalone(args: Args) -> Result<(), Box<dyn std::error:
                 service_arc,
             ),
         )
-        .serve(rpc_addr)
+        .serve_with_shutdown(rpc_addr, async move {
+            if *shutdown_rx.borrow() {
+                return;
+            }
+            while shutdown_rx.changed().await.is_ok() {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        })
         .await?;
 
     Ok(())

@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.enable_ha {
         main_ha::run_ha_loop(args, shutdown_signal()).await
     } else {
-        main_server::run_standalone(args).await
+        main_server::run_standalone(args, shutdown_signal()).await
     }
 }
 
