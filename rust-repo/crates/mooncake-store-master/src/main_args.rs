@@ -89,6 +89,14 @@ pub struct Args {
     #[arg(long)]
     pub offload_force_evict: bool,
 
+    /// Maximum pending offload objects per local disk segment.
+    #[arg(long, default_value_t = 50_000)]
+    pub offloading_queue_limit: usize,
+
+    /// Per-cycle offload cap as a fraction of offloading_queue_limit.
+    #[arg(long, default_value_t = 0.5)]
+    pub offload_cap_ratio: f64,
+
     /// Enable disk eviction feature for storage backend.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub enable_disk_eviction: bool,

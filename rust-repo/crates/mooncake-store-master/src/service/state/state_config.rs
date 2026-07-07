@@ -61,6 +61,10 @@ pub struct MasterRuntimeConfig {
     /// 淘汰时是否强制驱逐（即使有 soft_pin 也驱逐）。
     /// Whether to force eviction even for soft-pinned objects.
     pub offload_force_evict: bool,
+    /// Maximum pending offload objects per local disk segment.
+    pub offloading_queue_limit: usize,
+    /// Per-eviction-cycle offload cap as a fraction of offloading_queue_limit.
+    pub offload_cap_ratio: f64,
     /// 客户端心跳 TTL，超过此时间未 ping 的客户端视为下线。
     /// Client heartbeat TTL: clients not pinging within this period are considered offline.
     pub client_live_ttl: Duration,
@@ -142,6 +146,8 @@ impl Default for MasterRuntimeConfig {
             enable_nof: true,
             offload_on_evict: false,
             offload_force_evict: false,
+            offloading_queue_limit: 50_000,
+            offload_cap_ratio: 0.5,
             client_live_ttl: Duration::from_secs(10),
             client_monitor_interval: Duration::from_secs(1),
             storage_fs_dir: String::new(),

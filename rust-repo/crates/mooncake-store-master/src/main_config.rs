@@ -127,6 +127,12 @@ pub fn build_runtime_config(
     if args.allocation_strategy == "cxl" {
         return Err("allocation_strategy 'cxl' is not supported by the Rust master yet".into());
     }
+    if args.offloading_queue_limit == 0 {
+        return Err("offloading_queue_limit must be greater than 0".into());
+    }
+    if args.offload_cap_ratio < 0.0 || args.offload_cap_ratio > 1.0 {
+        return Err("offload_cap_ratio must be between 0.0 and 1.0".into());
+    }
     Ok(MasterRuntimeConfig {
         // ── 分配策略 / allocation strategy ──
         // 段选择：random（随机）或 free_ratio_first（空闲率优先）
@@ -155,6 +161,10 @@ pub fn build_runtime_config(
         offload_on_evict: args.offload_on_evict,
         // 强制驱逐（即使 offload 还没写完）
         offload_force_evict: args.offload_force_evict,
+        // 每个本地磁盘 segment 的 offload 队列上限
+        offloading_queue_limit: args.offloading_queue_limit,
+        // 单轮 eviction 最多入队多少比例的 offload 任务
+        offload_cap_ratio: args.offload_cap_ratio,
         // 透传给客户端：是否启用磁盘层淘汰
         enable_disk_eviction: args.enable_disk_eviction,
         // 透传给客户端：存储配额上限（字节）

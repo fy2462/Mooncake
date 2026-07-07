@@ -27,6 +27,8 @@ fn base_args() -> Args {
         eviction_ratio: 0.05,
         offload_on_evict: false,
         offload_force_evict: false,
+        offloading_queue_limit: 50_000,
+        offload_cap_ratio: 0.5,
         enable_disk_eviction: true,
         quota_bytes: 0,
         enable_multi_tenants: false,
@@ -218,6 +220,35 @@ fn test_build_runtime_config_applies_task_manager_limits() {
     assert_eq!(config.pending_task_timeout, Duration::from_secs(14));
     assert_eq!(config.processing_task_timeout, Duration::from_secs(15));
     assert_eq!(config.max_task_retry_attempts, 16);
+}
+
+#[test]
+fn test_build_runtime_config_applies_offload_tuning() {
+    let mut args = base_args();
+    args.offloading_queue_limit = 123;
+    args.offload_cap_ratio = 0.75;
+
+    let config = build_runtime_config(&args).unwrap();
+
+    assert_eq!(config.offloading_queue_limit, 123);
+    assert_eq!(config.offload_cap_ratio, 0.75);
+}
+
+#[test]
+fn test_build_runtime_config_rejects_invalid_offload_tuning() {
+    let mut args = base_args();
+    args.offloading_queue_limit = 0;
+    assert!(build_runtime_config(&args)
+        .unwrap_err()
+        .to_string()
+        .contains("offloading_queue_limit"));
+
+    let mut args = base_args();
+    args.offload_cap_ratio = 1.5;
+    assert!(build_runtime_config(&args)
+        .unwrap_err()
+        .to_string()
+        .contains("offload_cap_ratio"));
 }
 
 #[test]

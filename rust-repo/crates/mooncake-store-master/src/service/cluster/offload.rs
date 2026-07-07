@@ -126,6 +126,9 @@ impl MasterServiceImpl {
         for (task, metadata) in tasks.iter().zip(req.metadatas.iter()) {
             let key = make_tenant_scoped_key(&task.tenant_id, &task.key);
             clear_offloading_task(&self.state, &key);
+            if metadata.data_size < 0 {
+                continue;
+            }
             let replica = ReplicaDescriptor {
                 refcnt: 0,
                 handle_valid: true,

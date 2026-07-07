@@ -106,18 +106,23 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
         };
         source
     };
-    let offloading_enabled = state
+    let can_queue_offload = state
         .local_disk_segments
         .get(&client_id)
-        .is_some_and(|entry| entry.enable_offloading);
-    if !offloading_enabled {
+        .is_some_and(|entry| {
+            entry.enable_offloading
+                && entry.offloading_objects.len() < state.runtime_config.offloading_queue_limit
+        });
+    if !can_queue_offload {
         return;
     }
     if !inc_refcnt_for_replica(state, key, &source) {
         return;
     }
     let queued = if let Some(mut local_disk) = state.local_disk_segments.get_mut(&client_id) {
-        if local_disk.enable_offloading {
+        if local_disk.enable_offloading
+            && local_disk.offloading_objects.len() < state.runtime_config.offloading_queue_limit
+        {
             local_disk
                 .offloading_objects
                 .insert(key.to_string(), size as i64);
@@ -270,6 +275,14 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
     );
 
     let mut evicted = Vec::new();
+    let offload_cap = if state.runtime_config.offload_on_evict {
+        ((state.runtime_config.offloading_queue_limit as f64)
+            * state.runtime_config.offload_cap_ratio)
+            .floor() as usize
+    } else {
+        0
+    };
+    let mut offload_enqueued = 0usize;
     for key in selected {
         let (user_key, has_local_disk, owner_client, size) = match state.objects.get(&key) {
             Some(object) => {
@@ -300,9 +313,15 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         let should_offload =
             state.runtime_config.offload_on_evict && !has_local_disk && owner_client.is_some();
         if should_offload {
-            push_offloading_queue(state, owner_client.unwrap(), &key, size);
-            // 下沉任务未创建成功且非强制驱逐模式，则跳过本次驱逐
-            // If offload task was not created and force eviction is not enabled, skip
+            if offload_enqueued < offload_cap {
+                let had_task = state.offloading_tasks.contains_key(&key);
+                push_offloading_queue(state, owner_client.unwrap(), &key, size);
+                if !had_task && state.offloading_tasks.contains_key(&key) {
+                    offload_enqueued += 1;
+                }
+            }
+            // 下沉任务未创建成功且非强制驱逐模式，则跳过本次驱逐。
+            // If no offload task exists (queue/cap/client disabled) and force eviction is disabled, skip.
             if !state.offloading_tasks.contains_key(&key)
                 && !state.runtime_config.offload_force_evict
             {
