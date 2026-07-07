@@ -5,16 +5,19 @@ use crate::service::SegmentEntry;
 use crate::service::TaskEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use aws_sdk_s3::config::{
-    Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+    timeout::TimeoutConfig, Credentials, Region, RequestChecksumCalculation,
+    ResponseChecksumValidation,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SNAPSHOT_CATALOG_ROOT: &str = "mooncake_master_snapshot";
 const SNAPSHOT_LATEST_FILE: &str = "latest.txt";
 const SNAPSHOT_DESCRIPTOR_FILE: &str = "descriptor.txt";
 const SNAPSHOT_MANIFEST_FILE: &str = "manifest.txt";
+const DEFAULT_S3_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_S3_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 // ----------------------------------------------------------------------------
 // LoadedSnapshot — snapshot data loaded during standby recovery
@@ -223,10 +226,24 @@ impl S3SnapshotObjectStore {
         let endpoint = std::env::var("MOONCAKE_AWS_S3_ENDPOINT").ok();
         let access_key = std::env::var("MOONCAKE_AWS_ACCESS_KEY_ID").ok();
         let secret_key = std::env::var("MOONCAKE_AWS_SECRET_ACCESS_KEY").ok();
+        let use_https = std::env::var("MOONCAKE_AWS_USE_HTTPS")
+            .map(|value| parse_bool_like(&value))
+            .unwrap_or(true);
         let force_path_style = std::env::var("MOONCAKE_AWS_USE_VIRTUAL_ADDRESSING")
             .map(|value| !parse_bool_like(&value))
             .unwrap_or(endpoint.is_some());
         let prefix = std::env::var("MOONCAKE_AWS_S3_PREFIX").unwrap_or_default();
+        let endpoint_url = build_s3_endpoint_url(endpoint.as_deref(), &region, use_https);
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(env_timeout_ms(
+                "MOONCAKE_AWS_CONNECT_TIMEOUT_MS",
+                DEFAULT_S3_CONNECT_TIMEOUT_MS,
+            ))
+            .operation_attempt_timeout(env_timeout_ms(
+                "MOONCAKE_AWS_REQUEST_TIMEOUT_MS",
+                DEFAULT_S3_REQUEST_TIMEOUT_MS,
+            ))
+            .build();
         let request_checksum = parse_request_checksum_calculation(
             std::env::var("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION")
                 .ok()
@@ -240,7 +257,8 @@ impl S3SnapshotObjectStore {
 
         let client = run_async_sync(async move {
             let mut sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .region(Region::new(region));
+                .region(Region::new(region))
+                .timeout_config(timeout_config);
             if let (Some(key), Some(secret)) = (access_key, secret_key) {
                 sdk_config = sdk_config.credentials_provider(Credentials::new(
                     key,
@@ -250,8 +268,8 @@ impl S3SnapshotObjectStore {
                     "mooncake-master-snapshot",
                 ));
             }
-            if let Some(endpoint) = endpoint {
-                sdk_config = sdk_config.endpoint_url(endpoint);
+            if let Some(endpoint_url) = endpoint_url {
+                sdk_config = sdk_config.endpoint_url(endpoint_url);
             }
             let sdk_config = sdk_config.load().await;
             let mut builder = aws_sdk_s3::config::Builder::from(&sdk_config);
@@ -635,6 +653,32 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
+fn build_s3_endpoint_url(endpoint: Option<&str>, region: &str, use_https: bool) -> Option<String> {
+    let scheme = if use_https { "https" } else { "http" };
+    endpoint
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            let value = value.trim();
+            if value.contains("://") {
+                value.to_string()
+            } else {
+                format!("{scheme}://{value}")
+            }
+        })
+        .or_else(|| (!use_https).then(|| format!("http://s3.{region}.amazonaws.com")))
+}
+
+fn parse_timeout_ms(value: Option<&str>, default_ms: u64) -> Duration {
+    value
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(default_ms))
+}
+
+fn env_timeout_ms(name: &str, default_ms: u64) -> Duration {
+    parse_timeout_ms(std::env::var(name).ok().as_deref(), default_ms)
+}
+
 fn parse_request_checksum_calculation(value: Option<&str>) -> Option<RequestChecksumCalculation> {
     match value?.to_ascii_lowercase().as_str() {
         "when_supported" => Some(RequestChecksumCalculation::WhenSupported),
@@ -676,6 +720,39 @@ mod tests {
             Some(ResponseChecksumValidation::WhenRequired)
         );
         assert_eq!(parse_response_checksum_validation(Some("invalid")), None);
+    }
+
+    #[test]
+    fn test_s3_endpoint_url_honors_https_flag() {
+        assert_eq!(
+            build_s3_endpoint_url(Some("https://s3.example.com"), "us-east-1", false).as_deref(),
+            Some("https://s3.example.com")
+        );
+        assert_eq!(
+            build_s3_endpoint_url(Some("s3.example.com"), "us-east-1", false).as_deref(),
+            Some("http://s3.example.com")
+        );
+        assert_eq!(
+            build_s3_endpoint_url(None, "us-west-2", false).as_deref(),
+            Some("http://s3.us-west-2.amazonaws.com")
+        );
+        assert_eq!(build_s3_endpoint_url(None, "us-west-2", true), None);
+    }
+
+    #[test]
+    fn test_s3_timeout_ms_parsing_uses_cpp_defaults() {
+        assert_eq!(
+            parse_timeout_ms(Some("5000"), DEFAULT_S3_CONNECT_TIMEOUT_MS),
+            Duration::from_millis(5000)
+        );
+        assert_eq!(
+            parse_timeout_ms(Some("bogus"), DEFAULT_S3_REQUEST_TIMEOUT_MS),
+            Duration::from_millis(DEFAULT_S3_REQUEST_TIMEOUT_MS)
+        );
+        assert_eq!(
+            parse_timeout_ms(None, DEFAULT_S3_CONNECT_TIMEOUT_MS),
+            Duration::from_millis(DEFAULT_S3_CONNECT_TIMEOUT_MS)
+        );
     }
 }
 
