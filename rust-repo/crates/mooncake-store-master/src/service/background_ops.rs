@@ -1,23 +1,7 @@
-//! # Background Operations — 后台操作 / Periodic Background Operations
+//! Master background operations shared by workers and gRPC handlers.
 //!
-//! 本模块实现 Master 服务的后台周期性操作，被 `workers.rs` 中的工作线程和
-//! gRPC handler 调用。主要包括：
-//!
-//! This module implements the Master's background periodic operations,
-//! called by worker threads in `workers.rs` and by gRPC handlers. Key operations:
-//!
-//! | Operation | 触发源 / Trigger | 功能 / Function |
-//! |-----------|-----------------|----------------|
-//! | `push_offloading_queue` | PutEnd handler | 将对象推入下沉队列（内存→本地磁盘） |
-//! | `clear_offloading_task` | Remove/Cleanup | 清理下沉任务并从客户端队列中移除 |
-//! | `clear_promotion_task` | Remove/Cleanup | 清理提升任务并释放全局在途计数 |
-//! | `try_push_promotion_queue` | GetReplicaList handler | 热点检测后尝试入队提升（本地磁盘→内存） |
-//! | `release_staged_promotion_replica` | Promotion failure/reaper | 释放提升过程中分配的暂存副本 |
-//! | `reap_expired_background_tasks` | ProcessingReaper worker | 周期回收超时的 offload/promotion/remote_pull 任务 |
-//! | `run_eviction_cycle` | EvictionWorker / test | 执行一轮 LRU 淘汰循环 |
-//! | `run_automatic_eviction_once` | EvictionWorker | 基于内存水位计算目标后执行一轮淘汰 |
-//! | `automatic_eviction_target_count` | internal | 根据水位计算本轮需淘汰的对象数量 |
-//! | `process_drain_jobs` | DrainWorker | 周期性 drain 任务刷新、重试、完成检查 |
+//! This module owns offload/promotion queue bookkeeping and memory eviction.
+//! Reaper and drain processing live in sibling submodules.
 
 use crate::eviction::EvictionManager;
 use crate::proto;
@@ -229,6 +213,14 @@ fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescr
     removed
 }
 
+fn has_evictable_memory_replica(object: &ObjectEntry) -> bool {
+    object.replicas.iter().any(|replica| {
+        replica.replica_type == ReplicaType::Memory
+            && replica.status == ReplicaStatus::Complete
+            && !replica.is_busy()
+    })
+}
+
 /// 执行一轮驱逐循环，使用 LRU 策略选出 target_count 个候选对象。
 /// 对于有本地磁盘副本的对象，优先触发 offload（下沉到磁盘），
 /// 避免直接删除数据；仅在没有磁盘兜底时才彻底驱逐内存副本。
@@ -254,7 +246,9 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         .iter()
         .filter(|entry| {
             let key = entry.key();
-            !state.replication_tasks.contains_key(key) && !state.processing_keys.contains_key(key)
+            !state.replication_tasks.contains_key(key)
+                && !state.processing_keys.contains_key(key)
+                && has_evictable_memory_replica(entry.value())
         })
         .map(|entry| {
             (
@@ -373,8 +367,12 @@ fn automatic_eviction_target_count(state: &MasterState) -> usize {
         return 0; // 未超过水位线，无需驱逐 / Below watermark, no eviction needed
     }
 
-    let object_count = state.objects.len();
-    if object_count == 0 {
+    let evictable_object_count = state
+        .objects
+        .iter()
+        .filter(|entry| has_evictable_memory_replica(entry.value()))
+        .count();
+    if evictable_object_count == 0 {
         return 0;
     }
 
@@ -383,7 +381,7 @@ fn automatic_eviction_target_count(state: &MasterState) -> usize {
         used_ratio - state.runtime_config.eviction_high_watermark_ratio
             + state.runtime_config.eviction_ratio,
     );
-    let target = (object_count as f64 * evict_ratio_target).ceil() as usize;
+    let target = (evictable_object_count as f64 * evict_ratio_target).ceil() as usize;
     target.max(1)
 }
 
