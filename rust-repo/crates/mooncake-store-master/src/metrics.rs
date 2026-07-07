@@ -34,206 +34,30 @@ use lazy_static::lazy_static;
 use prometheus::{register_histogram, Encoder, Histogram, IntCounter, IntGauge, TextEncoder};
 use std::net::SocketAddr;
 
-// =============================================================================
-// Base operation counters — 基础操作计数器
-// =============================================================================
-// Count total requests and failures for each RPC method.
-// 统计每个 RPC 方法的总请求数和失败数。
+mod batch;
+mod cache;
+mod operations;
 
-lazy_static! {
-    pub static ref PUT_START_REQUESTS: IntCounter =
-        IntCounter::new("mooncake_store_put_start_total", "total put_start requests").unwrap();
-    pub static ref PUT_START_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_put_start_failures_total",
-        "total failed put_start requests"
-    )
-    .unwrap();
-    pub static ref PUT_END_REQUESTS: IntCounter =
-        IntCounter::new("mooncake_store_put_end_total", "total put_end requests").unwrap();
-    pub static ref PUT_END_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_put_end_failures_total",
-        "total failed put_end requests"
-    )
-    .unwrap();
-    pub static ref PUT_REVOKE_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_put_revoke_total",
-        "total put_revoke requests"
-    )
-    .unwrap();
-    pub static ref PUT_REVOKE_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_put_revoke_failures_total",
-        "total failed put_revoke requests"
-    )
-    .unwrap();
-    pub static ref GET_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_get_total",
-        "total get_replica_list requests"
-    )
-    .unwrap();
-    pub static ref GET_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_get_failures_total",
-        "total failed get_replica_list requests"
-    )
-    .unwrap();
-    pub static ref GET_BY_REGEX_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_get_by_regex_total",
-        "total query_by_regex requests"
-    )
-    .unwrap();
-    pub static ref GET_BY_REGEX_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_get_by_regex_failures_total",
-        "total failed query_by_regex requests"
-    )
-    .unwrap();
-    pub static ref EXIST_KEY_REQUESTS: IntCounter =
-        IntCounter::new("mooncake_store_exist_key_total", "total exist_key requests").unwrap();
-    pub static ref EXIST_KEY_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_exist_key_failures_total",
-        "total failed exist_key requests"
-    )
-    .unwrap();
-    pub static ref REMOVE_REQUESTS: IntCounter =
-        IntCounter::new("mooncake_store_remove_total", "total remove requests").unwrap();
-    pub static ref REMOVE_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_remove_failures_total",
-        "total failed remove requests"
-    )
-    .unwrap();
-    pub static ref REMOVE_BY_REGEX_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_remove_by_regex_total",
-        "total remove_by_regex requests"
-    )
-    .unwrap();
-    pub static ref REMOVE_BY_REGEX_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_remove_by_regex_failures_total",
-        "total failed remove_by_regex requests"
-    )
-    .unwrap();
-    pub static ref REMOVE_ALL_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_remove_all_total",
-        "total remove_all requests"
-    )
-    .unwrap();
-    pub static ref REMOVE_ALL_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_remove_all_failures_total",
-        "total failed remove_all requests"
-    )
-    .unwrap();
-    pub static ref PING_REQUESTS: IntCounter =
-        IntCounter::new("mooncake_store_ping_total", "total client pings").unwrap();
-    pub static ref PING_FAILURES: IntCounter =
-        IntCounter::new("mooncake_store_ping_failures_total", "total failed pings").unwrap();
-    pub static ref MOUNT_SEGMENT_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_mount_segment_total",
-        "total mount_segment requests"
-    )
-    .unwrap();
-    pub static ref MOUNT_SEGMENT_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_mount_segment_failures_total",
-        "total failed mount_segment requests"
-    )
-    .unwrap();
-    pub static ref UNMOUNT_SEGMENT_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_unmount_segment_total",
-        "total unmount_segment requests"
-    )
-    .unwrap();
-    pub static ref UNMOUNT_SEGMENT_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_unmount_segment_failures_total",
-        "total failed unmount_segment requests"
-    )
-    .unwrap();
-    pub static ref UPSERT_REQUESTS: IntCounter =
-        IntCounter::new("mooncake_store_upsert_total", "total upsert requests").unwrap();
-    pub static ref UPSERT_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_upsert_failures_total",
-        "total failed upsert requests"
-    )
-    .unwrap();
-    /// Generic error counter for all internal errors.
-    /// 通用错误计数器，统计所有内部错误。
-    pub static ref ERROR_COUNTER: IntCounter =
-        IntCounter::new("mooncake_store_errors_total", "total error count").unwrap();
-}
-
-// =============================================================================
-// Batch operation counters — 批量操作计数器
-// =============================================================================
-// Count batch requests and failures (counted per item).
-// 统计批量请求和失败数（按条目计数）。
-
-lazy_static! {
-    pub static ref BATCH_EXIST_KEY_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_exist_key_total",
-        "total batch exist_key requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_EXIST_KEY_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_exist_key_failures_total",
-        "total failed items in batch exist_key requests"
-    )
-    .unwrap();
-    pub static ref BATCH_QUERY_IP_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_query_ip_total",
-        "total batch query_ip requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_QUERY_IP_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_query_ip_failures_total",
-        "total failed items in batch query_ip requests"
-    )
-    .unwrap();
-    pub static ref BATCH_REPLICA_CLEAR_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_replica_clear_total",
-        "total batch replica_clear requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_REPLICA_CLEAR_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_replica_clear_failures_total",
-        "total failed items in batch replica_clear requests"
-    )
-    .unwrap();
-    pub static ref BATCH_PUT_END_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_put_end_total",
-        "total batch put_end requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_PUT_END_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_put_end_failures_total",
-        "total failed items in batch put_end requests"
-    )
-    .unwrap();
-    pub static ref BATCH_PUT_REVOKE_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_put_revoke_total",
-        "total batch put_revoke requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_PUT_REVOKE_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_put_revoke_failures_total",
-        "total failed items in batch put_revoke requests"
-    )
-    .unwrap();
-    pub static ref BATCH_REMOVE_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_remove_total",
-        "total batch remove requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_REMOVE_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_remove_failures_total",
-        "total failed items in batch remove requests"
-    )
-    .unwrap();
-    pub static ref BATCH_UPSERT_END_REQUESTS: IntCounter = IntCounter::new(
-        "mooncake_store_batch_upsert_end_total",
-        "total batch upsert_end requests (items)"
-    )
-    .unwrap();
-    pub static ref BATCH_UPSERT_END_FAILURES: IntCounter = IntCounter::new(
-        "mooncake_store_batch_upsert_end_failures_total",
-        "total failed items in batch upsert_end requests"
-    )
-    .unwrap();
-}
+pub use batch::{
+    BATCH_EXIST_KEY_FAILURES, BATCH_EXIST_KEY_REQUESTS, BATCH_PUT_END_FAILURES,
+    BATCH_PUT_END_REQUESTS, BATCH_PUT_REVOKE_FAILURES, BATCH_PUT_REVOKE_REQUESTS,
+    BATCH_QUERY_IP_FAILURES, BATCH_QUERY_IP_REQUESTS, BATCH_REMOVE_FAILURES, BATCH_REMOVE_REQUESTS,
+    BATCH_REPLICA_CLEAR_FAILURES, BATCH_REPLICA_CLEAR_REQUESTS, BATCH_UPSERT_END_FAILURES,
+    BATCH_UPSERT_END_REQUESTS,
+};
+pub use cache::{
+    FILE_CACHE_HITS, FILE_CACHE_HIT_BYTES, FILE_CACHE_TOTAL, MEM_CACHE_HITS, MEM_CACHE_HIT_BYTES,
+    MEM_CACHE_TOTAL, VALID_GETS,
+};
+pub use operations::{
+    ERROR_COUNTER, EXIST_KEY_FAILURES, EXIST_KEY_REQUESTS, GET_BY_REGEX_FAILURES,
+    GET_BY_REGEX_REQUESTS, GET_FAILURES, GET_REQUESTS, MOUNT_SEGMENT_FAILURES,
+    MOUNT_SEGMENT_REQUESTS, PING_FAILURES, PING_REQUESTS, PUT_END_FAILURES, PUT_END_REQUESTS,
+    PUT_REVOKE_FAILURES, PUT_REVOKE_REQUESTS, PUT_START_FAILURES, PUT_START_REQUESTS,
+    REMOVE_ALL_FAILURES, REMOVE_ALL_REQUESTS, REMOVE_BY_REGEX_FAILURES, REMOVE_BY_REGEX_REQUESTS,
+    REMOVE_FAILURES, REMOVE_REQUESTS, UNMOUNT_SEGMENT_FAILURES, UNMOUNT_SEGMENT_REQUESTS,
+    UPSERT_FAILURES, UPSERT_REQUESTS,
+};
 
 // =============================================================================
 // Gauges (global state) — 仪表值（全局状态）
@@ -273,38 +97,6 @@ lazy_static! {
     pub static ref TOTAL_FILE_CAPACITY: IntGauge = IntGauge::new(
         "mooncake_store_total_file_capacity_bytes",
         "total file capacity bytes"
-    )
-    .unwrap();
-}
-
-// =============================================================================
-// Cache hit counters — 缓存命中计数器
-// =============================================================================
-
-lazy_static! {
-    pub static ref MEM_CACHE_HITS: IntCounter = IntCounter::new(
-        "mooncake_store_mem_cache_hits_total",
-        "total memory cache hits"
-    )
-    .unwrap();
-    pub static ref FILE_CACHE_HITS: IntCounter = IntCounter::new(
-        "mooncake_store_file_cache_hits_total",
-        "total file cache hits"
-    )
-    .unwrap();
-    pub static ref MEM_CACHE_TOTAL: IntCounter = IntCounter::new(
-        "mooncake_store_mem_cache_requests_total",
-        "total memory cache requests"
-    )
-    .unwrap();
-    pub static ref FILE_CACHE_TOTAL: IntCounter = IntCounter::new(
-        "mooncake_store_file_cache_requests_total",
-        "total file cache requests"
-    )
-    .unwrap();
-    pub static ref VALID_GETS: IntCounter = IntCounter::new(
-        "mooncake_store_valid_gets_total",
-        "total valid get requests"
     )
     .unwrap();
 }
@@ -577,6 +369,8 @@ pub fn register_metrics() {
     // Cache counters
     register_counter(&MEM_CACHE_HITS);
     register_counter(&FILE_CACHE_HITS);
+    register_counter(&MEM_CACHE_HIT_BYTES);
+    register_counter(&FILE_CACHE_HIT_BYTES);
     register_counter(&MEM_CACHE_TOTAL);
     register_counter(&FILE_CACHE_TOTAL);
     register_counter(&VALID_GETS);

@@ -27,30 +27,35 @@ impl MasterServiceImpl {
 
         // Phase 1: read-only (uses get() — shared lock, allows concurrent reads).
         // 阶段 1：只读（使用 get() — 共享锁，允许并发读）
-        let (completed_replicas, promotion_eligible) = match self.state.objects.get(&scoped_key) {
-            Some(entry) => {
-                // 符合 promotion 条件：没有任何 Memory Complete 副本 + 有 LocalDisk Complete 副本
-                // Promotion eligible: no Memory Complete replicas + at least one LocalDisk Complete replica
-                let eligible = !entry.replicas.iter().any(|replica| {
-                    replica.replica_type == ReplicaType::Memory
-                        && replica.status == ReplicaStatus::Complete
-                }) && entry.replicas.iter().any(|replica| {
-                    replica.replica_type == ReplicaType::LocalDisk
-                        && replica.status == ReplicaStatus::Complete
-                });
-                let replicas: Vec<_> = entry
-                    .replicas
-                    .iter()
-                    .filter(|r| r.status == ReplicaStatus::Complete)
-                    .map(replica_to_proto)
-                    .collect();
-                if replicas.is_empty() {
-                    return Err(Status::failed_precondition("replica is not ready"));
+        let (completed_replicas, promotion_eligible, first_replica_type, object_size) =
+            match self.state.objects.get(&scoped_key) {
+                Some(entry) => {
+                    // 符合 promotion 条件：没有任何 Memory Complete 副本 + 有 LocalDisk Complete 副本
+                    // Promotion eligible: no Memory Complete replicas + at least one LocalDisk Complete replica
+                    let eligible = !entry.replicas.iter().any(|replica| {
+                        replica.replica_type == ReplicaType::Memory
+                            && replica.status == ReplicaStatus::Complete
+                    }) && entry.replicas.iter().any(|replica| {
+                        replica.replica_type == ReplicaType::LocalDisk
+                            && replica.status == ReplicaStatus::Complete
+                    });
+                    let complete = entry
+                        .replicas
+                        .iter()
+                        .filter(|r| r.status == ReplicaStatus::Complete)
+                        .collect::<Vec<_>>();
+                    let Some(first) = complete.first() else {
+                        return Err(Status::failed_precondition("replica is not ready"));
+                    };
+                    let first_replica_type = first.replica_type;
+                    let replicas = complete
+                        .into_iter()
+                        .map(replica_to_proto)
+                        .collect::<Vec<_>>();
+                    (replicas, eligible, first_replica_type, entry.size)
                 }
-                (replicas, eligible)
-            }
-            None => return Err(Status::not_found(format!("key not found: {key}"))),
-        };
+                None => return Err(Status::not_found(format!("key not found: {key}"))),
+            };
 
         // Phase 2: brief write lock for timestamp updates only (microseconds).
         // 阶段 2：短暂写锁仅更新时间戳（微秒级）
@@ -75,6 +80,7 @@ impl MasterServiceImpl {
             try_push_promotion_queue(&self.state, &scoped_key);
         }
         metrics::GET_REQUESTS.inc();
+        record_cache_hit_metrics(first_replica_type, object_size);
         let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
         Ok(proto::GetReplicaListResponse {
             replicas: completed_replicas,
@@ -370,6 +376,21 @@ impl MasterServiceImpl {
             Ok(Response::new(proto::QueryIpResponse { addresses }))
         }
     }
+}
+
+fn record_cache_hit_metrics(replica_type: ReplicaType, object_size: u64) {
+    match replica_type {
+        ReplicaType::Memory => {
+            metrics::MEM_CACHE_HITS.inc();
+            metrics::MEM_CACHE_HIT_BYTES.inc_by(object_size);
+        }
+        ReplicaType::Disk | ReplicaType::LocalDisk | ReplicaType::NoFSsd => {
+            metrics::FILE_CACHE_HITS.inc();
+            metrics::FILE_CACHE_HIT_BYTES.inc_by(object_size);
+        }
+        ReplicaType::All => {}
+    }
+    metrics::VALID_GETS.inc();
 }
 
 fn admin_query_status_code(status: &Status) -> i32 {
