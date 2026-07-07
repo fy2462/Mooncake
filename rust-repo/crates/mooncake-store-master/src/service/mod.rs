@@ -308,39 +308,82 @@ impl MasterServiceImpl {
         // 初始化所有 DashMap 存储 — 每个表负责一类数据的并发读写
         // Initialize all DashMap stores — each table handles one category of concurrent read/write
         let state = Arc::new(MasterState {
+            // ── 客户端注册 / client registry ──
+            // client_id → ClientEntry：客户端信息、地址、心跳时间
             clients: DashMap::new(),
+            // ok_clients 集合：心跳正常的客户端子集，仅本表中有记录的客户端被视为 alive
             ok_clients: DashMap::new(),
+
+            // ── 对象存储 / object store ──
+            // key → ObjectEntry：对象的全部元数据（副本列表、大小、last_access、pin 状态等）
             objects: DashMap::new(),
+            // 正在 PutStart 中的 key 集合：防止同一 key 的并发 PutStart 冲突
             processing_keys: DashMap::new(),
+            // client_id → Set<key>：每个客户端拥有的对象索引，加速客户端下线时批量清理
             client_objects: DashMap::new(),
+
+            // ── Segment 管理 / segment management ──
+            // segment_id → SegmentEntry：已挂载的 Memory segment（物理内存段）
             segments: DashMap::new(),
+            // segment_id → NoFSegmentEntry：已挂载的 NoF (NVMe-oF) segment
             nof_segments: DashMap::new(),
+            // client_id → LocalDiskSegmentEntry：每个客户端的本地磁盘 segment（offload/promotion 队列）
             local_disk_segments: DashMap::new(),
+
+            // ── 任务队列 / task queues ──
+            // task_id → TaskEntry：Copy/Move 异步任务（创建 → 分配 worker → 完成）
             tasks: DashMap::new(),
+            // key → ReplicationTaskEntry：进行中的副本复制/迁移任务
             replication_tasks: DashMap::new(),
+
+            // ── 后台操作 / background operations ──
+            // key → OffloadingTaskEntry：进行中的 offload 任务（内存 → 本地磁盘）
             offloading_tasks: DashMap::new(),
+            // key → PromotionTaskEntry：进行中的 promotion 任务（本地磁盘 → 内存）
             promotion_tasks: DashMap::new(),
+            // CountMinSketch 频率统计：approximate 访问次数，用于 promotion 准入控制
             promotion_sketch: RwLock::new(CountMinSketch::new()),
+            // Drain job 表：job_id → DrainJobEntry
             drain_jobs: DashMap::new(),
+
+            // ── 分配器 / allocators ──
+            // Memory segment 的段内空间分配器（offset 连续分配 / cachelib slab 分配）
             allocator: RwLock::new(
                 SegmentAllocator::new()
                     .with_strategy(runtime_config.allocation_strategy)
                     .with_memory_allocator(runtime_config.memory_allocator_kind),
             ),
+            // NoF segment 的段内空间分配器
             nof_allocator: RwLock::new(
                 SegmentAllocator::new()
                     .with_strategy(runtime_config.allocation_strategy)
                     .with_memory_allocator(runtime_config.memory_allocator_kind),
             ),
+
+            // ── 持久化 / persistence ──
+            // 快照后端的抽象接口（local-disk / hf3fs），用于 HA 状态备份与恢复
             storage_backend,
+
+            // ── 全局计数器 / global counters ──
+            // 全局在途 promotion 计数：CAS 式限流，防止并发 promotion 打爆内存
             promotion_in_flight: AtomicUsize::new(0),
+            // 全局视图版本号：段拓扑变更时 +1，Client Ping 时返回，Client 感知版本变化后重新 discover
             view_version: AtomicI64::new(0),
+
+            // ── 运行时 / runtime ──
+            // 运行时配置：lease TTL、淘汰水位线、promotion 参数等（只读，无需锁）
             runtime_config: runtime_config.clone(),
+            // 服务可用性门控：HA 模式 standby 时为 false，晋升 leader 后置 true
             service_available: AtomicBool::new(true),
+            // 租户配额表：per-tenant 存储配额分配与追踪
             tenant_quotas: RwLock::new(TenantQuotaTable::new(
                 runtime_config.default_tenant_quota_bytes,
             )),
+
+            // ── 远端回源 / remote pull ──
+            // key → PendingRemotePullEntry：缓存未命中时从 S3 等远端回拉数据的追踪状态
             pending_remote_pulls: DashMap::new(),
+            // segment_id → NoFHeartbeatState：NoF segment 的心跳探测状态（下次探测时间、连续失败次数）
             nof_heartbeat_states: DashMap::new(),
         });
         let metadata_state = MetadataState::new("");
