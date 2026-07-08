@@ -16,7 +16,19 @@ use mooncake_store_core::error::StoreResult;
 
 use super::read::scoped_cache_key;
 use super::MooncakeClient;
+use crate::local_storage_backend::LocalStorageBackend;
 use crate::proto;
+
+fn cleanup_local_storage_after_remove_all(local_storage: Option<&LocalStorageBackend>) {
+    if let Some(storage) = local_storage {
+        if let Err(error) = storage.remove_all() {
+            tracing::warn!(
+                %error,
+                "remove_all succeeded on master but local offload storage cleanup failed"
+            );
+        }
+    }
+}
 
 impl MooncakeClient {
     fn invalidate_hot_cache_key_for_tenant(&self, key: &str, tenant_id: &str) {
@@ -203,6 +215,32 @@ impl MooncakeClient {
         if let Some(ref cache) = self.hot_cache {
             cache.clear();
         }
+        cleanup_local_storage_after_remove_all(self.local_storage.as_deref());
         Ok(response.removed_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_local_storage_after_remove_all;
+    use crate::local_storage_backend::{LocalStorageBackend, LocalStorageConfig};
+
+    #[test]
+    fn remove_all_cleanup_clears_attached_local_storage() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage = LocalStorageBackend::new(LocalStorageConfig {
+            root_dir: temp_dir.path().to_path_buf(),
+            fsdir: "offload".to_string(),
+            enable_eviction: true,
+            quota_bytes: 1024,
+        });
+        storage.init().unwrap();
+        storage.write_object("tenant:key", b"value").unwrap();
+        assert!(storage.exists("tenant:key"));
+
+        cleanup_local_storage_after_remove_all(Some(&storage));
+
+        assert!(!storage.exists("tenant:key"));
+        assert_eq!(storage.scan_meta().unwrap(), Vec::<(String, u64)>::new());
     }
 }
