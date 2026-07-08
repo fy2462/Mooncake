@@ -7,6 +7,30 @@ use std::sync::Arc;
 use transfer_engine_ffi::TransferEngine;
 
 pub const MAX_CHUNK_SIZE: u64 = 4096 * 1024 * 1024;
+const MC_TE_FILTERS_ENV: &str = "MC_TE_FILTERS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportInstallPlan<'a> {
+    Tcp,
+    Rdma { topology_matrix: Option<&'a str> },
+}
+
+fn transport_install_plan<'a>(
+    nic_priority_matrix: &'a str,
+    mc_te_filters: Option<&str>,
+) -> TransportInstallPlan<'a> {
+    if !nic_priority_matrix.trim().is_empty() {
+        return TransportInstallPlan::Rdma {
+            topology_matrix: Some(nic_priority_matrix),
+        };
+    }
+    if mc_te_filters.is_some_and(|value| value.split(',').any(|item| !item.trim().is_empty())) {
+        return TransportInstallPlan::Rdma {
+            topology_matrix: None,
+        };
+    }
+    TransportInstallPlan::Tcp
+}
 
 #[derive(Debug, Clone)]
 pub struct Buffer {
@@ -36,14 +60,16 @@ impl P2pStore {
             TransferEngine::create(metadata_conn_string, local_server_name, ip, port, true)
                 .map_err(|_| P2pStoreError::TransferEngine)?;
 
-        if nic_priority_matrix.is_empty() {
-            engine
+        match transport_install_plan(
+            nic_priority_matrix,
+            std::env::var(MC_TE_FILTERS_ENV).ok().as_deref(),
+        ) {
+            TransportInstallPlan::Tcp => engine
                 .install_transport("tcp", None)
-                .map_err(|_| P2pStoreError::TransferEngine)?;
-        } else {
-            engine
-                .install_transport("rdma", Some(nic_priority_matrix))
-                .map_err(|_| P2pStoreError::TransferEngine)?;
+                .map_err(|_| P2pStoreError::TransferEngine)?,
+            TransportInstallPlan::Rdma { topology_matrix } => engine
+                .install_transport("rdma", topology_matrix)
+                .map_err(|_| P2pStoreError::TransferEngine)?,
         }
 
         let engine = Arc::new(engine);
@@ -169,5 +195,39 @@ impl P2pStore {
                 size_list: p.size_list,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{transport_install_plan, TransportInstallPlan};
+
+    #[test]
+    fn transport_plan_uses_tcp_without_matrix_or_env_filter() {
+        assert_eq!(transport_install_plan("", None), TransportInstallPlan::Tcp);
+        assert_eq!(
+            transport_install_plan("", Some(" , \t, ")),
+            TransportInstallPlan::Tcp
+        );
+    }
+
+    #[test]
+    fn transport_plan_installs_rdma_for_explicit_matrix() {
+        assert_eq!(
+            transport_install_plan("mlx5_0,mlx5_1", Some("")),
+            TransportInstallPlan::Rdma {
+                topology_matrix: Some("mlx5_0,mlx5_1")
+            }
+        );
+    }
+
+    #[test]
+    fn transport_plan_installs_rdma_when_env_filter_is_set() {
+        assert_eq!(
+            transport_install_plan("", Some(" mlx5_0 , mlx5_1 ,")),
+            TransportInstallPlan::Rdma {
+                topology_matrix: None
+            }
+        );
     }
 }
