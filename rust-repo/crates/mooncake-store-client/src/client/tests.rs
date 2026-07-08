@@ -83,6 +83,22 @@ fn resolve_auto_discover_matches_cpp_env_rules() {
 }
 
 #[test]
+fn effective_transport_protocol_honors_force_tcp_env() {
+    assert_eq!(
+        MooncakeClient::effective_transport_protocol("rdma", None),
+        "rdma"
+    );
+    assert_eq!(
+        MooncakeClient::effective_transport_protocol("rdma", Some("1".to_string())),
+        "tcp"
+    );
+    assert_eq!(
+        MooncakeClient::effective_transport_protocol("rdma", Some(String::new())),
+        "tcp"
+    );
+}
+
+#[test]
 fn transport_topology_matrix_matches_cpp_protocol_rules() {
     assert_eq!(
         MooncakeClient::transport_topology_matrix("rdma", "mlx5_0"),

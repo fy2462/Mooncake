@@ -220,10 +220,12 @@ impl MooncakeClient {
         let parts: Vec<&str> = local_host.split(':').collect();
         let ip = parts.first().copied().unwrap_or(local_host);
         let port: u64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+        let effective_protocol =
+            Self::effective_transport_protocol(protocol, std::env::var("MC_FORCE_TCP").ok());
 
         // Step 3: Create TransferEngine. / 创建 TransferEngine。
         let auto_discover = Self::resolve_auto_discover(
-            protocol,
+            effective_protocol,
             device,
             std::env::var("MC_MS_AUTO_DISC").ok().as_deref(),
         );
@@ -231,9 +233,11 @@ impl MooncakeClient {
             TransferEngine::create(metadata_conn_string, local_host, ip, port, auto_discover)?;
 
         // Step 4: Install the appropriate transport. / 安装合适的传输层。
-        if protocol != "tcp" {
-            engine
-                .install_transport(protocol, Self::transport_topology_matrix(protocol, device))?;
+        if effective_protocol != "tcp" {
+            engine.install_transport(
+                effective_protocol,
+                Self::transport_topology_matrix(effective_protocol, device),
+            )?;
         } else {
             engine.install_transport("tcp", None)?;
         }
@@ -312,7 +316,7 @@ impl MooncakeClient {
                 size: global_segment_size,
                 base_addr,
                 te_endpoint: local_host.to_string(),
-                protocol: protocol.to_string(),
+                protocol: effective_protocol.to_string(),
             };
             let mount_response = master
                 .mount_segment(request)
@@ -339,7 +343,7 @@ impl MooncakeClient {
             engine,
             client_id,
             local_hostname: local_host.to_string(),
-            protocol: protocol.to_string(),
+            protocol: effective_protocol.to_string(),
             local_buffer,
             segment_buffer,
             registered_buffers: RwLock::new(HashMap::new()),
@@ -409,6 +413,17 @@ impl MooncakeClient {
             )));
         }
         Ok(())
+    }
+
+    pub(super) fn effective_transport_protocol<'a>(
+        requested_protocol: &'a str,
+        force_tcp_env: Option<String>,
+    ) -> &'a str {
+        if force_tcp_env.is_some() {
+            "tcp"
+        } else {
+            requested_protocol
+        }
     }
 
     pub(super) fn resolve_auto_discover(
