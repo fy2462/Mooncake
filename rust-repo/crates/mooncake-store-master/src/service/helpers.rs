@@ -38,10 +38,32 @@ pub(crate) fn bump_view_version(state: &MasterState) -> i64 {
     state.view_version.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// 从 segment 名称（格式 host:port）中提取 host 部分。
-/// Extract host part from segment name (format: host:port).
+/// 从 segment 名称中提取 C++ 兼容的 host identity。
+/// Extract a C++-compatible host identity from a segment name.
+///
+/// Mirrors `ResolveMooncakeHostId`: trim whitespace, strip a host:port suffix
+/// for ordinary hostnames, preserve raw IPv6 literals, and ignore loopback or
+/// wildcard endpoints because they are not stable cross-node identities.
 pub(crate) fn host_from_segment_name(name: &str) -> String {
-    name.split(':').next().unwrap_or(name).to_string()
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let host = if let Some(rest) = trimmed.strip_prefix('[') {
+        rest.find(']')
+            .map(|end| &trimmed[..=end + 1])
+            .unwrap_or(trimmed)
+    } else if trimmed == "::1" || trimmed == "::" || trimmed.matches(':').count() > 1 {
+        trimmed
+    } else {
+        trimmed.split(':').next().unwrap_or(trimmed).trim()
+    };
+
+    match host.to_ascii_lowercase().as_str() {
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]" | "::" | "[::]" => String::new(),
+        _ => host.to_string(),
+    }
 }
 
 pub(crate) fn storage_fs_dir_for_client(config: &MasterRuntimeConfig) -> String {
@@ -813,5 +835,28 @@ mod tests {
             make_tenant_scoped_key("tenant-a", "key"),
             format!("tenant-a{TENANT_SCOPE_DELIMITER}key")
         );
+    }
+
+    #[test]
+    fn host_from_segment_name_matches_cpp_host_id_rules() {
+        assert_eq!(host_from_segment_name(" node-a:1234 "), "node-a");
+        assert_eq!(host_from_segment_name("node-a"), "node-a");
+        assert_eq!(host_from_segment_name("2001:db8::1"), "2001:db8::1");
+        assert_eq!(
+            host_from_segment_name("[2001:db8::1]:1234"),
+            "[2001:db8::1]"
+        );
+
+        for local in [
+            "localhost:1234",
+            "127.0.0.1:1234",
+            "0.0.0.0:1234",
+            "::1",
+            "[::1]:1234",
+            "::",
+            "[::]:1234",
+        ] {
+            assert_eq!(host_from_segment_name(local), "");
+        }
     }
 }
