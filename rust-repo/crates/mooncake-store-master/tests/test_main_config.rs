@@ -51,7 +51,13 @@ fn base_args() -> Args {
         max_task_retry_attempts: 10,
         enable_kv_events: false,
         kv_events_bind_endpoint: "tcp://0.0.0.0:5557".to_string(),
+        kv_events_model_name: String::new(),
         kv_events_backend_id: String::new(),
+        kv_events_tenant_id: "default".to_string(),
+        kv_events_additional_salt: String::new(),
+        kv_events_lora_name: String::new(),
+        kv_events_block_size: 0,
+        kv_events_dp_rank: 0,
         kv_events_emit_legacy_compat: true,
         kv_events_emit_object_key: true,
         kv_events_queue_capacity: 65_536,
@@ -80,7 +86,13 @@ fn test_build_runtime_config_maps_kv_events() {
     let mut args = base_args();
     args.enable_kv_events = true;
     args.kv_events_bind_endpoint = "tcp://127.0.0.1:5557".to_string();
+    args.kv_events_model_name = "deprecated-model".to_string();
     args.kv_events_backend_id = "backend-a".to_string();
+    args.kv_events_tenant_id = "deprecated-tenant".to_string();
+    args.kv_events_additional_salt = "deprecated-salt".to_string();
+    args.kv_events_lora_name = "deprecated-lora".to_string();
+    args.kv_events_block_size = 16;
+    args.kv_events_dp_rank = 2;
     args.kv_events_emit_legacy_compat = false;
     args.kv_events_emit_object_key = false;
     args.kv_events_queue_capacity = 128;
@@ -89,7 +101,13 @@ fn test_build_runtime_config_maps_kv_events() {
 
     assert!(config.kv_event_config.enabled);
     assert_eq!(config.kv_event_config.bind_endpoint, "tcp://127.0.0.1:5557");
+    assert_eq!(config.kv_event_config.model_name, "deprecated-model");
     assert_eq!(config.kv_event_config.backend_id, "backend-a");
+    assert_eq!(config.kv_event_config.tenant_id, "deprecated-tenant");
+    assert_eq!(config.kv_event_config.additional_salt, "deprecated-salt");
+    assert_eq!(config.kv_event_config.lora_name, "deprecated-lora");
+    assert_eq!(config.kv_event_config.block_size, 16);
+    assert_eq!(config.kv_event_config.dp_rank, 2);
     assert!(!config.kv_event_config.emit_legacy_compat);
     assert!(!config.kv_event_config.emit_object_key);
     assert_eq!(config.kv_event_config.queue_capacity, 128);

@@ -217,7 +217,13 @@ pub fn build_runtime_config(
         kv_event_config: crate::kv_event::KvEventConfig {
             enabled: args.enable_kv_events,
             bind_endpoint: args.kv_events_bind_endpoint.clone(),
+            model_name: args.kv_events_model_name.clone(),
             backend_id: args.kv_events_backend_id.clone(),
+            tenant_id: args.kv_events_tenant_id.clone(),
+            additional_salt: args.kv_events_additional_salt.clone(),
+            lora_name: args.kv_events_lora_name.clone(),
+            block_size: args.kv_events_block_size,
+            dp_rank: args.kv_events_dp_rank,
             emit_legacy_compat: args.kv_events_emit_legacy_compat,
             emit_object_key: args.kv_events_emit_object_key,
             queue_capacity: args.kv_events_queue_capacity,

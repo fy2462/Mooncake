@@ -198,9 +198,33 @@ pub struct Args {
     #[arg(long, default_value = "tcp://0.0.0.0:5557")]
     pub kv_events_bind_endpoint: String,
 
+    /// Deprecated: model identity is supplied through indexer registration, not master events.
+    #[arg(long, default_value = "")]
+    pub kv_events_model_name: String,
+
     /// backend_id for published KV events (cache owner identity).
     #[arg(long, default_value = "")]
     pub kv_events_backend_id: String,
+
+    /// Deprecated: tenant_id is taken from each object on events.
+    #[arg(long, default_value = "default")]
+    pub kv_events_tenant_id: String,
+
+    /// Deprecated: additional_salt is supplied through indexer registration, not master events.
+    #[arg(long, default_value = "")]
+    pub kv_events_additional_salt: String,
+
+    /// Deprecated: LoRA context is not stamped by the master publisher.
+    #[arg(long, default_value = "")]
+    pub kv_events_lora_name: String,
+
+    /// Deprecated: block_size is supplied through indexer registration, not master events.
+    #[arg(long, default_value_t = 0)]
+    pub kv_events_block_size: u32,
+
+    /// Deprecated: dp_rank is supplied through indexer registration, not master events.
+    #[arg(long, default_value_t = 0)]
+    pub kv_events_dp_rank: u32,
 
     /// Include vLLM/SGLang-compatible type/block_hashes fields.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]

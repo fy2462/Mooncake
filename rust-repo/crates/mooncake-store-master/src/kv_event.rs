@@ -13,7 +13,13 @@ const ZMQ_SEND_HWM: i32 = 10_000;
 pub struct KvEventConfig {
     pub enabled: bool,
     pub bind_endpoint: String,
+    pub model_name: String,
     pub backend_id: String,
+    pub tenant_id: String,
+    pub additional_salt: String,
+    pub lora_name: String,
+    pub block_size: u32,
+    pub dp_rank: u32,
     pub emit_legacy_compat: bool,
     pub emit_object_key: bool,
     pub queue_capacity: usize,
@@ -24,7 +30,13 @@ impl Default for KvEventConfig {
         Self {
             enabled: false,
             bind_endpoint: String::new(),
+            model_name: String::new(),
             backend_id: String::new(),
+            tenant_id: "default".to_string(),
+            additional_salt: String::new(),
+            lora_name: String::new(),
+            block_size: 0,
+            dp_rank: 0,
             emit_legacy_compat: true,
             emit_object_key: true,
             queue_capacity: 65_536,
@@ -457,7 +469,13 @@ mod tests {
         let config = KvEventConfig {
             enabled: true,
             bind_endpoint: "inproc://unused".to_string(),
+            model_name: "ignored-model".to_string(),
             backend_id: "backend-a".to_string(),
+            tenant_id: "ignored-tenant".to_string(),
+            additional_salt: "ignored-salt".to_string(),
+            lora_name: "ignored-lora".to_string(),
+            block_size: 16,
+            dp_rank: 2,
             ..Default::default()
         };
         let shared = Shared::new(true);
@@ -493,6 +511,11 @@ mod tests {
         assert_eq!(map_string(fields, "group_id").as_deref(), Some("group-a"));
         assert_eq!(map_string(fields, "medium").as_deref(), Some("cpu"));
         assert_eq!(map_string(fields, "object_key").as_deref(), Some("0x2a"));
+        assert!(map_is_nil(fields, "model_name"));
+        assert!(map_is_nil(fields, "block_size"));
+        assert!(map_is_nil(fields, "additional_salt"));
+        assert!(map_is_nil(fields, "lora_name"));
+        assert!(map_is_nil(fields, "dp_rank"));
         assert_eq!(map_array_len(fields, "seq_hashes"), Some(1));
         assert_eq!(map_array_len(fields, "block_hashes"), Some(1));
     }
@@ -633,5 +656,11 @@ mod tests {
                 _ => None,
             })?
         })
+    }
+
+    fn map_is_nil(fields: &[(Value, Value)], key: &str) -> bool {
+        fields
+            .iter()
+            .any(|(k, v)| k.as_str() == Some(key) && matches!(v, Value::Nil))
     }
 }
