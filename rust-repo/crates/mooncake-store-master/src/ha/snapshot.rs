@@ -237,9 +237,11 @@ impl S3SnapshotObjectStore {
         let use_https = std::env::var("MOONCAKE_AWS_USE_HTTPS")
             .map(|value| parse_bool_like(&value))
             .unwrap_or(true);
-        let force_path_style = std::env::var("MOONCAKE_AWS_USE_VIRTUAL_ADDRESSING")
-            .map(|value| !parse_bool_like(&value))
-            .unwrap_or(endpoint.is_some());
+        let force_path_style = s3_force_path_style(
+            std::env::var("MOONCAKE_AWS_USE_VIRTUAL_ADDRESSING")
+                .ok()
+                .as_deref(),
+        );
         let prefix = std::env::var("MOONCAKE_AWS_S3_PREFIX").unwrap_or_default();
         let endpoint_url = build_s3_endpoint_url(endpoint.as_deref(), &region, use_https);
         let timeout_config = TimeoutConfig::builder()
@@ -697,6 +699,10 @@ fn parse_bool_like(value: &str) -> bool {
     )
 }
 
+fn s3_force_path_style(use_virtual_addressing: Option<&str>) -> bool {
+    !use_virtual_addressing.map(parse_bool_like).unwrap_or(true)
+}
+
 fn build_s3_endpoint_url(endpoint: Option<&str>, region: &str, use_https: bool) -> Option<String> {
     let scheme = if use_https { "https" } else { "http" };
     endpoint
@@ -781,6 +787,15 @@ mod tests {
             Some("http://s3.us-west-2.amazonaws.com")
         );
         assert_eq!(build_s3_endpoint_url(None, "us-west-2", true), None);
+    }
+
+    #[test]
+    fn test_s3_virtual_addressing_defaults_match_cpp() {
+        assert!(!s3_force_path_style(None));
+        assert!(!s3_force_path_style(Some("true")));
+        assert!(!s3_force_path_style(Some("1")));
+        assert!(s3_force_path_style(Some("false")));
+        assert!(s3_force_path_style(Some("0")));
     }
 
     #[test]
