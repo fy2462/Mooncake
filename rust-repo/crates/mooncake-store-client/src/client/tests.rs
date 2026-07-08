@@ -96,14 +96,30 @@ fn resolve_auto_discover_matches_cpp_env_rules() {
     assert!(!MooncakeClient::resolve_auto_discover("tcp", "", None));
 
     assert!(MooncakeClient::resolve_auto_discover("tcp", "", Some("1")));
+    assert!(MooncakeClient::resolve_auto_discover("tcp", "", Some(" 1")));
+    assert!(MooncakeClient::resolve_auto_discover(
+        "tcp",
+        "",
+        Some("1abc")
+    ));
     assert!(!MooncakeClient::resolve_auto_discover(
         "rdma",
         "",
         Some("0")
     ));
+    assert!(!MooncakeClient::resolve_auto_discover(
+        "rdma",
+        "mlx5_0",
+        Some("2")
+    ));
     assert!(MooncakeClient::resolve_auto_discover(
         "rdma",
         "",
+        Some("not-a-number")
+    ));
+    assert!(!MooncakeClient::resolve_auto_discover(
+        "rdma",
+        "mlx5_0",
         Some("not-a-number")
     ));
     assert!(!MooncakeClient::resolve_auto_discover(

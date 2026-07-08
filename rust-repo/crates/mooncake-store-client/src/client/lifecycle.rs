@@ -478,7 +478,7 @@ impl MooncakeClient {
         env_value: Option<&str>,
     ) -> bool {
         if let Some(value) = env_value {
-            match value.parse::<i32>() {
+            match Self::parse_stoi_prefix(value) {
                 Ok(1) => return true,
                 Ok(0) => return false,
                 _ => {}
@@ -486,6 +486,23 @@ impl MooncakeClient {
         }
 
         matches!(protocol, "rdma" | "efa") && device.trim().is_empty()
+    }
+
+    pub(super) fn parse_stoi_prefix(value: &str) -> Result<i32, std::num::ParseIntError> {
+        let trimmed = value.trim_start();
+        let mut end = 0usize;
+        for (idx, ch) in trimmed.char_indices() {
+            if idx == 0 && (ch == '+' || ch == '-') {
+                end = ch.len_utf8();
+                continue;
+            }
+            if ch.is_ascii_digit() {
+                end = idx + ch.len_utf8();
+                continue;
+            }
+            break;
+        }
+        trimmed[..end].parse::<i32>()
     }
 
     pub(super) fn transport_topology_matrix<'a>(
