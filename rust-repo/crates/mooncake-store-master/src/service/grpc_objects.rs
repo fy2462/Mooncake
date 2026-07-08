@@ -304,46 +304,9 @@ impl MasterServiceImpl {
         &self,
         _request: Request<proto::GetSegmentsDetailRequest>,
     ) -> Result<Response<proto::GetSegmentsDetailResponse>, Status> {
-        let memory_used = self.state.allocator.read();
-        let nof_used = self.state.nof_allocator.read();
-        let mut segments =
-            Vec::with_capacity(self.state.segments.len() + self.state.nof_segments.len());
-
-        for entry in self.state.segments.iter() {
-            let segment = &entry.segment;
-            segments.push(proto::SegmentDetailInfo {
-                segment_name: segment.name.clone(),
-                segment_id: Some(uuid_to_proto(segment.id)),
-                client_id: Some(uuid_to_proto(entry.client_id)),
-                base_address: segment.base,
-                size_bytes: segment.size,
-                te_endpoint: segment.te_endpoint.clone(),
-                protocol: segment.protocol.clone(),
-                status: entry.status.into(),
-                allocator_used_bytes: memory_used.used_bytes(&segment.id).unwrap_or(entry.used),
-                allocator_capacity_bytes: segment.size,
-                nof: false,
-            });
-        }
-
-        for entry in self.state.nof_segments.iter() {
-            let segment = &entry.segment;
-            segments.push(proto::SegmentDetailInfo {
-                segment_name: segment.name.clone(),
-                segment_id: Some(uuid_to_proto(segment.id)),
-                client_id: Some(uuid_to_proto(segment.client_id)),
-                base_address: segment.base,
-                size_bytes: segment.size,
-                te_endpoint: segment.te_endpoint.clone(),
-                protocol: "nof".to_string(),
-                status: entry.status.into(),
-                allocator_used_bytes: nof_used.used_bytes(&segment.id).unwrap_or(entry.used),
-                allocator_capacity_bytes: segment.size,
-                nof: true,
-            });
-        }
-
-        Ok(Response::new(proto::GetSegmentsDetailResponse { segments }))
+        Ok(Response::new(proto::GetSegmentsDetailResponse {
+            segments: self.segments_detail_snapshot(),
+        }))
     }
 
     pub(super) async fn service_ready_impl(

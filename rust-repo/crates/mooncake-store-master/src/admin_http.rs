@@ -50,6 +50,7 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
         .route("/ha_status", get(ha_status_handler))
         .route("/leader", get(leader_handler))
         .route("/get_all_keys", get(get_all_keys_handler))
+        .route("/get_segments_detail", get(get_segments_detail_handler))
         .route("/batch_query_keys", get(batch_query_keys_handler))
         .route(
             "/api/v1/tenant_quotas",
@@ -122,6 +123,15 @@ async fn batch_query_keys_handler(
 
     let results = service.batch_get_replica_list_for_admin(&keys, "default");
     Ok(Json(build_batch_query_keys_json(&keys, &results)))
+}
+
+async fn get_segments_detail_handler(
+    State(state): State<AdminRuntimeState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    Ok(Json(build_segments_detail_json(
+        &service.segments_detail_snapshot(),
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,6 +393,49 @@ fn build_batch_query_keys_json(
     })
 }
 
+fn build_segments_detail_json(segments: &[proto::SegmentDetailInfo]) -> Value {
+    let items = segments
+        .iter()
+        .map(|segment| {
+            let used = segment.allocator_used_bytes;
+            let capacity = segment.allocator_capacity_bytes;
+            let usage_percent = if capacity > 0 {
+                used as f64 / capacity as f64 * 100.0
+            } else {
+                0.0
+            };
+            json!({
+                "segment_name": &segment.segment_name,
+                "segment_id": uuid_json_string(segment.segment_id.as_ref()),
+                "client_id": uuid_json_string(segment.client_id.as_ref()),
+                "base_address": format!("0x{:x}", segment.base_address),
+                "size_bytes": segment.size_bytes,
+                "size_human": format!("{:.6} GiB", segment.size_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
+                "te_endpoint": &segment.te_endpoint,
+                "protocol": &segment.protocol,
+                "status": segment_status_json_string(segment.status),
+                "allocator_used_bytes": used,
+                "allocator_capacity_bytes": capacity,
+                "allocator_usage_percent": usage_percent,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "total_segments": segments.len(),
+        "segments": items,
+    })
+}
+
+fn segment_status_json_string(status: i32) -> &'static str {
+    match proto::SegmentStatus::try_from(status) {
+        Ok(proto::SegmentStatus::Active) => "ACTIVE",
+        Ok(proto::SegmentStatus::Draining) => "DRAINING",
+        Ok(proto::SegmentStatus::Unavailable) => "UNAVAILABLE",
+        _ => "UNDEFINED",
+    }
+}
+
 fn buffer_descriptor_json(replica: &proto::ReplicaDescriptor) -> Value {
     json!({
         "segment_id": uuid_json_string(replica.segment_id.as_ref()),
@@ -490,5 +543,39 @@ mod tests {
             payload["data"][&key]["local_disk_values"][0]["transport_endpoint"],
             "127.0.0.1:9999"
         );
+    }
+
+    #[test]
+    fn test_segments_detail_json_matches_cpp_admin_shape() {
+        let segment_id = proto::Uuid { high: 3, low: 4 };
+        let client_id = proto::Uuid { high: 5, low: 6 };
+        let payload = build_segments_detail_json(&[proto::SegmentDetailInfo {
+            segment_name: "detail-host:1234".to_string(),
+            segment_id: Some(segment_id),
+            client_id: Some(client_id),
+            base_address: 0x300000000,
+            size_bytes: 1024 * 1024 * 1024,
+            te_endpoint: "tcp://detail-host:1234".to_string(),
+            protocol: "tcp".to_string(),
+            status: proto::SegmentStatus::Active as i32,
+            allocator_used_bytes: 256 * 1024 * 1024,
+            allocator_capacity_bytes: 1024 * 1024 * 1024,
+            nof: false,
+        }]);
+
+        assert_eq!(payload["total_segments"], 1);
+        let item = &payload["segments"][0];
+        assert_eq!(item["segment_name"], "detail-host:1234");
+        assert_eq!(item["segment_id"], "0000000000000003-0000000000000004");
+        assert_eq!(item["client_id"], "0000000000000005-0000000000000006");
+        assert_eq!(item["base_address"], "0x300000000");
+        assert_eq!(item["size_bytes"], 1024 * 1024 * 1024);
+        assert_eq!(item["size_human"], "1.000000 GiB");
+        assert_eq!(item["te_endpoint"], "tcp://detail-host:1234");
+        assert_eq!(item["protocol"], "tcp");
+        assert_eq!(item["status"], "ACTIVE");
+        assert_eq!(item["allocator_used_bytes"], 256 * 1024 * 1024);
+        assert_eq!(item["allocator_capacity_bytes"], 1024 * 1024 * 1024);
+        assert_eq!(item["allocator_usage_percent"], 25.0);
     }
 }
