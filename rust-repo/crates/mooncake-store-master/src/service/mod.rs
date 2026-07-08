@@ -233,16 +233,15 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("tenant quota is disabled"));
         }
         let capacity = self.tenant_quota_capacity_bytes();
-        self.state
-            .tenant_quotas
-            .write()
-            .upsert_policy(tenant_id, requested_quota_bytes, capacity)
+        let mut quotas = self.state.tenant_quotas.write();
+        let mut next = quotas.clone();
+        next.upsert_policy(tenant_id, requested_quota_bytes, capacity)
             .map_err(Self::tenant_quota_status)?;
-        self.save_tenant_quota_policies()?;
-        Ok(self
-            .state
-            .tenant_quotas
-            .read()
+        self.save_tenant_quota_policy_snapshot(&Self::tenant_quota_policy_snapshot_from_table(
+            &next,
+        ))?;
+        *quotas = next;
+        Ok(quotas
             .get_snapshot(tenant_id)
             .expect("tenant policy exists after upsert"))
     }
@@ -255,33 +254,40 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("tenant quota is disabled"));
         }
         let capacity = self.tenant_quota_capacity_bytes();
-        let deleted = self
-            .state
-            .tenant_quotas
-            .write()
+        let mut quotas = self.state.tenant_quotas.write();
+        let mut next = quotas.clone();
+        let deleted = next
             .erase_policy(tenant_id, capacity)
             .map_err(Self::tenant_quota_status)?;
-        self.save_tenant_quota_policies()?;
+        self.save_tenant_quota_policy_snapshot(&Self::tenant_quota_policy_snapshot_from_table(
+            &next,
+        ))?;
+        *quotas = next;
         Ok(deleted)
     }
 
-    fn save_tenant_quota_policies(&self) -> Result<(), Status> {
-        let snapshot = TenantQuotaPolicySnapshot {
-            tenant_quotas: self
-                .state
-                .tenant_quotas
-                .read()
+    fn tenant_quota_policy_snapshot_from_table(
+        quotas: &TenantQuotaTable,
+    ) -> TenantQuotaPolicySnapshot {
+        TenantQuotaPolicySnapshot {
+            tenant_quotas: quotas
                 .list_snapshots()
                 .into_iter()
                 .filter(|s| s.has_explicit_policy)
                 .map(|s| (s.tenant_id, s.requested_quota_bytes))
                 .collect(),
-        };
+        }
+    }
+
+    fn save_tenant_quota_policy_snapshot(
+        &self,
+        snapshot: &TenantQuotaPolicySnapshot,
+    ) -> Result<(), Status> {
         save_tenant_quota_policy(
             &self.state.runtime_config.tenant_quota_connector_type,
             &self.state.runtime_config.tenant_quota_connector_uri,
             &self.state.runtime_config.cluster_id,
-            &snapshot,
+            snapshot,
         )
         .map_err(Status::internal)
     }

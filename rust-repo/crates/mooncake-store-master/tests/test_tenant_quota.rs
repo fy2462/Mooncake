@@ -4,6 +4,7 @@ use common::proto_uuid;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::os::unix::fs::PermissionsExt;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
@@ -150,6 +151,51 @@ fn test_tenant_quota_admin_policy_lifecycle_methods() {
 
     let deleted = service.delete_tenant_quota_policy("tenant-a").unwrap();
     assert!(deleted.is_none());
+}
+
+#[test]
+fn test_tenant_quota_policy_save_failure_does_not_mutate_memory_state() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let policy_path = temp_dir.path().join("tenant-quota.yaml");
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        tenant_quota_connector_uri: policy_path.to_string_lossy().into_owned(),
+        tenant_quota_pool_capacity_bytes: 2000,
+        ..Default::default()
+    });
+
+    service
+        .upsert_tenant_quota_policy("tenant-a", 800)
+        .expect("initial tenant policy");
+    let original_permissions = std::fs::metadata(temp_dir.path())
+        .unwrap()
+        .permissions()
+        .mode();
+    let mut read_only = std::fs::metadata(temp_dir.path()).unwrap().permissions();
+    read_only.set_mode(0o500);
+    std::fs::set_permissions(temp_dir.path(), read_only).unwrap();
+
+    let upsert_err = service
+        .upsert_tenant_quota_policy("tenant-b", 600)
+        .unwrap_err();
+    assert_eq!(upsert_err.code(), Code::Internal);
+    assert!(service
+        .get_tenant_quota_snapshot("tenant-b")
+        .unwrap()
+        .is_none());
+
+    let delete_err = service.delete_tenant_quota_policy("tenant-a").unwrap_err();
+    assert_eq!(delete_err.code(), Code::Internal);
+    let tenant_a = service
+        .get_tenant_quota_snapshot("tenant-a")
+        .unwrap()
+        .expect("tenant-a policy should remain in memory after save failure");
+    assert_eq!(tenant_a.requested_quota_bytes, 800);
+    assert!(tenant_a.has_explicit_policy);
+
+    let mut restored = std::fs::metadata(temp_dir.path()).unwrap().permissions();
+    restored.set_mode(original_permissions);
+    std::fs::set_permissions(temp_dir.path(), restored).unwrap();
 }
 
 #[tokio::test]
