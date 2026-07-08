@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
@@ -223,6 +224,7 @@ impl MooncakeClient {
         let port: u64 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
         let effective_protocol =
             Self::effective_transport_protocol(protocol, std::env::var("MC_FORCE_TCP").ok());
+        let rpc_request_timeout = Self::rpc_timeout_from_env("MC_RPC_TIMEOUT_MS", 30_000);
 
         // Step 3: Create TransferEngine. / 创建 TransferEngine。
         let auto_discover = Self::resolve_auto_discover(
@@ -320,9 +322,9 @@ impl MooncakeClient {
                 protocol: effective_protocol.to_string(),
             };
             let mount_response = master
-                .mount_segment(request)
+                .mount_segment(Self::rpc_request_with_timeout(request, rpc_request_timeout))
                 .await
-                .map_err(|e| StoreError::Internal(e.to_string()))?
+                .map_err(Self::rpc_status_to_error)?
                 .into_inner();
             if let Some(id) = mount_response.segment_id {
                 mounted_segment_ids
@@ -363,6 +365,7 @@ impl MooncakeClient {
             offload_rpc_addr: RwLock::new(String::new()),
             master_addr: RwLock::new(selected_master_addr.to_string()),
             master_candidates: RwLock::new(master_candidates.to_vec()),
+            rpc_request_timeout,
             tenant_id: tenant_id.to_string(),
         })
     }
@@ -371,8 +374,12 @@ impl MooncakeClient {
         master_addr: &str,
     ) -> StoreResult<proto::master_service_client::MasterServiceClient<Channel>> {
         let master_url = Self::normalize_master_url(master_addr)?;
-        let channel = Channel::from_shared(master_url)
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+        let mut endpoint =
+            Channel::from_shared(master_url).map_err(|e| StoreError::Internal(e.to_string()))?;
+        if let Some(timeout) = Self::rpc_timeout_from_env("MC_RPC_CONNECT_TIMEOUT_MS", 30_000) {
+            endpoint = endpoint.connect_timeout(timeout);
+        }
+        let channel = endpoint
             .connect()
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
@@ -392,6 +399,44 @@ impl MooncakeClient {
             Ok(trimmed.to_string())
         } else {
             Ok(format!("http://{trimmed}"))
+        }
+    }
+
+    pub(super) fn rpc_timeout_from_env(name: &str, default_ms: u64) -> Option<Duration> {
+        Self::rpc_timeout_from_value(std::env::var(name).ok().as_deref(), default_ms)
+    }
+
+    pub(super) fn rpc_timeout_from_value(value: Option<&str>, default_ms: u64) -> Option<Duration> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Some(Duration::from_millis(default_ms)),
+            Some(value) => match value.parse::<i64>() {
+                Ok(ms) if ms < 0 => None,
+                Ok(ms) => Some(Duration::from_millis(ms as u64)),
+                Err(_) => Some(Duration::from_millis(default_ms)),
+            },
+        }
+    }
+
+    pub(super) fn rpc_request<T>(&self, message: T) -> tonic::Request<T> {
+        Self::rpc_request_with_timeout(message, self.rpc_request_timeout)
+    }
+
+    pub(super) fn rpc_request_with_timeout<T>(
+        message: T,
+        timeout: Option<Duration>,
+    ) -> tonic::Request<T> {
+        let mut request = tonic::Request::new(message);
+        if let Some(timeout) = timeout {
+            request.set_timeout(timeout);
+        }
+        request
+    }
+
+    pub(super) fn rpc_status_to_error(status: tonic::Status) -> StoreError {
+        if status.code() == tonic::Code::DeadlineExceeded {
+            StoreError::RpcTimeout(status.to_string())
+        } else {
+            StoreError::Internal(status.to_string())
         }
     }
 

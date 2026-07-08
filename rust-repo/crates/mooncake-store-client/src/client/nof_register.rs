@@ -118,12 +118,12 @@ impl MooncakeClient {
         owner_client_id: Uuid,
     ) -> StoreResult<()> {
         self.master
-            .unmount_no_f_segment(proto::UnmountNoFSegmentRequest {
+            .unmount_no_f_segment(self.rpc_request(proto::UnmountNoFSegmentRequest {
                 segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
                 client_id: Some(Self::uuid_to_proto_uuid(owner_client_id)),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 }

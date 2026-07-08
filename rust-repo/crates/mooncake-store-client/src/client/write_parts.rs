@@ -39,7 +39,7 @@ impl MooncakeClient {
             }),
         };
 
-        let response = match self.master.put_start(request).await {
+        let response = match self.master.put_start(self.rpc_request(request)).await {
             Ok(response) => response.into_inner(),
             Err(status) => {
                 let err = Self::put_start_error_from_status(key, status);
@@ -144,7 +144,7 @@ impl MooncakeClient {
             }),
         };
 
-        let response = match self.master.put_start(request).await {
+        let response = match self.master.put_start(self.rpc_request(request)).await {
             Ok(response) => response.into_inner(),
             Err(status) => {
                 let err = Self::put_start_error_from_status(key, status);

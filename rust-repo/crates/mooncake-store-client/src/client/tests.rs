@@ -32,6 +32,36 @@ fn normalize_master_url_rejects_empty_values() {
 }
 
 #[test]
+fn rpc_timeout_parsing_matches_cpp_env_rules() {
+    assert_eq!(
+        MooncakeClient::rpc_timeout_from_value(None, 30_000),
+        Some(Duration::from_millis(30_000))
+    );
+    assert_eq!(
+        MooncakeClient::rpc_timeout_from_value(Some("1000"), 30_000),
+        Some(Duration::from_millis(1_000))
+    );
+    assert_eq!(
+        MooncakeClient::rpc_timeout_from_value(Some("0"), 30_000),
+        Some(Duration::from_millis(0))
+    );
+    assert_eq!(
+        MooncakeClient::rpc_timeout_from_value(Some("-1"), 30_000),
+        None
+    );
+    assert_eq!(
+        MooncakeClient::rpc_timeout_from_value(Some("not-a-number"), 30_000),
+        Some(Duration::from_millis(30_000))
+    );
+}
+
+#[test]
+fn deadline_exceeded_maps_to_rpc_timeout() {
+    let err = MooncakeClient::rpc_status_to_error(tonic::Status::deadline_exceeded("expired"));
+    assert!(matches!(err, StoreError::RpcTimeout(_)));
+}
+
+#[test]
 fn validate_local_buffer_size_matches_cpp_config_rules() {
     assert!(MooncakeClient::validate_local_buffer_size(0).is_ok());
     assert!(MooncakeClient::validate_local_buffer_size(1024).is_ok());

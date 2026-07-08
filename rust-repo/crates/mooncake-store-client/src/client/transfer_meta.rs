@@ -41,9 +41,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .get_replica_list(request)
+            .get_replica_list(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
         Ok(replicas)
@@ -87,9 +87,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_get_replica_list(request)
+            .batch_get_replica_list(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if response.results.len() != keys.len() {
             return Err(StoreError::Internal(format!(

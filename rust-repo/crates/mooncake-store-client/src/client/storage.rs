@@ -21,7 +21,7 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{NoFSegment, NoFSegmentOwnerInfo, StoreError};
+use mooncake_store_core::{NoFSegment, NoFSegmentOwnerInfo};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -176,12 +176,12 @@ impl MooncakeClient {
     /// C++ equivalent: `Client::MountLocalDiskSegment(enable_offloading)`
     pub async fn mount_local_disk_segment(&mut self, enable_offloading: bool) -> StoreResult<()> {
         self.master
-            .mount_local_disk_segment(proto::MountLocalDiskSegmentRequest {
+            .mount_local_disk_segment(self.rpc_request(proto::MountLocalDiskSegmentRequest {
                 client_id: Some(self.client_id_proto()),
                 enable_offloading,
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -190,12 +190,12 @@ impl MooncakeClient {
     /// C++ equivalent: `MasterClient::MountNoFSegment(segment, client_id)`.
     pub async fn mount_nof_segment(&mut self, segment: &NoFSegment) -> StoreResult<()> {
         self.master
-            .mount_no_f_segment(proto::MountNoFSegmentRequest {
+            .mount_no_f_segment(self.rpc_request(proto::MountNoFSegmentRequest {
                 client_id: Some(self.client_id_proto()),
                 segment: Some(Self::nof_segment_to_proto(segment)),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -204,12 +204,12 @@ impl MooncakeClient {
     /// C++ equivalent: `MasterClient::ReMountNoFSegment(segments, client_id)`.
     pub async fn remount_nof_segments(&mut self, segments: &[NoFSegment]) -> StoreResult<()> {
         self.master
-            .re_mount_no_f_segment(proto::ReMountNoFSegmentRequest {
+            .re_mount_no_f_segment(self.rpc_request(proto::ReMountNoFSegmentRequest {
                 client_id: Some(self.client_id_proto()),
                 segments: segments.iter().map(Self::nof_segment_to_proto).collect(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -218,12 +218,12 @@ impl MooncakeClient {
     /// C++ equivalent: `MasterClient::UnmountNoFSegment(segment_id, client_id)`.
     pub async fn unmount_nof_segment(&mut self, segment_id: Uuid) -> StoreResult<()> {
         self.master
-            .unmount_no_f_segment(proto::UnmountNoFSegmentRequest {
+            .unmount_no_f_segment(self.rpc_request(proto::UnmountNoFSegmentRequest {
                 segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
                 client_id: Some(self.client_id_proto()),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -233,9 +233,9 @@ impl MooncakeClient {
     pub async fn get_all_nof_segments(&mut self) -> StoreResult<Vec<NoFSegment>> {
         let response = self
             .master
-            .get_all_no_f_segments(proto::GetAllNoFSegmentsRequest {})
+            .get_all_no_f_segments(self.rpc_request(proto::GetAllNoFSegmentsRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response
             .segments
@@ -253,11 +253,11 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<NoFSegmentOwnerInfo>> {
         let response = self
             .master
-            .get_no_f_segments_by_name(proto::GetNoFSegmentsByNameRequest {
+            .get_no_f_segments_by_name(self.rpc_request(proto::GetNoFSegmentsByNameRequest {
                 segment_name: segment_name.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response
             .owners
@@ -272,11 +272,11 @@ impl MooncakeClient {
     pub async fn query_segments(&mut self, segment_name: &str) -> StoreResult<SegmentUsage> {
         let response = self
             .master
-            .query_segments(proto::QuerySegmentsRequest {
+            .query_segments(self.rpc_request(proto::QuerySegmentsRequest {
                 segment_name: segment_name.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(SegmentUsage {
             total_size: response.total_size,
@@ -290,9 +290,9 @@ impl MooncakeClient {
     pub async fn get_segments_detail(&mut self) -> StoreResult<Vec<SegmentDetail>> {
         let response = self
             .master
-            .get_segments_detail(proto::GetSegmentsDetailRequest {})
+            .get_segments_detail(self.rpc_request(proto::GetSegmentsDetailRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response
             .segments
@@ -327,9 +327,9 @@ impl MooncakeClient {
     pub async fn get_storage_config(&mut self) -> StoreResult<StorageConfig> {
         let response = self
             .master
-            .get_storage_config(proto::GetStorageConfigRequest {})
+            .get_storage_config(self.rpc_request(proto::GetStorageConfigRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(StorageConfig {
             fs_dir: response.fs_dir,
@@ -344,11 +344,11 @@ impl MooncakeClient {
     pub async fn query_segment_status(&mut self, segment_name: &str) -> StoreResult<i32> {
         let response = self
             .master
-            .query_segment_status(proto::QuerySegmentStatusRequest {
+            .query_segment_status(self.rpc_request(proto::QuerySegmentStatusRequest {
                 segment_name: segment_name.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.status)
     }
@@ -359,11 +359,11 @@ impl MooncakeClient {
     pub async fn query_segment_status_by_id(&mut self, segment_id: Uuid) -> StoreResult<i32> {
         let response = self
             .master
-            .query_segment_status_by_id(proto::QuerySegmentStatusByIdRequest {
+            .query_segment_status_by_id(self.rpc_request(proto::QuerySegmentStatusByIdRequest {
                 segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.status)
     }
@@ -374,9 +374,9 @@ impl MooncakeClient {
     pub async fn get_fsdir(&mut self) -> StoreResult<String> {
         let response = self
             .master
-            .get_fsdir(proto::GetFsdirRequest {})
+            .get_fsdir(self.rpc_request(proto::GetFsdirRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.fs_dir)
     }
@@ -387,9 +387,9 @@ impl MooncakeClient {
     pub async fn service_ready(&mut self) -> StoreResult<String> {
         let response = self
             .master
-            .service_ready(proto::ServiceReadyRequest {})
+            .service_ready(self.rpc_request(proto::ServiceReadyRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.version)
     }
@@ -400,9 +400,9 @@ impl MooncakeClient {
     pub async fn get_all_keys_for_admin(&mut self) -> StoreResult<Vec<String>> {
         let response = self
             .master
-            .get_all_keys_for_admin(proto::GetAllKeysForAdminRequest {})
+            .get_all_keys_for_admin(self.rpc_request(proto::GetAllKeysForAdminRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.keys)
     }
@@ -413,9 +413,9 @@ impl MooncakeClient {
     pub async fn get_all_segments_for_admin(&mut self) -> StoreResult<Vec<String>> {
         let response = self
             .master
-            .get_all_segments_for_admin(proto::GetAllSegmentsForAdminRequest {})
+            .get_all_segments_for_admin(self.rpc_request(proto::GetAllSegmentsForAdminRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.segments)
     }
@@ -429,11 +429,11 @@ impl MooncakeClient {
     ) -> StoreResult<SegmentUsage> {
         let response = self
             .master
-            .query_segment_for_admin(proto::QuerySegmentsRequest {
+            .query_segment_for_admin(self.rpc_request(proto::QuerySegmentsRequest {
                 segment_name: segment_name.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(SegmentUsage {
             total_size: response.total_size,
@@ -447,9 +447,9 @@ impl MooncakeClient {
     pub async fn calc_cache_stats(&mut self) -> StoreResult<HashMap<String, f64>> {
         let response = self
             .master
-            .calc_cache_stats(proto::CalcCacheStatsRequest {})
+            .calc_cache_stats(self.rpc_request(proto::CalcCacheStatsRequest {}))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.stats)
     }

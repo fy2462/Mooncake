@@ -42,6 +42,7 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
@@ -234,6 +235,10 @@ pub struct MooncakeClient {
     /// This intentionally stores plain addresses rather than depending on the
     /// master crate's HA coordinator types, keeping the client crate standalone.
     pub(crate) master_candidates: RwLock<Vec<String>>,
+
+    /// Per-request timeout applied to master RPCs. `None` disables client-side
+    /// deadlines and matches C++ when MC_RPC_TIMEOUT_MS is negative.
+    pub(crate) rpc_request_timeout: Option<Duration>,
 
     /// Default tenant used by convenience APIs that do not take an explicit
     /// tenant parameter. Empty string preserves the legacy/default namespace.

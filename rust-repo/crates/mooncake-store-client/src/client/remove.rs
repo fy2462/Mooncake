@@ -13,7 +13,6 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::StoreError;
 
 use super::read::scoped_cache_key;
 use super::MooncakeClient;
@@ -64,9 +63,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.clone(),
         };
         self.master
-            .remove(request)
+            .remove(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
         Ok(())
     }
@@ -83,9 +82,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .exist_key(request)
+            .exist_key(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.exists)
     }
@@ -113,9 +112,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_remove(request)
+            .batch_remove(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         for (key, status) in keys.iter().zip(response.statuses.iter()) {
             if *status == 0 {
@@ -140,9 +139,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_exist_key(request)
+            .batch_exist_key(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.results)
     }
@@ -173,9 +172,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .remove_by_regex(request)
+            .remove_by_regex(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if response.removed_count > 0 {
             self.invalidate_hot_cache_regex_for_tenant(pattern, &tenant_id);
@@ -197,9 +196,9 @@ impl MooncakeClient {
         let request = proto::RemoveAllRequest { force, tenant_id };
         let response = self
             .master
-            .remove_all(request)
+            .remove_all(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if let Some(ref cache) = self.hot_cache {
             cache.clear();

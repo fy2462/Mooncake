@@ -14,7 +14,7 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
+use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -50,9 +50,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_query_ip(request)
+            .batch_query_ip(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response
             .ips
@@ -96,9 +96,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_replica_clear(request)
+            .batch_replica_clear(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.cleared_keys)
     }
@@ -145,9 +145,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_put_start(request)
+            .batch_put_start(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(self.replicas_from_proto(&response.replicas))
     }
@@ -179,9 +179,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_put_start(request)
+            .batch_put_start(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if !response.results.is_empty() {
             return Ok(response
@@ -251,9 +251,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_put_end(request)
+            .batch_put_end(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.statuses)
     }
@@ -286,9 +286,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_put_revoke(request)
+            .batch_put_revoke(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.statuses)
     }
@@ -328,9 +328,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_upsert_end(request)
+            .batch_upsert_end(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.statuses)
     }
@@ -368,9 +368,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_upsert_start(request)
+            .batch_upsert_start(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
 
         if !response.results.is_empty() {
@@ -433,9 +433,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .batch_upsert_revoke(request)
+            .batch_upsert_revoke(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.statuses)
     }

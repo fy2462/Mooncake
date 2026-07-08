@@ -33,9 +33,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .put_end(end_request)
+            .put_end(self.rpc_request(end_request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -52,9 +52,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .put_revoke(revoke_req)
+            .put_revoke(self.rpc_request(revoke_req))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -145,7 +145,7 @@ impl MooncakeClient {
         if status.code() == tonic::Code::AlreadyExists {
             StoreError::ObjectExists(key.to_string())
         } else {
-            StoreError::Internal(status.to_string())
+            Self::rpc_status_to_error(status)
         }
     }
 
@@ -319,7 +319,7 @@ impl MooncakeClient {
         };
 
         tracing::info!(target: "te_debug", %key, "put: calling put_start");
-        let response = match self.master.put_start(request).await {
+        let response = match self.master.put_start(self.rpc_request(request)).await {
             Ok(response) => response.into_inner(),
             Err(status) => {
                 tracing::error!(target: "te_debug", %key, error = %status, "put: put_start FAILED");

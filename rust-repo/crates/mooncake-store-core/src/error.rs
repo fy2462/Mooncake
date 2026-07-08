@@ -81,6 +81,11 @@ pub enum StoreError {
     #[error("service unavailable")]
     ServiceUnavailable,
 
+    /// The master RPC did not complete before the configured deadline.
+    /// master RPC 未在配置的截止时间内完成。
+    #[error("rpc timeout: {0}")]
+    RpcTimeout(String),
+
     /// Error returned by the etcd metadata backend.
     /// etcd 元数据后端返回的错误。
     /// 对应 C++ 中 etcd::Client 操作的异常。

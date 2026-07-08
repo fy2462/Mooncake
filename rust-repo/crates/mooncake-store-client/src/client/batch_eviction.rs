@@ -1,7 +1,6 @@
 use super::MooncakeClient;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::StoreError;
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------
@@ -29,9 +28,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .evict_disk_replica(request)
+            .evict_disk_replica(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -60,9 +59,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .batch_evict_disk_replica(request)
+            .batch_evict_disk_replica(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 }

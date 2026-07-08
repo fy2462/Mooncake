@@ -269,9 +269,9 @@ impl MooncakeClient {
 
         let response = self
             .master
-            .upsert(request)
+            .upsert(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
 
@@ -287,7 +287,7 @@ impl MooncakeClient {
                     replica_type: 0,
                     tenant_id: tenant_id.clone(),
                 };
-                let _ = self.master.put_revoke(revoke_req).await;
+                let _ = self.master.put_revoke(self.rpc_request(revoke_req)).await;
                 return Err(e);
             }
         }
@@ -307,9 +307,9 @@ impl MooncakeClient {
             }],
         };
         self.master
-            .batch_upsert_end(end_request)
+            .batch_upsert_end(self.rpc_request(end_request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
 
         Ok(replicas)
     }
@@ -363,9 +363,9 @@ impl MooncakeClient {
 
         let response = self
             .master
-            .upsert(request)
+            .upsert(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
 
@@ -380,7 +380,7 @@ impl MooncakeClient {
                     replica_type: 0,
                     tenant_id: tenant_id.clone(),
                 };
-                let _ = self.master.put_revoke(revoke_req).await;
+                let _ = self.master.put_revoke(self.rpc_request(revoke_req)).await;
                 return Err(e);
             }
         }
@@ -395,9 +395,9 @@ impl MooncakeClient {
             }],
         };
         self.master
-            .batch_upsert_end(end_request)
+            .batch_upsert_end(self.rpc_request(end_request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
 
         Ok(replicas)
     }

@@ -70,9 +70,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .create_copy_task(request)
+            .create_copy_task(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         match response.task_id {
             Some(id) => Ok(Uuid::from_u64_pair(id.high, id.low)),
@@ -103,9 +103,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .create_move_task(request)
+            .create_move_task(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         match response.task_id {
             Some(id) => Ok(Uuid::from_u64_pair(id.high, id.low)),
@@ -132,9 +132,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .query_task(request)
+            .query_task(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response)
     }
@@ -167,9 +167,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .fetch_tasks(request)
+            .fetch_tasks(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         Ok(response.tasks)
     }
@@ -211,9 +211,9 @@ impl MooncakeClient {
             }),
         };
         self.master
-            .mark_task_to_complete(request)
+            .mark_task_to_complete(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 

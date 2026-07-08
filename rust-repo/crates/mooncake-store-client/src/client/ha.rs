@@ -93,22 +93,23 @@ impl MooncakeClient {
             mounted_segments: vec![],
             tenant_id: self.tenant_id.clone(),
         };
-        let response = match self.master.ping(request).await {
+        let response = match self.master.ping(self.rpc_request(request)).await {
             Ok(response) => response,
             Err(first_error) => {
                 self.last_ping_success.store(false, Ordering::SeqCst);
                 self.failover_master().await?;
                 self.master
-                    .ping(proto::PingRequest {
+                    .ping(self.rpc_request(proto::PingRequest {
                         client_id: Some(self.client_id_proto()),
                         mounted_segments: vec![],
                         tenant_id: self.tenant_id.clone(),
-                    })
+                    }))
                     .await
                     .map_err(|second_error| {
                         self.last_ping_success.store(false, Ordering::SeqCst);
+                        let mapped = Self::rpc_status_to_error(second_error);
                         StoreError::Internal(format!(
-                            "ping failed before failover ({first_error}); after failover: {second_error}"
+                            "ping failed before failover ({first_error}); after failover: {mapped}"
                         ))
                     })?
             }
@@ -148,6 +149,7 @@ impl MooncakeClient {
         let segment_size = self.segment_size;
         let te_endpoint = self.local_hostname.clone();
         let protocol = self.protocol.clone();
+        let rpc_request_timeout = self.rpc_request_timeout;
         // SAFETY: segment_buffer is allocated in create() and never moved/reallocated
         // during the client's lifetime, so its pointer remains valid.
         let base_addr = self
@@ -168,7 +170,10 @@ impl MooncakeClient {
                 te_endpoints: vec![te_endpoint],
                 protocols: vec![protocol],
             };
-            match master.re_mount_segment(request).await {
+            match master
+                .re_mount_segment(Self::rpc_request_with_timeout(request, rpc_request_timeout))
+                .await
+            {
                 Ok(_) => {
                     tracing::info!("ReMountSegment succeeded");
                 }

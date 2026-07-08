@@ -255,16 +255,16 @@ impl MooncakeClient {
     ) -> StoreResult<()> {
         let response = self
             .master
-            .mount_segment(proto::MountSegmentRequest {
+            .mount_segment(self.rpc_request(proto::MountSegmentRequest {
                 client_id: Some(self.client_id_proto()),
                 segment_name: segment_name.to_string(),
                 size,
                 base_addr,
                 te_endpoint: self.local_hostname.clone(),
                 protocol: self.protocol.clone(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let segment_id = response.segment_id.as_ref().ok_or_else(|| {
             StoreError::Internal("MountSegment response missing segment_id".to_string())
@@ -307,21 +307,21 @@ impl MooncakeClient {
 
         if grace_period_ms > 0 {
             self.master
-                .graceful_unmount_segment(proto::GracefulUnmountSegmentRequest {
+                .graceful_unmount_segment(self.rpc_request(proto::GracefulUnmountSegmentRequest {
                     segment_id: Some(segment_id_proto),
                     client_id: Some(self.client_id_proto()),
                     grace_period_ms,
-                })
+                }))
                 .await
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
+                .map_err(Self::rpc_status_to_error)?;
         } else {
             self.master
-                .unmount_segment(proto::UnmountSegmentRequest {
+                .unmount_segment(self.rpc_request(proto::UnmountSegmentRequest {
                     segment_id: Some(segment_id_proto),
                     client_id: Some(self.client_id_proto()),
-                })
+                }))
                 .await
-                .map_err(|e| StoreError::Internal(e.to_string()))?;
+                .map_err(Self::rpc_status_to_error)?;
         };
         self.mounted_segment_ids.write().remove(segment_name);
         self.unregister_local_endpoint(segment_name);

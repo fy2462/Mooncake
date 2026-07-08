@@ -2,7 +2,6 @@ use super::storage::OffloadTaskItem;
 use super::MooncakeClient;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::StoreError;
 use std::collections::HashMap;
 
 impl MooncakeClient {
@@ -38,12 +37,12 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<OffloadTaskItem>> {
         let response = self
             .master
-            .offload_object_heartbeat(proto::OffloadObjectHeartbeatRequest {
+            .offload_object_heartbeat(self.rpc_request(proto::OffloadObjectHeartbeatRequest {
                 client_id: Some(self.client_id_proto()),
                 enable_offloading,
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if !response.tasks.is_empty() {
             return Ok(response.tasks.into_iter().map(Into::into).collect());
@@ -70,12 +69,12 @@ impl MooncakeClient {
     /// C++ equivalent: `Client::ReportSsdCapacity(bytes)`
     pub async fn report_ssd_capacity(&mut self, bytes: i64) -> StoreResult<()> {
         self.master
-            .report_ssd_capacity(proto::ReportSsdCapacityRequest {
+            .report_ssd_capacity(self.rpc_request(proto::ReportSsdCapacityRequest {
                 client_id: Some(self.client_id_proto()),
                 ssd_total_capacity_bytes: bytes,
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -110,21 +109,23 @@ impl MooncakeClient {
         metadatas: Vec<proto::StorageObjectMetadata>,
     ) -> StoreResult<()> {
         self.master
-            .notify_offload_success(proto::NotifyOffloadSuccessRequest {
-                client_id: Some(self.client_id_proto()),
-                keys: tasks.iter().map(|task| task.key.clone()).collect(),
-                metadatas,
-                tasks: tasks
-                    .into_iter()
-                    .map(|task| proto::OffloadTaskItem {
-                        tenant_id: task.tenant_id,
-                        key: task.key,
-                        size: task.size,
-                    })
-                    .collect(),
-            })
+            .notify_offload_success(
+                self.rpc_request(proto::NotifyOffloadSuccessRequest {
+                    client_id: Some(self.client_id_proto()),
+                    keys: tasks.iter().map(|task| task.key.clone()).collect(),
+                    metadatas,
+                    tasks: tasks
+                        .into_iter()
+                        .map(|task| proto::OffloadTaskItem {
+                            tenant_id: task.tenant_id,
+                            key: task.key,
+                            size: task.size,
+                        })
+                        .collect(),
+                }),
+            )
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 

@@ -65,9 +65,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .copy_start(request)
+            .copy_start(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let source = self
             .replicas_from_proto(std::slice::from_ref(
@@ -99,9 +99,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .copy_end(request)
+            .copy_end(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -123,9 +123,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .copy_revoke(request)
+            .copy_revoke(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -156,9 +156,9 @@ impl MooncakeClient {
         };
         let response = self
             .master
-            .move_start(request)
+            .move_start(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let source = self
             .replicas_from_proto(std::slice::from_ref(
@@ -201,9 +201,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .move_end(request)
+            .move_end(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -225,9 +225,9 @@ impl MooncakeClient {
             tenant_id: tenant_id.to_string(),
         };
         self.master
-            .move_revoke(request)
+            .move_revoke(self.rpc_request(request))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 

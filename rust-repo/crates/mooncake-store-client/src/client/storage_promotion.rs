@@ -32,11 +32,11 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<PromotionTaskItem>> {
         let response = self
             .master
-            .promotion_object_heartbeat(proto::PromotionObjectHeartbeatRequest {
+            .promotion_object_heartbeat(self.rpc_request(proto::PromotionObjectHeartbeatRequest {
                 client_id: Some(self.client_id_proto()),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if !response.tasks.is_empty() {
             return Ok(response.tasks.into_iter().map(Into::into).collect());
@@ -83,15 +83,15 @@ impl MooncakeClient {
     ) -> StoreResult<ReplicaDescriptor> {
         let response = self
             .master
-            .promotion_alloc_start(proto::PromotionAllocStartRequest {
+            .promotion_alloc_start(self.rpc_request(proto::PromotionAllocStartRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 size,
                 preferred_segments,
                 tenant_id: tenant_id.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?
+            .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let descriptor = response
             .memory_descriptor
@@ -120,13 +120,13 @@ impl MooncakeClient {
         tenant_id: &str,
     ) -> StoreResult<()> {
         self.master
-            .notify_promotion_success(proto::NotifyPromotionSuccessRequest {
+            .notify_promotion_success(self.rpc_request(proto::NotifyPromotionSuccessRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 tenant_id: tenant_id.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
@@ -148,13 +148,13 @@ impl MooncakeClient {
         tenant_id: &str,
     ) -> StoreResult<()> {
         self.master
-            .notify_promotion_failure(proto::NotifyPromotionFailureRequest {
+            .notify_promotion_failure(self.rpc_request(proto::NotifyPromotionFailureRequest {
                 client_id: Some(self.client_id_proto()),
                 key: key.to_string(),
                 tenant_id: tenant_id.to_string(),
-            })
+            }))
             .await
-            .map_err(|e| StoreError::Internal(e.to_string()))?;
+            .map_err(Self::rpc_status_to_error)?;
         Ok(())
     }
 
