@@ -55,9 +55,24 @@ fn test_hot_cache_evicts_when_full() {
 #[test]
 fn test_hot_cache_rejects_oversized() {
     let cache = LocalHotCache::new(4096, 10);
-    let big_value = vec![0u8; 3000];
+    let big_value = vec![0u8; 4097];
     cache.put("big", &big_value);
     assert!(cache.get("big").is_none());
+}
+
+#[test]
+fn test_hot_cache_accepts_larger_value_after_reuse() {
+    let cache = LocalHotCache::new(4096, 10);
+    cache.put("small", &[b's'; 1024]);
+    assert_eq!(cache.get("small").unwrap().len(), 1024);
+    cache.put("filler", &[b'f'; 3072]);
+    assert_eq!(cache.get("filler").unwrap().len(), 3072);
+
+    let larger = vec![b'L'; 3072];
+    cache.put("larger", &larger);
+
+    assert_eq!(cache.get("larger"), Some(larger));
+    assert!(cache.get("small").is_none());
 }
 
 #[test]

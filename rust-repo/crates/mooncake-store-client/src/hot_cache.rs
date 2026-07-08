@@ -22,7 +22,7 @@
 //! ### 限制 (Limitations)
 //!
 //! - 不支持并发读写同一数据区域
-//! - 单个 value 超过 `max_size / 2` 时直接丢弃（避免环形缓冲区频繁绕回）
+//! - 单个 value 超过 `max_size` 时直接丢弃
 //! - 绕回时清空整个缓存（简化实现）
 
 use parking_lot::Mutex;
@@ -90,13 +90,15 @@ impl LocalHotCache {
     /// (Put a key/value pair into the cache.)
     ///
     /// ## 行为 (Behavior)
-    /// 1. 若 value 超过 `max_size / 2`，直接丢弃（避免占据过多空间导致频繁驱逐）
+    /// 1. 若 value 超过 `max_size`，直接丢弃
     /// 2. 循环驱逐：当空间不足或条目数超过 `max_entries` 时，驱逐 offset 最小的条目
     /// 3. 若写入位置 + value 超出缓冲区末尾，绕回到开头并清空所有条目
     /// 4. 将 value 拷贝到环形缓冲区，更新 entries 索引和 tail 指针
     pub fn put(&self, key: &str, value: &[u8]) {
-        // 拒绝过大的值 (reject oversized values — they'd cause constant eviction)
-        if value.len() > self.max_size / 2 {
+        // C++ LocalHotCache admits any value that fits the physical cache block.
+        // This ring-buffer variant has one physical buffer, so the hard limit is
+        // max_size rather than a conservative fraction of it.
+        if value.len() > self.max_size {
             return;
         }
 
