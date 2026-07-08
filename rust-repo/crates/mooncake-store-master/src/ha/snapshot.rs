@@ -56,8 +56,15 @@ pub struct SnapshotDescriptor {
 
 impl SnapshotDescriptor {
     pub fn new(snapshot_id: impl Into<String>) -> Self {
+        Self::new_with_snapshot_root(build_snapshot_root(""), snapshot_id)
+    }
+
+    pub fn new_with_snapshot_root(
+        snapshot_root: impl AsRef<str>,
+        snapshot_id: impl Into<String>,
+    ) -> Self {
         let snapshot_id = snapshot_id.into();
-        let object_prefix = build_snapshot_prefix(&snapshot_id);
+        let object_prefix = build_snapshot_prefix(snapshot_root.as_ref(), &snapshot_id);
         Self {
             manifest_key: format!("{object_prefix}{SNAPSHOT_MANIFEST_FILE}"),
             object_prefix,
@@ -75,6 +82,7 @@ pub trait SnapshotCatalogStore: Send + Sync {
     fn get_latest(&self) -> Result<Option<SnapshotDescriptor>, HaError>;
     fn list(&self, limit: usize) -> Result<Vec<SnapshotDescriptor>, HaError>;
     fn delete(&self, snapshot_id: &str) -> Result<(), HaError>;
+    fn get_snapshot_root(&self) -> &str;
 }
 
 pub trait SnapshotObjectStore: Send + Sync {
@@ -399,6 +407,7 @@ impl SnapshotObjectStore for S3SnapshotObjectStore {
 /// Embedded catalog store backed by files under the snapshot root.
 pub struct EmbeddedSnapshotCatalogStore {
     object_store: Arc<dyn SnapshotObjectStore>,
+    snapshot_root: String,
 }
 
 impl EmbeddedSnapshotCatalogStore {
@@ -407,7 +416,17 @@ impl EmbeddedSnapshotCatalogStore {
     }
 
     pub fn with_object_store(object_store: Arc<dyn SnapshotObjectStore>) -> Self {
-        Self { object_store }
+        Self::with_object_store_and_cluster_id(object_store, "")
+    }
+
+    pub fn with_object_store_and_cluster_id(
+        object_store: Arc<dyn SnapshotObjectStore>,
+        cluster_id: &str,
+    ) -> Self {
+        Self {
+            object_store,
+            snapshot_root: build_snapshot_root(cluster_id),
+        }
     }
 }
 
@@ -415,16 +434,21 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
     fn publish(&self, snapshot: &SnapshotDescriptor) -> Result<(), HaError> {
         validate_snapshot_id(&snapshot.snapshot_id)?;
         self.object_store.upload_string(
-            &build_descriptor_key(&snapshot.snapshot_id),
+            &build_descriptor_key(&self.snapshot_root, &snapshot.snapshot_id),
             &serialize_snapshot_descriptor(snapshot),
         )?;
-        self.object_store
-            .upload_string(&build_latest_key(), &snapshot.snapshot_id)?;
+        self.object_store.upload_string(
+            &build_latest_key(&self.snapshot_root),
+            &snapshot.snapshot_id,
+        )?;
         Ok(())
     }
 
     fn get_latest(&self) -> Result<Option<SnapshotDescriptor>, HaError> {
-        let snapshot_id = match self.object_store.download_string(&build_latest_key()) {
+        let snapshot_id = match self
+            .object_store
+            .download_string(&build_latest_key(&self.snapshot_root))
+        {
             Ok(value) => value.trim().to_string(),
             Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
                 return Ok(None)
@@ -437,18 +461,19 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
         validate_snapshot_id(&snapshot_id)?;
         let payload = self
             .object_store
-            .download_string(&build_descriptor_key(&snapshot_id))?;
-        deserialize_snapshot_descriptor(&snapshot_id, &payload).map(Some)
+            .download_string(&build_descriptor_key(&self.snapshot_root, &snapshot_id))?;
+        deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload).map(Some)
     }
 
     fn list(&self, limit: usize) -> Result<Vec<SnapshotDescriptor>, HaError> {
         let descriptor_suffix = format!("/{SNAPSHOT_DESCRIPTOR_FILE}");
+        let snapshot_root = self.snapshot_root.as_str();
         let mut ids: Vec<String> = self
             .object_store
-            .list_objects_with_prefix(SNAPSHOT_CATALOG_ROOT)?
+            .list_objects_with_prefix(snapshot_root)?
             .into_iter()
             .filter_map(|key| {
-                let trimmed = key.strip_prefix(&format!("{SNAPSHOT_CATALOG_ROOT}/"))?;
+                let trimmed = key.strip_prefix(snapshot_root)?;
                 let snapshot_id = trimmed.strip_suffix(&descriptor_suffix)?;
                 is_valid_snapshot_id(snapshot_id).then(|| snapshot_id.to_string())
             })
@@ -462,9 +487,11 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
         for id in ids {
             if let Ok(payload) = self
                 .object_store
-                .download_string(&build_descriptor_key(&id))
+                .download_string(&build_descriptor_key(&self.snapshot_root, &id))
             {
-                if let Ok(descriptor) = deserialize_snapshot_descriptor(&id, &payload) {
+                if let Ok(descriptor) =
+                    deserialize_snapshot_descriptor(&self.snapshot_root, &id, &payload)
+                {
                     snapshots.push(descriptor);
                 }
             }
@@ -480,13 +507,17 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
             .map(|latest| latest.snapshot_id.as_str() == snapshot_id)
             .unwrap_or(false);
         self.object_store
-            .delete_objects_with_prefix(&build_snapshot_prefix(snapshot_id))?;
+            .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
         if deletes_latest {
             let _ = self
                 .object_store
-                .delete_objects_with_prefix(&build_latest_key());
+                .delete_objects_with_prefix(&build_latest_key(&self.snapshot_root));
         }
         Ok(())
+    }
+
+    fn get_snapshot_root(&self) -> &str {
+        &self.snapshot_root
     }
 }
 
@@ -494,6 +525,7 @@ pub struct RedisSnapshotCatalogStore {
     client: redis::Client,
     namespace: String,
     object_store: Arc<dyn SnapshotObjectStore>,
+    snapshot_root: String,
 }
 
 impl RedisSnapshotCatalogStore {
@@ -504,10 +536,13 @@ impl RedisSnapshotCatalogStore {
     ) -> Result<Self, HaError> {
         let client = redis::Client::open(connstring)
             .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog: {e}")))?;
+        let namespace = namespace.into();
+        let snapshot_root = build_snapshot_root(&namespace);
         Ok(Self {
             client,
-            namespace: namespace.into(),
+            namespace,
             object_store,
+            snapshot_root,
         })
     }
 
@@ -536,7 +571,7 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
     fn publish(&self, snapshot: &SnapshotDescriptor) -> Result<(), HaError> {
         validate_snapshot_id(&snapshot.snapshot_id)?;
         self.object_store.upload_string(
-            &build_descriptor_key(&snapshot.snapshot_id),
+            &build_descriptor_key(&self.snapshot_root, &snapshot.snapshot_id),
             &serialize_snapshot_descriptor(snapshot),
         )?;
         let mut connection = self.connection()?;
@@ -568,9 +603,12 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
         validate_snapshot_id(&snapshot_id)?;
         match self
             .object_store
-            .download_string(&build_descriptor_key(&snapshot_id))
+            .download_string(&build_descriptor_key(&self.snapshot_root, &snapshot_id))
         {
-            Ok(payload) => deserialize_snapshot_descriptor(&snapshot_id, &payload).map(Some),
+            Ok(payload) => {
+                deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload)
+                    .map(Some)
+            }
             Err(error) if self.object_store.is_not_found_error(&error.to_string()) => Ok(None),
             Err(error) => Err(error),
         }
@@ -596,9 +634,11 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
             }
             if let Ok(payload) = self
                 .object_store
-                .download_string(&build_descriptor_key(&snapshot_id))
+                .download_string(&build_descriptor_key(&self.snapshot_root, &snapshot_id))
             {
-                if let Ok(descriptor) = deserialize_snapshot_descriptor(&snapshot_id, &payload) {
+                if let Ok(descriptor) =
+                    deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload)
+                {
                     snapshots.push(descriptor);
                 }
             }
@@ -609,7 +649,7 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
     fn delete(&self, snapshot_id: &str) -> Result<(), HaError> {
         validate_snapshot_id(snapshot_id)?;
         self.object_store
-            .delete_objects_with_prefix(&build_snapshot_prefix(snapshot_id))?;
+            .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
         let mut connection = self.connection()?;
         let latest: Option<String> = redis::cmd("GET")
             .arg(self.latest_key())
@@ -627,6 +667,10 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
                 .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog delete: {e}")))?;
         }
         Ok(())
+    }
+
+    fn get_snapshot_root(&self) -> &str {
+        &self.snapshot_root
     }
 }
 
@@ -763,19 +807,27 @@ fn sanitize_redis_hash_tag(value: &str) -> String {
         .replace(['{', '}'], "_")
 }
 
-fn build_snapshot_prefix(snapshot_id: &str) -> String {
-    format!("{SNAPSHOT_CATALOG_ROOT}/{snapshot_id}/")
+fn build_snapshot_root(cluster_id: &str) -> String {
+    if cluster_id.is_empty() {
+        format!("{SNAPSHOT_CATALOG_ROOT}/")
+    } else {
+        format!("{SNAPSHOT_CATALOG_ROOT}/{cluster_id}/")
+    }
 }
 
-fn build_descriptor_key(snapshot_id: &str) -> String {
+fn build_snapshot_prefix(snapshot_root: &str, snapshot_id: &str) -> String {
+    format!("{snapshot_root}{snapshot_id}/")
+}
+
+fn build_descriptor_key(snapshot_root: &str, snapshot_id: &str) -> String {
     format!(
         "{}{SNAPSHOT_DESCRIPTOR_FILE}",
-        build_snapshot_prefix(snapshot_id)
+        build_snapshot_prefix(snapshot_root, snapshot_id)
     )
 }
 
-fn build_latest_key() -> String {
-    format!("{SNAPSHOT_CATALOG_ROOT}/{SNAPSHOT_LATEST_FILE}")
+fn build_latest_key(snapshot_root: &str) -> String {
+    format!("{snapshot_root}{SNAPSHOT_LATEST_FILE}")
 }
 
 fn serialize_snapshot_descriptor(descriptor: &SnapshotDescriptor) -> String {
@@ -786,6 +838,7 @@ fn serialize_snapshot_descriptor(descriptor: &SnapshotDescriptor) -> String {
 }
 
 fn deserialize_snapshot_descriptor(
+    snapshot_root: &str,
     snapshot_id: &str,
     payload: &str,
 ) -> Result<SnapshotDescriptor, HaError> {
@@ -811,7 +864,7 @@ fn deserialize_snapshot_descriptor(
         ));
     }
 
-    let mut descriptor = SnapshotDescriptor::new(snapshot_id);
+    let mut descriptor = SnapshotDescriptor::new_with_snapshot_root(snapshot_root, snapshot_id);
     descriptor.last_included_seq = last_included_seq;
     descriptor.producer_view_version = producer_view_version;
     descriptor.created_at_ms = created_at_ms;

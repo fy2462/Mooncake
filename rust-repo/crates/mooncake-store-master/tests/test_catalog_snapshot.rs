@@ -4,9 +4,10 @@ use mooncake_store_core::{
     TaskType,
 };
 use mooncake_store_master::ha::{
-    CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, LoadedSnapshot,
-    LocalFileSnapshotObjectStore, SnapshotCatalogStore, SnapshotDescriptor, SnapshotObjectStore,
-    SnapshotProvider,
+    create_catalog_backed_snapshot_provider, CatalogBackedSnapshotProvider,
+    EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalFileSnapshotObjectStore,
+    SnapshotCatalogStore, SnapshotCatalogStoreType, SnapshotDescriptor, SnapshotObjectStore,
+    SnapshotObjectStoreType, SnapshotProvider,
 };
 use mooncake_store_master::proto::SegmentStatus;
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry, TaskEntry};
@@ -319,6 +320,78 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
     assert_eq!(loaded.tasks.len(), 1);
     assert_eq!(loaded.tasks[0].info.id, task_id);
     assert_eq!(loaded.tasks[0].info.status, TaskStatus::Failed);
+}
+
+#[test]
+fn test_embedded_catalog_scopes_object_keys_by_cluster_id() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog =
+        EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(object_store, "cluster-a");
+    let mut descriptor = SnapshotDescriptor::new_with_snapshot_root(
+        catalog.get_snapshot_root(),
+        "20260610_120001_002",
+    );
+    descriptor.last_included_seq = 77;
+
+    catalog.publish(&descriptor).unwrap();
+
+    assert_eq!(
+        catalog.get_snapshot_root(),
+        "mooncake_master_snapshot/cluster-a/"
+    );
+    assert!(root
+        .path()
+        .join("mooncake_master_snapshot/cluster-a/latest.txt")
+        .exists());
+    assert!(root
+        .path()
+        .join("mooncake_master_snapshot/cluster-a/20260610_120001_002/descriptor.txt")
+        .exists());
+    assert!(!root
+        .path()
+        .join("mooncake_master_snapshot/latest.txt")
+        .exists());
+}
+
+#[test]
+fn test_catalog_provider_factory_publishes_cluster_scoped_snapshot_objects() {
+    let root = tempdir().unwrap();
+    let provider = create_catalog_backed_snapshot_provider(
+        "cluster-a",
+        SnapshotObjectStoreType::Local,
+        SnapshotCatalogStoreType::Embedded,
+        Some(root.path().to_path_buf()),
+        None,
+    )
+    .unwrap();
+    let snapshot = LoadedSnapshot {
+        snapshot_id: "20260610_120003_004".to_string(),
+        snapshot_sequence_id: 11,
+        segments: Vec::new(),
+        nof_segments: Vec::new(),
+        objects: Vec::new(),
+        tasks: Vec::new(),
+    };
+
+    let descriptor = provider.publish_loaded_snapshot(&snapshot, 1).unwrap();
+
+    assert_eq!(
+        descriptor.object_prefix,
+        "mooncake_master_snapshot/cluster-a/20260610_120003_004/"
+    );
+    assert!(root
+        .path()
+        .join("mooncake_master_snapshot/cluster-a/latest.txt")
+        .exists());
+    assert!(root
+        .path()
+        .join("mooncake_master_snapshot/cluster-a/20260610_120003_004/manifest.txt")
+        .exists());
+    assert!(!root
+        .path()
+        .join("mooncake_master_snapshot/20260610_120003_004/manifest.txt")
+        .exists());
 }
 
 #[test]

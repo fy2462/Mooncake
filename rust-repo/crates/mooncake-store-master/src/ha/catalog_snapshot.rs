@@ -53,7 +53,10 @@ impl CatalogBackedSnapshotProvider {
         } else {
             snapshot.snapshot_id.clone()
         };
-        let mut descriptor = SnapshotDescriptor::new(snapshot_id);
+        let mut descriptor = SnapshotDescriptor::new_with_snapshot_root(
+            self.catalog_store.get_snapshot_root(),
+            snapshot_id,
+        );
         descriptor.last_included_seq = snapshot.snapshot_sequence_id;
         descriptor.producer_view_version = producer_view_version;
 
@@ -114,7 +117,10 @@ pub fn create_catalog_backed_snapshot_provider(
     };
     let catalog_store: Box<dyn SnapshotCatalogStore> = match catalog_store_type {
         SnapshotCatalogStoreType::Embedded => Box::new(
-            EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone()),
+            EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(
+                object_store.clone(),
+                &cluster_id,
+            ),
         ),
         SnapshotCatalogStoreType::Redis => {
             let connstring = catalog_connstring
@@ -149,7 +155,11 @@ impl SnapshotProvider for CatalogBackedSnapshotProvider {
             return Ok(None);
         };
         let prefix = if descriptor.object_prefix.is_empty() {
-            format!("mooncake_master_snapshot/{}/", descriptor.snapshot_id)
+            format!(
+                "{}{}/",
+                self.catalog_store.get_snapshot_root(),
+                descriptor.snapshot_id
+            )
         } else {
             descriptor.object_prefix.clone()
         };
