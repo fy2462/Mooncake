@@ -50,7 +50,7 @@ impl Default for BucketBackendConfig {
         Self {
             bucket_size_limit: 256 * 1024 * 1024,
             bucket_keys_limit: 500,
-            eviction_policy: BucketEvictionPolicy::None,
+            eviction_policy: BucketEvictionPolicy::Fifo,
             max_total_size: 0,
         }
     }
@@ -59,27 +59,33 @@ impl Default for BucketBackendConfig {
 impl BucketBackendConfig {
     pub fn from_environment() -> Self {
         let mut config = Self::default();
-        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_SIZE_LIMIT") {
-            if let Ok(parsed) = value.parse::<u64>() {
-                config.bucket_size_limit = parsed;
-            }
+        if let Some(parsed) = parse_env_u64(&[
+            "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES",
+            "MOONCAKE_BUCKET_SIZE_LIMIT",
+        ]) {
+            config.bucket_size_limit = parsed;
         }
-        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_KEYS_LIMIT") {
-            if let Ok(parsed) = value.parse::<usize>() {
-                config.bucket_keys_limit = parsed;
-            }
+        if let Some(parsed) = parse_env_usize(&[
+            "MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT",
+            "MOONCAKE_BUCKET_KEYS_LIMIT",
+        ]) {
+            config.bucket_keys_limit = parsed;
         }
-        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_EVICTION_POLICY") {
+        if let Some(value) = get_first_env(&[
+            "MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY",
+            "MOONCAKE_BUCKET_EVICTION_POLICY",
+        ]) {
             config.eviction_policy = match value.to_ascii_lowercase().as_str() {
                 "fifo" => BucketEvictionPolicy::Fifo,
                 "lru" => BucketEvictionPolicy::Lru,
                 _ => BucketEvictionPolicy::None,
             };
         }
-        if let Ok(value) = std::env::var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE") {
-            if let Ok(parsed) = value.parse::<u64>() {
-                config.max_total_size = parsed;
-            }
+        if let Some(parsed) = parse_env_u64(&[
+            "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE",
+            "MOONCAKE_BUCKET_MAX_TOTAL_SIZE",
+        ]) {
+            config.max_total_size = parsed;
         }
         config
     }
@@ -214,9 +220,111 @@ impl DistributedStorageConfig {
     }
 }
 
+fn get_first_env(keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| std::env::var(key).ok())
+}
+
+fn parse_env_u64(keys: &[&str]) -> Option<u64> {
+    get_first_env(keys).and_then(|value| value.parse::<u64>().ok())
+}
+
+fn parse_env_usize(keys: &[&str]) -> Option<usize> {
+    get_first_env(keys).and_then(|value| value.parse::<usize>().ok())
+}
+
 fn parse_bool_env(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const BUCKET_ENV_KEYS: &[&str] = &[
+        "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES",
+        "MOONCAKE_BUCKET_SIZE_LIMIT",
+        "MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT",
+        "MOONCAKE_BUCKET_KEYS_LIMIT",
+        "MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY",
+        "MOONCAKE_BUCKET_EVICTION_POLICY",
+        "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE",
+        "MOONCAKE_BUCKET_MAX_TOTAL_SIZE",
+    ];
+
+    fn with_clean_bucket_env<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved: Vec<(&str, Option<String>)> = BUCKET_ENV_KEYS
+            .iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect();
+        for key in BUCKET_ENV_KEYS {
+            std::env::remove_var(key);
+        }
+        let result = f();
+        for key in BUCKET_ENV_KEYS {
+            std::env::remove_var(key);
+        }
+        for (key, value) in saved {
+            if let Some(value) = value {
+                std::env::set_var(key, value);
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn bucket_config_defaults_to_fifo_eviction() {
+        with_clean_bucket_env(|| {
+            let config = BucketBackendConfig::from_environment();
+
+            assert_eq!(config.eviction_policy, BucketEvictionPolicy::Fifo);
+            assert_eq!(config.bucket_keys_limit, 500);
+            assert_eq!(config.bucket_size_limit, 256 * 1024 * 1024);
+            assert_eq!(config.max_total_size, 0);
+        });
+    }
+
+    #[test]
+    fn bucket_config_prefers_offload_env_names() {
+        with_clean_bucket_env(|| {
+            std::env::set_var("MOONCAKE_BUCKET_EVICTION_POLICY", "none");
+            std::env::set_var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE", "10");
+            std::env::set_var("MOONCAKE_BUCKET_SIZE_LIMIT", "20");
+            std::env::set_var("MOONCAKE_BUCKET_KEYS_LIMIT", "30");
+            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY", "lru");
+            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE", "40");
+            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES", "50");
+            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT", "60");
+
+            let config = BucketBackendConfig::from_environment();
+
+            assert_eq!(config.eviction_policy, BucketEvictionPolicy::Lru);
+            assert_eq!(config.max_total_size, 40);
+            assert_eq!(config.bucket_size_limit, 50);
+            assert_eq!(config.bucket_keys_limit, 60);
+        });
+    }
+
+    #[test]
+    fn bucket_config_keeps_legacy_env_fallbacks() {
+        with_clean_bucket_env(|| {
+            std::env::set_var("MOONCAKE_BUCKET_EVICTION_POLICY", "none");
+            std::env::set_var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE", "70");
+            std::env::set_var("MOONCAKE_BUCKET_SIZE_LIMIT", "80");
+            std::env::set_var("MOONCAKE_BUCKET_KEYS_LIMIT", "90");
+
+            let config = BucketBackendConfig::from_environment();
+
+            assert_eq!(config.eviction_policy, BucketEvictionPolicy::None);
+            assert_eq!(config.max_total_size, 70);
+            assert_eq!(config.bucket_size_limit, 80);
+            assert_eq!(config.bucket_keys_limit, 90);
+        });
+    }
 }
