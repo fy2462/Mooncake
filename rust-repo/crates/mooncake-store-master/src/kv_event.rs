@@ -439,6 +439,9 @@ fn current_unix_time_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[test]
     fn test_parse_seq_hash_from_object_key_matches_cpp() {
@@ -492,6 +495,129 @@ mod tests {
         assert_eq!(map_string(fields, "object_key").as_deref(), Some("0x2a"));
         assert_eq!(map_array_len(fields, "seq_hashes"), Some(1));
         assert_eq!(map_array_len(fields, "block_hashes"), Some(1));
+    }
+
+    #[test]
+    fn test_publish_sglang_object_key_over_zmq() {
+        let endpoint = local_tcp_endpoint();
+        let object_key = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855_0_k";
+        let group_id =
+            "sglang-hicache:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let publisher = KvEventPublisher::new(KvEventConfig {
+            enabled: true,
+            bind_endpoint: endpoint.clone(),
+            backend_id: "mooncake-test".to_string(),
+            queue_capacity: 64,
+            ..Default::default()
+        });
+        assert!(publisher.enabled());
+
+        let context = zmq::Context::new();
+        let subscriber = context.socket(zmq::SUB).unwrap();
+        subscriber.set_subscribe(b"").unwrap();
+        subscriber.set_rcvtimeo(2_000).unwrap();
+        subscriber.connect(&endpoint).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        publisher.publish_stored(object_key, "cpu", "tenant-a", group_id);
+        let frames = subscriber.recv_multipart(0).unwrap();
+
+        assert_eq!(frames.len(), 3);
+        assert!(frames[0].is_empty());
+        assert_eq!(frames[1].len(), std::mem::size_of::<u64>());
+        assert_eq!(
+            u64::from_be_bytes(frames[1].as_slice().try_into().unwrap()),
+            1
+        );
+
+        let decoded = rmpv::decode::read_value(&mut frames[2].as_slice()).unwrap();
+        let fields = first_event_fields(&decoded);
+        assert_eq!(map_string(fields, "event_type").as_deref(), Some("stored"));
+        assert_eq!(
+            map_string(fields, "backend_id").as_deref(),
+            Some("mooncake-test")
+        );
+        assert_eq!(map_string(fields, "tenant_id").as_deref(), Some("tenant-a"));
+        assert_eq!(map_string(fields, "group_id").as_deref(), Some(group_id));
+        assert_eq!(
+            map_string(fields, "object_key").as_deref(),
+            Some(object_key)
+        );
+        assert_eq!(map_array_len(fields, "seq_hashes"), Some(0));
+
+        let stats = wait_for_stats(&publisher, |stats| {
+            stats.published_events == 1 && stats.published_batches == 1
+        });
+        assert_eq!(stats.published_events, 1);
+        assert_eq!(stats.published_batches, 1);
+        assert_eq!(stats.dropped_events, 0);
+        assert_eq!(stats.skipped_unparsed_keys, 1);
+    }
+
+    #[test]
+    fn test_queue_capacity_drops_oldest_and_reserves_sequence_gap() {
+        let publisher = KvEventPublisher {
+            config: KvEventConfig {
+                enabled: true,
+                bind_endpoint: "unused".to_string(),
+                backend_id: "backend-a".to_string(),
+                queue_capacity: 2,
+                ..Default::default()
+            },
+            shared: Arc::new(Shared::new(true)),
+            worker: Mutex::new(None),
+        };
+
+        publisher.publish_stored("1", "cpu", "", "");
+        publisher.publish_stored("2", "cpu", "", "");
+        publisher.publish_stored("3", "cpu", "", "");
+
+        let queue = publisher.shared.queue.lock().unwrap();
+        let keys = queue
+            .iter()
+            .map(|event| event.object_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["2", "3"]);
+        drop(queue);
+        assert_eq!(publisher.status().stats.dropped_events, 1);
+        assert_eq!(
+            publisher.shared.next_zmq_sequence.load(Ordering::Relaxed),
+            2
+        );
+    }
+
+    fn local_tcp_endpoint() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("tcp://{addr}")
+    }
+
+    fn wait_for_stats(
+        publisher: &KvEventPublisher,
+        predicate: impl Fn(KvEventStats) -> bool,
+    ) -> KvEventStats {
+        for _ in 0..50 {
+            let stats = publisher.status().stats;
+            if predicate(stats) {
+                return stats;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        publisher.status().stats
+    }
+
+    fn first_event_fields(decoded: &Value) -> &[(Value, Value)] {
+        let Value::Array(batch) = decoded else {
+            panic!("expected batch array");
+        };
+        let Value::Array(events) = &batch[1] else {
+            panic!("expected event array");
+        };
+        let Value::Map(fields) = &events[0] else {
+            panic!("expected event map");
+        };
+        fields
     }
 
     fn map_string(fields: &[(Value, Value)], key: &str) -> Option<String> {
