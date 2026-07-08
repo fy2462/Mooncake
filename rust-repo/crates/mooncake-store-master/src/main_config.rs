@@ -127,8 +127,8 @@ pub fn build_runtime_config(
     if args.allocation_strategy == "cxl" {
         return Err("allocation_strategy 'cxl' is not supported by the Rust master yet".into());
     }
-    if args.offloading_queue_limit == 0 {
-        return Err("offloading_queue_limit must be greater than 0".into());
+    if args.offloading_queue_limit == 0 || args.offloading_queue_limit > 100_000_000 {
+        return Err("offloading_queue_limit must be between 1 and 100000000".into());
     }
     if args.offload_cap_ratio < 0.0 || args.offload_cap_ratio > 1.0 {
         return Err("offload_cap_ratio must be between 0.0 and 1.0".into());
