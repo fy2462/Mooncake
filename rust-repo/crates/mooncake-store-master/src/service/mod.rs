@@ -43,6 +43,7 @@ use crate::allocator::{
 use crate::count_min_sketch::CountMinSketch;
 use crate::ha::LoadedSnapshot;
 use crate::http_metadata::MetadataState;
+use crate::kv_event::{KvEventPublisher, KvEventStatus};
 use crate::metrics;
 use crate::proto;
 use crate::proto::master_service_server::MasterService;
@@ -118,6 +119,7 @@ pub struct MasterServiceImpl {
     drain_worker: DrainWorker,
     nof_heartbeat_worker: NofHeartbeatWorker,
     oplog_manager: parking_lot::Mutex<crate::oplog::OpLogManager>,
+    kv_event_publisher: Arc<KvEventPublisher>,
 }
 
 /// 空间不足时返回给客户端的提示信息 / Hint returned to client on insufficient space.
@@ -352,6 +354,9 @@ impl MasterServiceImpl {
 
         // 初始化所有 DashMap 存储 — 每个表负责一类数据的并发读写
         // Initialize all DashMap stores — each table handles one category of concurrent read/write
+        let kv_event_publisher = Arc::new(KvEventPublisher::new(
+            runtime_config.kv_event_config.clone(),
+        ));
         let state = Arc::new(MasterState {
             // ── 客户端注册 / client registry ──
             // client_id → ClientEntry：客户端信息、地址、心跳时间
@@ -428,6 +433,8 @@ impl MasterServiceImpl {
             pending_remote_pulls: DashMap::new(),
             // segment_id → NoFHeartbeatState：NoF segment 的心跳探测状态（下次探测时间、连续失败次数）
             nof_heartbeat_states: DashMap::new(),
+            // KV event publisher shared with eviction/offload background paths.
+            kv_event_publisher: Arc::clone(&kv_event_publisher),
         });
         let metadata_state = MetadataState::new("");
         // 创建各后台 worker，各自持有 state 的 Arc 克隆
@@ -537,7 +544,70 @@ impl MasterServiceImpl {
             drain_worker,
             nof_heartbeat_worker,
             oplog_manager: parking_lot::Mutex::new(oplog_manager),
+            kv_event_publisher,
         }
+    }
+
+    pub fn kv_event_status(&self) -> KvEventStatus {
+        self.kv_event_publisher.status()
+    }
+
+    fn medium_for_replica_type(replica_type: ReplicaType) -> &'static str {
+        match replica_type {
+            ReplicaType::Memory | ReplicaType::All => "cpu",
+            ReplicaType::Disk | ReplicaType::LocalDisk | ReplicaType::NoFSsd => "disk",
+        }
+    }
+
+    fn medium_for_object(object: &ObjectEntry) -> &'static str {
+        if object
+            .replicas
+            .iter()
+            .any(|replica| replica.replica_type == ReplicaType::Memory)
+        {
+            "cpu"
+        } else if object.replicas.iter().any(|replica| {
+            matches!(
+                replica.replica_type,
+                ReplicaType::Disk | ReplicaType::LocalDisk | ReplicaType::NoFSsd
+            )
+        }) {
+            "disk"
+        } else {
+            "cpu"
+        }
+    }
+
+    fn publish_kv_stored(&self, scoped_key: &str, replica_type: ReplicaType, object: &ObjectEntry) {
+        let medium = if replica_type == ReplicaType::All {
+            Self::medium_for_object(object)
+        } else {
+            Self::medium_for_replica_type(replica_type)
+        };
+        self.kv_event_publisher.publish_stored(
+            object.user_key_for_event(scoped_key),
+            medium,
+            &object.tenant_id,
+            &object.group_id,
+        );
+    }
+
+    fn publish_kv_removed(&self, scoped_key: &str, object: &ObjectEntry) {
+        self.kv_event_publisher.publish_removed(
+            object.user_key_for_event(scoped_key),
+            Self::medium_for_object(object),
+            &object.tenant_id,
+            &object.group_id,
+        );
+    }
+
+    fn publish_kv_removed_with_medium(&self, scoped_key: &str, object: &ObjectEntry, medium: &str) {
+        self.kv_event_publisher.publish_removed(
+            object.user_key_for_event(scoped_key),
+            medium,
+            &object.tenant_id,
+            &object.group_id,
+        );
     }
 
     /// 保存当前 Master 状态快照到 storage_backend。

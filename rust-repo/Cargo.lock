@@ -2579,6 +2579,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "xxhash-rust",
+ "zmq",
  "zstd",
 ]
 

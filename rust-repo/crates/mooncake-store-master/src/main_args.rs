@@ -190,6 +190,30 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub max_task_retry_attempts: u32,
 
+    /// Enable RFC #1527 KV cache event publisher over ZMQ.
+    #[arg(long)]
+    pub enable_kv_events: bool,
+
+    /// ZMQ PUB bind endpoint for KV events, e.g. tcp://0.0.0.0:5557.
+    #[arg(long, default_value = "tcp://0.0.0.0:5557")]
+    pub kv_events_bind_endpoint: String,
+
+    /// backend_id for published KV events (cache owner identity).
+    #[arg(long, default_value = "")]
+    pub kv_events_backend_id: String,
+
+    /// Include vLLM/SGLang-compatible type/block_hashes fields.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub kv_events_emit_legacy_compat: bool,
+
+    /// Include Mooncake object_key in published KV events.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub kv_events_emit_object_key: bool,
+
+    /// Max pending events in the async publisher queue; oldest is dropped when full.
+    #[arg(long, default_value_t = 65_536)]
+    pub kv_events_queue_capacity: usize,
+
     /// 是否启用高可用 (HA) 模式 / Enable High Availability (HA) mode
     #[arg(long)]
     pub enable_ha: bool,

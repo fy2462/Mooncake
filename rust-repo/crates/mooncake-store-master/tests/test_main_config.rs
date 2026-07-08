@@ -49,6 +49,12 @@ fn base_args() -> Args {
         pending_task_timeout_secs: 300,
         processing_task_timeout_secs: 300,
         max_task_retry_attempts: 10,
+        enable_kv_events: false,
+        kv_events_bind_endpoint: "tcp://0.0.0.0:5557".to_string(),
+        kv_events_backend_id: String::new(),
+        kv_events_emit_legacy_compat: true,
+        kv_events_emit_object_key: true,
+        kv_events_queue_capacity: 65_536,
         enable_ha: true,
         etcd_endpoints: None,
         ha_backend_type: "etcd".to_string(),
@@ -67,6 +73,26 @@ fn base_args() -> Args {
         pod_name: None,
         pod_namespace: None,
     }
+}
+
+#[test]
+fn test_build_runtime_config_maps_kv_events() {
+    let mut args = base_args();
+    args.enable_kv_events = true;
+    args.kv_events_bind_endpoint = "tcp://127.0.0.1:5557".to_string();
+    args.kv_events_backend_id = "backend-a".to_string();
+    args.kv_events_emit_legacy_compat = false;
+    args.kv_events_emit_object_key = false;
+    args.kv_events_queue_capacity = 128;
+
+    let config = build_runtime_config(&args).unwrap();
+
+    assert!(config.kv_event_config.enabled);
+    assert_eq!(config.kv_event_config.bind_endpoint, "tcp://127.0.0.1:5557");
+    assert_eq!(config.kv_event_config.backend_id, "backend-a");
+    assert!(!config.kv_event_config.emit_legacy_compat);
+    assert!(!config.kv_event_config.emit_object_key);
+    assert_eq!(config.kv_event_config.queue_capacity, 128);
 }
 
 #[test]

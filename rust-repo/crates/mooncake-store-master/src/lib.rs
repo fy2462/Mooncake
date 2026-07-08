@@ -35,6 +35,7 @@ pub mod ha;
 pub mod hf3fs;
 pub mod hot_standby;
 pub mod http_metadata;
+pub mod kv_event;
 pub mod main_args;
 pub mod main_config;
 pub mod metrics;

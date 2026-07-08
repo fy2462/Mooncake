@@ -342,6 +342,12 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
             }
             if became_empty {
                 if let Some((_, removed_object)) = state.objects.remove(&key) {
+                    state.kv_event_publisher.publish_removed(
+                        removed_object.user_key_for_event(&key),
+                        "cpu",
+                        &removed_object.tenant_id,
+                        &removed_object.group_id,
+                    );
                     account_removed_object_quota(state, &removed_object);
                 }
                 // Clean up per-client object index / 清理每个客户端的对象索引

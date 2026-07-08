@@ -249,6 +249,7 @@ impl MasterServiceImpl {
             self.state.objects.insert(scoped_key, object);
             return Err(status);
         }
+        self.publish_kv_removed(&scoped_key, &object);
         metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
     }
@@ -292,6 +293,7 @@ impl MasterServiceImpl {
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
                 if self.cleanup_removed_object(&key, &object).is_ok() {
+                    self.publish_kv_removed(&key, &object);
                     removed += 1;
                 } else {
                     self.state.objects.insert(key, object);

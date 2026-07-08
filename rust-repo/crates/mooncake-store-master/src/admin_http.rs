@@ -49,6 +49,7 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
         .route("/role", get(role_handler))
         .route("/ha_status", get(ha_status_handler))
         .route("/leader", get(leader_handler))
+        .route("/kv_events/status", get(kv_events_status_handler))
         .route("/get_all_keys", get(get_all_keys_handler))
         .route("/get_segments_detail", get(get_segments_detail_handler))
         .route("/batch_query_keys", get(batch_query_keys_handler))
@@ -131,6 +132,15 @@ async fn get_segments_detail_handler(
     let service = service_or_unavailable(&state)?;
     Ok(Json(build_segments_detail_json(
         &service.segments_detail_snapshot(),
+    )))
+}
+
+async fn kv_events_status_handler(
+    State(state): State<AdminRuntimeState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    Ok(Json(build_kv_events_status_json(
+        &service.kv_event_status(),
     )))
 }
 
@@ -427,6 +437,16 @@ fn build_segments_detail_json(segments: &[proto::SegmentDetailInfo]) -> Value {
     })
 }
 
+fn build_kv_events_status_json(status: &crate::kv_event::KvEventStatus) -> Value {
+    json!({
+        "enabled": status.enabled,
+        "published_batches": status.stats.published_batches,
+        "published_events": status.stats.published_events,
+        "dropped_events": status.stats.dropped_events,
+        "skipped_unparsed_keys": status.stats.skipped_unparsed_keys,
+    })
+}
+
 fn segment_status_json_string(status: i32) -> &'static str {
     match proto::SegmentStatus::try_from(status) {
         Ok(proto::SegmentStatus::Active) => "ACTIVE",
@@ -577,5 +597,26 @@ mod tests {
         assert_eq!(item["allocator_used_bytes"], 256 * 1024 * 1024);
         assert_eq!(item["allocator_capacity_bytes"], 1024 * 1024 * 1024);
         assert_eq!(item["allocator_usage_percent"], 25.0);
+    }
+
+    #[test]
+    fn test_kv_events_status_json_matches_cpp_admin_shape() {
+        let payload = build_kv_events_status_json(&crate::kv_event::KvEventStatus {
+            enabled: true,
+            bind_endpoint: "tcp://127.0.0.1:5557".to_string(),
+            backend_id: "backend-a".to_string(),
+            stats: crate::kv_event::KvEventStats {
+                published_batches: 2,
+                published_events: 3,
+                dropped_events: 4,
+                skipped_unparsed_keys: 5,
+            },
+        });
+
+        assert_eq!(payload["enabled"], true);
+        assert_eq!(payload["published_batches"], 2);
+        assert_eq!(payload["published_events"], 3);
+        assert_eq!(payload["dropped_events"], 4);
+        assert_eq!(payload["skipped_unparsed_keys"], 5);
     }
 }

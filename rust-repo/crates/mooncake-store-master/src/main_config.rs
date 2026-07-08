@@ -212,6 +212,17 @@ pub fn build_runtime_config(
         // 新创建任务的默认重试次数
         max_task_retry_attempts: args.max_task_retry_attempts,
 
+        // ── KV Events / indexer publisher ──
+        // Optional RFC #1527 event stream consumed by global KV indexers.
+        kv_event_config: crate::kv_event::KvEventConfig {
+            enabled: args.enable_kv_events,
+            bind_endpoint: args.kv_events_bind_endpoint.clone(),
+            backend_id: args.kv_events_backend_id.clone(),
+            emit_legacy_compat: args.kv_events_emit_legacy_compat,
+            emit_object_key: args.kv_events_emit_object_key,
+            queue_capacity: args.kv_events_queue_capacity,
+        },
+
         // ── NoF 心跳探测 / NoF heartbeat probe ──
         // 探测间隔
         nof_heartbeat_interval: Duration::from_secs(args.nof_heartbeat_interval_sec),

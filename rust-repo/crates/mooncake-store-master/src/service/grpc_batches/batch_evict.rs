@@ -34,6 +34,7 @@ impl MasterServiceImpl {
             drop(entry);
             if remove_object {
                 if let Some((_, object)) = self.state.objects.remove(&key) {
+                    self.publish_kv_removed_with_medium(&key, &object, "disk");
                     account_removed_object_quota(&self.state, &object);
                 }
             }
@@ -77,6 +78,7 @@ impl MasterServiceImpl {
                 drop(entry);
                 if remove_object {
                     if let Some((_, object)) = self.state.objects.remove(&key) {
+                        self.publish_kv_removed_with_medium(&key, &object, "disk");
                         account_removed_object_quota(&self.state, &object);
                     }
                 }

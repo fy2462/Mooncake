@@ -240,6 +240,7 @@ mod tests {
     use dashmap::DashMap;
     use parking_lot::RwLock;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::Arc;
 
     fn make_state() -> Arc<MasterState> {
         Arc::new(MasterState {
@@ -267,6 +268,9 @@ mod tests {
             tenant_quotas: RwLock::new(crate::tenant_quota::TenantQuotaTable::new(0)),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
+            kv_event_publisher: Arc::new(
+                crate::kv_event::KvEventPublisher::new(Default::default()),
+            ),
         })
     }
 

@@ -35,6 +35,7 @@
 
 use crate::allocator::{AllocationStrategy, MemoryAllocatorKind, SegmentAllocator};
 use crate::count_min_sketch::CountMinSketch;
+use crate::kv_event::KvEventPublisher;
 use crate::storage_backend::StorageBackend;
 use crate::tenant_quota::TenantQuotaTable;
 use dashmap::DashMap;
@@ -43,6 +44,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
@@ -109,6 +111,8 @@ pub(crate) struct MasterState {
     pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
     /// NoF 心跳状态表 / NoF heartbeat state table: segment_id → heartbeat tracking state.
     pub(crate) nof_heartbeat_states: DashMap<Uuid, NoFHeartbeatState>,
+    /// Optional KV events publisher shared with background workers.
+    pub(crate) kv_event_publisher: Arc<KvEventPublisher>,
 }
 
 impl MasterState {
@@ -143,6 +147,7 @@ impl MasterState {
             tenant_quotas: RwLock::new(TenantQuotaTable::new(0)),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
+            kv_event_publisher: Arc::new(KvEventPublisher::new(Default::default())),
         }
     }
 }
@@ -222,6 +227,14 @@ pub struct ObjectEntry {
 }
 
 impl ObjectEntry {
+    pub(crate) fn user_key_for_event<'a>(&'a self, scoped_key: &'a str) -> &'a str {
+        if self.user_key.is_empty() {
+            scoped_key
+        } else {
+            &self.user_key
+        }
+    }
+
     /// 授予对象租约，刷新 lease 和 soft-pin 超时。
     /// C++ equivalent: ObjectMetadata::GrantLease(key_ttl, soft_ttl)
     ///

@@ -1,4 +1,5 @@
 use super::*;
+use crate::kv_event::KvEventConfig;
 
 /// MasterRuntimeConfig: 运行时配置参数，控制 lease TTL、eviction 水位线、promotion 策略等。
 /// 所有 Duration 字段使用 std::time::Duration 表示。
@@ -121,6 +122,8 @@ pub struct MasterRuntimeConfig {
     pub processing_task_timeout: Duration,
     /// Retry limit copied into newly submitted tasks.
     pub max_task_retry_attempts: u32,
+    /// Optional RFC #1527 KV events publisher config.
+    pub kv_event_config: KvEventConfig,
 }
 
 /// 默认运行时配置：生产环境建议通过 CLI 参数覆盖这些值。
@@ -172,6 +175,7 @@ impl Default for MasterRuntimeConfig {
             pending_task_timeout: Duration::from_secs(300),
             processing_task_timeout: Duration::from_secs(300),
             max_task_retry_attempts: 10,
+            kv_event_config: KvEventConfig::default(),
         }
     }
 }

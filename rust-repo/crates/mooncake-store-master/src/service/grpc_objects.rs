@@ -178,6 +178,9 @@ impl MasterServiceImpl {
                     .insert(scoped_key.to_string());
             }
             if let Some(entry) = self.state.objects.get(scoped_key) {
+                if all_complete {
+                    self.publish_kv_stored(scoped_key, target, &entry);
+                }
                 self.oplog_manager.lock().record_put_end_with_metadata(
                     scoped_key,
                     size,
