@@ -13,6 +13,10 @@ use parking_lot::RwLock;
 
 pub use config::LocalStorageConfig;
 
+const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
+
+type AvailableSpaceProbe = dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync;
+
 /// Local disk storage backend for FilePerKey offload/promotion data.
 ///
 /// Each key-value pair is stored as a single file under a hash-partitioned
@@ -39,6 +43,8 @@ pub struct LocalStorageBackend {
 
     /// Whether `init()` has been called successfully.
     initialized: AtomicBool,
+
+    available_space_probe: Box<AvailableSpaceProbe>,
 }
 
 impl LocalStorageBackend {
@@ -52,6 +58,23 @@ impl LocalStorageBackend {
             total_space: RwLock::new(0),
             used_space: RwLock::new(0),
             initialized: AtomicBool::new(false),
+            available_space_probe: Box::new(|path| fs2::available_space(path)),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_available_space_probe(
+        config: LocalStorageConfig,
+        available_space_probe: Box<AvailableSpaceProbe>,
+    ) -> Self {
+        Self {
+            config,
+            write_queue: RwLock::new(VecDeque::new()),
+            queue_set: RwLock::new(HashMap::new()),
+            total_space: RwLock::new(0),
+            used_space: RwLock::new(0),
+            initialized: AtomicBool::new(false),
+            available_space_probe,
         }
     }
 
@@ -138,7 +161,7 @@ impl LocalStorageBackend {
         let mut set = self.queue_set.write();
 
         for (rel_path, size, _ct) in &entries {
-            if used + size > total && self.config.enable_eviction {
+            if used.saturating_add(*size) > total && self.config.enable_eviction {
                 // Over quota — delete excess files from disk.
                 let abs_path = data_dir.join(rel_path);
                 let _ = std::fs::remove_file(&abs_path);
@@ -376,7 +399,9 @@ impl LocalStorageBackend {
 
         loop {
             let used = *self.used_space.read();
-            if used + required <= total {
+            let has_quota_space = used.saturating_add(required) <= total;
+            let has_actual_space = self.has_actual_disk_space(required);
+            if has_quota_space && has_actual_space {
                 break;
             }
             match self.evict_one() {
@@ -415,6 +440,19 @@ impl LocalStorageBackend {
         }
 
         Ok(evicted)
+    }
+
+    fn has_actual_disk_space(&self, required: u64) -> bool {
+        match (self.available_space_probe)(&self.data_dir()) {
+            Ok(available) => available >= required.saturating_add(MIN_FREE_SPACE_BYTES),
+            Err(err) => {
+                tracing::warn!(
+                    "failed to query available disk space for {:?}: {err}",
+                    self.data_dir()
+                );
+                true
+            }
+        }
     }
 
     /// Evict the oldest valid file from the FIFO queue.
@@ -484,3 +522,49 @@ impl LocalStorageBackend {
 // Safety: all interior mutability is behind parking_lot::RwLock.
 unsafe impl Send for LocalStorageBackend {}
 unsafe impl Sync for LocalStorageBackend {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn backend_with_available_space_sequence(
+        quota: u64,
+        values: Vec<u64>,
+    ) -> (LocalStorageBackend, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = LocalStorageConfig {
+            root_dir: tmp.path().to_path_buf(),
+            fsdir: "test_data".to_string(),
+            enable_eviction: true,
+            quota_bytes: quota,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = LocalStorageBackend::new_with_available_space_probe(
+            config,
+            Box::new(move |_| {
+                let index = calls.fetch_add(1, Ordering::SeqCst);
+                Ok(*values
+                    .get(index)
+                    .unwrap_or_else(|| values.last().expect("space sequence is empty")))
+            }),
+        );
+        backend.init().unwrap();
+        (backend, tmp)
+    }
+
+    #[test]
+    fn actual_disk_space_shortage_triggers_fifo_eviction() {
+        let enough_space = MIN_FREE_SPACE_BYTES + 1024;
+        let (backend, _tmp) =
+            backend_with_available_space_sequence(500, vec![enough_space, 0, enough_space]);
+
+        backend.write_object("old", &vec![0u8; 100]).unwrap();
+        let evicted = backend.write_object("new", &vec![0u8; 50]).unwrap();
+
+        assert_eq!(evicted, vec!["old".to_string()]);
+        assert!(!backend.exists("old"));
+        assert!(backend.exists("new"));
+    }
+}
