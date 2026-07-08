@@ -284,6 +284,8 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
                 tenant_id: "tenant-a".to_string(),
                 group_id: "group-a".to_string(),
                 quota_committed: true,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
                 user_key: "key-a".to_string(),
             },
         )],

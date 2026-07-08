@@ -366,13 +366,13 @@ pub fn register_metrics() {
     register_gauge(&ALLOCATED_FILE_SIZE);
     register_gauge(&TOTAL_FILE_CAPACITY);
 
-    // Cache counters
+    // Cache metrics
     register_counter(&MEM_CACHE_HITS);
     register_counter(&FILE_CACHE_HITS);
     register_counter(&MEM_CACHE_HIT_BYTES);
     register_counter(&FILE_CACHE_HIT_BYTES);
-    register_counter(&MEM_CACHE_TOTAL);
-    register_counter(&FILE_CACHE_TOTAL);
+    register_gauge(&MEM_CACHE_TOTAL);
+    register_gauge(&FILE_CACHE_TOTAL);
     register_counter(&VALID_GETS);
 
     // Transfer bytes

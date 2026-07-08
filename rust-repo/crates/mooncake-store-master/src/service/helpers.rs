@@ -507,7 +507,55 @@ pub(crate) fn release_object_replicas(
     release_replicas(state, replicas);
 }
 
+fn has_completed_memory_cache_replica(object: &ObjectEntry) -> bool {
+    object
+        .replicas
+        .iter()
+        .any(|r| r.replica_type == ReplicaType::Memory && r.status == ReplicaStatus::Complete)
+}
+
+fn has_completed_disk_cache_replica(object: &ObjectEntry) -> bool {
+    object
+        .replicas
+        .iter()
+        .any(|r| r.replica_type == ReplicaType::LocalDisk && r.status == ReplicaStatus::Complete)
+}
+
+pub(crate) fn sync_cache_total_accounting(object: &mut ObjectEntry) {
+    let has_memory = has_completed_memory_cache_replica(object);
+    if !object.memory_cache_total_accounted && has_memory {
+        metrics::MEM_CACHE_TOTAL.inc();
+        object.memory_cache_total_accounted = true;
+    } else if object.memory_cache_total_accounted && !has_memory {
+        metrics::MEM_CACHE_TOTAL.dec();
+        object.memory_cache_total_accounted = false;
+    }
+
+    let has_disk = has_completed_disk_cache_replica(object);
+    if !object.disk_cache_total_accounted && has_disk {
+        metrics::FILE_CACHE_TOTAL.inc();
+        object.disk_cache_total_accounted = true;
+    } else if object.disk_cache_total_accounted && !has_disk {
+        metrics::FILE_CACHE_TOTAL.dec();
+        object.disk_cache_total_accounted = false;
+    }
+}
+
+pub(crate) fn account_cache_total_removal(object: &mut ObjectEntry) {
+    if object.memory_cache_total_accounted {
+        metrics::MEM_CACHE_TOTAL.dec();
+        object.memory_cache_total_accounted = false;
+    }
+    if object.disk_cache_total_accounted {
+        metrics::FILE_CACHE_TOTAL.dec();
+        object.disk_cache_total_accounted = false;
+    }
+}
+
 pub(crate) fn account_removed_object_quota(state: &MasterState, object: &ObjectEntry) {
+    let mut object = object.clone();
+    account_cache_total_removal(&mut object);
+
     if !state.runtime_config.enable_tenant_quota {
         return;
     }

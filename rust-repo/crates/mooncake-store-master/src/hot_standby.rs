@@ -35,6 +35,7 @@ use crate::ha::{
 };
 use crate::oplog::OpLogStore;
 use crate::service::state::MasterState;
+use crate::service::sync_cache_total_accounting;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
@@ -331,7 +332,9 @@ impl HotStandbyService {
                         // Restore objects and tasks
                         // 恢复对象和任务
                         for entry in &snapshot.objects {
-                            self.state.objects.insert(entry.0.clone(), entry.1.clone());
+                            let mut object = entry.1.clone();
+                            sync_cache_total_accounting(&mut object);
+                            self.state.objects.insert(entry.0.clone(), object);
                         }
                         for task in &snapshot.tasks {
                             self.state.tasks.insert(task.info.id, task.clone());

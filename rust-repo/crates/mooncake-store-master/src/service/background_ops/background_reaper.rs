@@ -130,6 +130,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
                 }
                 !should_remove
             });
+            sync_cache_total_accounting(&mut object);
             remove_object = object.replicas.is_empty();
         }
         if !removed_targets.is_empty() {

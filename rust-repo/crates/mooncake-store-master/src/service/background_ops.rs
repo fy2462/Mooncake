@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::helpers::{
     account_removed_object_quota, choose_drain_target_segment, client_id_by_segment_name,
     default_drain_target_segments, has_pending_task_capacity, is_lease_expired, memory_usage_ratio,
-    release_replicas,
+    release_replicas, sync_cache_total_accounting,
 };
 use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
 
@@ -174,6 +174,7 @@ fn evict_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescriptor> {
         }
         !should_remove
     });
+    sync_cache_total_accounting(object);
     removed
 }
 
@@ -210,6 +211,7 @@ fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescr
         removed.push(replica.clone());
         false
     });
+    sync_cache_total_accounting(object);
     removed
 }
 

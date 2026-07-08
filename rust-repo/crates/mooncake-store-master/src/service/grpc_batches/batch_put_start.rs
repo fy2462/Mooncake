@@ -164,6 +164,8 @@ impl MasterServiceImpl {
                         tenant_id: t_id,
                         group_id,
                         quota_committed: false,
+                        memory_cache_total_accounted: false,
+                        disk_cache_total_accounted: false,
                         user_key: u_key,
                     },
                 );

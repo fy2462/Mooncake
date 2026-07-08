@@ -612,6 +612,8 @@ fn decode_object(
         .to_string(),
         group_id,
         quota_committed: true,
+        memory_cache_total_accounted: false,
+        disk_cache_total_accounted: false,
         user_key: user_key.to_string(),
     }))
 }

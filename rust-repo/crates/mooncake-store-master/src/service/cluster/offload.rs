@@ -151,26 +151,28 @@ impl MasterServiceImpl {
                     object.replicas.push(replica);
                 }
                 object.size = metadata.data_size.max(0) as u64;
+                sync_cache_total_accounting(&mut object);
             } else {
                 let (t_id, u_key) = split_scoped_key(&key);
-                self.state.objects.insert(
-                    key.clone(),
-                    ObjectEntry {
-                        replicas: vec![replica],
-                        size: metadata.data_size.max(0) as u64,
-                        last_access: SystemTime::now(),
-                        hard_pinned: false,
-                        data_type: ObjectDataType::Unknown,
-                        client_id: Uuid::nil(),
-                        put_start_time: None,
-                        lease_timeout: None,
-                        soft_pin_timeout: None,
-                        tenant_id: t_id,
-                        group_id: String::new(),
-                        quota_committed: false,
-                        user_key: u_key,
-                    },
-                );
+                let mut object = ObjectEntry {
+                    replicas: vec![replica],
+                    size: metadata.data_size.max(0) as u64,
+                    last_access: SystemTime::now(),
+                    hard_pinned: false,
+                    data_type: ObjectDataType::Unknown,
+                    client_id: Uuid::nil(),
+                    put_start_time: None,
+                    lease_timeout: None,
+                    soft_pin_timeout: None,
+                    tenant_id: t_id,
+                    group_id: String::new(),
+                    quota_committed: false,
+                    memory_cache_total_accounted: false,
+                    disk_cache_total_accounted: false,
+                    user_key: u_key,
+                };
+                sync_cache_total_accounting(&mut object);
+                self.state.objects.insert(key.clone(), object);
             }
         }
         Ok(Response::new(proto::NotifyOffloadSuccessResponse {}))

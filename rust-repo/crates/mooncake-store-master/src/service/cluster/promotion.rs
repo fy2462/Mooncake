@@ -166,6 +166,7 @@ impl MasterServiceImpl {
             replica.status = ReplicaStatus::Complete;
             committed = true;
         }
+        sync_cache_total_accounting(&mut object);
         drop(object);
         clear_promotion_task(&self.state, &scoped_key);
         if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&client_id) {

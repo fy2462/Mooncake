@@ -208,6 +208,12 @@ pub struct ObjectEntry {
     /// Whether this object has already moved from reserved quota to used quota.
     #[serde(default)]
     pub quota_committed: bool,
+    /// Whether this object is currently counted in the memory-cache inventory gauge.
+    #[serde(skip)]
+    pub memory_cache_total_accounted: bool,
+    /// Whether this object is currently counted in the file-cache inventory gauge.
+    #[serde(skip)]
+    pub disk_cache_total_accounted: bool,
     /// 用户提供的原始 key（不包含租户作用域前缀）。
     /// Original user-provided key (without tenant scope prefix).
     /// C++ equivalent: ObjectMetadata::user_key

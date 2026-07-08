@@ -215,6 +215,8 @@ fn test_local_snapshot_provider_loads_snapshot() {
             soft_pin_timeout: None,
             group_id: String::new(),
             quota_committed: true,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
         },
     );
     backend
@@ -261,6 +263,8 @@ fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
             soft_pin_timeout: None,
             group_id: String::new(),
             quota_committed: true,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
         },
     );
     StorageBackend::new(StorageBackendType::LocalDisk, &root.join("cluster-a"))

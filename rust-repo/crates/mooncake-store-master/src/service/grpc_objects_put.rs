@@ -204,6 +204,8 @@ impl MasterServiceImpl {
                 tenant_id,
                 group_id,
                 quota_committed: false,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
                 user_key,
             },
         );
@@ -283,25 +285,27 @@ impl MasterServiceImpl {
             } else {
                 entry.replicas.push(replica);
             }
+            sync_cache_total_accounting(&mut entry);
         } else if replica.replica_type == ReplicaType::LocalDisk {
-            self.state.objects.insert(
-                scoped_key.clone(),
-                ObjectEntry {
-                    size: replica.size,
-                    replicas: vec![replica],
-                    last_access: SystemTime::now(),
-                    hard_pinned: false,
-                    data_type: ObjectDataType::Unknown,
-                    client_id,
-                    put_start_time: None,
-                    lease_timeout: None,
-                    soft_pin_timeout: None,
-                    tenant_id,
-                    group_id: String::new(),
-                    quota_committed: false,
-                    user_key: req.key.clone(),
-                },
-            );
+            let mut entry = ObjectEntry {
+                size: replica.size,
+                replicas: vec![replica],
+                last_access: SystemTime::now(),
+                hard_pinned: false,
+                data_type: ObjectDataType::Unknown,
+                client_id,
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id,
+                group_id: String::new(),
+                quota_committed: false,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: req.key.clone(),
+            };
+            sync_cache_total_accounting(&mut entry);
+            self.state.objects.insert(scoped_key.clone(), entry);
         }
         Ok(Response::new(proto::AddReplicaResponse {}))
     }

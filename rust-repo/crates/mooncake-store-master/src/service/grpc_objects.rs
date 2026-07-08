@@ -142,6 +142,7 @@ impl MasterServiceImpl {
                     r.status = ReplicaStatus::Complete;
                 }
             }
+            sync_cache_total_accounting(&mut entry);
             // C++ PutEnd grants ttl=0: the object starts without a hard read lease,
             // while soft pin is extended when enabled.
             entry.grant_lease(Duration::ZERO, self.state.runtime_config.soft_pin_ttl);

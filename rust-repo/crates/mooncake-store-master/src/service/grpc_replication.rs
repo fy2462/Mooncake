@@ -419,6 +419,7 @@ impl MasterServiceImpl {
                     }
                 }
             }
+            sync_cache_total_accounting(&mut object);
         } else {
             all_present = false;
         }
@@ -447,6 +448,7 @@ impl MasterServiceImpl {
                     }
                     !matched
                 });
+                sync_cache_total_accounting(&mut object);
             }
             release_object_replicas(&self.state, &key, &removed_targets);
             return Err(Status::failed_precondition(
@@ -672,6 +674,7 @@ impl MasterServiceImpl {
                         idx += 1;
                     }
                 }
+                sync_cache_total_accounting(&mut object);
             }
             remove_object = object.replicas.is_empty();
         } else {
@@ -692,6 +695,7 @@ impl MasterServiceImpl {
                     }
                     !matched
                 });
+                sync_cache_total_accounting(&mut object);
             }
             release_object_replicas(&self.state, &key, &removed_targets);
             // Release source replica refcnt

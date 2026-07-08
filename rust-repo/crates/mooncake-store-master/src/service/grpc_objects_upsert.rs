@@ -234,6 +234,8 @@ impl MasterServiceImpl {
                 tenant_id: tenant_id.to_string(),
                 group_id,
                 quota_committed: false,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
                 user_key: user_key.to_string(),
             },
         );

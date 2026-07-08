@@ -29,6 +29,8 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         user_key: String::new(),
         group_id: String::new(),
         quota_committed: false,
+        memory_cache_total_accounted: false,
+        disk_cache_total_accounted: false,
     }
 }
 

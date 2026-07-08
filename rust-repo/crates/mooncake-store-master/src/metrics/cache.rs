@@ -1,5 +1,5 @@
 use lazy_static::lazy_static;
-use prometheus::IntCounter;
+use prometheus::{IntCounter, IntGauge};
 
 // =============================================================================
 // Cache hit counters — 缓存命中计数器
@@ -26,14 +26,14 @@ lazy_static! {
         "total bytes served from file cache hits"
     )
     .unwrap();
-    pub static ref MEM_CACHE_TOTAL: IntCounter = IntCounter::new(
-        "mooncake_store_mem_cache_requests_total",
-        "total memory cache requests"
+    pub static ref MEM_CACHE_TOTAL: IntGauge = IntGauge::new(
+        "mooncake_store_mem_cache_objects",
+        "current objects with completed memory cache replicas"
     )
     .unwrap();
-    pub static ref FILE_CACHE_TOTAL: IntCounter = IntCounter::new(
-        "mooncake_store_file_cache_requests_total",
-        "total file cache requests"
+    pub static ref FILE_CACHE_TOTAL: IntGauge = IntGauge::new(
+        "mooncake_store_file_cache_objects",
+        "current objects with completed file cache replicas"
     )
     .unwrap();
     pub static ref VALID_GETS: IntCounter = IntCounter::new(

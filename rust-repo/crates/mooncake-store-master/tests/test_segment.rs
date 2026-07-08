@@ -228,6 +228,8 @@ fn test_object_entry_creation() {
         user_key: String::new(),
         group_id: String::new(),
         quota_committed: false,
+        memory_cache_total_accounted: false,
+        disk_cache_total_accounted: false,
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");

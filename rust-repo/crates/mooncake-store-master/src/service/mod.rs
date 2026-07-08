@@ -72,6 +72,7 @@ use self::background_ops::{
     release_staged_promotion_replica, run_automatic_eviction_once, run_eviction_cycle,
     try_push_promotion_queue,
 };
+pub(crate) use self::helpers::sync_cache_total_accounting;
 use self::helpers::{
     account_removed_object_quota, addresses_for_client, allocate_memory_replicas,
     allocate_nof_replicas, bump_view_version, choose_drain_target_segment, cleanup_stale_handles,
@@ -509,7 +510,8 @@ impl MasterServiceImpl {
                     );
                 }
                 // 恢复对象 / Restore objects
-                for (key, object) in objects {
+                for (key, mut object) in objects {
+                    sync_cache_total_accounting(&mut object);
                     state.objects.insert(key, object);
                 }
                 // 恢复任务 / Restore tasks

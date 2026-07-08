@@ -29,6 +29,7 @@ impl MasterServiceImpl {
                 }
                 _ => true,
             });
+            sync_cache_total_accounting(&mut entry);
             let remove_object = entry.replicas.is_empty();
             drop(entry);
             if remove_object {
@@ -71,6 +72,7 @@ impl MasterServiceImpl {
                     }
                     _ => true,
                 });
+                sync_cache_total_accounting(&mut entry);
                 let remove_object = entry.replicas.is_empty();
                 drop(entry);
                 if remove_object {
