@@ -23,6 +23,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use aws_config::timeout::TimeoutConfig;
 use aws_sdk_s3::config::{
     Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
 };
@@ -67,8 +68,16 @@ impl S3RemoteSource {
         let config = config.with_mooncake_env_fallbacks();
         let region = Region::new(config.region.clone());
 
-        let mut sdk_config =
-            aws_config::defaults(aws_config::BehaviorVersion::latest()).region(region);
+        let timeout_config = TimeoutConfig::builder()
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .operation_attempt_timeout(Duration::from_millis(config.request_timeout_ms))
+            .build();
+        let endpoint_url =
+            build_s3_endpoint_url(config.endpoint.as_deref(), &config.region, config.use_https);
+
+        let mut sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(region)
+            .timeout_config(timeout_config);
 
         // Apply explicit credentials when provided
         // 若显式提供了凭证，则覆盖默认凭证链
@@ -85,8 +94,8 @@ impl S3RemoteSource {
 
         // Custom endpoint for S3-compatible stores (e.g. MinIO, Ceph RGW)
         // 自定义端点用于 MinIO / Ceph RGW 等兼容存储
-        if let Some(ref endpoint) = config.endpoint {
-            sdk_config = sdk_config.endpoint_url(endpoint);
+        if let Some(endpoint_url) = endpoint_url {
+            sdk_config = sdk_config.endpoint_url(endpoint_url);
         }
 
         let sdk_config = sdk_config.load().await;
@@ -157,6 +166,47 @@ fn parse_response_checksum_validation(value: Option<&str>) -> Option<ResponseChe
         "when_supported" => Some(ResponseChecksumValidation::WhenSupported),
         "when_required" => Some(ResponseChecksumValidation::WhenRequired),
         _ => None,
+    }
+}
+
+fn build_s3_endpoint_url(endpoint: Option<&str>, region: &str, use_https: bool) -> Option<String> {
+    let scheme = if use_https { "https" } else { "http" };
+    endpoint
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            let value = value.trim();
+            if value.contains("://") {
+                value.to_string()
+            } else {
+                format!("{scheme}://{value}")
+            }
+        })
+        .or_else(|| (!use_https).then(|| format!("http://s3.{region}.amazonaws.com")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn s3_endpoint_url_honors_https_flag_like_cpp_env() {
+        assert_eq!(
+            build_s3_endpoint_url(Some("https://s3.example.com"), "us-east-1", false).as_deref(),
+            Some("https://s3.example.com")
+        );
+        assert_eq!(
+            build_s3_endpoint_url(Some("s3.example.com"), "us-east-1", false).as_deref(),
+            Some("http://s3.example.com")
+        );
+        assert_eq!(
+            build_s3_endpoint_url(Some(" s3.example.com "), "us-east-1", true).as_deref(),
+            Some("https://s3.example.com")
+        );
+        assert_eq!(
+            build_s3_endpoint_url(None, "us-west-2", false).as_deref(),
+            Some("http://s3.us-west-2.amazonaws.com")
+        );
+        assert_eq!(build_s3_endpoint_url(None, "us-west-2", true), None);
     }
 }
 
