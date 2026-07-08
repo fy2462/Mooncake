@@ -52,43 +52,131 @@ impl From<BatchStatus> for i32 {
     }
 }
 
-fn status_to_batch_status(status: &Status) -> BatchStatus {
-    match status.code() {
-        tonic::Code::NotFound => BatchStatus::KeyNotFound,
-        tonic::Code::FailedPrecondition => BatchStatus::ReplicaNotReady,
-        tonic::Code::PermissionDenied => BatchStatus::IllegalClient,
-        _ => BatchStatus::InvalidState,
+fn record_batch_cache_hit_metrics(replica_type: ReplicaType, object_size: u64) {
+    match replica_type {
+        ReplicaType::Memory => {
+            metrics::MEM_CACHE_HITS.inc();
+            metrics::MEM_CACHE_HIT_BYTES.inc_by(object_size);
+        }
+        ReplicaType::Disk | ReplicaType::LocalDisk | ReplicaType::NoFSsd => {
+            metrics::FILE_CACHE_HITS.inc();
+            metrics::FILE_CACHE_HIT_BYTES.inc_by(object_size);
+        }
+        ReplicaType::All => {}
     }
+    metrics::VALID_GETS.inc();
 }
 
 impl MasterServiceImpl {
     // ---- BatchGetReplicaList ----
-    // C++ equivalent: WrappedMasterService::BatchGetReplicaList, implemented as
-    // repeated GetReplicaList calls with per-key expected/error results.
+    // C++ equivalent: WrappedMasterService::BatchGetReplicaList. Keep per-key
+    // expected/error results while doing the read, lease refresh, promotion, and
+    // metrics phases once for the batch instead of routing through repeated
+    // single-key GetReplicaList calls.
     pub(super) async fn batch_get_replica_list_impl(
         &self,
         request: Request<proto::BatchGetReplicaListRequest>,
     ) -> Result<Response<proto::BatchGetReplicaListResponse>, Status> {
         let req = request.into_inner();
-        let results = req
-            .keys
-            .iter()
-            .map(|key| match self.replica_list_for_key(&req.tenant_id, key) {
-                Ok(response) => proto::BatchGetReplicaListResult {
-                    status: BatchStatus::Success.into(),
-                    response: Some(response),
-                    error_message: String::new(),
-                },
-                Err(status) => proto::BatchGetReplicaListResult {
-                    status: status_to_batch_status(&status).into(),
-                    response: None,
-                    error_message: status.message().to_string(),
-                },
-            })
-            .collect();
+        let results = self.batch_replica_lists_for_keys(&req.tenant_id, &req.keys);
         Ok(Response::new(proto::BatchGetReplicaListResponse {
             results,
         }))
+    }
+
+    fn batch_replica_lists_for_keys(
+        &self,
+        tenant_id: &str,
+        keys: &[String],
+    ) -> Vec<proto::BatchGetReplicaListResult> {
+        struct BatchGetHit {
+            scoped_key: String,
+            first_replica_type: ReplicaType,
+            object_size: u64,
+            promotion_eligible: bool,
+        }
+
+        let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
+        let mut results = Vec::with_capacity(keys.len());
+        let mut hits = Vec::new();
+
+        for key in keys {
+            let scoped_key = make_tenant_scoped_key(tenant_id, key);
+            let result = match self.state.objects.get(&scoped_key) {
+                Some(entry) => {
+                    let complete = entry
+                        .replicas
+                        .iter()
+                        .filter(|replica| replica.status == ReplicaStatus::Complete)
+                        .collect::<Vec<_>>();
+                    if complete.is_empty() {
+                        proto::BatchGetReplicaListResult {
+                            status: BatchStatus::ReplicaNotReady.into(),
+                            response: None,
+                            error_message: "replica is not ready".to_string(),
+                        }
+                    } else {
+                        let first_replica_type = complete[0].replica_type;
+                        let promotion_eligible = !entry.replicas.iter().any(|replica| {
+                            replica.replica_type == ReplicaType::Memory
+                                && replica.status == ReplicaStatus::Complete
+                        }) && entry.replicas.iter().any(|replica| {
+                            replica.replica_type == ReplicaType::LocalDisk
+                                && replica.status == ReplicaStatus::Complete
+                        });
+                        hits.push(BatchGetHit {
+                            scoped_key,
+                            first_replica_type,
+                            object_size: entry.size,
+                            promotion_eligible,
+                        });
+                        proto::BatchGetReplicaListResult {
+                            status: BatchStatus::Success.into(),
+                            response: Some(proto::GetReplicaListResponse {
+                                replicas: complete.into_iter().map(replica_to_proto).collect(),
+                                lease_ttl_ms,
+                            }),
+                            error_message: String::new(),
+                        }
+                    }
+                }
+                None => proto::BatchGetReplicaListResult {
+                    status: BatchStatus::KeyNotFound.into(),
+                    response: None,
+                    error_message: format!("key not found: {key}"),
+                },
+            };
+            results.push(result);
+        }
+
+        let mut group_leases = Vec::new();
+        for hit in &hits {
+            if let Some(mut entry) = self.state.objects.get_mut(&hit.scoped_key) {
+                entry.last_access = SystemTime::now();
+                entry.grant_lease(
+                    self.state.runtime_config.lease_ttl,
+                    self.state.runtime_config.soft_pin_ttl,
+                );
+                if !entry.group_id.is_empty() {
+                    group_leases.push((entry.tenant_id.clone(), entry.group_id.clone()));
+                }
+            }
+        }
+        group_leases.sort();
+        group_leases.dedup();
+        for (tenant_id, group_id) in group_leases {
+            self.grant_group_lease(&tenant_id, &group_id);
+        }
+
+        for hit in hits {
+            if hit.promotion_eligible {
+                try_push_promotion_queue(&self.state, &hit.scoped_key);
+            }
+            metrics::GET_REQUESTS.inc();
+            record_batch_cache_hit_metrics(hit.first_replica_type, hit.object_size);
+        }
+
+        results
     }
 
     // ---- BatchExistKey ----

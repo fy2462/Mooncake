@@ -300,10 +300,10 @@ async fn test_admin_batch_get_replica_list_does_not_trigger_promotion() {
     assert!(admin_heartbeat.tasks.is_empty());
     assert!(admin_heartbeat.objects.is_empty());
 
-    MasterService::get_replica_list(
+    MasterService::batch_get_replica_list(
         &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "admin-disk-hot".into(),
+        Request::new(proto::BatchGetReplicaListRequest {
+            keys: vec!["admin-disk-hot".into()],
             tenant_id: String::new(),
         }),
     )
