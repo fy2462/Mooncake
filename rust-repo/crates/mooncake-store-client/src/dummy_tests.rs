@@ -5,7 +5,7 @@ use crate::dummy::{
 use std::fs;
 use std::io::{Read, Write};
 use std::mem;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 
 fn as_bytes<T>(value: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
@@ -104,5 +104,46 @@ fn ipc_channel_sends_fd_with_cxx_payload() {
 
     unsafe {
         libc::close(fds[0]);
+    }
+}
+
+#[test]
+fn ipc_channel_rejects_fd_with_partial_payload() {
+    let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
+    let receiver = DummyIpcChannel::from_stream(right);
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+
+    let marker: u32 = 7;
+    let mut iov = libc::iovec {
+        iov_base: &marker as *const u32 as *mut libc::c_void,
+        iov_len: mem::size_of::<u32>() - 1,
+    };
+    let mut control =
+        vec![0u8; unsafe { libc::CMSG_SPACE(mem::size_of::<libc::c_int>() as _) as usize }];
+    let mut msg: libc::msghdr = unsafe { mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = control.len() as _;
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        assert!(!cmsg.is_null());
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(mem::size_of::<libc::c_int>() as _) as _;
+        *(libc::CMSG_DATA(cmsg) as *mut libc::c_int) = fds[0];
+
+        let sent = libc::sendmsg(left.as_raw_fd(), &msg, 0);
+        assert_eq!(sent, (mem::size_of::<u32>() - 1) as isize);
+    }
+    drop(left);
+
+    assert!(receiver.recv_fd_with_bytes(mem::size_of::<u32>()).is_err());
+
+    unsafe {
+        libc::close(fds[0]);
+        libc::close(fds[1]);
     }
 }

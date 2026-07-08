@@ -48,10 +48,17 @@ pub(super) fn send_fd_with_bytes(
         let data = libc::CMSG_DATA(cmsg) as *mut RawFd;
         *data = fd;
 
-        let sent = libc::sendmsg(stream.as_raw_fd(), &msg, 0);
-        if sent < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
+        let sent = loop {
+            let sent = libc::sendmsg(stream.as_raw_fd(), &msg, 0);
+            if sent < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(err.into());
+            }
+            break sent;
+        };
         if sent as usize != iov.iov_len {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WriteZero,
@@ -85,27 +92,37 @@ pub(super) fn recv_fd_with_bytes(
     msg.msg_controllen = control.len() as _;
 
     unsafe {
-        let received = libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_WAITALL);
-        if received < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        if received as usize != len {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "short recvmsg while receiving fd",
-            )
-            .into());
-        }
+        let received = loop {
+            let received = libc::recvmsg(stream.as_raw_fd(), &mut msg, libc::MSG_WAITALL);
+            if received < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(err.into());
+            }
+            break received;
+        };
         let cmsg = libc::CMSG_FIRSTHDR(&msg);
         if cmsg.is_null()
             || (*cmsg).cmsg_level != libc::SOL_SOCKET
             || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+            || (*cmsg).cmsg_len < libc::CMSG_LEN(mem::size_of::<RawFd>() as _) as _
         {
             return Err(DummyClientError::InvalidInput(
                 "message did not contain a file descriptor".to_string(),
             ));
         }
-        Ok((*(libc::CMSG_DATA(cmsg) as *const RawFd), data))
+        let received_fd = *(libc::CMSG_DATA(cmsg) as *const RawFd);
+        if received as usize != len || (msg.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC)) != 0 {
+            libc::close(received_fd);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short or truncated recvmsg while receiving fd",
+            )
+            .into());
+        }
+        Ok((received_fd, data))
     }
 }
 
