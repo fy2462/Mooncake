@@ -1,3 +1,4 @@
+use super::buffer::OwnedBuffer;
 use super::MooncakeClient;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
@@ -251,7 +252,7 @@ impl MooncakeClient {
         let local_buffer_size_usize = usize::try_from(local_buffer_size).map_err(|_| {
             StoreError::InvalidParams("local_buffer_size exceeds addressable memory".to_string())
         })?;
-        let local_buffer = vec![0u8; local_buffer_size_usize];
+        let local_buffer = OwnedBuffer::allocate(local_buffer_size_usize);
         unsafe {
             engine.register_local_memory(
                 local_buffer.as_ptr() as *mut c_void,
@@ -269,7 +270,7 @@ impl MooncakeClient {
         // Step 7: If this node is a storage node (global_segment_size > 0),
         // allocate, register, open, and mount a segment.
         // 如果本节点是存储节点（global_segment_size > 0），分配、注册、打开并挂载 segment。
-        let mut segment_buffer: Option<Vec<u8>> = None;
+        let mut segment_buffer: Option<OwnedBuffer> = None;
         if global_segment_size > 0 {
             let global_segment_size_usize = usize::try_from(global_segment_size).map_err(|_| {
                 StoreError::InvalidParams(
@@ -280,7 +281,7 @@ impl MooncakeClient {
             // remote nodes can read from / write to this segment via RDMA/TCP.
             //
             // 分配 segment 内存并向 TE 注册，使远端节点可以通过 RDMA/TCP 读写此 segment。
-            let seg_buf = vec![0u8; global_segment_size_usize];
+            let seg_buf = OwnedBuffer::allocate(global_segment_size_usize);
             let base_addr = seg_buf.as_ptr() as u64;
             unsafe {
                 engine.register_local_memory(

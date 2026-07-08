@@ -3,6 +3,7 @@ pub(crate) mod background;
 pub(crate) mod batch_eviction;
 pub(crate) mod batch_types;
 pub(crate) mod batches;
+pub(crate) mod buffer;
 pub(crate) mod finalize;
 pub(crate) mod ha;
 pub(crate) mod lifecycle;
@@ -48,6 +49,8 @@ use uuid::Uuid;
 use crate::local_storage_backend::LocalStorageBackend;
 use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource};
+
+use self::buffer::OwnedBuffer;
 
 // ---------------------------------------------------------------------------
 // MooncakeClient — primary client for the Mooncake distributed store
@@ -120,14 +123,14 @@ pub struct MooncakeClient {
     /// write_to_replica: 先 memcpy 数据至此，再通过 TE 传输。
     /// read_from_replica: TE 读取到此缓冲区，再拷贝出去。
     /// 大小由 create() 中的 local_buffer_size 控制。
-    pub(crate) local_buffer: Vec<u8>,
+    pub(crate) local_buffer: OwnedBuffer,
 
     /// Segment memory buffer (only for storage nodes with global_segment_size > 0).
     /// Must be kept alive for the lifetime of the client so the TE can access it.
     ///
     /// Segment 内存缓冲区（仅当 global_segment_size > 0 时分配，用于存储节点）。
     /// 必须在客户端整个生命周期内保持存活，以便 TE 能够访问。
-    pub(crate) segment_buffer: Option<Vec<u8>>,
+    pub(crate) segment_buffer: Option<OwnedBuffer>,
 
     /// Map of externally-registered user buffers: `ptr_addr → (size, location)`.
     /// Populated via [`register_buffer`](MooncakeClient::register_buffer) for
