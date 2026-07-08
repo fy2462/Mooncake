@@ -101,6 +101,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::warn;
 use uuid::Uuid;
 
 use super::to_py_err;
@@ -124,9 +125,82 @@ pub(crate) struct PythonMooncakeClient {
     pub(crate) registered_py_buffers: Arc<Mutex<Vec<(usize, Py<PyAny>)>>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct NormalizedCreateArgs {
+    local_hostname: String,
+    metadata_server: String,
+    master_server_addr: String,
+    protocol: String,
+}
+
 // =========================================================================
 // Internal helpers — 内部辅助函数
 // =========================================================================
+
+const KNOWN_PROTOCOLS: &[&str] = &[
+    "tcp",
+    "rdma",
+    "efa",
+    "nvmeof",
+    "nvlink",
+    "nvlink_intra",
+    "hip",
+    "barex",
+    "cxl",
+    "ascend",
+    "ub",
+    "ubshmem",
+    "maca",
+    "sunrise_link",
+    "rpc_only",
+];
+
+fn required_non_empty(field: &str, value: String) -> PyResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(to_py_err(format!(
+            "Config field '{field}' must be a non-empty string"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_create_args(
+    local_hostname: String,
+    metadata_server: String,
+    master_server_addr: String,
+    protocol: String,
+) -> PyResult<NormalizedCreateArgs> {
+    let local_hostname = required_non_empty("local_hostname", local_hostname)?;
+    let metadata_server = required_non_empty("metadata_server", metadata_server)?;
+    let master_server_addr = required_non_empty("master_server_addr", master_server_addr)?;
+
+    let protocol = if protocol.is_empty() {
+        "tcp".to_string()
+    } else {
+        let trimmed = protocol.trim();
+        if trimmed.is_empty() {
+            return Err(to_py_err(
+                "Invalid protocol: protocol must be a non-empty string",
+            ));
+        }
+        trimmed.to_ascii_lowercase()
+    };
+
+    if !KNOWN_PROTOCOLS.contains(&protocol.as_str()) {
+        warn!(
+            protocol,
+            "unrecognised protocol; passing it through to the Mooncake engine"
+        );
+    }
+
+    Ok(NormalizedCreateArgs {
+        local_hostname,
+        metadata_server,
+        master_server_addr,
+        protocol,
+    })
+}
 
 /// Extract the raw pointer and size from a Python buffer-like object.
 ///
@@ -270,7 +344,7 @@ impl PythonMooncakeClient {
     ///
     /// Parameters (参数):
     ///   local_hostname:   This node's hostname for RDMA/device identification.
-    ///                     本节点用于 RDMA/设备识别的主机名。默认 "localhost"。
+    ///                     本节点用于 RDMA/设备识别的主机名。
     ///   metadata_server:  etcd connection string, e.g. "http://localhost:2379".
     ///                     etcd 连接字符串。
     ///   master_server_addr: Master server address (host:port).
@@ -305,18 +379,12 @@ impl PythonMooncakeClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         use mooncake_store_client::LocalFsSource;
 
-        // Apply defaults for empty/negative sentinel values.
-        // 对空值/负数值哨兵应用默认值。
-        let local_hostname = if local_hostname.is_empty() {
-            "localhost".to_string()
-        } else {
-            local_hostname
-        };
-        let protocol = if protocol.is_empty() {
-            "tcp".to_string()
-        } else {
-            protocol
-        };
+        let normalized = normalize_create_args(
+            local_hostname,
+            metadata_server,
+            master_server_addr,
+            protocol,
+        )?;
         let gss = if global_segment_size < 0 {
             0u64
         } else {
@@ -335,10 +403,10 @@ impl PythonMooncakeClient {
         // PythonMooncakeClient 在 GIL 持有下转换为 Python 对象。
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = MooncakeClient::create(
-                &master_server_addr,
-                &metadata_server,
-                &local_hostname,
-                &protocol,
+                &normalized.master_server_addr,
+                &normalized.metadata_server,
+                &normalized.local_hostname,
+                &normalized.protocol,
                 &device,
                 gss,
                 lbs,
@@ -2307,5 +2375,75 @@ impl PythonMooncakeClient {
             all_src_offsets,
             all_sizes,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn normalize(protocol: &str) -> PyResult<NormalizedCreateArgs> {
+        normalize_create_args(
+            " host-1 ".to_string(),
+            " P2PHANDSHAKE ".to_string(),
+            " localhost:50051 ".to_string(),
+            protocol.to_string(),
+        )
+    }
+
+    #[test]
+    fn normalize_create_args_trims_required_fields_and_defaults_protocol() {
+        let normalized = normalize("").unwrap();
+        assert_eq!(
+            normalized,
+            NormalizedCreateArgs {
+                local_hostname: "host-1".to_string(),
+                metadata_server: "P2PHANDSHAKE".to_string(),
+                master_server_addr: "localhost:50051".to_string(),
+                protocol: "tcp".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn normalize_create_args_lowercases_known_protocols() {
+        assert_eq!(normalize(" RDMA ").unwrap().protocol, "rdma");
+        assert_eq!(normalize("Tcp").unwrap().protocol, "tcp");
+        assert_eq!(normalize("UBSHMEM").unwrap().protocol, "ubshmem");
+        assert_eq!(normalize("rpc_only").unwrap().protocol, "rpc_only");
+    }
+
+    #[test]
+    fn normalize_create_args_warns_but_passes_unknown_protocol() {
+        assert_eq!(
+            normalize(" FooTransport ").unwrap().protocol,
+            "footransport"
+        );
+    }
+
+    #[test]
+    fn normalize_create_args_rejects_blank_protocol_when_explicit() {
+        let err = normalize("   ").unwrap_err().to_string();
+        assert!(err.contains("Invalid protocol"));
+    }
+
+    #[test]
+    fn normalize_create_args_rejects_empty_required_fields() {
+        for field in [
+            ("local_hostname", "", "metadata", "master"),
+            ("metadata_server", "host", "   ", "master"),
+            ("master_server_addr", "host", "metadata", ""),
+        ] {
+            let (name, local_hostname, metadata_server, master_server_addr) = field;
+            let err = normalize_create_args(
+                local_hostname.to_string(),
+                metadata_server.to_string(),
+                master_server_addr.to_string(),
+                "tcp".to_string(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains(name), "{err}");
+        }
     }
 }
