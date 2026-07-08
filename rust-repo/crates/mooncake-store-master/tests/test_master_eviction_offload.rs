@@ -21,6 +21,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
         ..Default::default()
     });
     let client_id = Uuid::new_v4();
+    let tenant_id = "tenant-a";
 
     for segment_name in ["evict-a", "evict-b"] {
         MasterService::mount_segment(
@@ -65,7 +66,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
             }),
-            tenant_id: String::new(),
+            tenant_id: tenant_id.into(),
         }),
     )
     .await
@@ -78,7 +79,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
             client_id: Some(uuid_proto(client_id)),
             key: "evict-offload".into(),
             replica_type: 0,
-            tenant_id: String::new(),
+            tenant_id: tenant_id.into(),
         }),
     )
     .await
@@ -99,12 +100,20 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     .unwrap()
     .into_inner();
     assert_eq!(offload.objects.get("evict-offload"), Some(&256));
+    assert_eq!(
+        offload.tasks,
+        vec![proto::OffloadTaskItem {
+            tenant_id: tenant_id.into(),
+            key: "evict-offload".into(),
+            size: 256,
+        }]
+    );
 
     let replicas = MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "evict-offload".into(),
-            tenant_id: String::new(),
+            tenant_id: tenant_id.into(),
         }),
     )
     .await

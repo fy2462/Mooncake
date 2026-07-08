@@ -72,9 +72,6 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
         let Some(object) = state.objects.get(key) else {
             return;
         };
-        if object.tenant_id != "default" {
-            return;
-        }
         let Some(source) = object
             .replicas
             .iter()
