@@ -388,7 +388,10 @@ impl SnapshotObjectStore for S3SnapshotObjectStore {
                         keys.push(key[local_prefix_len..].to_string());
                     }
                 }
-                token = output.next_continuation_token().map(ToString::to_string);
+                token = next_s3_list_token(
+                    output.is_truncated().unwrap_or(false),
+                    output.next_continuation_token(),
+                )?;
                 if token.is_none() {
                     break;
                 }
@@ -692,6 +695,22 @@ where
     .map_err(|_| HaError::Snapshot("snapshot async bridge panicked".into()))?
 }
 
+fn next_s3_list_token(
+    is_truncated: bool,
+    next_token: Option<&str>,
+) -> Result<Option<String>, HaError> {
+    if !is_truncated {
+        return Ok(None);
+    }
+    let token = next_token.unwrap_or("").trim();
+    if token.is_empty() {
+        return Err(HaError::Snapshot(
+            "ListObjectsV2 error: truncated response missing next continuation token".into(),
+        ));
+    }
+    Ok(Some(token.to_string()))
+}
+
 fn parse_bool_like(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
@@ -812,6 +831,20 @@ mod tests {
             parse_timeout_ms(None, DEFAULT_S3_CONNECT_TIMEOUT_MS),
             Duration::from_millis(DEFAULT_S3_CONNECT_TIMEOUT_MS)
         );
+    }
+
+    #[test]
+    fn test_s3_list_v2_requires_token_when_truncated() {
+        assert_eq!(next_s3_list_token(false, None).unwrap(), None);
+        assert_eq!(
+            next_s3_list_token(true, Some(" next-page ")).unwrap(),
+            Some("next-page".to_string())
+        );
+
+        let error = next_s3_list_token(true, None).unwrap_err().to_string();
+        assert!(error.contains("truncated response missing next continuation token"));
+        let empty_error = next_s3_list_token(true, Some("")).unwrap_err().to_string();
+        assert!(empty_error.contains("truncated response missing next continuation token"));
     }
 }
 
