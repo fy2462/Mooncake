@@ -3,6 +3,9 @@ mod common;
 use common::proto_uuid;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
+use mooncake_store_master::tenant_quota_policy_store::{
+    load_tenant_quota_policy, save_tenant_quota_policy, TenantQuotaPolicySnapshot,
+};
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::os::unix::fs::PermissionsExt;
 use tonic::{Code, Request};
@@ -39,11 +42,20 @@ async fn mount_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str,
     .unwrap();
 }
 
+fn temp_policy_uri() -> String {
+    tempfile::NamedTempFile::new()
+        .unwrap()
+        .path()
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[tokio::test]
 async fn test_tenant_quota_admission_commit_and_release() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_tenant_quota: true,
         default_tenant_quota_bytes: 512,
+        tenant_quota_connector_uri: temp_policy_uri(),
         tenant_quota_pool_capacity_bytes: 512,
         lease_ttl: std::time::Duration::ZERO,
         ..Default::default()
@@ -132,6 +144,23 @@ async fn test_tenant_quota_admission_commit_and_release() {
 }
 
 #[test]
+fn test_tenant_quota_policy_connectors_require_uri() {
+    for connector_type in ["file", "etcd"] {
+        let load_err = load_tenant_quota_policy(connector_type, " ", "cluster-a").unwrap_err();
+        assert!(load_err.contains("non-empty uri"));
+
+        let save_err = save_tenant_quota_policy(
+            connector_type,
+            "",
+            "cluster-a",
+            &TenantQuotaPolicySnapshot::default(),
+        )
+        .unwrap_err();
+        assert!(save_err.contains("non-empty uri"));
+    }
+}
+
+#[test]
 fn test_tenant_quota_admin_policy_lifecycle_methods() {
     let temp = tempfile::NamedTempFile::new().unwrap();
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
@@ -202,6 +231,7 @@ fn test_tenant_quota_policy_save_failure_does_not_mutate_memory_state() {
 async fn test_tenant_quota_rejects_unregistered_tenant() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_tenant_quota: true,
+        tenant_quota_connector_uri: temp_policy_uri(),
         tenant_quota_pool_capacity_bytes: 512,
         ..Default::default()
     });
@@ -229,6 +259,7 @@ async fn test_tenant_quota_rejects_unregistered_tenant() {
 async fn test_tenant_quota_rejects_delete_for_non_empty_tenant() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_tenant_quota: true,
+        tenant_quota_connector_uri: temp_policy_uri(),
         tenant_quota_pool_capacity_bytes: 512,
         lease_ttl: std::time::Duration::ZERO,
         ..Default::default()

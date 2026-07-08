@@ -21,12 +21,15 @@ pub fn load_tenant_quota_policy(
     connector_uri: &str,
     cluster_id: &str,
 ) -> Result<TenantQuotaPolicySnapshot, String> {
-    if connector_uri.trim().is_empty() {
-        return Ok(TenantQuotaPolicySnapshot::default());
-    }
     match connector_type {
-        "file" => load_file_policy(connector_uri),
-        "etcd" => load_etcd_policy(connector_uri, cluster_id),
+        "file" => {
+            require_tenant_quota_connector_uri("file", connector_uri)?;
+            load_file_policy(connector_uri)
+        }
+        "etcd" => {
+            require_tenant_quota_connector_uri("etcd", connector_uri)?;
+            load_etcd_policy(connector_uri, cluster_id)
+        }
         other => Err(format!("unsupported tenant quota connector type: {other}")),
     }
 }
@@ -37,14 +40,29 @@ pub fn save_tenant_quota_policy(
     cluster_id: &str,
     snapshot: &TenantQuotaPolicySnapshot,
 ) -> Result<(), String> {
-    if connector_uri.trim().is_empty() {
-        return Ok(());
-    }
     match connector_type {
-        "file" => save_file_policy(connector_uri, snapshot),
-        "etcd" => save_etcd_policy(connector_uri, cluster_id, snapshot),
+        "file" => {
+            require_tenant_quota_connector_uri("file", connector_uri)?;
+            save_file_policy(connector_uri, snapshot)
+        }
+        "etcd" => {
+            require_tenant_quota_connector_uri("etcd", connector_uri)?;
+            save_etcd_policy(connector_uri, cluster_id, snapshot)
+        }
         other => Err(format!("unsupported tenant quota connector type: {other}")),
     }
+}
+
+fn require_tenant_quota_connector_uri(
+    connector_type: &str,
+    connector_uri: &str,
+) -> Result<(), String> {
+    if connector_uri.trim().is_empty() {
+        return Err(format!(
+            "tenant quota {connector_type} connector requires a non-empty uri"
+        ));
+    }
+    Ok(())
 }
 
 fn load_file_policy(path: &str) -> Result<TenantQuotaPolicySnapshot, String> {
