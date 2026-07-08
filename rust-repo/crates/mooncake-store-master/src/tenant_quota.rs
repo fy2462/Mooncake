@@ -18,6 +18,7 @@ pub struct TenantQuotaSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TenantQuotaError {
     QuotaExceeded,
+    TenantNotRegistered,
     InvalidArgument,
     AccountingMismatch,
     TenantNotEmpty,
@@ -128,10 +129,10 @@ impl TenantQuotaTable {
             return Ok(());
         }
         let Some(state) = self.tenants.get_mut(&tenant_id) else {
-            return Err(TenantQuotaError::QuotaExceeded);
+            return Err(TenantQuotaError::TenantNotRegistered);
         };
         if !state.has_explicit_policy {
-            return Err(TenantQuotaError::QuotaExceeded);
+            return Err(TenantQuotaError::TenantNotRegistered);
         }
         let next = state.used_bytes as u128 + state.reserved_bytes as u128 + bytes as u128;
         if next > state.effective_quota_bytes as u128 {

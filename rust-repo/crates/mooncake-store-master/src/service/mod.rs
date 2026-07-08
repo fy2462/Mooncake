@@ -153,6 +153,9 @@ impl MasterServiceImpl {
     fn tenant_quota_status(error: TenantQuotaError) -> Status {
         match error {
             TenantQuotaError::QuotaExceeded => Status::resource_exhausted("tenant quota exceeded"),
+            TenantQuotaError::TenantNotRegistered => {
+                Status::resource_exhausted("tenant not registered")
+            }
             TenantQuotaError::InvalidArgument => Status::invalid_argument("invalid tenant quota"),
             TenantQuotaError::AccountingMismatch => {
                 Status::failed_precondition("tenant quota accounting mismatch")

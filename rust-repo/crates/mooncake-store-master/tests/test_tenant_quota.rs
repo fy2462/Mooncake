@@ -107,6 +107,7 @@ async fn test_tenant_quota_admission_commit_and_release() {
     .await
     .unwrap_err();
     assert_eq!(rejected.code(), Code::ResourceExhausted);
+    assert!(rejected.message().contains("tenant quota exceeded"));
 
     MasterService::remove(
         &service,
@@ -175,6 +176,7 @@ async fn test_tenant_quota_rejects_unregistered_tenant() {
     .unwrap_err();
 
     assert_eq!(rejected.code(), Code::ResourceExhausted);
+    assert!(rejected.message().contains("tenant not registered"));
 }
 
 #[tokio::test]
