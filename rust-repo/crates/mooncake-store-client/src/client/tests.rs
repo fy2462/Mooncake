@@ -6,6 +6,7 @@ use super::finalize::{
 use super::read::scoped_cache_key;
 use super::{CachedQueryResultResponse, MooncakeClient};
 use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
+use std::ffi::c_void;
 use std::time::Duration;
 
 #[test]
@@ -96,6 +97,29 @@ fn effective_transport_protocol_honors_force_tcp_env() {
         MooncakeClient::effective_transport_protocol("rdma", Some(String::new())),
         "tcp"
     );
+}
+
+#[test]
+fn metadata_value_buffers_preserve_metadata_only_zero_data() {
+    let data = 0x1000usize as *mut c_void;
+    let metadata = 0x2000usize as *mut c_void;
+
+    let (buffers, sizes) = super::write_batch::metadata_value_buffers(data, metadata, 8, 4)
+        .expect("metadata and data buffers");
+    assert_eq!(buffers, vec![metadata, data]);
+    assert_eq!(sizes, vec![4, 8]);
+
+    let (buffers, sizes) = super::write_batch::metadata_value_buffers(data, metadata, 0, 4)
+        .expect("metadata-only buffer");
+    assert_eq!(buffers, vec![metadata]);
+    assert_eq!(sizes, vec![4]);
+
+    let (buffers, sizes) =
+        super::write_batch::metadata_value_buffers(data, metadata, 8, 0).expect("data buffer");
+    assert_eq!(buffers, vec![data]);
+    assert_eq!(sizes, vec![8]);
+
+    assert!(super::write_batch::metadata_value_buffers(data, metadata, 0, 0).is_none());
 }
 
 #[test]

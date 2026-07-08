@@ -7,6 +7,25 @@ use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaType, ReplicateConfig, StoreError};
 use std::ffi::c_void;
 
+pub(super) fn metadata_value_buffers(
+    buffer: *mut c_void,
+    metadata_buffer: *mut c_void,
+    size: usize,
+    metadata_size: usize,
+) -> Option<(Vec<*mut c_void>, Vec<usize>)> {
+    let mut buffers = Vec::with_capacity(2);
+    let mut sizes = Vec::with_capacity(2);
+    if metadata_size > 0 {
+        buffers.push(metadata_buffer);
+        sizes.push(metadata_size);
+    }
+    if size > 0 {
+        buffers.push(buffer);
+        sizes.push(size);
+    }
+    (!buffers.is_empty()).then_some((buffers, sizes))
+}
+
 impl MooncakeClient {
     pub async fn batch_put(
         &mut self,
@@ -120,8 +139,8 @@ impl MooncakeClient {
     /// Zero-copy put from a data buffer plus a metadata buffer.
     ///
     /// The object layout matches C++ `RealClient::put_from_with_metadata`:
-    /// metadata bytes are written first, followed by data bytes. If `size == 0`,
-    /// this is a no-op success.
+    /// metadata bytes are written first, followed by data bytes. Metadata-only
+    /// zero-sized tensors are stored when `metadata_size > 0`.
     ///
     /// # Safety
     /// `buffer` and `metadata_buffer` must be valid and pre-registered with the
@@ -139,20 +158,13 @@ impl MooncakeClient {
         if cfg.prefer_alloc_in_same_node {
             return Ok(-1);
         }
-        if size == 0 {
+        let Some((buffers, sizes)) =
+            metadata_value_buffers(buffer, metadata_buffer, size, metadata_size)
+        else {
             return Ok(0);
-        }
+        };
 
         let keys = vec![key.to_string()];
-        let mut buffers = Vec::with_capacity(2);
-        let mut sizes = Vec::with_capacity(2);
-        if metadata_size > 0 {
-            buffers.push(metadata_buffer);
-            sizes.push(metadata_size);
-        }
-        buffers.push(buffer);
-        sizes.push(size);
-
         let statuses = unsafe {
             self.batch_put_from_multi_buffers(&keys, &[buffers], &[sizes], Some(cfg))
                 .await?
