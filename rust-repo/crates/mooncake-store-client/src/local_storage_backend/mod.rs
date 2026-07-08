@@ -131,11 +131,12 @@ impl LocalStorageBackend {
     /// C++ equivalent: `StorageBackend::Init(quota_bytes)` +
     /// `StorageBackendAdaptor::Init()`.
     pub fn init(&self) -> StoreResult<()> {
-        if self.initialized.swap(true, Ordering::SeqCst) {
+        if self.initialized.load(Ordering::SeqCst) {
             return Ok(());
         }
 
         let data_dir = self.data_dir();
+        self.clean_storage_path()?;
         std::fs::create_dir_all(&data_dir)?;
 
         // Determine quota.
@@ -173,6 +174,7 @@ impl LocalStorageBackend {
         }
 
         *self.used_space.write() = used;
+        self.initialized.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -351,6 +353,47 @@ impl LocalStorageBackend {
         Ok(count)
     }
 
+    /// Wipe every file and subdirectory under the data directory, keeping the
+    /// directory itself. This is used by the P2P SSD/offload path, where local
+    /// disk data is an ephemeral cache rather than durable FileStorage state.
+    ///
+    /// C++ equivalent: `StorageBackendInterface::CleanStoragePath()`, invoked
+    /// by `StorageTier` on startup and destruction.
+    pub fn clean_storage_path(&self) -> StoreResult<usize> {
+        let data_dir = self.data_dir();
+        self.validate_clean_storage_path(&data_dir)?;
+
+        if !data_dir.exists() {
+            return Ok(0);
+        }
+        if !data_dir.is_dir() {
+            tracing::warn!(
+                "LocalStorageBackend clean_storage_path skipped non-directory path: {:?}",
+                data_dir
+            );
+            return Ok(0);
+        }
+
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&data_dir)? {
+            let entry = entry?;
+            std::fs::remove_dir_all(entry.path()).or_else(|err| {
+                if err.kind() == std::io::ErrorKind::NotADirectory {
+                    std::fs::remove_file(entry.path())
+                } else {
+                    Err(err)
+                }
+            })?;
+            removed += 1;
+        }
+
+        self.write_queue.write().clear();
+        self.queue_set.write().clear();
+        *self.used_space.write() = 0;
+
+        Ok(removed)
+    }
+
     /// Remove keys whose sanitized filenames match the given regex pattern.
     /// Returns the count of removed files.
     ///
@@ -516,6 +559,29 @@ impl LocalStorageBackend {
             }
         }
         Ok(count)
+    }
+
+    fn validate_clean_storage_path(&self, data_dir: &Path) -> StoreResult<()> {
+        if self.config.fsdir.trim().is_empty() {
+            return Err(StoreError::InvalidParams(
+                "LocalStorageBackend clean_storage_path requires a non-empty fsdir".to_string(),
+            ));
+        }
+        if !data_dir.is_absolute() || data_dir.parent().is_none() {
+            return Err(StoreError::InvalidParams(format!(
+                "LocalStorageBackend refuses to clean unsafe storage path: {}",
+                data_dir.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LocalStorageBackend {
+    fn drop(&mut self) {
+        if let Err(err) = self.clean_storage_path() {
+            tracing::warn!("LocalStorageBackend clean_storage_path on drop failed: {err}");
+        }
     }
 }
 

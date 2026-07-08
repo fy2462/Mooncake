@@ -26,6 +26,46 @@ fn eviction_backend(quota: u64) -> (LocalStorageBackend, tempfile::TempDir) {
     (backend, tmp)
 }
 
+#[test]
+fn test_ephemeral_storage_wipes_on_startup_and_drop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "ephemeral_data".to_string(),
+        enable_eviction: true,
+        quota_bytes: 1024 * 1024,
+    };
+    let data_dir = tmp.path().join("ephemeral_data");
+
+    std::fs::create_dir_all(data_dir.join("stale_subdir")).unwrap();
+    std::fs::write(data_dir.join("leftover.bin"), b"stale").unwrap();
+
+    {
+        let backend = LocalStorageBackend::new(config.clone());
+        backend.init().unwrap();
+
+        assert!(data_dir.exists(), "startup wipe keeps the data directory");
+        assert!(
+            !data_dir.join("leftover.bin").exists(),
+            "startup wipe removes stale files"
+        );
+        assert!(
+            !data_dir.join("stale_subdir").exists(),
+            "startup wipe removes stale subdirectories"
+        );
+
+        backend.write_object("live_key", b"live").unwrap();
+        assert!(backend.exists("live_key"));
+    }
+
+    assert!(data_dir.exists(), "drop wipe keeps the data directory");
+    assert_eq!(
+        std::fs::read_dir(&data_dir).unwrap().count(),
+        0,
+        "drop wipe removes cached data"
+    );
+}
+
 // ------------------------------------------------------------------
 // Path tests
 // ------------------------------------------------------------------
