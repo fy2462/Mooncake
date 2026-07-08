@@ -48,6 +48,10 @@ pub use storage_backend_config::{
     BucketBackendConfig, BucketEvictionPolicy, DistributedStorageConfig, StorageBackendType,
 };
 
+const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
+
+type AvailableSpaceProbe = dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync;
+
 /// The main storage backend for snapshot persistence and key-based file operations.
 /// 用于快照持久化和基于 key 的文件操作的主存储后端。
 pub struct StorageBackend {
@@ -55,6 +59,7 @@ pub struct StorageBackend {
     disk_dir: PathBuf,
     distributed_config: Option<DistributedStorageConfig>,
     distributed_adapter: Option<Box<dyn FileSystemAdapter>>,
+    available_space_probe: Box<AvailableSpaceProbe>,
 }
 
 // =============================================================================
@@ -75,6 +80,7 @@ impl StorageBackend {
                     disk_dir: disk_dir.to_path_buf(),
                     distributed_config: None,
                     distributed_adapter: None,
+                    available_space_probe: Box::new(|path| fs2::available_space(path)),
                 }
             });
         }
@@ -85,6 +91,23 @@ impl StorageBackend {
             disk_dir: disk_dir.to_path_buf(),
             distributed_config: None,
             distributed_adapter: None,
+            available_space_probe: Box::new(|path| fs2::available_space(path)),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_available_space_probe(
+        backend_type: StorageBackendType,
+        disk_dir: &Path,
+        available_space_probe: Box<AvailableSpaceProbe>,
+    ) -> Self {
+        fs::create_dir_all(disk_dir).ok();
+        Self {
+            backend_type,
+            disk_dir: disk_dir.to_path_buf(),
+            distributed_config: None,
+            distributed_adapter: None,
+            available_space_probe,
         }
     }
 
@@ -107,6 +130,7 @@ impl StorageBackend {
             disk_dir: config.fsdir.clone(),
             distributed_config: Some(config),
             distributed_adapter: Some(adapter),
+            available_space_probe: Box::new(|path| fs2::available_space(path)),
         })
     }
 

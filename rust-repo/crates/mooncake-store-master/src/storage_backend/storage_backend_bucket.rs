@@ -111,9 +111,11 @@ impl StorageBackend {
             entries: Vec::new(),
         };
         let mut bucket_size = 0u64;
+        let mut required_size = 0u64;
 
         for (key, value) in entries {
             let value_len = value.len() as u64;
+            required_size = required_size.saturating_add(value_len);
             if !bucket.entries.is_empty()
                 && (bucket.entries.len() >= config.bucket_keys_limit
                     || bucket_size.saturating_add(value_len) > config.bucket_size_limit)
@@ -134,17 +136,19 @@ impl StorageBackend {
         if !bucket.entries.is_empty() {
             self.write_bucket(&bucket)?;
         }
-        self.enforce_bucket_total_size(&config)?;
+        self.enforce_bucket_total_size(&config, required_size)?;
         Ok(())
     }
 
     pub(super) fn enforce_bucket_total_size(
         &self,
         config: &BucketBackendConfig,
+        required_size: u64,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if config.max_total_size == 0 || config.eviction_policy == BucketEvictionPolicy::None {
             return Ok(());
         }
+        let disk_deficit = self.bucket_disk_space_deficit(required_size);
         let mut buckets = Vec::new();
         let mut total = 0u64;
         for bucket_id in self.list_bucket_ids()? {
@@ -162,8 +166,13 @@ impl StorageBackend {
             BucketEvictionPolicy::Lru => buckets.sort_by_key(|(_, _, last_access, _)| *last_access),
             BucketEvictionPolicy::None => {}
         }
+        let mut freed_for_disk = 0u64;
         for (bucket_id, _, _, size) in buckets {
-            if total <= config.max_total_size {
+            let quota_satisfied = total <= config.max_total_size;
+            let disk_satisfied = disk_deficit
+                .map(|deficit| freed_for_disk >= deficit)
+                .unwrap_or(true);
+            if quota_satisfied && disk_satisfied {
                 break;
             }
             let path = self.bucket_path(bucket_id);
@@ -171,8 +180,25 @@ impl StorageBackend {
                 std::fs::remove_file(path)?;
             }
             total = total.saturating_sub(size);
+            freed_for_disk = freed_for_disk.saturating_add(size);
         }
         Ok(())
+    }
+
+    fn bucket_disk_space_deficit(&self, required_size: u64) -> Option<u64> {
+        match (self.available_space_probe)(&self.bucket_dir()) {
+            Ok(available) => required_size
+                .saturating_add(MIN_FREE_SPACE_BYTES)
+                .checked_sub(available)
+                .filter(|deficit| *deficit > 0),
+            Err(err) => {
+                tracing::warn!(
+                    "failed to query available bucket disk space for {:?}: {err}",
+                    self.bucket_dir()
+                );
+                None
+            }
+        }
     }
 
     pub(super) fn batch_load_bucket(
@@ -263,5 +289,47 @@ impl StorageBackend {
             }
         }
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bucket_file(
+        bucket_id: u64,
+        created_at_ms: i64,
+        last_access_ns: i64,
+        size: usize,
+    ) -> BucketFile {
+        BucketFile {
+            bucket_id,
+            created_at_ms,
+            last_access_ns,
+            entries: vec![(format!("key-{bucket_id}"), vec![0; size])],
+        }
+    }
+
+    #[test]
+    fn bucket_eviction_uses_actual_disk_space_deficit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = StorageBackend::new_with_available_space_probe(
+            StorageBackendType::Bucket,
+            tmp.path(),
+            Box::new(|_| Ok(MIN_FREE_SPACE_BYTES + 50)),
+        );
+        backend.write_bucket(&bucket_file(1, 1, 10, 100)).unwrap();
+        backend.write_bucket(&bucket_file(2, 2, 20, 100)).unwrap();
+        let config = BucketBackendConfig {
+            bucket_size_limit: 1024,
+            bucket_keys_limit: 10,
+            eviction_policy: BucketEvictionPolicy::Fifo,
+            max_total_size: 1024,
+        };
+
+        backend.enforce_bucket_total_size(&config, 100).unwrap();
+
+        assert!(!backend.bucket_path(1).exists());
+        assert!(backend.bucket_path(2).exists());
     }
 }

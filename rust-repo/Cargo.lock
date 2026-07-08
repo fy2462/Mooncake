@@ -2550,6 +2550,7 @@ dependencies = [
  "clap",
  "dashmap",
  "etcd-client",
+ "fs2",
  "futures-util",
  "k8s-openapi",
  "kube",
