@@ -401,6 +401,55 @@ async fn test_group_lookup_grants_lease_to_all_group_members() {
 }
 
 #[tokio::test]
+async fn test_batch_exist_grants_lease_to_all_group_members() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_secs(3600),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "batch-exist-group:1", 4096).await;
+
+    for key in ["batch-exist-group-a", "batch-exist-group-b"] {
+        put_complete_with_config(
+            &service,
+            client_id,
+            key,
+            "",
+            proto::ReplicateConfig {
+                preferred_segment: "batch-exist-group:1".into(),
+                group_ids: vec!["batch-exist-shared".into()],
+                ..replicate_config()
+            },
+        )
+        .await;
+    }
+
+    let exist = MasterService::batch_exist_key(
+        &service,
+        Request::new(proto::BatchExistKeyRequest {
+            keys: vec!["batch-exist-group-a".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(exist.results, vec![true]);
+
+    let remove_other_group_member = MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "batch-exist-group-b".into(),
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(remove_other_group_member.code(), Code::FailedPrecondition);
+}
+
+#[tokio::test]
 async fn test_upsert_group_membership_is_immutable_when_explicit() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();

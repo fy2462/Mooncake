@@ -186,15 +186,57 @@ impl MasterServiceImpl {
         request: Request<proto::BatchExistKeyRequest>,
     ) -> Result<Response<proto::BatchExistKeyResponse>, Status> {
         let req = request.into_inner();
-        let results: Vec<bool> = req
-            .keys
-            .iter()
-            .map(|k| {
-                let key = make_tenant_scoped_key(&req.tenant_id, k);
-                self.completed_object_exists_and_grant_lease(&key)
-            })
-            .collect();
+        let results = self.batch_completed_objects_exist_and_grant_lease(&req.tenant_id, &req.keys);
         Ok(Response::new(proto::BatchExistKeyResponse { results }))
+    }
+
+    fn batch_completed_objects_exist_and_grant_lease(
+        &self,
+        tenant_id: &str,
+        keys: &[String],
+    ) -> Vec<bool> {
+        let mut results = Vec::with_capacity(keys.len());
+        let mut lease_keys = Vec::new();
+
+        for key in keys {
+            let scoped_key = make_tenant_scoped_key(tenant_id, key);
+            let exists = self
+                .state
+                .objects
+                .get(&scoped_key)
+                .map(|entry| {
+                    entry
+                        .replicas
+                        .iter()
+                        .any(|replica| replica.status == ReplicaStatus::Complete)
+                })
+                .unwrap_or(false);
+            if exists {
+                lease_keys.push(scoped_key);
+            }
+            results.push(exists);
+        }
+
+        let mut group_leases = Vec::new();
+        for scoped_key in lease_keys {
+            if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
+                entry.last_access = SystemTime::now();
+                entry.grant_lease(
+                    self.state.runtime_config.lease_ttl,
+                    self.state.runtime_config.soft_pin_ttl,
+                );
+                if !entry.group_id.is_empty() {
+                    group_leases.push((entry.tenant_id.clone(), entry.group_id.clone()));
+                }
+            }
+        }
+        group_leases.sort();
+        group_leases.dedup();
+        for (tenant_id, group_id) in group_leases {
+            self.grant_group_lease(&tenant_id, &group_id);
+        }
+
+        results
     }
 
     // ---- BatchQueryIp ----
