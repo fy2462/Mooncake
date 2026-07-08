@@ -33,6 +33,28 @@ fn test_hot_cache_remove() {
 }
 
 #[test]
+fn test_hot_cache_remove_by_regex_respects_tenant_scope() {
+    let cache = LocalHotCache::new(1024 * 1024, 100);
+    cache.put("tenant-a\0prefix_1", b"a1");
+    cache.put("tenant-a\0other_1", b"a2");
+    cache.put("tenant-b\0prefix_1", b"b1");
+    cache.put("prefix_1", b"default");
+
+    let removed = cache
+        .remove_by_regex_for_tenant("tenant-a", "^prefix_.*")
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert!(cache.get("tenant-a\0prefix_1").is_none());
+    assert_eq!(cache.get("tenant-a\0other_1"), Some(b"a2".to_vec()));
+    assert_eq!(cache.get("tenant-b\0prefix_1"), Some(b"b1".to_vec()));
+    assert_eq!(cache.get("prefix_1"), Some(b"default".to_vec()));
+
+    let removed_default = cache.remove_by_regex_for_tenant("", "^prefix_.*").unwrap();
+    assert_eq!(removed_default, 1);
+    assert!(cache.get("prefix_1").is_none());
+}
+
+#[test]
 fn test_hot_cache_clear() {
     let cache = LocalHotCache::new(1024 * 1024, 100);
     cache.put("key1", b"a");

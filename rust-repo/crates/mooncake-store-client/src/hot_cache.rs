@@ -26,6 +26,7 @@
 //! - 绕回时清空整个缓存（简化实现）
 
 use parking_lot::Mutex;
+use regex::Regex;
 use std::collections::HashMap;
 
 /// 默认热缓存大小: 256 MiB
@@ -141,6 +142,36 @@ impl LocalHotCache {
     /// (Remove a key from the cache. No-op if the key is not present.)
     pub fn remove(&self, key: &str) {
         self.entries.lock().remove(key);
+    }
+
+    /// Remove cached entries whose user key matches `pattern`.
+    ///
+    /// When `tenant_id` is non-empty, cache keys use the same scoped format as
+    /// the client (`tenant_id + '\0' + key`) and the regex is applied only to
+    /// the user-key suffix.
+    pub fn remove_by_regex_for_tenant(
+        &self,
+        tenant_id: &str,
+        pattern: &str,
+    ) -> Result<usize, regex::Error> {
+        let re = Regex::new(pattern)?;
+        let prefix = (!tenant_id.is_empty()).then(|| format!("{tenant_id}\0"));
+        let mut removed = 0usize;
+        self.entries.lock().retain(|key, _| {
+            let user_key = match prefix.as_deref() {
+                Some(prefix) => match key.strip_prefix(prefix) {
+                    Some(user_key) => user_key,
+                    None => return true,
+                },
+                None => key.as_str(),
+            };
+            let keep = !re.is_match(user_key);
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        Ok(removed)
     }
 
     /// 清空所有缓存条目，重置 tail 指针。

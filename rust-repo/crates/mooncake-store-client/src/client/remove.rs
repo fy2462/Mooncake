@@ -15,10 +15,32 @@
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
 
+use super::read::scoped_cache_key;
 use super::MooncakeClient;
 use crate::proto;
 
 impl MooncakeClient {
+    fn invalidate_hot_cache_key_for_tenant(&self, key: &str, tenant_id: &str) {
+        if let Some(ref cache) = self.hot_cache {
+            cache.remove(scoped_cache_key(tenant_id, key).as_ref());
+        }
+    }
+
+    fn invalidate_hot_cache_regex_for_tenant(&self, pattern: &str, tenant_id: &str) {
+        if let Some(ref cache) = self.hot_cache {
+            if cache
+                .remove_by_regex_for_tenant(tenant_id, pattern)
+                .is_err()
+            {
+                tracing::warn!(
+                    pattern = %pattern,
+                    "remove_by_regex succeeded on master but local hot-cache regex parsing failed; clearing cache"
+                );
+                cache.clear();
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Remove / Exist — single-key operations
     // 删除 / 存在性检查 —— 单 key 操作
@@ -35,15 +57,17 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::Remove(key, force)`
     pub async fn remove(&mut self, key: &str, force: bool) -> StoreResult<()> {
+        let tenant_id = self.tenant_id.clone();
         let request = proto::RemoveRequest {
             key: key.to_string(),
             force,
-            tenant_id: self.tenant_id.clone(),
+            tenant_id: tenant_id.clone(),
         };
         self.master
             .remove(request)
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?;
+        self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
         Ok(())
     }
 
@@ -81,10 +105,11 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::BatchRemove(keys, force)`
     pub async fn batch_remove(&mut self, keys: &[String], force: bool) -> StoreResult<Vec<i32>> {
+        let tenant_id = self.tenant_id.clone();
         let request = proto::BatchRemoveRequest {
             keys: keys.to_vec(),
             force,
-            tenant_id: self.tenant_id.clone(),
+            tenant_id: tenant_id.clone(),
         };
         let response = self
             .master
@@ -92,6 +117,11 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
+        for (key, status) in keys.iter().zip(response.statuses.iter()) {
+            if *status == 0 {
+                self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
+            }
+        }
         Ok(response.statuses)
     }
 
@@ -135,10 +165,11 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::RemoveByRegex(pattern, force)`
     pub async fn remove_by_regex(&mut self, pattern: &str, force: bool) -> StoreResult<i64> {
+        let tenant_id = self.tenant_id.clone();
         let request = proto::RemoveByRegexRequest {
             pattern: pattern.to_string(),
             force,
-            tenant_id: self.tenant_id.clone(),
+            tenant_id: tenant_id.clone(),
         };
         let response = self
             .master
@@ -146,6 +177,9 @@ impl MooncakeClient {
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
+        if response.removed_count > 0 {
+            self.invalidate_hot_cache_regex_for_tenant(pattern, &tenant_id);
+        }
         Ok(response.removed_count)
     }
 
@@ -159,16 +193,17 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::RemoveAll(force)`
     pub async fn remove_all(&mut self, force: bool) -> StoreResult<i64> {
-        let request = proto::RemoveAllRequest {
-            force,
-            tenant_id: self.tenant_id.clone(),
-        };
+        let tenant_id = self.tenant_id.clone();
+        let request = proto::RemoveAllRequest { force, tenant_id };
         let response = self
             .master
             .remove_all(request)
             .await
             .map_err(|e| StoreError::Internal(e.to_string()))?
             .into_inner();
+        if let Some(ref cache) = self.hot_cache {
+            cache.clear();
+        }
         Ok(response.removed_count)
     }
 }
