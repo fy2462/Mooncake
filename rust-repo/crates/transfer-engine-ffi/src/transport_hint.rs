@@ -17,6 +17,10 @@ pub enum TransportHint {
     Ascend = 9,
     SunriseLink = 10,
     Tpu = 11,
+    Efa = 12,
+    Cxi = 13,
+    Ub = 14,
+    UbShmem = 15,
 }
 
 impl TransportHint {
@@ -34,6 +38,10 @@ impl TransportHint {
             Self::Ascend => Some("ascend"),
             Self::SunriseLink => Some("sunrise_link"),
             Self::Tpu => Some("tpu"),
+            Self::Efa => Some("efa"),
+            Self::Cxi => Some("cxi"),
+            Self::Ub => Some("ub"),
+            Self::UbShmem => Some("ubshmem"),
         }
     }
 
@@ -51,6 +59,10 @@ impl TransportHint {
             "ascend" | "ascend_direct" => Self::Ascend,
             "sunrise_link" | "sunrise-link" => Self::SunriseLink,
             "tpu" => Self::Tpu,
+            "efa" => Self::Efa,
+            "cxi" => Self::Cxi,
+            "ub" => Self::Ub,
+            "ubshmem" | "ub-shmem" => Self::UbShmem,
             _ => Self::Unspecified,
         }
     }
@@ -141,6 +153,13 @@ mod tests {
             TransportHint::SunriseLink
         );
         assert_eq!(TransportHint::from_protocol("tpu"), TransportHint::Tpu);
+        assert_eq!(TransportHint::from_protocol("efa"), TransportHint::Efa);
+        assert_eq!(TransportHint::from_protocol("cxi"), TransportHint::Cxi);
+        assert_eq!(TransportHint::from_protocol("ub"), TransportHint::Ub);
+        assert_eq!(
+            TransportHint::from_protocol("ub-shmem"),
+            TransportHint::UbShmem
+        );
         assert_eq!(
             TransportHint::from_protocol("unknown"),
             TransportHint::Unspecified
@@ -161,6 +180,10 @@ mod tests {
             Some("sunrise_link")
         );
         assert_eq!(TransportHint::Tpu.as_protocol(), Some("tpu"));
+        assert_eq!(TransportHint::Efa.as_protocol(), Some("efa"));
+        assert_eq!(TransportHint::Cxi.as_protocol(), Some("cxi"));
+        assert_eq!(TransportHint::Ub.as_protocol(), Some("ub"));
+        assert_eq!(TransportHint::UbShmem.as_protocol(), Some("ubshmem"));
         assert_eq!(TransportHint::Unspecified.as_protocol(), None);
     }
 
