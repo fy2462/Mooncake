@@ -672,10 +672,17 @@ pub const DEFAULT_TENANT: &str = "default";
 /// 规范化传入的 tenant_id：空字符串 → "default"。
 /// C++ equivalent: types.h:225-227 NormalizeTenantId()
 pub fn normalize_tenant_id(tenant_id: &str) -> String {
+    normalize_tenant_id_ref(tenant_id).to_string()
+}
+
+/// Borrowing variant for hot paths that only need to read or compose with the tenant id.
+/// 用于热路径的借用版本，避免仅仅读取或拼接 tenant id 时产生临时 String。
+/// C++ equivalent: types.h NormalizeTenantIdRef()
+pub fn normalize_tenant_id_ref(tenant_id: &str) -> &str {
     if tenant_id.is_empty() {
-        DEFAULT_TENANT.to_string()
+        DEFAULT_TENANT
     } else {
-        tenant_id.to_string()
+        tenant_id
     }
 }
 
@@ -683,7 +690,7 @@ pub fn normalize_tenant_id(tenant_id: &str) -> String {
 /// 构造租户作用域的内部 key："{tenant_id}\0{user_key}"。
 /// C++ equivalent: master_service.h MakeTenantScopedKey()
 pub fn make_tenant_scoped_key(tenant_id: &str, user_key: &str) -> String {
-    let tenant = normalize_tenant_id(tenant_id);
+    let tenant = normalize_tenant_id_ref(tenant_id);
     let mut buf = String::with_capacity(tenant.len() + 1 + user_key.len());
     buf.push_str(&tenant);
     buf.push(TENANT_SCOPE_DELIMITER);
@@ -735,5 +742,28 @@ pub fn validate_user_key(key: &str) -> Result<(), Status> {
         )))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_tenant_id_ref_defaults_without_allocating_new_value() {
+        assert_eq!(normalize_tenant_id_ref(""), DEFAULT_TENANT);
+        assert_eq!(normalize_tenant_id(""), DEFAULT_TENANT);
+    }
+
+    #[test]
+    fn make_tenant_scoped_key_uses_borrowing_tenant_normalization() {
+        assert_eq!(
+            make_tenant_scoped_key("", "key"),
+            format!("{DEFAULT_TENANT}{TENANT_SCOPE_DELIMITER}key")
+        );
+        assert_eq!(
+            make_tenant_scoped_key("tenant-a", "key"),
+            format!("tenant-a{TENANT_SCOPE_DELIMITER}key")
+        );
     }
 }
