@@ -171,36 +171,68 @@ fn metadata_value_buffers_preserve_metadata_only_zero_data() {
 #[test]
 fn transport_topology_matrix_matches_cpp_protocol_rules() {
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("rdma", "mlx5_0"),
-        Some("mlx5_0")
+        MooncakeClient::transport_topology_matrix_from_env("rdma", "mlx5_0", None),
+        Some("mlx5_0".to_string())
     );
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("efa", "efa0"),
-        Some("efa0")
+        MooncakeClient::transport_topology_matrix_from_env("efa", "efa0", None),
+        Some("efa0".to_string())
     );
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("ub", "bonding_dev_0"),
-        Some("bonding_dev_0")
+        MooncakeClient::transport_topology_matrix_from_env("ub", "bonding_dev_0", None),
+        Some("bonding_dev_0".to_string())
     );
 
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("cxi", "ignored"),
+        MooncakeClient::transport_topology_matrix_from_env("cxi", "ignored", None),
         None
     );
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("cxl", "ignored"),
+        MooncakeClient::transport_topology_matrix_from_env("cxl", "ignored", None),
         None
     );
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("ascend", "ignored"),
+        MooncakeClient::transport_topology_matrix_from_env("ascend", "ignored", None),
         None
     );
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("ubshmem", "ignored"),
+        MooncakeClient::transport_topology_matrix_from_env("ubshmem", "ignored", None),
         None
     );
     assert_eq!(
-        MooncakeClient::transport_topology_matrix("tcp", "ignored"),
+        MooncakeClient::transport_topology_matrix_from_env("tcp", "ignored", None),
+        None
+    );
+}
+
+#[test]
+fn transport_topology_matrix_env_fallback_matches_cpp_filters() {
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("rdma", "mlx5_0", Some("mlx5_1")),
+        Some("mlx5_0".to_string())
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("rdma", "", Some(" mlx5_0 , mlx5_1 ,")),
+        Some("mlx5_0,mlx5_1".to_string())
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("efa", "  ", Some("efa0")),
+        Some("efa0".to_string())
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("rdma", "", Some(" ,  ")),
+        None
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("ub", "", None),
+        Some("bonding_dev_0".to_string())
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("ub", "ub_dev_0", None),
+        Some("ub_dev_0".to_string())
+    );
+    assert_eq!(
+        MooncakeClient::transport_topology_matrix_from_env("cxi", "ignored", Some("mlx5_0")),
         None
     );
 }

@@ -237,10 +237,12 @@ impl MooncakeClient {
 
         // Step 4: Install the appropriate transport. / 安装合适的传输层。
         if effective_protocol != "tcp" {
-            engine.install_transport(
+            let topology_matrix = Self::transport_topology_matrix_from_env(
                 effective_protocol,
-                Self::transport_topology_matrix(effective_protocol, device),
-            )?;
+                device,
+                std::env::var("MC_MS_FILTERS").ok().as_deref(),
+            );
+            engine.install_transport(effective_protocol, topology_matrix.as_deref())?;
         } else {
             engine.install_transport("tcp", None)?;
         }
@@ -505,13 +507,42 @@ impl MooncakeClient {
         trimmed[..end].parse::<i32>()
     }
 
-    pub(super) fn transport_topology_matrix<'a>(
+    pub(super) fn transport_topology_matrix_from_env(
         protocol: &str,
-        device: &'a str,
-    ) -> Option<&'a str> {
+        device: &str,
+        ms_filters_env: Option<&str>,
+    ) -> Option<String> {
         match protocol {
-            "rdma" | "efa" | "ub" => Some(device),
+            "rdma" | "efa" => {
+                let explicit = device.trim();
+                if !explicit.is_empty() {
+                    Some(explicit.to_string())
+                } else {
+                    Self::trim_filter_list(ms_filters_env)
+                }
+            }
+            "ub" => {
+                let explicit = device.trim();
+                if explicit.is_empty() {
+                    Some("bonding_dev_0".to_string())
+                } else {
+                    Some(explicit.to_string())
+                }
+            }
             _ => None,
+        }
+    }
+
+    fn trim_filter_list(value: Option<&str>) -> Option<String> {
+        let filters: Vec<&str> = value?
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .collect();
+        if filters.is_empty() {
+            None
+        } else {
+            Some(filters.join(","))
         }
     }
 }
