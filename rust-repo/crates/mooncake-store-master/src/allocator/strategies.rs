@@ -101,6 +101,69 @@ impl SegmentAllocator {
         }
     }
 
+    pub(super) fn allocate_ssd_free_ratio_remaining(
+        &mut self,
+        slice_size: u64,
+        replica_count: usize,
+        replicas: &mut Vec<ReplicaDescriptor>,
+        used_segment_names: &mut HashSet<String>,
+        excluded_segments: &HashSet<String>,
+        ssd_metrics: Option<&HashMap<Uuid, SsdUsageMetrics>>,
+    ) {
+        let names = self.segment_names();
+        if names.is_empty() {
+            return;
+        }
+
+        let remaining = replica_count.saturating_sub(replicas.len());
+        let sample_count = (FREE_RATIO_CANDIDATE_MULTIPLIER * remaining).min(names.len());
+        let mut rng = thread_rng();
+        let mut start_idx = rng.gen_range(0..names.len());
+        let mut candidates = Vec::with_capacity(sample_count);
+
+        for _ in 0..sample_count {
+            let segment_name = names[start_idx % names.len()].clone();
+            start_idx += 1;
+            candidates.push((
+                segment_name.clone(),
+                self.ssd_free_ratio_for_name(&segment_name, ssd_metrics),
+                self.free_ratio_for_name(&segment_name),
+            ));
+        }
+
+        candidates.sort_by(|(_, ssd_a, mem_a), (_, ssd_b, mem_b)| {
+            ssd_b
+                .partial_cmp(ssd_a)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| mem_b.partial_cmp(mem_a).unwrap_or(Ordering::Equal))
+        });
+
+        for (segment_name, _, _) in candidates {
+            if replicas.len() >= replica_count {
+                return;
+            }
+            if excluded_segments.contains(&segment_name)
+                || used_segment_names.contains(&segment_name)
+            {
+                continue;
+            }
+            if let Some(replica) = self.allocate_from_segment_name(&segment_name, slice_size) {
+                used_segment_names.insert(replica.segment_name.clone());
+                replicas.push(replica);
+            }
+        }
+
+        if replicas.len() < replica_count {
+            self.allocate_random_remaining(
+                slice_size,
+                replica_count,
+                replicas,
+                used_segment_names,
+                excluded_segments,
+            );
+        }
+    }
+
     pub(super) fn allocate_local_first_remaining(
         &mut self,
         key: &str,
@@ -174,6 +237,33 @@ impl SegmentAllocator {
                     used.saturating_add(state.used),
                 )
             });
+        offset_layout::free_ratio(total, used)
+    }
+
+    fn ssd_free_ratio_for_name(
+        &self,
+        segment_name: &str,
+        ssd_metrics: Option<&HashMap<Uuid, SsdUsageMetrics>>,
+    ) -> f64 {
+        let Some(ssd_metrics) = ssd_metrics else {
+            return self.free_ratio_for_name(segment_name);
+        };
+        let mut seen_clients = HashSet::new();
+        let (total, used) = self
+            .segments
+            .values()
+            .filter(|state| state.segment.name == segment_name)
+            .filter(|state| seen_clients.insert(state.client_id))
+            .filter_map(|state| ssd_metrics.get(&state.client_id))
+            .fold((0_u64, 0_u64), |(total, used), metrics| {
+                (
+                    total.saturating_add(metrics.total_capacity_bytes),
+                    used.saturating_add(metrics.used_bytes),
+                )
+            });
+        if total == 0 {
+            return self.free_ratio_for_name(segment_name);
+        }
         offset_layout::free_ratio(total, used)
     }
 

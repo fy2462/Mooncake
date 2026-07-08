@@ -85,16 +85,14 @@ impl MasterServiceImpl {
                 });
                 continue;
             }
-            let mut replicas = {
-                let mut allocator = self.state.allocator.write();
-                allocator.allocate_for_client(
-                    &key,
-                    Some(client_id),
-                    *slice_len,
-                    memory_replica_count,
-                    &config,
-                )
-            };
+            let mut replicas = allocate_memory_replicas(
+                &self.state,
+                &key,
+                Some(client_id),
+                *slice_len,
+                memory_replica_count,
+                &config,
+            );
             if replicas.len() != memory_replica_count {
                 release_replicas(&self.state, &replicas);
                 self.abort_tenant_quota(&tenant_id, *slice_len);

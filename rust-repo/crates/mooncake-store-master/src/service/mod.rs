@@ -73,15 +73,15 @@ use self::background_ops::{
     try_push_promotion_queue,
 };
 use self::helpers::{
-    account_removed_object_quota, addresses_for_client, allocate_nof_replicas, bump_view_version,
-    choose_drain_target_segment, cleanup_stale_handles, client_id_by_nof_segment_name,
-    client_id_by_replica_segment_name, client_id_by_segment_name, default_drain_target_segments,
-    get_alive_clients_snapshot, has_pending_task_capacity, host_from_segment_name,
-    is_lease_expired, make_tenant_scoped_key, normalize_tenant_id, object_owner_client_id,
-    processing_task_capacity, register_metadata_segments, release_object_replicas,
-    release_replicas, release_replicas_scheduled, split_scoped_key, storage_fs_dir_for_client,
-    sync_client_segments, sync_nof_segment_usage, sync_segment_usage, unmount_nof_segment_owned,
-    unmount_segment_owned, upsert_client_addresses, validate_user_key,
+    account_removed_object_quota, addresses_for_client, allocate_memory_replicas,
+    allocate_nof_replicas, bump_view_version, choose_drain_target_segment, cleanup_stale_handles,
+    client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
+    default_drain_target_segments, get_alive_clients_snapshot, has_pending_task_capacity,
+    host_from_segment_name, is_lease_expired, make_tenant_scoped_key, normalize_tenant_id,
+    object_owner_client_id, processing_task_capacity, register_metadata_segments,
+    release_object_replicas, release_replicas, release_replicas_scheduled, split_scoped_key,
+    storage_fs_dir_for_client, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
+    unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses, validate_user_key,
 };
 use self::nof_probe::probe_nof_endpoint;
 use self::proto_conv::{

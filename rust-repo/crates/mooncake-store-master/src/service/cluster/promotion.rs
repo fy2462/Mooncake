@@ -87,10 +87,14 @@ impl MasterServiceImpl {
             config.preferred_segment = preferred.clone();
         }
         config.preferred_segments = req.preferred_segments.clone();
-        let replicas = {
-            let mut allocator = self.state.allocator.write();
-            allocator.allocate_for_client(&scoped_key, Some(client_id), req.size, 1, &config)
-        };
+        let replicas = allocate_memory_replicas(
+            &self.state,
+            &scoped_key,
+            Some(client_id),
+            req.size,
+            1,
+            &config,
+        );
         let Some(mut staged) = replicas.into_iter().next() else {
             return Err(Status::resource_exhausted("no available memory segment"));
         };

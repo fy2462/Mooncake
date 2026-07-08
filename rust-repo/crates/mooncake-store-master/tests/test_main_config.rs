@@ -181,6 +181,19 @@ fn test_build_runtime_config_accepts_local_first_strategy() {
 }
 
 #[test]
+fn test_build_runtime_config_accepts_ssd_free_ratio_first_strategy() {
+    let mut args = base_args();
+    args.allocation_strategy = "ssd_free_ratio_first".to_string();
+
+    let config = build_runtime_config(&args).unwrap();
+
+    assert_eq!(
+        config.allocation_strategy,
+        mooncake_store_master::allocator::AllocationStrategy::SsdFreeRatioFirst
+    );
+}
+
+#[test]
 fn test_build_runtime_config_applies_task_manager_limits() {
     let mut args = base_args();
     args.client_ttl_secs = 9;

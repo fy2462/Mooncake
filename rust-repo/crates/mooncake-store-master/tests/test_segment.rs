@@ -166,6 +166,10 @@ fn test_allocator_strategy_enum() {
     let b = AllocationStrategy::FreeRatioFirst;
     assert_ne!(a, b);
     assert_eq!(a, AllocationStrategy::Random);
+    assert_eq!(
+        AllocationStrategy::parse("ssd_free_ratio_first"),
+        Some(AllocationStrategy::SsdFreeRatioFirst)
+    );
 }
 
 #[test]

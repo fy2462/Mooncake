@@ -9,7 +9,7 @@
 // │  SegmentAllocator (facade)                              │
 // │  ┌──────────────────────┐  ┌─────────────────────────┐  │
 // │  │ AllocationStrategy   │  │ Segment → SegmentState   │  │
-// │  │ Random / FreeRatioFirst│  │   ├─ Offset (simple)    │  │
+// │  │ AllocationStrategy     │  │   ├─ Offset (simple)    │  │
 // │  └──────────────────────┘  │   └─ Cachelib (slab)     │  │
 // │                            └─────────────────────────┘  │
 // └─────────────────────────────────────────────────────────┘
@@ -47,7 +47,8 @@ use self::types::DEFAULT_CACHELIB_POOL_NAME;
 pub use self::types::{
     cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
     AllocationStrategy, CachelibAllocInfo, CachelibAllocationVisit, ClassId, MemoryAllocatorKind,
-    PoolId, SlabReleaseContext, SlabReleaseMode, CACHELIB_MIN_ALLOC_SIZE, CACHELIB_SLAB_SIZE,
+    PoolId, SlabReleaseContext, SlabReleaseMode, SsdUsageMetrics, CACHELIB_MIN_ALLOC_SIZE,
+    CACHELIB_SLAB_SIZE,
 };
 
 const RANDOM_MAX_RETRY_LIMIT: usize = 100;
@@ -111,9 +112,9 @@ struct SegmentState {
 /// memory segments.
 /// 段分配器：管理多个 memory segment 的空间分配和回收。
 ///
-/// Supports two allocation strategies (Random / FreeRatioFirst) and two memory
+/// Supports multiple allocation strategies and two memory
 /// allocator kinds (Offset / CachelibLike).
-/// 支持两种分配策略（Random / FreeRatioFirst）和两种内存分配器（Offset / CachelibLike）。
+/// 支持多种分配策略和两种内存分配器（Offset / CachelibLike）。
 ///
 /// Thread safety: SegmentAllocator is NOT internally synchronized; the caller
 /// (typically MasterState) wraps it in a RwLock.
@@ -159,6 +160,12 @@ impl SegmentAllocator {
     /// 获取当前内存分配器类型。
     pub fn memory_allocator_kind(&self) -> MemoryAllocatorKind {
         self.memory_allocator_kind
+    }
+
+    /// Get the current allocation strategy.
+    /// 获取当前分配策略。
+    pub fn allocation_strategy(&self) -> AllocationStrategy {
+        self.strategy
     }
 
     /// Register a new memory segment with the allocator.
@@ -291,6 +298,28 @@ impl SegmentAllocator {
             replica_count,
             config,
             &HashSet::new(),
+            None,
+        )
+    }
+
+    /// Allocate replicas with a snapshot of local SSD usage for SsdFreeRatioFirst.
+    pub fn allocate_for_client_with_ssd_metrics(
+        &mut self,
+        key: &str,
+        client_id: Option<Uuid>,
+        slice_size: u64,
+        replica_count: usize,
+        config: &ReplicateConfig,
+        ssd_metrics: &HashMap<Uuid, SsdUsageMetrics>,
+    ) -> Vec<ReplicaDescriptor> {
+        self.allocate_for_client_excluding(
+            key,
+            client_id,
+            slice_size,
+            replica_count,
+            config,
+            &HashSet::new(),
+            Some(ssd_metrics),
         )
     }
 
@@ -315,6 +344,7 @@ impl SegmentAllocator {
             replica_count,
             config,
             &excluded_segments,
+            None,
         )
     }
 
@@ -346,6 +376,7 @@ impl SegmentAllocator {
         replica_count: usize,
         config: &ReplicateConfig,
         excluded_segments: &HashSet<String>,
+        ssd_metrics: Option<&HashMap<Uuid, SsdUsageMetrics>>,
     ) -> Vec<ReplicaDescriptor> {
         if self.segments.is_empty() || replica_count == 0 || slice_size == 0 {
             return vec![];
@@ -392,6 +423,16 @@ impl SegmentAllocator {
                     &mut replicas,
                     &mut used_segment_names,
                     excluded_segments,
+                );
+            }
+            AllocationStrategy::SsdFreeRatioFirst => {
+                self.allocate_ssd_free_ratio_remaining(
+                    slice_size,
+                    replica_count,
+                    &mut replicas,
+                    &mut used_segment_names,
+                    excluded_segments,
+                    ssd_metrics,
                 );
             }
             AllocationStrategy::LocalFirst => {

@@ -140,8 +140,8 @@ impl MasterServiceImpl {
 
         // 分配 Memory 副本 / Allocate Memory replicas
         let mut replicas = if replica_count > 0 {
-            let mut allocator = self.state.allocator.write();
-            allocator.allocate_for_client(
+            allocate_memory_replicas(
+                &self.state,
                 &scoped_key,
                 Some(client_id),
                 req.slice_length,

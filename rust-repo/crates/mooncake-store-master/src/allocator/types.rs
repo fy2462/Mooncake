@@ -138,6 +138,9 @@ pub struct CachelibAllocationVisit {
 ///   随机打乱候选 segment，然后用稳定排序按亲和性（同节点 > 首选 segment）排序。
 /// - FreeRatioFirst: Composite sort: same node > preferred segment > highest free ratio.
 ///   复合排序：同节点 > 首选 segment > 空闲率从高到低。
+/// - SsdFreeRatioFirst: Prefer segments whose owner has more free local SSD capacity,
+///   then fall back to the memory free ratio.
+///   优先选择所属 client 本地 SSD 空闲比例更高的 segment，再回退到内存空闲率。
 /// - LocalFirst: Prefer writer-local host for single-replica writes, then ordered remote fallback.
 ///   LocalFirst：单副本写入优先 writer 本机 host，再按 host 顺序回退。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +151,9 @@ pub enum AllocationStrategy {
     /// Deterministic sort: same node > preferred > highest free ratio first.
     /// 确定排序：同节点 > 首选 segment > 空闲率高者优先。
     FreeRatioFirst,
+    /// Deterministic sort by local SSD free ratio, then memory free ratio.
+    /// 按本地 SSD 空闲率排序，再按内存空闲率排序。
+    SsdFreeRatioFirst,
     /// Writer-local host first, then ordered remote fallback.
     /// writer 本机 host 优先，然后有序远端回退。
     LocalFirst,
@@ -156,15 +162,25 @@ pub enum AllocationStrategy {
 impl AllocationStrategy {
     /// Parse allocation strategy from a string value.
     /// 从字符串解析分配策略。
-    /// "random" -> Random, "free_ratio_first" -> FreeRatioFirst, "local_first" -> LocalFirst.
+    /// "random" -> Random, "free_ratio_first" -> FreeRatioFirst,
+    /// "ssd_free_ratio_first" -> SsdFreeRatioFirst, "local_first" -> LocalFirst.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "random" => Some(Self::Random),
             "free_ratio_first" => Some(Self::FreeRatioFirst),
+            "ssd_free_ratio_first" => Some(Self::SsdFreeRatioFirst),
             "local_first" => Some(Self::LocalFirst),
             _ => None,
         }
     }
+}
+
+/// Local SSD usage metrics associated with a segment owner.
+/// 与 segment 所属 client 关联的本地 SSD 使用指标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SsdUsageMetrics {
+    pub total_capacity_bytes: u64,
+    pub used_bytes: u64,
 }
 
 /// Kind of memory allocator used within a segment.

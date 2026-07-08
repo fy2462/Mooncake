@@ -14,7 +14,7 @@
 //!
 //! | 模块 / Module | 职责 / Purpose |
 //! |---------------|----------------|
-//! | `allocator`   | Segment 内存分配器，支持 Random / FreeRatioFirst 策略 |
+//! | `allocator`   | Segment 内存分配器，支持 Random / FreeRatioFirst / SsdFreeRatioFirst / LocalFirst 策略 |
 //! | `count_min_sketch` | Count-Min Sketch 频率统计，用于 promotion 准入控制 |
 //! | `eviction`    | LRU 驱逐管理器，按 last_access + soft_pin + lease 选择驱逐候选 |
 //! | `ha`          | 高可用 (HA) 支持：Leader 选举、热备、etcd/redis 协调 |

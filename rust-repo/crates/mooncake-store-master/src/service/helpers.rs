@@ -16,13 +16,14 @@
 //! - Stale handle cleanup
 //! - View version management
 
+use crate::allocator::{AllocationStrategy, SsdUsageMetrics};
 use crate::http_metadata::MetadataState;
 use crate::metrics;
 use chrono::Utc;
 use mooncake_store_core::{
     ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskStatus,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use tonic::Status;
@@ -51,6 +52,67 @@ pub(crate) fn storage_fs_dir_for_client(config: &MasterRuntimeConfig) -> String 
         .join(config.cluster_id.trim())
         .to_string_lossy()
         .into_owned()
+}
+
+/// Build per-client local SSD usage metrics from reported capacity and LocalDisk replicas.
+/// 从客户端上报容量和 LocalDisk 副本构造本地 SSD 使用指标。
+pub(crate) fn local_ssd_usage_metrics(state: &MasterState) -> HashMap<Uuid, SsdUsageMetrics> {
+    let mut metrics = state
+        .local_disk_segments
+        .iter()
+        .map(|entry| {
+            (
+                *entry.key(),
+                SsdUsageMetrics {
+                    total_capacity_bytes: entry.value().ssd_total_capacity_bytes.max(0) as u64,
+                    used_bytes: 0,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+
+    for object in state.objects.iter() {
+        for replica in &object.value().replicas {
+            if replica.replica_type != ReplicaType::LocalDisk {
+                continue;
+            }
+            let Some(client_id) = replica.holder_client_id else {
+                continue;
+            };
+            let entry = metrics.entry(client_id).or_insert(SsdUsageMetrics {
+                total_capacity_bytes: 0,
+                used_bytes: 0,
+            });
+            entry.used_bytes = entry.used_bytes.saturating_add(replica.size);
+        }
+    }
+    metrics
+}
+
+/// Allocate memory replicas, using SSD free-ratio metrics only when that strategy is configured.
+/// 分配内存副本；仅在配置 ssd_free_ratio_first 时引入本地 SSD 空闲率指标。
+pub(crate) fn allocate_memory_replicas(
+    state: &MasterState,
+    key: &str,
+    client_id: Option<Uuid>,
+    size: u64,
+    count: usize,
+    config: &ReplicateConfig,
+) -> Vec<ReplicaDescriptor> {
+    let use_ssd_metrics =
+        state.allocator.read().allocation_strategy() == AllocationStrategy::SsdFreeRatioFirst;
+    if use_ssd_metrics {
+        let ssd_metrics = local_ssd_usage_metrics(state);
+        state
+            .allocator
+            .write()
+            .allocate_for_client_with_ssd_metrics(key, client_id, size, count, config, &ssd_metrics)
+    } else {
+        state
+            .allocator
+            .write()
+            .allocate_for_client(key, client_id, size, count, config)
+    }
 }
 
 /// 从 segment 名称中提取端口号，解析失败返回 0。

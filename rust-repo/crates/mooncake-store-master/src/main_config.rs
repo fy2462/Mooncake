@@ -135,9 +135,9 @@ pub fn build_runtime_config(
     }
     Ok(MasterRuntimeConfig {
         // ── 分配策略 / allocation strategy ──
-        // 段选择：random（随机）或 free_ratio_first（空闲率优先）
+        // 段选择：random、free_ratio_first、ssd_free_ratio_first 或 local_first
         allocation_strategy: AllocationStrategy::parse(&args.allocation_strategy)
-            .ok_or("allocation_strategy must be 'random', 'free_ratio_first', or 'local_first'")?,
+            .ok_or("allocation_strategy must be 'random', 'free_ratio_first', 'ssd_free_ratio_first', or 'local_first'")?,
         // 段内分配器：offset（连续分配）或 cachelib（slab + class）
         memory_allocator_kind: MemoryAllocatorKind::parse(&args.memory_allocator)
             .ok_or("memory_allocator must be 'offset' or 'cachelib'")?,

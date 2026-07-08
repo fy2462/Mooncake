@@ -172,7 +172,8 @@ impl MasterServiceImpl {
     ) -> Result<Vec<ReplicaDescriptor>, Status> {
         self.reserve_tenant_quota(tenant_id, slice_length)?;
         let mut replicas = if replica_count > 0 {
-            self.state.allocator.write().allocate_for_client(
+            allocate_memory_replicas(
+                &self.state,
                 scoped_key,
                 Some(client_id),
                 slice_length,

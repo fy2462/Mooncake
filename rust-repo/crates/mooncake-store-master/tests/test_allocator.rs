@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::collections::HashMap;
 
 mod common;
 use common::{make_seg, make_seg_with_usage};
@@ -7,7 +8,7 @@ use mooncake_store_core::{ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{
     cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
     AllocationStrategy, MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator,
-    SlabReleaseMode, CACHELIB_SLAB_SIZE,
+    SlabReleaseMode, SsdUsageMetrics, CACHELIB_SLAB_SIZE,
 };
 use uuid::Uuid;
 
@@ -175,6 +176,53 @@ fn test_free_ratio_sort_order() {
     assert_eq!(repls.len(), 2);
     assert_eq!(repls[0].segment_name, "most_free:1");
     assert_eq!(repls[1].segment_name, "some_free:1");
+}
+
+#[test]
+fn test_ssd_free_ratio_first_uses_owner_ssd_metrics() {
+    let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::SsdFreeRatioFirst);
+    let nearly_full_ssd = Uuid::new_v4();
+    let most_free_ssd = Uuid::new_v4();
+    let some_free_ssd = Uuid::new_v4();
+    a.add_segment(make_seg("nearly_full_ssd:1", 10000), 0, nearly_full_ssd);
+    a.add_segment(make_seg("most_free_ssd:1", 10000), 9000, most_free_ssd);
+    a.add_segment(make_seg("some_free_ssd:1", 10000), 0, some_free_ssd);
+
+    let metrics = HashMap::from([
+        (
+            nearly_full_ssd,
+            SsdUsageMetrics {
+                total_capacity_bytes: 1000,
+                used_bytes: 950,
+            },
+        ),
+        (
+            most_free_ssd,
+            SsdUsageMetrics {
+                total_capacity_bytes: 1000,
+                used_bytes: 100,
+            },
+        ),
+        (
+            some_free_ssd,
+            SsdUsageMetrics {
+                total_capacity_bytes: 1000,
+                used_bytes: 400,
+            },
+        ),
+    ]);
+
+    let repls = a.allocate_for_client_with_ssd_metrics(
+        "k",
+        Some(Uuid::new_v4()),
+        500,
+        2,
+        &ReplicateConfig::default(),
+        &metrics,
+    );
+    assert_eq!(repls.len(), 2);
+    assert_eq!(repls[0].segment_name, "most_free_ssd:1");
+    assert_eq!(repls[1].segment_name, "some_free_ssd:1");
 }
 
 #[test]
