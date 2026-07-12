@@ -182,6 +182,7 @@ void setAutoDiscover(transfer_engine_t engine, int auto_discover);
 
 void *getBaseAddr(transfer_engine_t engine);
 
+void enableGracefulShutdown(transfer_engine_t engine);
 int showLinks(transfer_engine_t engine, char *buf_out, size_t buf_len,
               int json);
 
