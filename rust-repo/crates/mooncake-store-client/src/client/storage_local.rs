@@ -1,8 +1,10 @@
-use super::storage::{local_storage_key, OffloadTaskItem};
+use super::storage::OffloadTaskItem;
 use super::MooncakeClient;
+use crate::local_storage_backend::{local_storage_key, parse_local_storage_key};
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -54,6 +56,7 @@ impl MooncakeClient {
         let mut offloaded = 0usize;
         let mut notify_tasks = Vec::with_capacity(tasks.len());
         let mut metadatas = Vec::with_capacity(tasks.len());
+        let mut committed_storage_keys = Vec::with_capacity(tasks.len());
 
         for task in &tasks {
             let key = task.key.as_str();
@@ -75,17 +78,20 @@ impl MooncakeClient {
                 }
             };
 
-            // Write to local disk (blocking I/O).
+            // Reserve FIFO victims first. Master metadata is updated before
+            // those files are deleted, so readers never get routed to an
+            // already-removed LOCAL_DISK replica.
             let key_owned = local_storage_key(tenant_id, key);
             let s = Arc::clone(&storage);
-            let write_result = match tokio::task::spawn_blocking(move || {
-                s.write_object(&key_owned, &data)
+            let pending = match tokio::task::spawn_blocking(move || {
+                s.prepare_write(data.len() as u64)
+                    .map(|pending| (pending, data))
             })
             .await
             {
-                Ok(Ok(write_result)) => write_result,
+                Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
-                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "offload: failed to write object to local storage");
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "offload: failed to reserve local storage");
                     notify_tasks.push(task.clone());
                     metadatas.push(failed_offload_metadata());
                     continue;
@@ -97,13 +103,44 @@ impl MooncakeClient {
                     continue;
                 }
             };
+            let (pending_eviction, data) = pending;
+            let evicted_keys = pending_eviction.keys();
+            if let Err(error) = self.notify_evicted_disk_replicas(&evicted_keys).await {
+                storage.rollback_eviction(pending_eviction);
+                tracing::warn!(target: "storage_debug", %tenant_id, %key, %error, "offload: failed to publish local eviction");
+                notify_tasks.push(task.clone());
+                metadatas.push(failed_offload_metadata());
+                continue;
+            }
 
-            // Log any evicted keys.
-            for evicted_key in &write_result {
+            let key_for_write = key_owned.clone();
+            let s = Arc::clone(&storage);
+            let write_result = tokio::task::spawn_blocking(move || {
+                s.commit_write(&key_for_write, &data, pending_eviction)
+            })
+            .await;
+            match write_result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %error, "offload: failed to write object to local storage");
+                    notify_tasks.push(task.clone());
+                    metadatas.push(failed_offload_metadata());
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, %error, "offload: local storage write task failed");
+                    notify_tasks.push(task.clone());
+                    metadatas.push(failed_offload_metadata());
+                    continue;
+                }
+            }
+
+            for evicted_key in &evicted_keys {
                 tracing::info!(target: "storage_debug", %evicted_key, "offload: evicted old file");
             }
 
             offloaded += 1;
+            committed_storage_keys.push(key_owned);
             notify_tasks.push(task.clone());
             metadatas.push(proto::StorageObjectMetadata {
                 bucket_id: 0,
@@ -115,8 +152,22 @@ impl MooncakeClient {
         }
 
         if !notify_tasks.is_empty() {
-            self.notify_offload_success_tasks(notify_tasks, metadatas)
-                .await?;
+            if let Err(error) = self
+                .notify_offload_success_tasks(notify_tasks, metadatas)
+                .await
+            {
+                let storage = Arc::clone(&storage);
+                tokio::task::spawn_blocking(move || {
+                    for storage_key in committed_storage_keys {
+                        if let Err(cleanup_error) = storage.delete_object(&storage_key) {
+                            tracing::warn!(target: "storage_debug", %storage_key, %cleanup_error, "offload: failed to roll back unpublished local object");
+                        }
+                    }
+                })
+                .await
+                .map_err(|join_error| StoreError::Internal(join_error.to_string()))?;
+                return Err(error);
+            }
         }
 
         Ok(offloaded)
@@ -131,6 +182,53 @@ impl MooncakeClient {
         }
         let metadatas = tasks.iter().map(|_| failed_offload_metadata()).collect();
         self.notify_offload_success_tasks(tasks, metadatas).await
+    }
+
+    async fn notify_evicted_disk_replicas(&mut self, storage_keys: &[String]) -> StoreResult<()> {
+        let mut keys_by_tenant: HashMap<String, Vec<String>> = HashMap::new();
+        for storage_key in storage_keys {
+            let (tenant_id, key) = parse_local_storage_key(storage_key);
+            keys_by_tenant
+                .entry(tenant_id.to_string())
+                .or_default()
+                .push(key.to_string());
+        }
+
+        for (tenant_id, keys) in keys_by_tenant {
+            self.batch_evict_disk_replica(
+                &keys,
+                proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+                &tenant_id,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn run_disk_watermark_eviction(
+        &mut self,
+        high_watermark_ratio: f64,
+        low_watermark_ratio: f64,
+    ) -> StoreResult<usize> {
+        let Some(storage) = self.local_storage.as_ref().cloned() else {
+            return Ok(0);
+        };
+        let prepare_storage = Arc::clone(&storage);
+        let pending = tokio::task::spawn_blocking(move || {
+            prepare_storage.prepare_watermark_eviction(high_watermark_ratio, low_watermark_ratio)
+        })
+        .await
+        .map_err(|error| StoreError::Internal(error.to_string()))??;
+        let evicted_keys = pending.keys();
+        if let Err(error) = self.notify_evicted_disk_replicas(&evicted_keys).await {
+            storage.rollback_eviction(pending);
+            return Err(error);
+        }
+        let count = evicted_keys.len();
+        tokio::task::spawn_blocking(move || storage.commit_eviction(pending))
+            .await
+            .map_err(|error| StoreError::Internal(error.to_string()))??;
+        Ok(count)
     }
 
     /// Execute a complete promotion cycle:

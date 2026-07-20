@@ -12,10 +12,33 @@ pub struct ClientBackgroundConfig {
     pub enable_promotion: bool,
     pub enable_task_poll: bool,
     pub report_ssd_capacity: bool,
+    pub enable_disk_watermark_eviction: bool,
+    pub disk_eviction_high_watermark_ratio: f64,
+    pub disk_eviction_low_watermark_ratio: f64,
 }
 
 impl Default for ClientBackgroundConfig {
     fn default() -> Self {
+        let configured_high = env_ratio(
+            "MOONCAKE_OFFLOAD_DISK_EVICTION_HIGH_WATERMARK_RATIO",
+            "MOONCAKE_DISK_EVICTION_HIGH_WATERMARK_RATIO",
+            0.90,
+        );
+        let configured_low = env_ratio(
+            "MOONCAKE_OFFLOAD_DISK_EVICTION_LOW_WATERMARK_RATIO",
+            "MOONCAKE_DISK_EVICTION_LOW_WATERMARK_RATIO",
+            0.80,
+        );
+        let (high, low) = if configured_low < configured_high {
+            (configured_high, configured_low)
+        } else {
+            tracing::warn!(
+                high = configured_high,
+                low = configured_low,
+                "invalid disk eviction watermarks; using defaults"
+            );
+            (0.90, 0.80)
+        };
         Self {
             health_interval: Duration::from_secs(1),
             storage_interval: Duration::from_secs(5),
@@ -25,6 +48,12 @@ impl Default for ClientBackgroundConfig {
             enable_promotion: true,
             enable_task_poll: true,
             report_ssd_capacity: true,
+            enable_disk_watermark_eviction: env_bool(
+                "MOONCAKE_OFFLOAD_ENABLE_DISK_WATERMARK_EVICTION",
+                true,
+            ),
+            disk_eviction_high_watermark_ratio: high,
+            disk_eviction_low_watermark_ratio: low,
         }
     }
 }
@@ -63,7 +92,11 @@ impl MooncakeClient {
             shutdown_rx.clone(),
         )));
 
-        if config.enable_offloading || config.enable_promotion || config.report_ssd_capacity {
+        if config.enable_offloading
+            || config.enable_promotion
+            || config.report_ssd_capacity
+            || config.enable_disk_watermark_eviction
+        {
             join_handles.push(tokio::spawn(Self::storage_worker_loop(
                 Arc::clone(&client),
                 config.clone(),
@@ -137,6 +170,16 @@ impl MooncakeClient {
                             tracing::warn!(target: "client_background", %e, "promotion worker iteration failed");
                         }
                     }
+                    if config.enable_disk_watermark_eviction && guard.local_storage.is_some() {
+                        match guard.run_disk_watermark_eviction(
+                            config.disk_eviction_high_watermark_ratio,
+                            config.disk_eviction_low_watermark_ratio,
+                        ).await {
+                            Ok(0) => {}
+                            Ok(count) => tracing::info!(target: "client_background", count, "disk watermark eviction completed"),
+                            Err(e) => tracing::warn!(target: "client_background", %e, "disk watermark eviction failed"),
+                        }
+                    }
                 }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
@@ -179,4 +222,28 @@ impl MooncakeClient {
             }
         }
     }
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" => true,
+            "0" | "false" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+fn env_ratio(preferred: &str, fallback: &str, default: f64) -> f64 {
+    [preferred, fallback]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find_map(|value| {
+            value
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+        })
+        .unwrap_or(default)
 }

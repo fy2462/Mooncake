@@ -90,14 +90,6 @@ impl From<proto::PromotionTaskItem> for PromotionTaskItem {
     }
 }
 
-pub(super) fn local_storage_key(tenant_id: &str, key: &str) -> String {
-    if tenant_id.is_empty() {
-        key.to_string()
-    } else {
-        format!("{tenant_id}\0{key}")
-    }
-}
-
 impl MooncakeClient {
     pub(super) fn uuid_to_proto_uuid(id: Uuid) -> proto::Uuid {
         let (high, low) = id.as_u64_pair();

@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use super::buffer::{OffloadBatch, OffloadBufferPool};
-use crate::local_storage_backend::LocalStorageBackend;
+use crate::local_storage_backend::{local_storage_key, LocalStorageBackend};
 use crate::offload_proto::offload_read_service_server::{
     OffloadReadService, OffloadReadServiceServer,
 };
@@ -18,14 +18,6 @@ use tonic::{Request, Response, Status};
 /// Default GC TTL for offload buffers (milliseconds).
 /// Peers must complete their RDMA read within this window.
 const DEFAULT_GC_TTL_MS: u64 = 30_000;
-
-fn local_storage_key(tenant_id: &str, key: &str) -> String {
-    if tenant_id.is_empty() {
-        key.to_string()
-    } else {
-        format!("{tenant_id}\0{key}")
-    }
-}
 
 /// gRPC handler implementing the OffloadReadService.
 pub(crate) struct OffloadReadHandler {

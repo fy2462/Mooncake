@@ -17,6 +17,56 @@ const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
 
 type AvailableSpaceProbe = dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync;
 
+pub(crate) fn local_storage_key(tenant_id: &str, key: &str) -> String {
+    let tenant_id = if tenant_id.is_empty() {
+        "default"
+    } else {
+        tenant_id
+    };
+    format!("v1:{}:{tenant_id}{key}", tenant_id.len())
+}
+
+pub(crate) fn parse_local_storage_key(storage_key: &str) -> (&str, &str) {
+    let Some(encoded) = storage_key.strip_prefix("v1:") else {
+        return ("default", storage_key);
+    };
+    let Some((tenant_len, payload)) = encoded.split_once(':') else {
+        return ("default", storage_key);
+    };
+    let Ok(tenant_len) = tenant_len.parse::<usize>() else {
+        return ("default", storage_key);
+    };
+    if tenant_len > payload.len() || !payload.is_char_boundary(tenant_len) {
+        return ("default", storage_key);
+    }
+    payload.split_at(tenant_len)
+}
+
+#[derive(Clone, Debug)]
+struct FileRecord {
+    storage_key: String,
+    relative_path: String,
+    size: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct PendingLocalEviction {
+    records: Vec<FileRecord>,
+}
+
+impl PendingLocalEviction {
+    pub(crate) fn keys(&self) -> Vec<String> {
+        self.records
+            .iter()
+            .map(|record| record.storage_key.clone())
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+}
+
 /// Local disk storage backend for FilePerKey offload/promotion data.
 ///
 /// Each key-value pair is stored as a single file under a hash-partitioned
@@ -27,10 +77,10 @@ type AvailableSpaceProbe = dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync;
 pub struct LocalStorageBackend {
     config: LocalStorageConfig,
 
-    /// FIFO write queue: (path_relative_to_fsdir, file_size_bytes).
+    /// FIFO write queue with both the logical key and relative file path.
     /// Entries are lazily cleaned — stale entries (already deleted) are
     /// skipped during eviction and compacted periodically.
-    write_queue: RwLock<VecDeque<(String, u64)>>,
+    write_queue: RwLock<VecDeque<FileRecord>>,
 
     /// Set of currently-valid paths in `write_queue`, for O(1) staleness check.
     queue_set: RwLock<HashMap<String, ()>>,
@@ -169,7 +219,14 @@ impl LocalStorageBackend {
             } else {
                 used += size;
                 set.insert(rel_path.clone(), ());
-                queue.push_back((rel_path.clone(), *size));
+                queue.push_back(FileRecord {
+                    storage_key: Path::new(rel_path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| rel_path.clone()),
+                    relative_path: rel_path.clone(),
+                    size: *size,
+                });
             }
         }
 
@@ -218,32 +275,104 @@ impl LocalStorageBackend {
     /// C++ equivalent: `StorageBackendAdaptor::BatchOffload` (single-key path).
     pub fn write_object(&self, key: &str, data: &[u8]) -> StoreResult<Vec<String>> {
         self.ensure_init()?;
+        let pending = self.prepare_write(data.len() as u64)?;
+        let evicted = pending.keys();
+        self.commit_write(key, data, pending)?;
+        Ok(evicted)
+    }
+
+    pub(crate) fn prepare_write(&self, required: u64) -> StoreResult<PendingLocalEviction> {
+        self.ensure_init()?;
+        if !self.config.enable_eviction {
+            return Ok(PendingLocalEviction::default());
+        }
+        self.prepare_space_eviction(required)
+    }
+
+    pub(crate) fn commit_write(
+        &self,
+        key: &str,
+        data: &[u8],
+        pending: PendingLocalEviction,
+    ) -> StoreResult<()> {
+        self.ensure_init()?;
+        self.commit_eviction(pending)?;
 
         let path = self.key_path(key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-
-        let evicted = if self.config.enable_eviction {
-            self.ensure_disk_space(data.len() as u64)?
-        } else {
-            Vec::new()
-        };
-
+        let previous_size = std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         std::fs::write(&path, data)?;
 
-        // Track in FIFO queue for eviction.
         if self.config.enable_eviction {
             let rel_path = path
                 .strip_prefix(self.data_dir())
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
-            self.add_to_write_queue(&rel_path, data.len() as u64);
-            *self.used_space.write() += data.len() as u64;
+            self.remove_from_write_queue(&rel_path);
+            self.add_to_write_queue(key, &rel_path, data.len() as u64);
+            let mut used = self.used_space.write();
+            *used = used
+                .saturating_sub(previous_size)
+                .saturating_add(data.len() as u64);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rollback_eviction(&self, pending: PendingLocalEviction) {
+        if pending.is_empty() {
+            return;
+        }
+        let mut queue = self.write_queue.write();
+        for record in pending.records.into_iter().rev() {
+            queue.push_front(record);
+        }
+    }
+
+    pub(crate) fn prepare_watermark_eviction(
+        &self,
+        high_watermark_ratio: f64,
+        low_watermark_ratio: f64,
+    ) -> StoreResult<PendingLocalEviction> {
+        self.ensure_init()?;
+        validate_watermark_ratios(high_watermark_ratio, low_watermark_ratio)?;
+        if !self.config.enable_eviction {
+            return Ok(PendingLocalEviction::default());
         }
 
-        Ok(evicted)
+        let total = *self.total_space.read();
+        let used = *self.used_space.read();
+        if total == 0 || used <= (total as f64 * high_watermark_ratio) as u64 {
+            return Ok(PendingLocalEviction::default());
+        }
+
+        let target = (total as f64 * low_watermark_ratio) as u64;
+        self.prepare_eviction_bytes(used.saturating_sub(target))
+    }
+
+    pub(crate) fn commit_eviction(&self, pending: PendingLocalEviction) -> StoreResult<()> {
+        let mut first_error = None;
+        for record in pending.records {
+            let path = self.data_dir().join(&record.relative_path);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+            self.remove_from_write_queue(&record.relative_path);
+            let mut used = self.used_space.write();
+            *used = used.saturating_sub(record.size);
+        }
+        if let Some(error) = first_error {
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Read the value for a key from disk.
@@ -436,31 +565,40 @@ impl LocalStorageBackend {
     /// if the quota would be exceeded. Returns the list of evicted keys.
     ///
     /// C++ equivalent: `StorageBackend::EnsureDiskSpace`.
-    fn ensure_disk_space(&self, required: u64) -> StoreResult<Vec<String>> {
-        let mut evicted = Vec::new();
+    fn prepare_space_eviction(&self, required: u64) -> StoreResult<PendingLocalEviction> {
         let total = *self.total_space.read();
-
-        loop {
-            let used = *self.used_space.read();
-            let has_quota_space = used.saturating_add(required) <= total;
-            let has_actual_space = self.has_actual_disk_space(required);
-            if has_quota_space && has_actual_space {
-                break;
+        let used = *self.used_space.read();
+        let quota_deficit = used.saturating_add(required).saturating_sub(total);
+        let disk_deficit = match (self.available_space_probe)(&self.data_dir()) {
+            Ok(available) => required
+                .saturating_add(MIN_FREE_SPACE_BYTES)
+                .saturating_sub(available),
+            Err(error) => {
+                tracing::warn!(
+                    "failed to query available disk space for {:?}: {error}",
+                    self.data_dir()
+                );
+                0
             }
+        };
+        self.prepare_eviction_bytes(quota_deficit.max(disk_deficit))
+    }
+
+    fn prepare_eviction_bytes(&self, bytes_to_free: u64) -> StoreResult<PendingLocalEviction> {
+        if bytes_to_free == 0 {
+            return Ok(PendingLocalEviction::default());
+        }
+
+        let mut pending = PendingLocalEviction::default();
+        let mut selected_bytes = 0u64;
+        while selected_bytes < bytes_to_free {
             match self.evict_one() {
-                Some((file_path, size)) => {
-                    // Extract key from path: <dir1>/<dir2>/<sanitized_key>
-                    let key = Path::new(&file_path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| file_path.clone());
-                    let _ = std::fs::remove_file(self.data_dir().join(&file_path));
-                    let mut used = self.used_space.write();
-                    *used = used.saturating_sub(size);
-                    self.remove_from_write_queue(&file_path);
-                    evicted.push(key);
+                Some(record) => {
+                    selected_bytes = selected_bytes.saturating_add(record.size);
+                    pending.records.push(record);
                 }
                 None => {
+                    self.rollback_eviction(pending);
                     return Err(StoreError::Internal(
                         "disk full: cannot satisfy quota after eviction".to_string(),
                     ));
@@ -482,41 +620,30 @@ impl LocalStorageBackend {
             self.compact_write_queue();
         }
 
-        Ok(evicted)
-    }
-
-    fn has_actual_disk_space(&self, required: u64) -> bool {
-        match (self.available_space_probe)(&self.data_dir()) {
-            Ok(available) => available >= required.saturating_add(MIN_FREE_SPACE_BYTES),
-            Err(err) => {
-                tracing::warn!(
-                    "failed to query available disk space for {:?}: {err}",
-                    self.data_dir()
-                );
-                true
-            }
-        }
+        Ok(pending)
     }
 
     /// Evict the oldest valid file from the FIFO queue.
     /// Returns `None` if the queue is exhausted.
-    fn evict_one(&self) -> Option<(String, u64)> {
+    fn evict_one(&self) -> Option<FileRecord> {
         let mut queue = self.write_queue.write();
         let set = self.queue_set.read();
 
-        while let Some((path, size)) = queue.pop_front() {
-            if set.contains_key(&path) {
-                return Some((path, size));
+        while let Some(record) = queue.pop_front() {
+            if set.contains_key(&record.relative_path) {
+                return Some(record);
             }
             // Stale entry — already deleted, skip.
         }
         None
     }
 
-    fn add_to_write_queue(&self, file_path: &str, size: u64) {
-        self.write_queue
-            .write()
-            .push_back((file_path.to_string(), size));
+    fn add_to_write_queue(&self, storage_key: &str, file_path: &str, size: u64) {
+        self.write_queue.write().push_back(FileRecord {
+            storage_key: storage_key.to_string(),
+            relative_path: file_path.to_string(),
+            size,
+        });
         self.queue_set.write().insert(file_path.to_string(), ());
     }
 
@@ -528,7 +655,7 @@ impl LocalStorageBackend {
     fn compact_write_queue(&self) {
         let set = self.queue_set.read();
         let mut queue = self.write_queue.write();
-        queue.retain(|(path, _)| set.contains_key(path));
+        queue.retain(|record| set.contains_key(&record.relative_path));
     }
 
     // ------------------------------------------------------------------
@@ -577,6 +704,22 @@ impl LocalStorageBackend {
     }
 }
 
+fn validate_watermark_ratios(high: f64, low: f64) -> StoreResult<()> {
+    if !high.is_finite()
+        || !low.is_finite()
+        || !(0.0..=1.0).contains(&high)
+        || high == 0.0
+        || !(0.0..=1.0).contains(&low)
+        || low == 0.0
+        || low >= high
+    {
+        return Err(StoreError::InvalidParams(
+            "disk eviction watermarks must satisfy 0 < low < high <= 1".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl Drop for LocalStorageBackend {
     fn drop(&mut self) {
         if let Err(err) = self.clean_storage_path() {
@@ -623,14 +766,62 @@ mod tests {
     #[test]
     fn actual_disk_space_shortage_triggers_fifo_eviction() {
         let enough_space = MIN_FREE_SPACE_BYTES + 1024;
-        let (backend, _tmp) =
-            backend_with_available_space_sequence(500, vec![enough_space, 0, enough_space]);
+        let (backend, _tmp) = backend_with_available_space_sequence(
+            500,
+            vec![enough_space, MIN_FREE_SPACE_BYTES + 49],
+        );
 
-        backend.write_object("old", &vec![0u8; 100]).unwrap();
-        let evicted = backend.write_object("new", &vec![0u8; 50]).unwrap();
+        backend.write_object("old", &[0u8; 100]).unwrap();
+        let evicted = backend.write_object("new", &[0u8; 50]).unwrap();
 
         assert_eq!(evicted, vec!["old".to_string()]);
         assert!(!backend.exists("old"));
         assert!(backend.exists("new"));
+    }
+
+    #[test]
+    fn tenant_storage_key_round_trips_without_path_delimiters() {
+        let storage_key = local_storage_key("租户/a", "模型/key:1");
+        assert!(!storage_key.contains('\0'));
+        assert_eq!(
+            parse_local_storage_key(&storage_key),
+            ("租户/a", "模型/key:1")
+        );
+
+        let default_key = local_storage_key("", "path/to/key");
+        assert_eq!(
+            parse_local_storage_key(&default_key),
+            ("default", "path/to/key")
+        );
+    }
+
+    #[test]
+    fn watermark_eviction_can_be_rolled_back_without_deleting_files() {
+        let (backend, _tmp) = backend_with_available_space_sequence(100, vec![u64::MAX]);
+        backend.write_object("tenant/key-a", &[0u8; 60]).unwrap();
+        backend.write_object("tenant/key-b", &[0u8; 20]).unwrap();
+
+        let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(pending.keys(), vec!["tenant/key-a"]);
+        assert!(backend.exists("tenant/key-a"));
+        assert_eq!(backend.space_usage(), (80, 100));
+
+        backend.rollback_eviction(pending);
+        let pending_again = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(pending_again.keys(), vec!["tenant/key-a"]);
+    }
+
+    #[test]
+    fn watermark_eviction_commit_deletes_fifo_victims() {
+        let (backend, _tmp) = backend_with_available_space_sequence(100, vec![u64::MAX]);
+        backend.write_object("tenant/key-a", &[0u8; 60]).unwrap();
+        backend.write_object("tenant/key-b", &[0u8; 20]).unwrap();
+
+        let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        backend.commit_eviction(pending).unwrap();
+
+        assert!(!backend.exists("tenant/key-a"));
+        assert!(backend.exists("tenant/key-b"));
+        assert_eq!(backend.space_usage(), (20, 100));
     }
 }
