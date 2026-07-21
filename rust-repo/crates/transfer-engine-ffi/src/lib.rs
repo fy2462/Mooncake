@@ -251,7 +251,11 @@ impl TransferEngine {
     pub fn get_local_ip_and_port(&self) -> TransferEngineResult<String> {
         let mut buf = vec![0u8; 256];
         let rc = unsafe {
-            ffi::getLocalIpAndPort(self.handle.as_ptr(), buf.as_mut_ptr() as *mut i8, buf.len())
+            ffi::getLocalIpAndPort(
+                self.handle.as_ptr(),
+                buf.as_mut_ptr() as *mut std::os::raw::c_char,
+                buf.len(),
+            )
         };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
@@ -733,8 +737,8 @@ impl TransferEngine {
         let name_c = CString::new(notify_msg.name.as_str())?;
         let msg_c = CString::new(notify_msg.msg.as_str())?;
         let ffi_notify = ffi::notify_msg_t {
-            name: name_c.as_ptr() as *mut i8,
-            msg: msg_c.as_ptr() as *mut i8,
+            name: name_c.as_ptr() as *mut std::os::raw::c_char,
+            msg: msg_c.as_ptr() as *mut std::os::raw::c_char,
         };
 
         let rc = unsafe {
@@ -767,8 +771,8 @@ impl TransferEngine {
         let name_c = CString::new(notify_msg.name.as_str())?;
         let msg_c = CString::new(notify_msg.msg.as_str())?;
         let ffi_notify = ffi::notify_msg_t {
-            name: name_c.as_ptr() as *mut i8,
-            msg: msg_c.as_ptr() as *mut i8,
+            name: name_c.as_ptr() as *mut std::os::raw::c_char,
+            msg: msg_c.as_ptr() as *mut std::os::raw::c_char,
         };
         let rc = unsafe { ffi::genNotifyInEngine(self.handle.as_ptr(), target_id, ffi_notify) };
         if rc != 0 {
