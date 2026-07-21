@@ -175,3 +175,97 @@ pub(crate) fn task_status_to_proto(status: TaskStatus) -> i32 {
 pub(crate) fn task_status_from_proto(status: i32) -> TaskStatus {
     TaskStatus::try_from(status).unwrap_or(TaskStatus::Pending)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{replica_from_proto, replica_to_proto};
+    use crate::proto;
+    use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
+    use uuid::Uuid;
+
+    fn wire_replica(status: i32, replica_type: i32) -> proto::ReplicaDescriptor {
+        proto::ReplicaDescriptor {
+            segment_id: Some(proto::Uuid { high: 7, low: 11 }),
+            segment_name: "segment-a".to_string(),
+            offset: 13,
+            status,
+            replica_type,
+            size: 17,
+            base_addr: 19,
+            holder_client_id: Some(proto::Uuid { high: 23, low: 29 }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replica_status_wire_mapping_preserves_cpp_fallback() {
+        let cases = [
+            (0, ReplicaStatus::Undefined),
+            (1, ReplicaStatus::Allocating),
+            (2, ReplicaStatus::Written),
+            (3, ReplicaStatus::Complete),
+            (4, ReplicaStatus::Failed),
+            (-1, ReplicaStatus::Undefined),
+            (99, ReplicaStatus::Undefined),
+        ];
+
+        for (wire, expected) in cases {
+            assert_eq!(replica_from_proto(&wire_replica(wire, 0)).status, expected);
+        }
+    }
+
+    #[test]
+    fn replica_type_wire_mapping_preserves_cpp_fallback() {
+        let cases = [
+            (0, ReplicaType::Memory),
+            (1, ReplicaType::Disk),
+            (2, ReplicaType::LocalDisk),
+            (3, ReplicaType::NoFSsd),
+            (4, ReplicaType::Memory),
+            (-1, ReplicaType::Memory),
+            (99, ReplicaType::Memory),
+        ];
+
+        for (wire, expected) in cases {
+            assert_eq!(
+                replica_from_proto(&wire_replica(3, wire)).replica_type,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn replica_proto_adapter_preserves_compatibility_alias_fields() {
+        let holder = Uuid::from_u64_pair(31, 37);
+        let replica = ReplicaDescriptor {
+            segment_id: Uuid::from_u64_pair(41, 43),
+            segment_name: "tcp://node-a:1234".to_string(),
+            offset: 47,
+            size: 53,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: Some(holder),
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 59,
+        };
+
+        let wire = replica_to_proto(&replica);
+        assert_eq!(wire.status, 3);
+        assert_eq!(wire.replica_type, 0);
+        assert_eq!(wire.transport_endpoint, replica.segment_name);
+        assert_eq!(wire.object_size, replica.size);
+        assert_eq!(wire.local_disk_client_id, wire.holder_client_id);
+        assert_eq!(wire.base_addr, replica.base_addr);
+
+        let round_trip = replica_from_proto(&wire);
+        assert_eq!(round_trip.segment_id, replica.segment_id);
+        assert_eq!(round_trip.segment_name, replica.segment_name);
+        assert_eq!(round_trip.offset, replica.offset);
+        assert_eq!(round_trip.size, replica.size);
+        assert_eq!(round_trip.status, replica.status);
+        assert_eq!(round_trip.replica_type, replica.replica_type);
+        assert_eq!(round_trip.holder_client_id, replica.holder_client_id);
+        assert_eq!(round_trip.base_addr, replica.base_addr);
+    }
+}
