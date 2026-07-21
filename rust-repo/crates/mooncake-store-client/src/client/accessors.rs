@@ -5,6 +5,17 @@ use std::ffi::c_void;
 use uuid::Uuid;
 
 impl MooncakeClient {
+    /// Configure remote MEMORY selection while building a client value.
+    pub fn with_replica_selection_policy(mut self, policy: super::ReplicaSelectionPolicy) -> Self {
+        self.replica_selection_policy = policy;
+        self
+    }
+
+    /// Replace this client's remote MEMORY selection policy.
+    pub fn set_replica_selection_policy(&mut self, policy: super::ReplicaSelectionPolicy) {
+        self.replica_selection_policy = policy;
+    }
+
     /// Query the master for the list of replicas hosting a given key,
     /// without fetching the data. Returns an empty vector if the key is
     /// not found.

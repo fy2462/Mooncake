@@ -165,7 +165,7 @@ impl MooncakeClient {
     /// | Priority | Replica Type | Locality  | Behavior                        |
     /// |----------|-------------|-----------|----------------------------------|
     /// | 1        | MEMORY      | Local     | Return immediately (最优)       |
-    /// | 2        | MEMORY      | Remote    | First seen (任意远程 MEMORY)     |
+    /// | 2        | MEMORY      | Remote    | First seen, or lowest score when enabled |
     /// | 3        | NOF_SSD     | Local     | Return immediately (次优)       |
     /// | 4        | NOF_SSD     | Remote    | First seen (任意远程 NOF_SSD)    |
     /// | 5        | LOCAL_DISK  | —         | Last one wins (覆盖 DISK)       |
@@ -177,11 +177,14 @@ impl MooncakeClient {
     /// - If a local MEMORY replica is found, return it immediately (short-circuit).
     /// - If a local NOF_SSD replica is found, return it immediately.
     /// - Otherwise, remember the first remote MEMORY and first remote NOF_SSD.
+    /// - When scoring is enabled, choose the lowest-scoring remote MEMORY;
+    ///   equal scores retain master return order.
     ///
     /// **第一遍** —— 扫描 MEMORY 和 NOF_SSD：
     /// - 找到本地 MEMORY 副本则立即返回（短路）。
     /// - 找到本地 NOF_SSD 副本则立即返回。
     /// - 否则记住第一个远程 MEMORY 和第一个远程 NOF_SSD。
+    /// - 启用评分时，选择分数最低的远程 MEMORY；同分保持 master 返回顺序。
     ///
     /// **Pass 2** — if no MEMORY/NOF_SSD found, scan for disk-based replicas:
     /// - LOCAL_DISK always overwrites any previous disk pick.
@@ -200,62 +203,10 @@ impl MooncakeClient {
         replicas: &'a [ReplicaDescriptor],
     ) -> Option<&'a ReplicaDescriptor> {
         let endpoints = self.local_endpoints.read();
-        let mut first_memory: Option<&ReplicaDescriptor> = None;
-        let mut first_nof: Option<&ReplicaDescriptor> = None;
-
-        // Pass 1: prioritize local MEMORY/NOF_SSD, otherwise record first remote.
-        // 第一遍：优先本地 MEMORY/NOF_SSD，否则记录第一个远程副本。
-        for r in replicas {
-            if r.status != mooncake_store_core::ReplicaStatus::Complete {
-                continue; // skip non-ready replicas / 跳过未就绪的副本
-            }
-            match r.replica_type {
-                mooncake_store_core::ReplicaType::Memory => {
-                    if endpoints.contains(&r.segment_name) {
-                        return Some(r); // 本地 MEMORY —— 最优 / local MEMORY — best
-                    }
-                    if first_memory.is_none() {
-                        first_memory = Some(r); // 记录第一个远程 MEMORY / record first remote MEMORY
-                    }
-                }
-                mooncake_store_core::ReplicaType::NoFSsd => {
-                    if endpoints.contains(&r.segment_name) {
-                        return Some(r); // 本地 NOF_SSD —— 次优 / local NOF_SSD — second best
-                    }
-                    if first_nof.is_none() {
-                        first_nof = Some(r); // 记录第一个远程 NOF_SSD / record first remote NOF_SSD
-                    }
-                }
-                _ => {} // disk types handled in pass 2 / 磁盘类型在第二遍处理
-            }
-        }
-
-        // Return best memory/NOF found (local was already short-circuited above).
-        // 返回找到的最佳 MEMORY/NOF（本地已在上面短路返回）。
-        if let Some(r) = first_memory {
-            return Some(r);
-        }
-        if let Some(r) = first_nof {
-            return Some(r);
-        }
-
-        // Pass 2: LOCAL_DISK preferred over DISK.
-        // 第二遍：LOCAL_DISK 优先于 DISK。
-        let mut best: Option<&ReplicaDescriptor> = None;
-        for r in replicas {
-            if r.status != mooncake_store_core::ReplicaStatus::Complete {
-                continue;
-            }
-            match r.replica_type {
-                mooncake_store_core::ReplicaType::LocalDisk => {
-                    best = Some(r); // LOCAL_DISK always overrides DISK / LOCAL_DISK 始终覆盖 DISK
-                }
-                mooncake_store_core::ReplicaType::Disk if best.is_none() => {
-                    best = Some(r); // DISK only if no LOCAL_DISK / DISK 仅在没有任何 LOCAL_DISK 时
-                }
-                _ => {}
-            }
-        }
-        best
+        super::replica_selection::select_best_replica(
+            replicas,
+            &endpoints,
+            &self.replica_selection_policy,
+        )
     }
 }

@@ -349,6 +349,7 @@ impl MooncakeClient {
             master_candidates: RwLock::new(master_addrs.to_vec()),
             rpc_request_timeout,
             tenant_id: tenant_id.to_string(),
+            replica_selection_policy: super::ReplicaSelectionPolicy::from_env(),
         })
     }
 

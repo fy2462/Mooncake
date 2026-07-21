@@ -16,6 +16,7 @@ pub(crate) mod read_batch;
 pub(crate) mod read_meta;
 pub(crate) mod read_ranges;
 pub(crate) mod remove;
+mod replica_selection;
 pub(crate) mod replication;
 pub(crate) mod storage;
 pub(crate) mod storage_local;
@@ -37,6 +38,7 @@ pub(crate) mod write_parts;
 
 pub use background::{ClientBackgroundConfig, ClientBackgroundHandle};
 pub use batch_types::{BatchPutStartResult, BatchUpsertEntry};
+pub use replica_selection::{builtin_remote_replica_score, ReplicaScorer, ReplicaSelectionPolicy};
 pub use storage::{OffloadTaskItem, PromotionTaskItem, SegmentDetail};
 pub use types::{BufferHandle, CachedQueryResultResponse};
 
@@ -236,4 +238,6 @@ pub struct MooncakeClient {
     /// Default tenant used by convenience APIs that do not take an explicit
     /// tenant parameter. Empty string preserves the legacy/default namespace.
     pub(crate) tenant_id: String,
+
+    replica_selection_policy: ReplicaSelectionPolicy,
 }

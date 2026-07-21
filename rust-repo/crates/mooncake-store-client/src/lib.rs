@@ -59,8 +59,9 @@ pub mod offload;
 pub mod remote_source;
 
 pub use client::{
-    BufferHandle, CachedQueryResultResponse, ClientBackgroundConfig, ClientBackgroundHandle,
-    MooncakeClient, OffloadTaskItem, PromotionTaskItem, SegmentDetail,
+    builtin_remote_replica_score, BufferHandle, CachedQueryResultResponse, ClientBackgroundConfig,
+    ClientBackgroundHandle, MooncakeClient, OffloadTaskItem, PromotionTaskItem, ReplicaScorer,
+    ReplicaSelectionPolicy, SegmentDetail,
 };
 pub use dummy::{
     DummyIpcChannel, DummyMemoryPool, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
