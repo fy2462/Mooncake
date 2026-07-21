@@ -9,7 +9,6 @@ use crate::{
 };
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 impl MooncakeClient {
@@ -57,7 +56,7 @@ impl MooncakeClient {
         let next_master = Self::connect_master_addr(master_addr).await?;
         self.master = next_master;
         *self.master_addr.write() = master_addr.trim().to_string();
-        self.last_ping_success.store(false, Ordering::SeqCst);
+        self.health_state.record_failure();
         Ok(())
     }
 
@@ -98,7 +97,7 @@ impl MooncakeClient {
         let response = match self.master.ping(self.rpc_request(request)).await {
             Ok(response) => response,
             Err(first_error) => {
-                self.last_ping_success.store(false, Ordering::SeqCst);
+                self.health_state.record_failure();
                 self.failover_master().await?;
                 self.master
                     .ping(self.rpc_request(proto::PingRequest {
@@ -108,7 +107,7 @@ impl MooncakeClient {
                     }))
                     .await
                     .map_err(|second_error| {
-                        self.last_ping_success.store(false, Ordering::SeqCst);
+                        self.health_state.record_failure();
                         let mapped = Self::rpc_status_to_error(second_error);
                         StoreError::Internal(format!(
                             "ping failed before failover ({first_error}); after failover: {mapped}"
@@ -118,7 +117,7 @@ impl MooncakeClient {
         }
         .into_inner();
 
-        self.last_ping_success.store(true, Ordering::SeqCst);
+        self.health_state.record_success();
 
         // C++ client_service.cpp:3547 — check client_status for NeedRemount
         // C++ 中检查 client_status 是否为 NeedRemount
@@ -136,12 +135,12 @@ impl MooncakeClient {
     fn try_trigger_remount(&self) {
         // Ensure at most one remount segment task is running.
         // 确保同一时间最多只有一个 remount 任务在运行。
-        if self.remount_in_progress.swap(true, Ordering::SeqCst) {
+        if !self.remount_state.try_start() {
             return; // already in progress / 已有在途
         }
 
         if self.segment_name.is_empty() || self.segment_size == 0 {
-            self.remount_in_progress.store(false, Ordering::SeqCst);
+            self.remount_state.finish();
             return; // not a storage node / 非存储节点
         }
 
@@ -159,7 +158,7 @@ impl MooncakeClient {
             .as_ref()
             .map(|buf| buf.as_ptr() as u64)
             .unwrap_or(0);
-        let remount_flag = self.remount_in_progress.clone();
+        let remount_state = self.remount_state.clone();
 
         // Spawn a background task so we don't block the caller.
         // 启动后台任务，不阻塞调用方。
@@ -183,7 +182,7 @@ impl MooncakeClient {
                     tracing::error!("ReMountSegment failed: {}", e);
                 }
             }
-            remount_flag.store(false, Ordering::SeqCst);
+            remount_state.finish();
         });
     }
 
@@ -309,17 +308,13 @@ impl MooncakeClient {
         };
 
         let (port, handle) = crate::offload::server::start_offload_server(handler).await;
-        *self.offload_server_handle.write() = Some(handle);
-        self.offload_server_port
-            .store(port, std::sync::atomic::Ordering::SeqCst);
-
         // Build the RPC address: hostname (without port) + offload port.
         let addr = if let Some(pos) = self.local_hostname.rfind(':') {
             format!("{}:{port}", &self.local_hostname[..pos])
         } else {
             format!("{}:{port}", self.local_hostname)
         };
-        *self.offload_rpc_addr.write() = addr;
+        self.offload_server_state.record_started(handle, port, addr);
 
         Ok(port)
     }
@@ -327,7 +322,7 @@ impl MooncakeClient {
     /// Returns the P2P offload RPC address (`hostname:port`) if the server is running.
     /// C++ equivalent: `RealClient::local_rpc_addr`
     pub fn offload_rpc_address(&self) -> String {
-        self.offload_rpc_addr.read().clone()
+        self.offload_server_state.address()
     }
 
     /// Returns `true` if the last ping to the master was successful.
@@ -338,7 +333,7 @@ impl MooncakeClient {
     /// 如果最后一次向 master 的 ping 成功则返回 true。
     /// 这是一个轻量的、非阻塞的调用，适合轮询循环。
     pub fn is_ping_healthy(&self) -> bool {
-        self.last_ping_success.load(Ordering::SeqCst)
+        self.health_state.is_healthy()
     }
 
     /// Manually trigger a ReMountSegment request. Only one remount may be

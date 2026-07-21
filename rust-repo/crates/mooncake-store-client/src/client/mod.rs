@@ -8,6 +8,7 @@ mod config;
 pub(crate) mod finalize;
 pub(crate) mod ha;
 pub(crate) mod lifecycle;
+mod lifecycle_state;
 pub(crate) mod nof_register;
 pub(crate) mod offload_read;
 pub(crate) mod read;
@@ -41,7 +42,6 @@ pub use types::{BufferHandle, CachedQueryResultResponse};
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -52,6 +52,7 @@ use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource};
 
 use self::buffer::OwnedBuffer;
+use self::lifecycle_state::{HealthState, OffloadServerState, RemountState, ShutdownState};
 
 // ---------------------------------------------------------------------------
 // MooncakeClient — primary client for the Mooncake distributed store
@@ -149,7 +150,7 @@ pub struct MooncakeClient {
     ///
     /// 关闭标志。设置为 true 后，操作应停止，客户端被视为已关闭。
     /// 通过 is_closed() 检查。
-    pub(crate) tear_down: Arc<RwLock<bool>>,
+    shutdown_state: ShutdownState,
 
     /// Set of locally-mounted segment transport endpoints, used for
     /// [`select_best_replica`](Self::select_best_replica) locality checks.
@@ -210,22 +211,14 @@ pub struct MooncakeClient {
 
     /// Guard to ensure at most one remount is in progress at any time.
     /// 确保同一时间最多只有一个 remount 在进行中。C++ equivalent: remount_segment_future.valid()
-    pub(crate) remount_in_progress: Arc<AtomicBool>,
+    remount_state: RemountState,
 
     /// Whether the last ping to the master succeeded.
     /// 最后一次 ping master 是否成功。C++ equivalent: Client::is_ping_healthy()
-    pub(crate) last_ping_success: Arc<AtomicBool>,
+    health_state: HealthState,
 
-    /// Handle to the offload RPC server task.
-    pub(crate) offload_server_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
-
-    /// Port the offload RPC server is listening on (0 if not started).
-    /// C++ equivalent: `RealClient::offload_rpc_port_`
-    pub(crate) offload_server_port: Arc<std::sync::atomic::AtomicU16>,
-
-    /// P2P offload RPC address (`hostname:port`).
-    /// C++ equivalent: `RealClient::local_rpc_addr`
-    pub(crate) offload_rpc_addr: RwLock<String>,
+    /// Offload RPC server task and its published endpoint.
+    offload_server_state: OffloadServerState,
 
     /// Currently connected master address (`host:port`).
     /// C++ equivalent: `Client::current_master_view_.leader_address`.

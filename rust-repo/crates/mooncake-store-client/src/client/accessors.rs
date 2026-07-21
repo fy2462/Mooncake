@@ -40,7 +40,7 @@ impl MooncakeClient {
 
     /// Returns `true` if the client has been torn down. / 如果客户端已关闭则返回 true。
     pub fn is_closed(&self) -> bool {
-        *self.tear_down.read()
+        self.shutdown_state.is_closed()
     }
 
     /// Return this client's UUID. / 返回当前客户端 UUID。
@@ -62,12 +62,10 @@ impl MooncakeClient {
     /// 所有用户注册的缓冲区。此调用后客户端不应再用于任何操作。
     /// C++ 等价：`Client::TearDownAll()`。
     pub async fn tear_down_all(&mut self) -> StoreResult<()> {
-        *self.tear_down.write() = true;
+        self.shutdown_state.close();
 
         // Stop offload RPC server if running.
-        if let Some(handle) = self.offload_server_handle.write().take() {
-            handle.abort();
-        }
+        self.offload_server_state.stop();
 
         // unregister local buffer / 取消注册本地缓冲区
         unsafe {

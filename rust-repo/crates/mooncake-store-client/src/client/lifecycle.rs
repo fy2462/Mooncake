@@ -7,7 +7,6 @@ use mooncake_store_core::StoreError;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -335,7 +334,7 @@ impl MooncakeClient {
             local_buffer,
             segment_buffer,
             registered_buffers: RwLock::new(HashMap::new()),
-            tear_down: Arc::new(RwLock::new(false)),
+            shutdown_state: Default::default(),
             local_endpoints: RwLock::new(endpoints),
             mounted_segment_ids: RwLock::new(mounted_segment_ids),
             miss_handler: None,
@@ -343,11 +342,9 @@ impl MooncakeClient {
             local_storage: None,
             segment_name,
             segment_size,
-            remount_in_progress: Arc::new(AtomicBool::new(false)),
-            last_ping_success: Arc::new(AtomicBool::new(false)),
-            offload_server_handle: RwLock::new(None),
-            offload_server_port: Arc::new(std::sync::atomic::AtomicU16::new(0)),
-            offload_rpc_addr: RwLock::new(String::new()),
+            remount_state: Default::default(),
+            health_state: Default::default(),
+            offload_server_state: Default::default(),
             master_addr: RwLock::new(selected_master_addr.to_string()),
             master_candidates: RwLock::new(master_addrs.to_vec()),
             rpc_request_timeout,
