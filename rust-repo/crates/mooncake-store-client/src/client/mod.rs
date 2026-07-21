@@ -4,6 +4,7 @@ pub(crate) mod batch_eviction;
 pub(crate) mod batch_types;
 pub(crate) mod batches;
 pub(crate) mod buffer;
+mod config;
 pub(crate) mod finalize;
 pub(crate) mod ha;
 pub(crate) mod lifecycle;

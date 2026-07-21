@@ -1,4 +1,5 @@
 use super::buffer::OwnedBuffer;
+use super::config::ClientConfig;
 use super::MooncakeClient;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
@@ -118,7 +119,7 @@ impl MooncakeClient {
         local_buffer_size: u64,
         tenant_id: &str,
     ) -> StoreResult<Self> {
-        Self::create_with_master_candidates_inner(
+        Self::create_with_config(ClientConfig {
             master_addrs,
             metadata_conn_string,
             local_host,
@@ -127,7 +128,7 @@ impl MooncakeClient {
             global_segment_size,
             local_buffer_size,
             tenant_id,
-        )
+        })
         .await
     }
 
@@ -146,7 +147,7 @@ impl MooncakeClient {
         global_segment_size: u64,
         local_buffer_size: u64,
     ) -> StoreResult<Self> {
-        Self::create_with_master_candidates_inner(
+        Self::create_with_config(ClientConfig {
             master_addrs,
             metadata_conn_string,
             local_host,
@@ -154,46 +155,25 @@ impl MooncakeClient {
             device,
             global_segment_size,
             local_buffer_size,
-            "",
-        )
+            tenant_id: "",
+        })
         .await
     }
 
-    async fn create_with_master_candidates_inner(
-        master_addrs: &[String],
-        metadata_conn_string: &str,
-        local_host: &str,
-        protocol: &str,
-        device: &str,
-        global_segment_size: u64,
-        local_buffer_size: u64,
-        tenant_id: &str,
-    ) -> StoreResult<Self> {
-        if master_addrs.is_empty() {
+    async fn create_with_config(config: ClientConfig<'_>) -> StoreResult<Self> {
+        if config.master_addrs.is_empty() {
             return Err(StoreError::InvalidParams(
                 "at least one master address is required".to_string(),
             ));
         }
-        Self::validate_global_segment_size(global_segment_size)?;
-        Self::validate_local_buffer_size(local_buffer_size)?;
+        Self::validate_global_segment_size(config.global_segment_size)?;
+        Self::validate_local_buffer_size(config.local_buffer_size)?;
 
         let mut last_error = None;
-        for addr in master_addrs {
+        for addr in config.master_addrs {
             match Self::connect_master_addr(addr).await {
                 Ok(master) => {
-                    return Self::create_with_connected_master(
-                        addr,
-                        master_addrs,
-                        master,
-                        metadata_conn_string,
-                        local_host,
-                        protocol,
-                        device,
-                        global_segment_size,
-                        local_buffer_size,
-                        tenant_id,
-                    )
-                    .await;
+                    return Self::create_with_connected_master(addr, master, &config).await;
                 }
                 Err(err) => {
                     last_error = Some(err);
@@ -208,16 +188,19 @@ impl MooncakeClient {
 
     async fn create_with_connected_master(
         selected_master_addr: &str,
-        master_candidates: &[String],
         mut master: proto::master_service_client::MasterServiceClient<Channel>,
-        metadata_conn_string: &str,
-        local_host: &str,
-        protocol: &str,
-        device: &str,
-        global_segment_size: u64,
-        local_buffer_size: u64,
-        tenant_id: &str,
+        config: &ClientConfig<'_>,
     ) -> StoreResult<Self> {
+        let ClientConfig {
+            master_addrs,
+            metadata_conn_string,
+            local_host,
+            protocol,
+            device,
+            global_segment_size,
+            local_buffer_size,
+            tenant_id,
+        } = *config;
         // Step 2: Parse IP and port from local_host. / 从 local_host 解析 IP 和端口。
         let parts: Vec<&str> = local_host.split(':').collect();
         let ip = parts.first().copied().unwrap_or(local_host);
@@ -366,7 +349,7 @@ impl MooncakeClient {
             offload_server_port: Arc::new(std::sync::atomic::AtomicU16::new(0)),
             offload_rpc_addr: RwLock::new(String::new()),
             master_addr: RwLock::new(selected_master_addr.to_string()),
-            master_candidates: RwLock::new(master_candidates.to_vec()),
+            master_candidates: RwLock::new(master_addrs.to_vec()),
             rpc_request_timeout,
             tenant_id: tenant_id.to_string(),
         })
