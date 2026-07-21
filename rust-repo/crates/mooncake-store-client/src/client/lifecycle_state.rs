@@ -1,25 +1,28 @@
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct ShutdownState {
-    closed: RwLock<bool>,
+    closed: Arc<AtomicBool>,
 }
 
 impl ShutdownState {
     pub(super) fn is_closed(&self) -> bool {
-        *self.closed.read()
+        self.closed.load(Ordering::SeqCst)
     }
 
     pub(super) fn close(&self) {
-        *self.closed.write() = true;
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn shared_flag(&self) -> Arc<AtomicBool> {
+        self.closed.clone()
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct HealthState {
-    last_ping_succeeded: AtomicBool,
+    last_ping_succeeded: Arc<AtomicBool>,
 }
 
 impl HealthState {
@@ -33,6 +36,10 @@ impl HealthState {
 
     pub(super) fn record_failure(&self) {
         self.last_ping_succeeded.store(false, Ordering::SeqCst);
+    }
+
+    pub(super) fn shared_flag(&self) -> Arc<AtomicBool> {
+        self.last_ping_succeeded.clone()
     }
 }
 
@@ -53,9 +60,9 @@ impl RemountState {
 
 #[derive(Default)]
 pub(super) struct OffloadServerState {
-    handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
+    handle: parking_lot::RwLock<Option<tokio::task::JoinHandle<()>>>,
     port: AtomicU16,
-    address: RwLock<String>,
+    address: parking_lot::RwLock<String>,
 }
 
 impl OffloadServerState {

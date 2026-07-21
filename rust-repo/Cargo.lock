@@ -2510,6 +2510,7 @@ dependencies = [
  "libc",
  "mooncake-store-core",
  "parking_lot",
+ "prometheus",
  "prost",
  "regex",
  "serde",

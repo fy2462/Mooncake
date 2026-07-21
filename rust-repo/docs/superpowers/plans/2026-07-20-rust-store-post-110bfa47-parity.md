@@ -36,8 +36,8 @@
 | `711fac99` | Layered snapshot restore | Equivalent behavior | Rust catalog restore supports candidates/fallback and state application. |
 | `cc745659` | Snapshot cleanup/documentation | Not a new capability | Keep the current Rust layering; no class-for-class rewrite. |
 | `70ba3158` | Parallel HugeTLB population | Gap | Implement opt-in deferred, parallel page touching before TE registration. |
-| `12304b92` | Client metrics HTTP config exposed to Python | Gap | Add Rust client HTTP health/metrics configuration and PyO3 arguments. |
-| `b996ac4b` | Opt-in topology-aware remote replica scoring | Gap | Extend Rust's locality-only selection with the upstream scoring policy and fallback. |
+| `12304b92` | Client metrics HTTP config exposed to Python | Migrated | Rust client owns optional health/Prometheus endpoints; PyO3 exposes appended configuration arguments. |
+| `b996ac4b` | Opt-in topology-aware remote replica scoring | Migrated | Rust has opt-in scoring with protocol propagation and verification logs `2026-07-21-009..011`. |
 | `a5b938cd` | SSD publish-before-commit race | Migrated | Covered by migration log `2026-07-20-001`. |
 | `63bcc646` | FIFO eviction for OffsetAllocator backend | Migrated | Client SSD OffsetAllocator has quota/key watermarks, FIFO eviction, persistence, and extent reuse; commit `eb4eb1eb`. |
 | `f6cc5625` | Master default tuning | Migrated | Rust defaults now match upstream; commit `c7c52fd9`. |
@@ -276,19 +276,19 @@ refactor and `b996ac4b` behavior change in one commit.
 **Interfaces:**
 - Produces: an opt-in selection policy that scores complete remote memory replicas and falls back to current deterministic ordering when topology data is absent or disabled.
 
-- [ ] **Step 1: Port the upstream scoring cases as table-driven failing tests**
+- [x] **Step 1: Port the upstream scoring cases as table-driven failing tests**
 
 Cover disabled policy, local replica dominance, injected lower score, built-in `rdma < tcp < unknown` ordering, unavailable protocol fallback, incomplete replica exclusion, and stable tie-breaking.
 
-- [ ] **Step 2: Run the focused tests and confirm locality-only selection fails cost ordering**
+- [x] **Step 2: Run the focused tests and confirm locality-only selection fails cost ordering**
 
 Run: `cargo test -p mooncake-store-client client::tests::topology -- --nocapture`
 
-- [ ] **Step 3: Add the minimal policy/configuration and scoring adapter**
+- [x] **Step 3: Add the minimal policy/configuration and scoring adapter**
 
 Carry segment protocol additively in the proto/domain model with backward-compatible defaults. Keep local Memory and local NoF short-circuits. When enabled, rank remote complete Memory candidates with a client-owned scorer or the built-in protocol priority; preserve first-seen order for equal or unavailable scores. Do not copy the C++ process-global mutable scorer into Rust.
 
-- [ ] **Step 4: Run the full client suite, log, and commit**
+- [x] **Step 4: Run the full client suite, log, and commit**
 
 Run: `cargo test -p mooncake-store-client --no-fail-fast`
 
@@ -308,19 +308,19 @@ Commit: `feat(store-rust): score remote replicas by topology`
 **Interfaces:**
 - Produces: `enable_client_http_server: bool` and `client_http_port: u16` with default port `9300`, plus `/health` and `/metrics` endpoints.
 
-- [ ] **Step 1: Add failing configuration and endpoint tests**
+- [x] **Step 1: Add failing configuration and endpoint tests**
 
 Verify disabled-by-default behavior, explicit port selection, invalid/occupied port behavior matching upstream (client setup continues without endpoints on bind failure), health response, and Prometheus metrics response.
 
-- [ ] **Step 2: Add an owned HTTP task to the client lifecycle**
+- [x] **Step 2: Add an owned HTTP task to the client lifecycle**
 
 Start it only when enabled, retain its shutdown sender/task handle, and stop it during client teardown. A duplicate start must not create a second listener.
 
-- [ ] **Step 3: Extend PyO3 setup without breaking positional callers**
+- [x] **Step 3: Extend PyO3 setup without breaking positional callers**
 
 Append keyword arguments `enable_client_http_server=false` and `client_http_port=9300`; do not reorder existing parameters.
 
-- [ ] **Step 4: Run Rust and Python binding tests, log, and commit**
+- [x] **Step 4: Run Rust and Python binding tests, log, and commit**
 
 Run: `cargo test -p mooncake-store-client --no-fail-fast && cargo test -p mooncake-store-python --no-fail-fast`
 

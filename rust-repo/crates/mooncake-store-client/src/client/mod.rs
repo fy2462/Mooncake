@@ -7,6 +7,7 @@ pub(crate) mod buffer;
 mod config;
 pub(crate) mod finalize;
 pub(crate) mod ha;
+mod http;
 pub(crate) mod lifecycle;
 mod lifecycle_state;
 pub(crate) mod nof_register;
@@ -38,6 +39,7 @@ pub(crate) mod write_parts;
 
 pub use background::{ClientBackgroundConfig, ClientBackgroundHandle};
 pub use batch_types::{BatchPutStartResult, BatchUpsertEntry};
+pub use http::ClientHttpConfig;
 pub use replica_selection::{builtin_remote_replica_score, ReplicaScorer, ReplicaSelectionPolicy};
 pub use storage::{OffloadTaskItem, PromotionTaskItem, SegmentDetail};
 pub use types::{BufferHandle, CachedQueryResultResponse};
@@ -54,6 +56,7 @@ use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource};
 
 use self::buffer::OwnedBuffer;
+use self::http::ClientHttpServerState;
 use self::lifecycle_state::{HealthState, OffloadServerState, RemountState, ShutdownState};
 
 // ---------------------------------------------------------------------------
@@ -221,6 +224,9 @@ pub struct MooncakeClient {
 
     /// Offload RPC server task and its published endpoint.
     offload_server_state: OffloadServerState,
+
+    /// Optional health and Prometheus HTTP endpoint task owned by this client.
+    client_http_server_state: ClientHttpServerState,
 
     /// Currently connected master address (`host:port`).
     /// C++ equivalent: `Client::current_master_view_.leader_address`.

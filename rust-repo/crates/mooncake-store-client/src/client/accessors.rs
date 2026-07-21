@@ -64,6 +64,11 @@ impl MooncakeClient {
         &self.tenant_id
     }
 
+    /// Bound client health/metrics HTTP port, if the optional server started.
+    pub fn client_http_port(&self) -> Option<u16> {
+        self.client_http_server_state.port()
+    }
+
     /// Tear down the client: set the shutdown flag, unregister the local buffer
     /// and all user-registered buffers from the TransferEngine.
     ///
@@ -77,6 +82,7 @@ impl MooncakeClient {
 
         // Stop offload RPC server if running.
         self.offload_server_state.stop();
+        self.client_http_server_state.stop();
 
         // unregister local buffer / 取消注册本地缓冲区
         unsafe {

@@ -1,3 +1,5 @@
+use super::ClientHttpConfig;
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ClientConfig<'a> {
     pub(super) master_addrs: &'a [String],
@@ -8,4 +10,5 @@ pub(crate) struct ClientConfig<'a> {
     pub(super) global_segment_size: u64,
     pub(super) local_buffer_size: u64,
     pub(super) tenant_id: &'a str,
+    pub(super) http: ClientHttpConfig,
 }

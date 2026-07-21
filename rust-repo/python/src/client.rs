@@ -202,6 +202,16 @@ fn normalize_create_args(
     })
 }
 
+fn normalize_client_http_config(
+    enabled: bool,
+    port: u16,
+) -> PyResult<mooncake_store_client::ClientHttpConfig> {
+    if enabled && port == 0 {
+        return Err(to_py_err("client_http_port must be between 1 and 65535"));
+    }
+    Ok(mooncake_store_client::ClientHttpConfig { enabled, port })
+}
+
 /// Extract the raw pointer and size from a Python buffer-like object.
 ///
 /// 从 Python buffer-like 对象（如 bytearray、memoryview、numpy array）中
@@ -355,6 +365,8 @@ impl PythonMooncakeClient {
     ///   local_buffer_size:   Size of local buffer pool. 默认 256 MiB。
     ///   remote_config:    Optional S3 / LocalFS remote source for prefetch.
     ///                     可选的 S3 / LocalFS 远程源配置，用于预取。
+    ///   enable_client_http_server: Enable /health and /metrics endpoints.
+    ///   client_http_port: Port for the optional client HTTP server. 默认 9300。
     #[staticmethod]
     #[pyo3(signature = (
         local_hostname,
@@ -365,6 +377,8 @@ impl PythonMooncakeClient {
         global_segment_size = -1,
         local_buffer_size = -1,
         remote_config = None::<PyRemoteSourceConfig>,
+        enable_client_http_server = false,
+        client_http_port = 9300,
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -376,6 +390,8 @@ impl PythonMooncakeClient {
         global_segment_size: i64,
         local_buffer_size: i64,
         remote_config: Option<PyRemoteSourceConfig>,
+        enable_client_http_server: bool,
+        client_http_port: u16,
     ) -> PyResult<Bound<'py, PyAny>> {
         use mooncake_store_client::LocalFsSource;
 
@@ -395,6 +411,8 @@ impl PythonMooncakeClient {
         } else {
             local_buffer_size as u64
         };
+        let http_config =
+            normalize_client_http_config(enable_client_http_server, client_http_port)?;
 
         // future_into_py: the async block runs on the tokio runtime, then
         // the returned PythonMooncakeClient is converted into a Python object
@@ -402,7 +420,7 @@ impl PythonMooncakeClient {
         // future_into_py: async 块在 tokio runtime 上执行，返回的
         // PythonMooncakeClient 在 GIL 持有下转换为 Python 对象。
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = MooncakeClient::create(
+            let mut client = MooncakeClient::create_with_http_config(
                 &normalized.master_server_addr,
                 &normalized.metadata_server,
                 &normalized.local_hostname,
@@ -410,6 +428,7 @@ impl PythonMooncakeClient {
                 &device,
                 gss,
                 lbs,
+                http_config,
             )
             .await
             .map_err(to_py_err)?;
@@ -2381,6 +2400,22 @@ impl PythonMooncakeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_http_arguments_default_and_validate_like_rust_config() {
+        assert_eq!(
+            normalize_client_http_config(false, 9300).unwrap(),
+            mooncake_store_client::ClientHttpConfig::default()
+        );
+        assert_eq!(
+            normalize_client_http_config(true, 19_300).unwrap(),
+            mooncake_store_client::ClientHttpConfig {
+                enabled: true,
+                port: 19_300,
+            }
+        );
+        assert!(normalize_client_http_config(true, 0).is_err());
+    }
 
     fn normalize(protocol: &str) -> PyResult<NormalizedCreateArgs> {
         normalize_create_args(

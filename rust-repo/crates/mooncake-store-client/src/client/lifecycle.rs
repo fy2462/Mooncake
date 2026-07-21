@@ -1,5 +1,6 @@
 use super::buffer::OwnedBuffer;
 use super::config::ClientConfig;
+use super::http::{ClientHttpConfig, ClientHttpServerState, ClientHttpSnapshot};
 use super::MooncakeClient;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
@@ -69,7 +70,7 @@ impl MooncakeClient {
         global_segment_size: u64,
         local_buffer_size: u64,
     ) -> StoreResult<Self> {
-        Self::create_for_tenant(
+        Self::create_with_http_config(
             master_addr,
             metadata_conn_string,
             local_host,
@@ -77,8 +78,32 @@ impl MooncakeClient {
             device,
             global_segment_size,
             local_buffer_size,
-            "",
+            ClientHttpConfig::default(),
         )
+        .await
+    }
+
+    pub async fn create_with_http_config(
+        master_addr: &str,
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+        http: ClientHttpConfig,
+    ) -> StoreResult<Self> {
+        Self::create_with_config(ClientConfig {
+            master_addrs: &[master_addr.to_string()],
+            metadata_conn_string,
+            local_host,
+            protocol,
+            device,
+            global_segment_size,
+            local_buffer_size,
+            tenant_id: "",
+            http,
+        })
         .await
     }
 
@@ -127,6 +152,7 @@ impl MooncakeClient {
             global_segment_size,
             local_buffer_size,
             tenant_id,
+            http: ClientHttpConfig::default(),
         })
         .await
     }
@@ -155,6 +181,7 @@ impl MooncakeClient {
             global_segment_size,
             local_buffer_size,
             tenant_id: "",
+            http: ClientHttpConfig::default(),
         })
         .await
     }
@@ -167,6 +194,7 @@ impl MooncakeClient {
         }
         Self::validate_global_segment_size(config.global_segment_size)?;
         Self::validate_local_buffer_size(config.local_buffer_size)?;
+        Self::validate_client_http_config(config.http)?;
 
         let mut last_error = None;
         for addr in config.master_addrs {
@@ -199,6 +227,7 @@ impl MooncakeClient {
             global_segment_size,
             local_buffer_size,
             tenant_id,
+            http,
         } = *config;
         // Step 2: Parse IP and port from local_host. / 从 local_host 解析 IP 和端口。
         let parts: Vec<&str> = local_host.split(':').collect();
@@ -325,7 +354,7 @@ impl MooncakeClient {
         let mut endpoints = HashSet::new();
         endpoints.insert(local_host.to_string());
 
-        Ok(Self {
+        let client = Self {
             master,
             engine,
             client_id,
@@ -345,12 +374,24 @@ impl MooncakeClient {
             remount_state: Default::default(),
             health_state: Default::default(),
             offload_server_state: Default::default(),
+            client_http_server_state: ClientHttpServerState::default(),
             master_addr: RwLock::new(selected_master_addr.to_string()),
             master_candidates: RwLock::new(master_addrs.to_vec()),
             rpc_request_timeout,
             tenant_id: tenant_id.to_string(),
             replica_selection_policy: super::ReplicaSelectionPolicy::from_env(),
-        })
+        };
+        client
+            .client_http_server_state
+            .start(
+                http,
+                ClientHttpSnapshot::new(
+                    client.health_state.shared_flag(),
+                    client.shutdown_state.shared_flag(),
+                ),
+            )
+            .await;
+        Ok(client)
     }
 
     pub(super) async fn connect_master_addr(
@@ -440,6 +481,15 @@ impl MooncakeClient {
             return Err(StoreError::InvalidParams(format!(
                 "local_buffer_size must be 0 or between {MIN_SEGMENT_SIZE} and {MAX_SEGMENT_SIZE}"
             )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_client_http_config(config: ClientHttpConfig) -> StoreResult<()> {
+        if config.enabled && config.port == 0 {
+            return Err(StoreError::InvalidParams(
+                "client_http_port must be between 1 and 65535".to_string(),
+            ));
         }
         Ok(())
     }

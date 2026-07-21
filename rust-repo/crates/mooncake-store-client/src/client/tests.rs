@@ -1,12 +1,53 @@
 use super::background::ClientBackgroundConfig;
+use super::config::ClientConfig;
 use super::finalize::{
     determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary,
 };
 use super::read::scoped_cache_key;
-use super::{CachedQueryResultResponse, MooncakeClient};
+use super::{CachedQueryResultResponse, ClientHttpConfig, MooncakeClient};
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::ffi::c_void;
 use std::time::Duration;
+
+#[test]
+fn client_bootstrap_config_carries_http_configuration() {
+    let masters = ["127.0.0.1:50051".to_string()];
+    let config = ClientConfig {
+        master_addrs: &masters,
+        metadata_conn_string: "P2PHANDSHAKE",
+        local_host: "127.0.0.1:50052",
+        protocol: "tcp",
+        device: "",
+        global_segment_size: 0,
+        local_buffer_size: 0,
+        tenant_id: "default",
+        http: ClientHttpConfig {
+            enabled: true,
+            port: 19_300,
+        },
+    };
+
+    assert!(config.http.enabled);
+    assert_eq!(config.http.port, 19_300);
+}
+
+#[test]
+fn enabled_client_http_rejects_port_zero() {
+    let error = MooncakeClient::validate_client_http_config(ClientHttpConfig {
+        enabled: true,
+        port: 0,
+    })
+    .unwrap_err();
+
+    assert!(matches!(error, StoreError::InvalidParams(_)));
+    assert!(
+        MooncakeClient::validate_client_http_config(ClientHttpConfig {
+            enabled: false,
+            port: 0,
+        })
+        .is_ok()
+    );
+}
 
 #[test]
 fn normalize_master_url_accepts_plain_and_url_forms() {
