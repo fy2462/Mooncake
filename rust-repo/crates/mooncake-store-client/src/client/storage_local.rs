@@ -5,7 +5,6 @@ use crate::proto;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
 use std::collections::HashMap;
-use std::sync::Arc;
 use uuid::Uuid;
 
 impl MooncakeClient {
@@ -51,7 +50,7 @@ impl MooncakeClient {
                 "no local storage backend configured".to_string(),
             ));
         };
-        let storage = Arc::clone(storage);
+        let storage = storage.clone();
 
         let mut offloaded = 0usize;
         let mut notify_tasks = Vec::with_capacity(tasks.len());
@@ -82,9 +81,10 @@ impl MooncakeClient {
             // those files are deleted, so readers never get routed to an
             // already-removed LOCAL_DISK replica.
             let key_owned = local_storage_key(tenant_id, key);
-            let s = Arc::clone(&storage);
+            let key_for_prepare = key_owned.clone();
+            let s = storage.clone();
             let pending = match tokio::task::spawn_blocking(move || {
-                s.prepare_write(data.len() as u64)
+                s.prepare_write(&key_for_prepare, data.len() as u64)
                     .map(|pending| (pending, data))
             })
             .await
@@ -114,7 +114,7 @@ impl MooncakeClient {
             }
 
             let key_for_write = key_owned.clone();
-            let s = Arc::clone(&storage);
+            let s = storage.clone();
             let write_result = tokio::task::spawn_blocking(move || {
                 s.commit_write(&key_for_write, &data, pending_eviction)
             })
@@ -156,7 +156,7 @@ impl MooncakeClient {
                 .notify_offload_success_tasks(notify_tasks, metadatas)
                 .await
             {
-                let storage = Arc::clone(&storage);
+                let storage = storage.clone();
                 tokio::task::spawn_blocking(move || {
                     for storage_key in committed_storage_keys {
                         if let Err(cleanup_error) = storage.delete_object(&storage_key) {
@@ -213,7 +213,7 @@ impl MooncakeClient {
         let Some(storage) = self.local_storage.as_ref().cloned() else {
             return Ok(0);
         };
-        let prepare_storage = Arc::clone(&storage);
+        let prepare_storage = storage.clone();
         let pending = tokio::task::spawn_blocking(move || {
             prepare_storage.prepare_watermark_eviction(high_watermark_ratio, low_watermark_ratio)
         })
@@ -262,7 +262,7 @@ impl MooncakeClient {
         let storage = self.local_storage.as_ref().ok_or_else(|| {
             StoreError::Internal("no local storage backend configured".to_string())
         })?;
-        let storage = Arc::clone(storage);
+        let storage = storage.clone();
 
         let mut promoted = 0usize;
 
@@ -279,7 +279,7 @@ impl MooncakeClient {
             // Read from local disk (blocking I/O).
             let key_owned = local_storage_key(tenant_id, key);
             let data = {
-                let s = Arc::clone(&storage);
+                let s = storage.clone();
                 tokio::task::spawn_blocking(move || s.read_object(&key_owned))
                     .await
                     .map_err(|e| StoreError::Internal(e.to_string()))??

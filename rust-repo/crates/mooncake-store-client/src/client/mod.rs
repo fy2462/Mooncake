@@ -47,7 +47,6 @@ use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
 
-use crate::local_storage_backend::LocalStorageBackend;
 use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource};
 
@@ -196,7 +195,7 @@ pub struct MooncakeClient {
     ///
     /// 本地存储后端，用于将 offload 数据持久化到本地磁盘。
     /// 设置后，完整的 offload 循环和 promotion 循环将启用。
-    pub(crate) local_storage: Option<Arc<LocalStorageBackend>>,
+    pub(crate) local_storage: Option<crate::local_storage_backend::AttachedLocalStorage>,
 
     /// Segment name registered with the master (equals `local_hostname` when a
     /// storage segment is mounted). Used by ReMountSegment on NeedRemount.

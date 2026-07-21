@@ -1,17 +1,20 @@
 pub mod config;
+mod offset;
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
 use parking_lot::RwLock;
 
-pub use config::LocalStorageConfig;
+pub use config::{LocalStorageConfig, OffsetAllocatorConfig, OffsetEvictionPolicy};
+pub use offset::OffsetAllocatorStorageBackend;
 
 const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -64,6 +67,132 @@ impl PendingLocalEviction {
 
     fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum PendingStorageEviction {
+    FilePerKey(PendingLocalEviction),
+    OffsetAllocator(offset::PendingOffsetEviction),
+}
+
+impl PendingStorageEviction {
+    pub(crate) fn keys(&self) -> Vec<String> {
+        match self {
+            Self::FilePerKey(pending) => pending.keys(),
+            Self::OffsetAllocator(pending) => pending.keys(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum AttachedLocalStorage {
+    FilePerKey(Arc<LocalStorageBackend>),
+    OffsetAllocator(Arc<OffsetAllocatorStorageBackend>),
+}
+
+impl AttachedLocalStorage {
+    pub(crate) fn space_usage(&self) -> (u64, u64) {
+        match self {
+            Self::FilePerKey(storage) => storage.space_usage(),
+            Self::OffsetAllocator(storage) => storage.space_usage(),
+        }
+    }
+
+    pub(crate) fn prepare_write(
+        &self,
+        key: &str,
+        required: u64,
+    ) -> StoreResult<PendingStorageEviction> {
+        match self {
+            Self::FilePerKey(storage) => storage
+                .prepare_write(required)
+                .map(PendingStorageEviction::FilePerKey),
+            Self::OffsetAllocator(storage) => storage
+                .prepare_write(key, required)
+                .map(PendingStorageEviction::OffsetAllocator),
+        }
+    }
+
+    pub(crate) fn commit_write(
+        &self,
+        key: &str,
+        data: &[u8],
+        pending: PendingStorageEviction,
+    ) -> StoreResult<()> {
+        match (self, pending) {
+            (Self::FilePerKey(storage), PendingStorageEviction::FilePerKey(pending)) => {
+                storage.commit_write(key, data, pending)
+            }
+            (Self::OffsetAllocator(storage), PendingStorageEviction::OffsetAllocator(pending)) => {
+                storage.commit_write(key, data, pending)
+            }
+            _ => Err(StoreError::Internal(
+                "local storage pending eviction backend mismatch".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn rollback_eviction(&self, pending: PendingStorageEviction) {
+        match (self, pending) {
+            (Self::FilePerKey(storage), PendingStorageEviction::FilePerKey(pending)) => {
+                storage.rollback_eviction(pending)
+            }
+            (Self::OffsetAllocator(storage), PendingStorageEviction::OffsetAllocator(pending)) => {
+                storage.rollback_eviction(pending)
+            }
+            _ => tracing::error!("local storage pending eviction backend mismatch"),
+        }
+    }
+
+    pub(crate) fn prepare_watermark_eviction(
+        &self,
+        high: f64,
+        low: f64,
+    ) -> StoreResult<PendingStorageEviction> {
+        match self {
+            Self::FilePerKey(storage) => storage
+                .prepare_watermark_eviction(high, low)
+                .map(PendingStorageEviction::FilePerKey),
+            Self::OffsetAllocator(storage) => storage
+                .prepare_watermark_eviction(high, low)
+                .map(PendingStorageEviction::OffsetAllocator),
+        }
+    }
+
+    pub(crate) fn commit_eviction(&self, pending: PendingStorageEviction) -> StoreResult<()> {
+        match (self, pending) {
+            (Self::FilePerKey(storage), PendingStorageEviction::FilePerKey(pending)) => {
+                storage.commit_eviction(pending)
+            }
+            (Self::OffsetAllocator(storage), PendingStorageEviction::OffsetAllocator(pending)) => {
+                storage.commit_eviction(pending)
+            }
+            _ => Err(StoreError::Internal(
+                "local storage pending eviction backend mismatch".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) fn read_object(&self, key: &str) -> StoreResult<Vec<u8>> {
+        match self {
+            Self::FilePerKey(storage) => storage.read_object(key),
+            Self::OffsetAllocator(storage) => storage.read_object(key),
+        }
+    }
+
+    pub(crate) fn delete_object(&self, key: &str) -> StoreResult<()> {
+        match self {
+            Self::FilePerKey(storage) => storage.delete_object(key),
+            Self::OffsetAllocator(storage) => storage.delete_object(key),
+        }
+    }
+
+    pub(crate) fn remove_all(&self) -> StoreResult<usize> {
+        match self {
+            Self::FilePerKey(storage) => storage.remove_all(),
+            Self::OffsetAllocator(storage) => storage.remove_all(),
+        }
     }
 }
 

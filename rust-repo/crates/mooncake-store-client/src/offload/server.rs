@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use super::buffer::{OffloadBatch, OffloadBufferPool};
-use crate::local_storage_backend::{local_storage_key, LocalStorageBackend};
+use crate::local_storage_backend::{local_storage_key, AttachedLocalStorage};
 use crate::offload_proto::offload_read_service_server::{
     OffloadReadService, OffloadReadServiceServer,
 };
@@ -21,7 +21,7 @@ const DEFAULT_GC_TTL_MS: u64 = 30_000;
 
 /// gRPC handler implementing the OffloadReadService.
 pub(crate) struct OffloadReadHandler {
-    pub storage: Arc<LocalStorageBackend>,
+    pub storage: AttachedLocalStorage,
     pub engine: Arc<transfer_engine_ffi::TransferEngine>,
     pub pool: Arc<OffloadBufferPool>,
     pub te_endpoint: String,

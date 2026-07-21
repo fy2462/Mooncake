@@ -4,8 +4,6 @@ use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::mem;
-#[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
 use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};

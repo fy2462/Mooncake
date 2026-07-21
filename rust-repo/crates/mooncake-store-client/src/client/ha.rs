@@ -1,5 +1,7 @@
 use super::MooncakeClient;
-use crate::local_storage_backend::LocalStorageBackend;
+use crate::local_storage_backend::{
+    AttachedLocalStorage, LocalStorageBackend, OffsetAllocatorStorageBackend,
+};
 use crate::proto;
 use crate::{
     LocalHotCache, MissHandler, MissHandlerSnapshot, MissHandlerStats, RemoteSource,
@@ -270,7 +272,16 @@ impl MooncakeClient {
     ///
     /// 构建器模式方法：在 create() 之后调用。
     pub fn with_local_storage_backend(mut self, backend: Arc<LocalStorageBackend>) -> Self {
-        self.local_storage = Some(backend);
+        self.local_storage = Some(AttachedLocalStorage::FilePerKey(backend));
+        self
+    }
+
+    /// Attach an offset-allocator SSD backend for offload and promotion.
+    pub fn with_offset_allocator_storage_backend(
+        mut self,
+        backend: Arc<OffsetAllocatorStorageBackend>,
+    ) -> Self {
+        self.local_storage = Some(AttachedLocalStorage::OffsetAllocator(backend));
         self
     }
 
@@ -291,7 +302,7 @@ impl MooncakeClient {
         })?;
 
         let handler = crate::offload::server::OffloadReadHandler {
-            storage: Arc::clone(storage),
+            storage: storage.clone(),
             engine: Arc::clone(&self.engine),
             pool: Arc::new(crate::offload::buffer::OffloadBufferPool::new()),
             te_endpoint: self.local_hostname.clone(),

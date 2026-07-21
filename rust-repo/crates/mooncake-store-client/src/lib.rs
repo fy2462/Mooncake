@@ -68,7 +68,10 @@ pub use dummy::{
 };
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
-pub use local_storage_backend::{LocalStorageBackend, LocalStorageConfig};
+pub use local_storage_backend::{
+    LocalStorageBackend, LocalStorageConfig, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
+    OffsetEvictionPolicy,
+};
 pub use remote_source::{
     config::{RemoteSourceConfig, S3Config},
     distributed::DistributedMissHandler,
