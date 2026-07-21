@@ -52,6 +52,13 @@ struct FileRecord {
     size: u64,
 }
 
+#[derive(Debug)]
+struct ScannedFile {
+    relative_path: String,
+    size: u64,
+    created: std::time::SystemTime,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct PendingLocalEviction {
     records: Vec<FileRecord>,
@@ -331,30 +338,29 @@ impl LocalStorageBackend {
         *self.total_space.write() = total;
 
         // Scan existing files, sorted by creation time (oldest first).
-        let mut entries: Vec<(String, u64, std::time::SystemTime)> = Vec::new();
-        self.scan_files(&data_dir, &mut entries)?;
+        let mut entries = self.scan_files(&data_dir)?;
 
-        entries.sort_by_key(|(_, _, ct)| *ct);
+        entries.sort_by_key(|entry| entry.created);
 
         let mut used = 0u64;
         let mut queue = self.write_queue.write();
         let mut set = self.queue_set.write();
 
-        for (rel_path, size, _ct) in &entries {
-            if used.saturating_add(*size) > total && self.config.enable_eviction {
+        for entry in &entries {
+            if used.saturating_add(entry.size) > total && self.config.enable_eviction {
                 // Over quota — delete excess files from disk.
-                let abs_path = data_dir.join(rel_path);
+                let abs_path = data_dir.join(&entry.relative_path);
                 let _ = std::fs::remove_file(&abs_path);
             } else {
-                used += size;
-                set.insert(rel_path.clone(), ());
+                used += entry.size;
+                set.insert(entry.relative_path.clone(), ());
                 queue.push_back(FileRecord {
-                    storage_key: Path::new(rel_path)
+                    storage_key: Path::new(&entry.relative_path)
                         .file_name()
                         .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| rel_path.clone()),
-                    relative_path: rel_path.clone(),
-                    size: *size,
+                        .unwrap_or_else(|| entry.relative_path.clone()),
+                    relative_path: entry.relative_path.clone(),
+                    size: entry.size,
                 });
             }
         }
@@ -365,33 +371,32 @@ impl LocalStorageBackend {
     }
 
     /// Recursively scan all files under `dir` and collect (relative_path, size, creation_time).
-    fn scan_files(
-        &self,
-        dir: &Path,
-        out: &mut Vec<(String, u64, std::time::SystemTime)>,
-    ) -> StoreResult<()> {
+    fn scan_files(&self, dir: &Path) -> StoreResult<Vec<ScannedFile>> {
         if !dir.exists() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let data_dir = self.data_dir();
+        let mut files = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                self.scan_files(&path, out)?;
+                files.extend(self.scan_files(&path)?);
             } else if path.is_file() {
                 let metadata = entry.metadata()?;
-                let size = metadata.len();
-                let created = metadata.created().unwrap_or(UNIX_EPOCH);
                 let rel_path = path
                     .strip_prefix(&data_dir)
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .to_string();
-                out.push((rel_path, size, created));
+                files.push(ScannedFile {
+                    relative_path: rel_path,
+                    size: metadata.len(),
+                    created: metadata.created().unwrap_or(UNIX_EPOCH),
+                });
             }
         }
-        Ok(())
+        Ok(files)
     }
 
     // ------------------------------------------------------------------
@@ -573,15 +578,14 @@ impl LocalStorageBackend {
         }
 
         let mut results = Vec::new();
-        let mut file_entries = Vec::new();
-        self.scan_files(&data_dir, &mut file_entries)?;
+        let file_entries = self.scan_files(&data_dir)?;
 
-        for (rel_path, size, _ct) in &file_entries {
+        for entry in &file_entries {
             // The relative path encodes the key: <dir1>/<dir2>/<safe_key>
             // Extract the filename (safe_key) as the stored key.
-            let p = Path::new(rel_path);
+            let p = Path::new(&entry.relative_path);
             if let Some(name) = p.file_name() {
-                results.push((name.to_string_lossy().to_string(), *size));
+                results.push((name.to_string_lossy().to_string(), entry.size));
             }
         }
 
@@ -664,19 +668,18 @@ impl LocalStorageBackend {
 
         let data_dir = self.data_dir();
         let mut removed = 0usize;
-        let mut file_entries = Vec::new();
-        self.scan_files(&data_dir, &mut file_entries)?;
+        let file_entries = self.scan_files(&data_dir)?;
 
-        for (rel_path, size, _ct) in &file_entries {
-            let p = Path::new(rel_path);
+        for entry in &file_entries {
+            let p = Path::new(&entry.relative_path);
             if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
                 if re.is_match(name) {
-                    let abs_path = data_dir.join(rel_path);
+                    let abs_path = data_dir.join(&entry.relative_path);
                     std::fs::remove_file(&abs_path)?;
                     if self.config.enable_eviction {
-                        self.remove_from_write_queue(rel_path);
+                        self.remove_from_write_queue(&entry.relative_path);
                         let mut used = self.used_space.write();
-                        *used = used.saturating_sub(*size);
+                        *used = used.saturating_sub(entry.size);
                     }
                     removed += 1;
                 }
@@ -921,6 +924,24 @@ mod tests {
         assert_eq!(
             parse_local_storage_key(&default_key),
             ("default", "path/to/key")
+        );
+    }
+
+    #[test]
+    fn scan_files_returns_named_file_entries() {
+        let (backend, _tmp) = backend_with_available_space_sequence(100, vec![u64::MAX]);
+        backend.write_object("tenant/key", &[1, 2, 3]).unwrap();
+
+        let entries = backend.scan_files(&backend.data_dir()).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].size, 3);
+        assert_eq!(
+            Path::new(&entries[0].relative_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "tenant_key"
         );
     }
 
