@@ -259,6 +259,10 @@ Commit: `fix(store-rust): make offset allocator eviction transactional`
 
 ### Task 4: Add opt-in topology-aware remote replica scoring
 
+**Prerequisite:** Complete the behavior-preserving Rust-idiomatic refactor in
+`2026-07-21-rust-idiomatic-refactor-before-replica-scoring.md`. Do not mix the
+refactor and `b996ac4b` behavior change in one commit.
+
 **Files:**
 - Modify: `rust-repo/proto/mooncake_store_types.proto`
 - Modify: `rust-repo/crates/mooncake-store-core/src/types.rs`
