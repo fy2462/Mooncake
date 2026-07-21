@@ -56,6 +56,7 @@ mod dummy_tests;
 pub mod engram;
 pub mod hot_cache;
 pub mod local_storage_backend;
+mod memory_ffi;
 pub mod offload;
 pub mod remote_source;
 

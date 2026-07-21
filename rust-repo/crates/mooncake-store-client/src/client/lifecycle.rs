@@ -7,7 +7,6 @@ use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -267,15 +266,15 @@ impl MooncakeClient {
         let local_buffer_size_usize = usize::try_from(local_buffer_size).map_err(|_| {
             StoreError::InvalidParams("local_buffer_size exceeds addressable memory".to_string())
         })?;
-        let local_buffer = OwnedBuffer::allocate(local_buffer_size_usize);
-        unsafe {
-            engine.register_local_memory(
-                local_buffer.as_ptr() as *mut c_void,
-                local_buffer_size_usize,
-                "cpu:0",
-                true,
-            )?;
-        }
+        let mut local_buffer = OwnedBuffer::allocate(local_buffer_size_usize);
+        local_buffer
+            .populate_before_registration(effective_protocol)
+            .map_err(|error| {
+                StoreError::Internal(format!(
+                    "failed to populate local HugeTLB buffer before registration: {error}"
+                ))
+            })?;
+        crate::memory_ffi::register_local_memory(&engine, &local_buffer, "cpu:0", true)?;
 
         let client_id = Uuid::new_v4();
         let mut segment_name = String::new();
@@ -296,16 +295,16 @@ impl MooncakeClient {
             // remote nodes can read from / write to this segment via RDMA/TCP.
             //
             // 分配 segment 内存并向 TE 注册，使远端节点可以通过 RDMA/TCP 读写此 segment。
-            let seg_buf = OwnedBuffer::allocate(global_segment_size_usize);
+            let mut seg_buf = OwnedBuffer::allocate(global_segment_size_usize);
+            seg_buf
+                .populate_before_registration(effective_protocol)
+                .map_err(|error| {
+                    StoreError::Internal(format!(
+                        "failed to populate segment HugeTLB buffer before registration: {error}"
+                    ))
+                })?;
             let base_addr = seg_buf.as_ptr() as u64;
-            unsafe {
-                engine.register_local_memory(
-                    seg_buf.as_ptr() as *mut c_void,
-                    global_segment_size_usize,
-                    "cpu:0",
-                    true,
-                )?;
-            }
+            crate::memory_ffi::register_local_memory(&engine, &seg_buf, "cpu:0", true)?;
 
             // Create a local TE segment so the transfer engine can discover
             // and resolve this node's segment memory for remote transfers.
