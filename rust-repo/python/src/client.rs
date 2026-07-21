@@ -224,6 +224,36 @@ pub(crate) fn get_buffer_ptr(obj: &Bound<'_, PyAny>) -> PyResult<(*mut c_void, u
     Ok((buf.buf_ptr() as *mut c_void, buf.item_count()))
 }
 
+pub(crate) fn get_pointer(obj: &Bound<'_, PyAny>) -> PyResult<*mut c_void> {
+    if let Ok(address) = obj.extract::<usize>() {
+        if address == 0 {
+            return Err(to_py_err("buffer address must not be zero"));
+        }
+        return Ok(address as *mut c_void);
+    }
+    get_buffer_ptr(obj).map(|(pointer, _)| pointer)
+}
+
+fn get_pointer_and_size(
+    obj: &Bound<'_, PyAny>,
+    requested_size: Option<usize>,
+) -> PyResult<(*mut c_void, usize)> {
+    if let Ok(address) = obj.extract::<usize>() {
+        let size = requested_size
+            .ok_or_else(|| to_py_err("size is required when buffer is a raw integer address"))?;
+        if address == 0 {
+            return Err(to_py_err("buffer address must not be zero"));
+        }
+        return Ok((address as *mut c_void, size));
+    }
+    let (pointer, capacity) = get_buffer_ptr(obj)?;
+    let size = requested_size.unwrap_or(capacity);
+    if size > capacity {
+        return Err(to_py_err("requested size exceeds Python buffer capacity"));
+    }
+    Ok((pointer, size))
+}
+
 /// Take temporary ownership of the MooncakeClient from its Mutex.
 ///
 /// 从 Mutex 中临时取出 MooncakeClient 的所有权。
@@ -1180,8 +1210,14 @@ impl PythonMooncakeClient {
     /// 零拷贝读取：通过 RDMA 直接将数据读入 Python buffer（如 bytearray、
     /// memoryview、numpy array）。返回实际读取的字节数。
     /// buffer must support the Python buffer protocol and be large enough.
-    fn get_into(slf: &Bound<'_, Self>, key: String, buffer: Bound<'_, PyAny>) -> PyResult<usize> {
-        let (ptr, size) = get_buffer_ptr(&buffer)?;
+    #[pyo3(signature = (key, buffer, size = None))]
+    fn get_into(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: Option<usize>,
+    ) -> PyResult<usize> {
+        let (ptr, size) = get_pointer_and_size(&buffer, size)?;
         let inner = slf.borrow().inner.clone();
         // block_on: future captures raw ptr, not Send-safe
         // block_on: future 捕获了裸指针，不是 Send 的
@@ -1207,10 +1243,7 @@ impl PythonMooncakeClient {
         if keys.len() != buffers.len() || keys.len() != sizes.len() {
             return Err(to_py_err("keys, buffers, sizes must have same length"));
         }
-        let ptrs: Vec<*mut c_void> = buffers
-            .iter()
-            .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
-            .collect::<PyResult<_>>()?;
+        let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
@@ -1237,11 +1270,7 @@ impl PythonMooncakeClient {
     ) -> PyResult<Vec<i64>> {
         let ptrs: Vec<Vec<*mut c_void>> = all_buffers
             .iter()
-            .map(|bufs| {
-                bufs.iter()
-                    .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
-                    .collect::<PyResult<Vec<_>>>()
-            })
+            .map(|bufs| bufs.iter().map(get_pointer).collect::<PyResult<Vec<_>>>())
             .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
@@ -1264,10 +1293,7 @@ impl PythonMooncakeClient {
         all_src_offsets: Vec<Vec<Vec<usize>>>,
         all_sizes: Vec<Vec<Vec<usize>>>,
     ) -> PyResult<Vec<Vec<Vec<i64>>>> {
-        let ptrs: Vec<*mut c_void> = buffers
-            .iter()
-            .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
-            .collect::<PyResult<_>>()?;
+        let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
             let mut client = take_client(&inner)?;
@@ -1309,7 +1335,7 @@ impl PythonMooncakeClient {
         size: usize,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<()> {
-        let (ptr, _) = get_buffer_ptr(&buffer)?;
+        let ptr = get_pointer(&buffer)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
@@ -1330,10 +1356,7 @@ impl PythonMooncakeClient {
         sizes: Vec<usize>,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<Vec<i32>> {
-        let ptrs: Vec<*mut c_void> = buffers
-            .iter()
-            .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
-            .collect::<PyResult<_>>()?;
+        let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
@@ -1355,7 +1378,7 @@ impl PythonMooncakeClient {
         metadata_size: usize,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<i32> {
-        let (ptr, _) = get_buffer_ptr(&buffer)?;
+        let ptr = get_pointer(&buffer)?;
         let (metadata_ptr, _) = get_buffer_ptr(&metadata_buffer)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
@@ -1382,11 +1405,7 @@ impl PythonMooncakeClient {
     ) -> PyResult<Vec<i32>> {
         let ptrs: Vec<Vec<*mut c_void>> = all_buffers
             .iter()
-            .map(|bufs| {
-                bufs.iter()
-                    .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
-                    .collect::<PyResult<Vec<_>>>()
-            })
+            .map(|bufs| bufs.iter().map(get_pointer).collect::<PyResult<Vec<_>>>())
             .collect::<PyResult<_>>()?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
@@ -1540,7 +1559,7 @@ impl PythonMooncakeClient {
         size: usize,
         location: String,
     ) -> PyResult<()> {
-        let (ptr, _) = get_buffer_ptr(&buffer)?;
+        let ptr = get_pointer(&buffer)?;
         {
             let slf_ref = slf.borrow();
             let guard = slf_ref.inner.lock();
@@ -1561,7 +1580,7 @@ impl PythonMooncakeClient {
     /// Unregister a previously registered Python buffer.
     /// 注销之前注册的 Python buffer。
     fn unregister_buffer(slf: &Bound<'_, Self>, buffer: Bound<'_, PyAny>) -> PyResult<()> {
-        let (ptr, _) = get_buffer_ptr(&buffer)?;
+        let ptr = get_pointer(&buffer)?;
         {
             let slf_ref = slf.borrow();
             let guard = slf_ref.inner.lock();
@@ -1598,7 +1617,7 @@ impl PythonMooncakeClient {
         size: usize,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<Py<PyAny>> {
-        let (ptr, _) = get_buffer_ptr(&buffer)?;
+        let ptr = get_pointer(&buffer)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         let replicas = tokio::runtime::Handle::current().block_on(async {
@@ -1620,10 +1639,7 @@ impl PythonMooncakeClient {
         sizes: Vec<usize>,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<Py<PyAny>> {
-        let ptrs: Vec<*mut c_void> = buffers
-            .iter()
-            .map(|b| get_buffer_ptr(b).map(|(p, _)| p))
-            .collect::<PyResult<_>>()?;
+        let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         let results = tokio::runtime::Handle::current().block_on(async {

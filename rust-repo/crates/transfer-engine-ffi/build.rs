@@ -11,6 +11,7 @@ fn main() {
         .join("mooncake-transfer-engine")
         .join("include");
     let te_c_header = te_include.join("transfer_engine_c.h");
+    let accelerator_c_header = te_include.join("accelerator_memory_c.h");
 
     if !te_c_header.exists() {
         println!(
@@ -25,6 +26,11 @@ fn main() {
                 .to_str()
                 .unwrap_or("mooncake-transfer-engine/include/transfer_engine_c.h"),
         )
+        .header(
+            accelerator_c_header
+                .to_str()
+                .unwrap_or("mooncake-transfer-engine/include/accelerator_memory_c.h"),
+        )
         .clang_args(&["-x", "c", &format!("-I{}", te_include.display())])
         .allowlist_type("transfer_engine_t")
         .allowlist_type("transport_t")
@@ -38,6 +44,10 @@ fn main() {
         .allowlist_var("STATUS_.*")
         .allowlist_var("LOCAL_SEGMENT")
         .allowlist_var("INVALID_BATCH")
+        .allowlist_var("MEMORY_POINTER_.*")
+        .allowlist_function("classifyMemoryPointer")
+        .allowlist_function("copyMemoryToHost")
+        .allowlist_function("copyMemoryFromHost")
         .allowlist_function("createTransferEngine")
         .allowlist_function("destroyTransferEngine")
         .allowlist_function("installTransport")

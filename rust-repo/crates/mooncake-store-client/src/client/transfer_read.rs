@@ -193,12 +193,25 @@ impl MooncakeClient {
     /// been registered with the TE. / buffer 必须指向至少 size 字节的已向 TE
     /// 注册的有效内存。
     pub(crate) async fn zero_copy_read(
-        &self,
+        &mut self,
         replica: &ReplicaDescriptor,
         buffer: RegisteredBufferRegion,
     ) -> StoreResult<usize> {
         let size = buffer.len();
-        let buffer = buffer.as_mut_ptr();
+        let destination = buffer.foreign_region();
+        let device_destination =
+            crate::data_plane_ffi::is_device_memory(self.accelerator.as_ref(), destination)?;
+        if device_destination && size > self.local_buffer.len() {
+            return Err(StoreError::InvalidParams(format!(
+                "device read size {size} exceeds staging buffer size {}",
+                self.local_buffer.len()
+            )));
+        }
+        let buffer = if device_destination {
+            self.local_buffer.as_mut_ptr().cast()
+        } else {
+            buffer.as_mut_ptr()
+        };
         tracing::info!(
             target: "te_debug",
             seg_name = %replica.segment_name,
@@ -249,6 +262,14 @@ impl MooncakeClient {
             }
         };
         let transferred = statuses[0].transferred_bytes;
+
+        if device_destination {
+            crate::data_plane_ffi::scatter_host_to_device(
+                self.accelerator.as_ref(),
+                destination,
+                &self.local_buffer[..transferred as usize],
+            )?;
+        }
 
         if let Err(e) = self.engine.free_batch_id(batch_id) {
             let _ = self.engine.close_segment(segment_id);

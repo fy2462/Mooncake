@@ -194,7 +194,8 @@ impl MooncakeClient {
             let data = self
                 .read_from_replica_for_tenant(key, &tenant_id, replica)
                 .await?;
-            buffer.copy_from_slice(&data)?;
+            self.accelerator
+                .copy_from_host(buffer.foreign_region(), &data)?;
             return Ok(data.len());
         }
         // SAFETY: the caller guarantees the buffer lifetime; its writable

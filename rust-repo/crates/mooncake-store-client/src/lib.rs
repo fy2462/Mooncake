@@ -49,6 +49,7 @@
 
 pub mod buffer_allocator;
 pub mod client;
+mod data_plane_ffi;
 pub mod dummy;
 #[cfg(test)]
 mod dummy_tests;

@@ -69,11 +69,13 @@ mod ffi {
     include!(concat!(env!("OUT_DIR"), "/transfer_engine_bindings.rs"));
 }
 
+mod accelerator;
 mod error;
 mod segment;
 mod transfer;
 mod transport_hint;
 
+pub use accelerator::{PointerMemoryType, classify_pointer, copy_from_host, copy_to_host};
 pub use error::{TransferEngineError, TransferEngineResult};
 pub use segment::{SegmentDesc, SegmentId};
 pub use transfer::{

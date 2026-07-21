@@ -147,19 +147,39 @@ impl MooncakeClient {
                 };
 
                 let mut range_results: Vec<i64> = vec![-1; range_count];
-                let valid_ranges: Vec<usize> = sizes[buf_idx][key_idx]
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(ri, &sz)| {
-                        let src_end = src_offsets[buf_idx][key_idx][ri].checked_add(sz)?;
-                        let dst = dst_offsets[buf_idx][key_idx][ri];
-                        let _dst_end = dst.checked_add(sz)?;
-                        let target = buffers[buf_idx].wrapping_byte_add(dst);
-                        (src_end as u64 <= replica.size
-                            && self.resolve_writable_buffer_region(target, sz).is_ok())
-                        .then_some(ri)
-                    })
-                    .collect();
+                let mut valid_ranges = Vec::new();
+                let mut staging_offset = 0_usize;
+                for (ri, &sz) in sizes[buf_idx][key_idx].iter().enumerate() {
+                    let Some(src_end) = src_offsets[buf_idx][key_idx][ri].checked_add(sz) else {
+                        continue;
+                    };
+                    let dst = dst_offsets[buf_idx][key_idx][ri];
+                    if dst.checked_add(sz).is_none() || src_end as u64 > replica.size {
+                        continue;
+                    }
+                    let target = buffers[buf_idx].wrapping_byte_add(dst);
+                    let Ok(region) = self.resolve_writable_buffer_region(target, sz) else {
+                        continue;
+                    };
+                    let is_device = crate::data_plane_ffi::is_device_memory(
+                        self.accelerator.as_ref(),
+                        region.foreign_region(),
+                    )?;
+                    let range_staging_offset = if is_device {
+                        let Some(end) = staging_offset.checked_add(sz) else {
+                            continue;
+                        };
+                        if end > self.local_buffer.len() {
+                            continue;
+                        }
+                        let offset = staging_offset;
+                        staging_offset = end;
+                        Some(offset)
+                    } else {
+                        None
+                    };
+                    valid_ranges.push((ri, region, range_staging_offset));
+                }
                 if valid_ranges.is_empty() {
                     buf_results.push(range_results);
                     continue;
@@ -183,12 +203,14 @@ impl MooncakeClient {
                 // 构建传输请求：每个范围一个，全部在同一批次中。
                 let reqs: Vec<TransferRequest> = valid_ranges
                     .iter()
-                    .map(|&ri| {
+                    .map(|&(ri, region, range_staging_offset)| {
                         let sz = sizes[buf_idx][key_idx][ri];
                         TransferRequest {
                             opcode: Opcode::Read,
-                            source: buffers[buf_idx]
-                                .wrapping_byte_add(dst_offsets[buf_idx][key_idx][ri]),
+                            source: range_staging_offset.map_or_else(
+                                || region.as_mut_ptr(),
+                                |offset| self.local_buffer[offset..].as_mut_ptr().cast(),
+                            ),
                             target_id: seg,
                             target_offset: replica.base_addr
                                 + replica.offset
@@ -219,8 +241,18 @@ impl MooncakeClient {
                         return Err(e);
                     }
                 };
-                for (status, &range_idx) in statuses.iter().zip(valid_ranges.iter()) {
+                for (status, &(range_idx, region, range_staging_offset)) in
+                    statuses.iter().zip(valid_ranges.iter())
+                {
                     range_results[range_idx] = if status.status == TransferStatusEnum::Completed {
+                        if let Some(offset) = range_staging_offset {
+                            let transferred = status.transferred_bytes as usize;
+                            crate::data_plane_ffi::scatter_host_to_device(
+                                self.accelerator.as_ref(),
+                                region.foreign_region(),
+                                &self.local_buffer[offset..offset + transferred],
+                            )?;
+                        }
                         status.transferred_bytes as i64
                     } else {
                         -1

@@ -357,6 +357,7 @@ impl MooncakeClient {
         let client = Self {
             master,
             engine,
+            accelerator: Arc::new(crate::data_plane_ffi::NativeAcceleratorBackend),
             client_id,
             local_hostname: local_host.to_string(),
             protocol: effective_protocol.to_string(),

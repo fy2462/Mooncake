@@ -1,4 +1,4 @@
-install(FILES transfer_engine_c.h DESTINATION include)
+install(FILES transfer_engine_c.h accelerator_memory_c.h DESTINATION include)
 install(FILES common.h DESTINATION include)
 install(FILES config.h DESTINATION include)
 install(FILES error.h DESTINATION include)

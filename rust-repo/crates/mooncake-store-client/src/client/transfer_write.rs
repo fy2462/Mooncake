@@ -203,12 +203,22 @@ impl MooncakeClient {
     /// been registered with the TE. / buffer 必须指向至少 size 字节的已向 TE
     /// 注册的有效内存。
     pub(crate) async fn zero_copy_write(
-        &self,
+        &mut self,
         replica: &ReplicaDescriptor,
         buffer: RegisteredBufferRegion,
     ) -> StoreResult<()> {
         let size = buffer.len();
-        let buffer = buffer.as_mut_ptr();
+        let source = buffer.foreign_region();
+        let device_source = crate::data_plane_ffi::gather_device_to_host(
+            self.accelerator.as_ref(),
+            source,
+            &mut self.local_buffer,
+        )?;
+        let buffer = if device_source {
+            self.local_buffer.as_mut_ptr().cast()
+        } else {
+            buffer.as_mut_ptr()
+        };
         tracing::info!(
             target: "te_debug",
             seg_name = %replica.segment_name,

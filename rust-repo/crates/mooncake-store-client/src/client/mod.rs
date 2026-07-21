@@ -52,6 +52,7 @@ use tonic::transport::Channel;
 use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
 
+use crate::data_plane_ffi::AcceleratorBackend;
 use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource};
 
@@ -101,6 +102,10 @@ pub struct MooncakeClient {
     /// 执行 RDMA / TCP 数据面传输的 TransferEngine 实例。
     /// 使用 Arc 包装，可在多个异步任务间共享。C++ 等价：`std::shared_ptr<TransferEngine>`。
     pub(crate) engine: Arc<TransferEngine>,
+
+    /// Safe strategy interface; its native unsafe implementation lives only
+    /// in `data_plane_ffi`, outside the client business layer.
+    pub(crate) accelerator: Arc<dyn AcceleratorBackend>,
 
     /// Unique identifier for this client instance, assigned at creation time.
     /// Sent to the master in every request so the master can track client state.

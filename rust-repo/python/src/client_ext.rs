@@ -1,4 +1,4 @@
-use crate::client::{PythonMooncakeClient, get_buffer_ptr, replicas_to_py, take_client};
+use crate::client::{PythonMooncakeClient, get_pointer, replicas_to_py, take_client};
 use crate::to_py_err;
 use mooncake_store_client::CachedQueryResultResponse;
 use pyo3::prelude::*;
@@ -157,10 +157,7 @@ pub(crate) fn get_into_ranges_cached(
     all_src_offsets: Vec<Vec<Vec<usize>>>,
     all_sizes: Vec<Vec<Vec<usize>>>,
 ) -> PyResult<Vec<Vec<Vec<i64>>>> {
-    let ptrs: Vec<*mut c_void> = buffers
-        .iter()
-        .map(|buffer| get_buffer_ptr(buffer).map(|(ptr, _)| ptr))
-        .collect::<PyResult<_>>()?;
+    let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
     let mut unique_keys = Vec::<String>::new();
     for keys in &all_keys {
         for key in keys {
