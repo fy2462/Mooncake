@@ -47,6 +47,7 @@ use crate::kv_event::{KvEventPublisher, KvEventStatus};
 use crate::metrics;
 use crate::proto;
 use crate::proto::master_service_server::MasterService;
+use crate::storage_backend::LocalDiskSnapshotEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use crate::tenant_quota::{TenantQuotaError, TenantQuotaSnapshot, TenantQuotaTable};
 use crate::tenant_quota_policy_store::{
@@ -475,7 +476,9 @@ impl MasterServiceImpl {
             }
             // 从快照恢复状态：先恢复 segment（含分配器），再恢复对象和任务
             // Restore from snapshot: segments first (incl. allocators), then objects and tasks
-            if let Ok(Some((segments, nof_segments, objects, tasks))) = backend.load() {
+            if let Ok(Some((segments, nof_segments, objects, tasks, local_disk_segments))) =
+                backend.load_with_local_disk()
+            {
                 // 恢复 Memory segments / Restore Memory segments
                 for seg in segments {
                     state.segments.insert(
@@ -524,6 +527,19 @@ impl MasterServiceImpl {
                 // 恢复任务 / Restore tasks
                 for task in tasks {
                     state.tasks.insert(task.info.id, task);
+                }
+                // 恢复持久化的本地磁盘状态；promotion 队列仅属于运行时状态。
+                // Restore persisted local-disk state; promotion queues are runtime-only.
+                for local_disk in local_disk_segments {
+                    state.local_disk_segments.insert(
+                        local_disk.client_id,
+                        state::LocalDiskSegmentEntry {
+                            enable_offloading: local_disk.enable_offloading,
+                            offloading_objects: local_disk.offloading_objects,
+                            promotion_objects: HashMap::new(),
+                            ssd_total_capacity_bytes: local_disk.ssd_total_capacity_bytes,
+                        },
+                    );
                 }
                 tracing::info!("Restored state from snapshot");
                 // 从快照恢复了完整状态
@@ -626,11 +642,28 @@ impl MasterServiceImpl {
                 let start = std::time::Instant::now();
                 let guard = state.storage_backend.read();
                 if let Some(ref backend) = *guard {
-                    if let Err(e) = backend.save(
+                    let local_disk_segments = state
+                        .local_disk_segments
+                        .iter()
+                        .map(|entry| {
+                            let client_id = *entry.key();
+                            (
+                                client_id,
+                                LocalDiskSnapshotEntry {
+                                    client_id,
+                                    enable_offloading: entry.enable_offloading,
+                                    offloading_objects: entry.offloading_objects.clone(),
+                                    ssd_total_capacity_bytes: entry.ssd_total_capacity_bytes,
+                                },
+                            )
+                        })
+                        .collect::<DashMap<_, _>>();
+                    if let Err(e) = backend.save_with_local_disk(
                         &state.segments,
                         &state.nof_segments,
                         &state.objects,
                         &state.tasks,
+                        &local_disk_segments,
                     ) {
                         metrics::SNAPSHOT_FAIL_COUNT.inc();
                         tracing::error!("Failed to save snapshot: {}", e);
@@ -686,6 +719,17 @@ impl MasterServiceImpl {
                 .tasks
                 .iter()
                 .map(|entry| entry.value().clone())
+                .collect(),
+            local_disk_segments: self
+                .state
+                .local_disk_segments
+                .iter()
+                .map(|entry| LocalDiskSnapshotEntry {
+                    client_id: *entry.key(),
+                    enable_offloading: entry.enable_offloading,
+                    offloading_objects: entry.offloading_objects.clone(),
+                    ssd_total_capacity_bytes: entry.ssd_total_capacity_bytes,
+                })
                 .collect(),
         }
     }

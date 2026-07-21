@@ -1,6 +1,7 @@
 use super::storage_backend_file::BackendFile;
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::BufReader;
 
 fn invalid_snapshot_data(message: impl Into<String>) -> Box<dyn std::error::Error> {
@@ -67,6 +68,14 @@ struct SnapshotTask {
     payload: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDiskSnapshotEntry {
+    pub client_id: Uuid,
+    pub enable_offloading: bool,
+    pub offloading_objects: HashMap<String, i64>,
+    pub ssd_total_capacity_bytes: i64,
+}
+
 /// Top-level snapshot structure for serialization.
 /// 顶层快照结构，用于序列化。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +84,8 @@ struct Snapshot {
     nof_segments: Vec<SnapshotNoFSegment>,
     objects: Vec<(String, SnapshotObject)>,
     tasks: Vec<(String, SnapshotTask)>,
+    #[serde(default)]
+    local_disk_segments: Vec<LocalDiskSnapshotEntry>,
 }
 
 // =============================================================================
@@ -104,6 +115,17 @@ impl StorageBackend {
         nof_segments: &DashMap<Uuid, crate::service::NoFSegmentEntry>,
         objects: &DashMap<String, crate::service::ObjectEntry>,
         tasks: &DashMap<Uuid, crate::service::TaskEntry>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.save_with_local_disk(segments, nof_segments, objects, tasks, &DashMap::new())
+    }
+
+    pub fn save_with_local_disk(
+        &self,
+        segments: &DashMap<Uuid, crate::service::SegmentEntry>,
+        nof_segments: &DashMap<Uuid, crate::service::NoFSegmentEntry>,
+        objects: &DashMap<String, crate::service::ObjectEntry>,
+        tasks: &DashMap<Uuid, crate::service::TaskEntry>,
+        local_disk_segments: &DashMap<Uuid, LocalDiskSnapshotEntry>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Convert domain types to serializable snapshot types
         // 将领域类型转换为可序列化的快照类型
@@ -162,6 +184,10 @@ impl StorageBackend {
                     };
                     (id_str, task)
                 })
+                .collect(),
+            local_disk_segments: local_disk_segments
+                .iter()
+                .map(|entry| entry.value().clone())
                 .collect(),
         };
 
@@ -263,6 +289,7 @@ impl StorageBackend {
             Vec<crate::service::NoFSegmentEntry>,
             Vec<(String, crate::service::ObjectEntry)>,
             Vec<crate::service::TaskEntry>,
+            Vec<LocalDiskSnapshotEntry>,
         ),
         Box<dyn std::error::Error>,
     > {
@@ -382,7 +409,13 @@ impl StorageBackend {
             tasks.len()
         );
 
-        Ok((segments, nof_segments, objects, tasks))
+        Ok((
+            segments,
+            nof_segments,
+            objects,
+            tasks,
+            snap.local_disk_segments,
+        ))
     }
 
     /// Load a snapshot from disk.
@@ -405,15 +438,40 @@ impl StorageBackend {
         )>,
         Box<dyn std::error::Error>,
     > {
+        Ok(self
+            .load_with_local_disk()?
+            .map(|(segments, nof_segments, objects, tasks, _)| {
+                (segments, nof_segments, objects, tasks)
+            }))
+    }
+
+    pub fn load_with_local_disk(
+        &self,
+    ) -> Result<
+        Option<(
+            Vec<crate::service::SegmentEntry>,
+            Vec<crate::service::NoFSegmentEntry>,
+            Vec<(String, crate::service::ObjectEntry)>,
+            Vec<crate::service::TaskEntry>,
+            Vec<LocalDiskSnapshotEntry>,
+        )>,
+        Box<dyn std::error::Error>,
+    > {
         // Try msgpack first (new format), then fall back to JSON (legacy)
         // 优先尝试 msgpack（新格式），不存在则回退到 JSON（旧版兼容）
         let msgpack_path = self.disk_dir.join("master_snapshot.msgpack");
         if msgpack_path.exists() {
             let reader = BufReader::new(BackendFile::open(&msgpack_path, self.backend_type)?);
             let snap: Snapshot = rmp_serde::decode::from_read(reader)?;
-            let (segments, nof_segments, objects, tasks) =
+            let (segments, nof_segments, objects, tasks, local_disk_segments) =
                 Self::build_loaded_state(snap, self.backend_type, &msgpack_path)?;
-            return Ok(Some((segments, nof_segments, objects, tasks)));
+            return Ok(Some((
+                segments,
+                nof_segments,
+                objects,
+                tasks,
+                local_disk_segments,
+            )));
         }
 
         // Fall back to legacy JSON format
@@ -425,9 +483,15 @@ impl StorageBackend {
 
         let reader = BufReader::new(BackendFile::open(&json_path, self.backend_type)?);
         let snap: Snapshot = serde_json::from_reader(reader)?;
-        let (segments, nof_segments, objects, tasks) =
+        let (segments, nof_segments, objects, tasks, local_disk_segments) =
             Self::build_loaded_state(snap, self.backend_type, &json_path)?;
-        Ok(Some((segments, nof_segments, objects, tasks)))
+        Ok(Some((
+            segments,
+            nof_segments,
+            objects,
+            tasks,
+            local_disk_segments,
+        )))
     }
 
     /// Clear all snapshot files.

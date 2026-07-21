@@ -339,6 +339,17 @@ impl HotStandbyService {
                         for task in &snapshot.tasks {
                             self.state.tasks.insert(task.info.id, task.clone());
                         }
+                        for local_disk in &snapshot.local_disk_segments {
+                            self.state.local_disk_segments.insert(
+                                local_disk.client_id,
+                                crate::service::state::LocalDiskSegmentEntry {
+                                    enable_offloading: local_disk.enable_offloading,
+                                    offloading_objects: local_disk.offloading_objects.clone(),
+                                    promotion_objects: Default::default(),
+                                    ssd_total_capacity_bytes: local_disk.ssd_total_capacity_bytes,
+                                },
+                            );
+                        }
 
                         let mut status = self.sync_status.write();
                         status.applied_seq_id = snapshot.snapshot_sequence_id;

@@ -47,6 +47,7 @@ mod storage_backend_snapshot;
 pub use storage_backend_config::{
     BucketBackendConfig, BucketEvictionPolicy, DistributedStorageConfig, StorageBackendType,
 };
+pub use storage_backend_snapshot::LocalDiskSnapshotEntry;
 
 const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
 

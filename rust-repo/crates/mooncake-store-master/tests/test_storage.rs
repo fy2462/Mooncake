@@ -5,10 +5,13 @@ use common::temp_dir;
 
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
-use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
-use mooncake_store_master::storage_backend::{
-    DistributedStorageConfig, StorageBackend, StorageBackendType,
+use mooncake_store_master::service::{
+    MasterServiceImpl, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry,
 };
+use mooncake_store_master::storage_backend::{
+    DistributedStorageConfig, LocalDiskSnapshotEntry, StorageBackend, StorageBackendType,
+};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -149,6 +152,110 @@ fn test_storage_backend_save_and_load() {
     assert_eq!(loaded_objs[0].1.replicas[0].segment_name, "node1:12345");
     assert_eq!(loaded_objs[0].1.replicas[0].offset, 0x1000);
     assert_eq!(loaded_objs[0].1.size, 256);
+}
+
+#[test]
+fn test_storage_backend_local_disk_state_roundtrip() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let segments = DashMap::new();
+    let nof_segments = DashMap::new();
+    let objects = DashMap::new();
+    let tasks = DashMap::new();
+    let local_disk_segments = DashMap::new();
+    let client_id = Uuid::new_v4();
+    local_disk_segments.insert(
+        client_id,
+        LocalDiskSnapshotEntry {
+            client_id,
+            enable_offloading: true,
+            offloading_objects: HashMap::from([("tenant\0key".to_string(), 4096)]),
+            ssd_total_capacity_bytes: 1 << 30,
+        },
+    );
+
+    backend
+        .save_with_local_disk(
+            &segments,
+            &nof_segments,
+            &objects,
+            &tasks,
+            &local_disk_segments,
+        )
+        .unwrap();
+
+    let (_, _, _, _, loaded_local_disk) = backend.load_with_local_disk().unwrap().unwrap();
+    assert_eq!(loaded_local_disk.len(), 1);
+    assert_eq!(loaded_local_disk[0].client_id, client_id);
+    assert!(loaded_local_disk[0].enable_offloading);
+    assert_eq!(loaded_local_disk[0].offloading_objects["tenant\0key"], 4096);
+    assert_eq!(loaded_local_disk[0].ssd_total_capacity_bytes, 1 << 30);
+}
+
+#[test]
+fn test_storage_backend_loads_legacy_snapshot_without_local_disk_state() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    backend
+        .save(
+            &DashMap::new(),
+            &DashMap::new(),
+            &DashMap::new(),
+            &DashMap::new(),
+        )
+        .unwrap();
+
+    let snapshot_path = tmp.join("master_snapshot.msgpack");
+    let mut snapshot: serde_json::Value =
+        rmp_serde::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("local_disk_segments");
+    std::fs::write(&snapshot_path, rmp_serde::to_vec_named(&snapshot).unwrap()).unwrap();
+
+    let (_, _, _, _, local_disk_segments) = backend.load_with_local_disk().unwrap().unwrap();
+    assert!(local_disk_segments.is_empty());
+}
+
+#[tokio::test]
+async fn test_master_service_restores_local_disk_state_from_snapshot() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let segments = DashMap::new();
+    let nof_segments = DashMap::new();
+    let objects = DashMap::new();
+    let tasks = DashMap::new();
+    let local_disk_segments = DashMap::new();
+    let client_id = Uuid::new_v4();
+    local_disk_segments.insert(
+        client_id,
+        LocalDiskSnapshotEntry {
+            client_id,
+            enable_offloading: true,
+            offloading_objects: HashMap::from([("tenant\0key".to_string(), 4096)]),
+            ssd_total_capacity_bytes: 1 << 30,
+        },
+    );
+    backend
+        .save_with_local_disk(
+            &segments,
+            &nof_segments,
+            &objects,
+            &tasks,
+            &local_disk_segments,
+        )
+        .unwrap();
+
+    let service = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp));
+    let restored = service.capture_loaded_snapshot("restored");
+
+    assert_eq!(restored.local_disk_segments.len(), 1);
+    let local_disk = &restored.local_disk_segments[0];
+    assert_eq!(local_disk.client_id, client_id);
+    assert!(local_disk.enable_offloading);
+    assert_eq!(local_disk.offloading_objects["tenant\0key"], 4096);
+    assert_eq!(local_disk.ssd_total_capacity_bytes, 1 << 30);
 }
 
 #[test]

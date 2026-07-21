@@ -9,6 +9,7 @@ use super::types::HaError;
 use crate::make_tenant_scoped_key;
 use crate::proto::SegmentStatus;
 use crate::service::{ObjectEntry, SegmentEntry};
+use crate::storage_backend::LocalDiskSnapshotEntry;
 use chrono::{Datelike, Timelike};
 use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 use rmpv::Value;
@@ -169,11 +170,11 @@ impl SnapshotProvider for CatalogBackedSnapshotProvider {
             descriptor.manifest_key.clone()
         };
         validate_manifest(&self.object_store.download_string(&manifest_key)?)?;
-        let decoded_segments = decode_segments(
-            &self
-                .object_store
-                .download_buffer(&format!("{prefix}segments"))?,
-        )?;
+        let segment_payload = self
+            .object_store
+            .download_buffer(&format!("{prefix}segments"))?;
+        let decoded_segments = decode_segments(&segment_payload)?;
+        let local_disk_segments = decode_local_disk_segments(&segment_payload)?;
         let segments = decoded_segments
             .values()
             .map(|segment| segment.entry.clone())
@@ -192,6 +193,7 @@ impl SnapshotProvider for CatalogBackedSnapshotProvider {
             nof_segments: Vec::new(),
             objects,
             tasks,
+            local_disk_segments,
         }))
     }
 }
@@ -269,12 +271,32 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
         .collect::<Vec<_>>();
     clients.sort_by(|left, right| left.0.as_str().cmp(&right.0.as_str()));
 
+    let mut local_disks = snapshot.local_disk_segments.clone();
+    local_disks.sort_by_key(|entry| entry.client_id);
+    let local_disks = local_disks
+        .into_iter()
+        .map(|entry| {
+            let mut objects = entry.offloading_objects.into_iter().collect::<Vec<_>>();
+            objects.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut fields = vec![
+                entry.enable_offloading.into(),
+                (objects.len() as u64).into(),
+            ];
+            for (key, size) in objects {
+                fields.push(key.into());
+                fields.push(size.into());
+            }
+            fields.push(entry.ssd_total_capacity_bytes.into());
+            (entry.client_id.to_string().into(), Value::Array(fields))
+        })
+        .collect();
+
     encode_compressed_value(&Value::Map(vec![
         ("ma".into(), 0.into()),
         ("an".into(), Value::Array(active_names)),
         ("ms".into(), Value::Map(mounted_segments)),
         ("cs".into(), Value::Map(clients)),
-        ("ld".into(), Value::Map(vec![])),
+        ("ld".into(), Value::Map(local_disks)),
     ]))
 }
 
@@ -485,6 +507,59 @@ fn decode_segments(data: &[u8]) -> Result<HashMap<Uuid, DecodedSegment>, HaError
                 has_allocator,
             },
         );
+    }
+    Ok(result)
+}
+
+fn decode_local_disk_segments(data: &[u8]) -> Result<Vec<LocalDiskSnapshotEntry>, HaError> {
+    let root = decode_value(&zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?)?;
+    let Ok(local_disks) = map_field(&root, "ld") else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for (client, value) in value_map(local_disks, "local disk segments")? {
+        let client_id = parse_uuid(value_str(client, "local disk client UUID")?)?;
+        let fields = value_array(value, "local disk segment")?;
+        if fields.len() < 2 {
+            return Err(snapshot_error("local disk segment is too short"));
+        }
+        let enable_offloading = value_bool(&fields[0], "local disk offloading flag")?;
+        let count = usize::try_from(value_u64(&fields[1], "local disk object count")?)
+            .map_err(|_| snapshot_error("local disk object count exceeds usize"))?;
+        let capacity_index = 2_usize
+            .checked_add(
+                count
+                    .checked_mul(2)
+                    .ok_or_else(|| snapshot_error("local disk object count overflow"))?,
+            )
+            .ok_or_else(|| snapshot_error("local disk object count overflow"))?;
+        if fields.len() < capacity_index {
+            return Err(snapshot_error("local disk object list is truncated"));
+        }
+        let mut offloading_objects = HashMap::new();
+        for pair in fields[2..capacity_index].chunks_exact(2) {
+            let key = value_str(&pair[0], "local disk object key")?.to_string();
+            let size = value_i64(&pair[1], "local disk object size")?;
+            if size < 0 {
+                return Err(snapshot_error("local disk object size is negative"));
+            }
+            offloading_objects.insert(key, size);
+        }
+        let ssd_total_capacity_bytes = if fields.len() > capacity_index {
+            let capacity = value_i64(&fields[capacity_index], "local disk SSD capacity")?;
+            if capacity < 0 {
+                return Err(snapshot_error("local disk SSD capacity is negative"));
+            }
+            capacity
+        } else {
+            0
+        };
+        result.push(LocalDiskSnapshotEntry {
+            client_id,
+            enable_offloading,
+            offloading_objects,
+            ssd_total_capacity_bytes,
+        });
     }
     Ok(result)
 }

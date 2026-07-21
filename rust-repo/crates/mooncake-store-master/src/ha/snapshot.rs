@@ -3,6 +3,7 @@ use crate::service::NoFSegmentEntry;
 use crate::service::ObjectEntry;
 use crate::service::SegmentEntry;
 use crate::service::TaskEntry;
+use crate::storage_backend::LocalDiskSnapshotEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use aws_sdk_s3::config::{
     timeout::TimeoutConfig, Credentials, Region, RequestChecksumCalculation,
@@ -41,6 +42,8 @@ pub struct LoadedSnapshot {
     pub objects: Vec<(String, ObjectEntry)>,
     /// Pending tasks at snapshot time. / 快照时的待处理任务。
     pub tasks: Vec<TaskEntry>,
+    /// Persisted per-client local-disk state; promotion queues are runtime-only.
+    pub local_disk_segments: Vec<LocalDiskSnapshotEntry>,
 }
 
 /// Catalog descriptor for a published snapshot.
@@ -1013,8 +1016,8 @@ impl SnapshotProvider for LocalSnapshotProvider {
             // Load segments, NOF segments, objects, and tasks from the backend.
             // 从后端加载 segments、NOF segments、objects 和 tasks。
             let backend = StorageBackend::new(self.backend_type, &dir);
-            let Some((segments, nof_segments, objects, tasks)) = backend
-                .load()
+            let Some((segments, nof_segments, objects, tasks, local_disk_segments)) = backend
+                .load_with_local_disk()
                 .map_err(|error| HaError::Snapshot(error.to_string()))?
             else {
                 continue;
@@ -1052,6 +1055,7 @@ impl SnapshotProvider for LocalSnapshotProvider {
                 nof_segments,
                 objects,
                 tasks,
+                local_disk_segments,
             }));
         }
 

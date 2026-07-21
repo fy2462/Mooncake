@@ -11,6 +11,7 @@ use mooncake_store_master::ha::{
 };
 use mooncake_store_master::proto::SegmentStatus;
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry, TaskEntry};
+use mooncake_store_master::storage_backend::LocalDiskSnapshotEntry;
 use rmpv::Value;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -61,7 +62,18 @@ fn cxx_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
                 Value::Array(vec![segment_id.to_string().into()]),
             )]),
         ),
-        ("ld".into(), Value::Map(vec![])),
+        (
+            "ld".into(),
+            Value::Map(vec![(
+                client_id.to_string().into(),
+                Value::Array(vec![
+                    true.into(),
+                    1_u64.into(),
+                    "tenant-a\0key-a".into(),
+                    128_i64.into(),
+                ]),
+            )]),
+        ),
     ]))
 }
 
@@ -198,6 +210,9 @@ fn test_catalog_provider_loads_cxx_snapshot_payloads() {
         mooncake_store_core::TaskStatus::Pending
     );
     assert_eq!(snapshot.tasks[0].key, "tenant-a\0key-a");
+    assert_eq!(snapshot.local_disk_segments.len(), 1);
+    assert_eq!(snapshot.local_disk_segments[0].client_id, client_id);
+    assert_eq!(snapshot.local_disk_segments[0].ssd_total_capacity_bytes, 0);
 }
 
 #[test]
@@ -303,6 +318,15 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
             payload: r#"{"key":"tenant-a\u0000key-a","source":"a","target":"b"}"#.to_string(),
             max_retry_attempts: 3,
         }],
+        local_disk_segments: vec![LocalDiskSnapshotEntry {
+            client_id,
+            enable_offloading: true,
+            offloading_objects: std::collections::HashMap::from([(
+                "tenant-a\0key-a".to_string(),
+                128,
+            )]),
+            ssd_total_capacity_bytes: 8 * 1024 * 1024,
+        }],
     };
 
     let descriptor = provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
@@ -312,6 +336,12 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
 
     let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
     assert_eq!(loaded.snapshot_id, "20260610_120001_002");
+    assert_eq!(loaded.local_disk_segments.len(), 1);
+    assert_eq!(loaded.local_disk_segments[0].client_id, client_id);
+    assert_eq!(
+        loaded.local_disk_segments[0].ssd_total_capacity_bytes,
+        8 * 1024 * 1024
+    );
     assert_eq!(loaded.snapshot_sequence_id, 77);
     assert_eq!(loaded.segments[0].segment.id, segment_id);
     assert_eq!(loaded.segments[0].used, 512);
@@ -374,6 +404,7 @@ fn test_catalog_provider_factory_publishes_cluster_scoped_snapshot_objects() {
         nof_segments: Vec::new(),
         objects: Vec::new(),
         tasks: Vec::new(),
+        local_disk_segments: Vec::new(),
     };
 
     let descriptor = provider.publish_loaded_snapshot(&snapshot, 1).unwrap();
@@ -414,6 +445,7 @@ fn test_catalog_provider_prunes_old_snapshots() {
             nof_segments: Vec::new(),
             objects: Vec::new(),
             tasks: Vec::new(),
+            local_disk_segments: Vec::new(),
         };
         provider.publish_loaded_snapshot(&snapshot, 1).unwrap();
     }
