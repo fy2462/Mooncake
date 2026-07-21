@@ -31,6 +31,7 @@ pub(super) async fn run_standalone(
         args.http_metadata_server_host.parse()?,
         args.http_metadata_server_port,
     );
+    let metadata_listener = bind_metadata_listener(metadata_addr).await?;
 
     let runtime_config = build_runtime_config(&args)?;
     let service = MasterServiceImpl::new_with_runtime_config(
@@ -50,10 +51,12 @@ pub(super) async fn run_standalone(
         .await;
 
     // 启动 HTTP metadata 服务
-    tokio::spawn(serve_metadata_http(
-        metadata_addr,
-        service_arc.metadata_state(),
-    ));
+    let metadata_state = service_arc.metadata_state();
+    tokio::spawn(async move {
+        if let Err(error) = serve_metadata_listener(metadata_listener, metadata_state).await {
+            error!("HTTP metadata server stopped: {error}");
+        }
+    });
 
     if args.enable_snapshot {
         let svc = service_arc.clone();
@@ -134,16 +137,19 @@ pub(super) async fn run_leader_server(
         args.http_metadata_server_host.parse()?,
         args.http_metadata_server_port,
     );
+    let metadata_listener = bind_metadata_listener(metadata_addr).await?;
 
     service_arc
         .metadata_state()
         .set_master_addr(format!("http://{}", rpc_addr))
         .await;
 
-    background_tasks.push(tokio::spawn(serve_metadata_http(
-        metadata_addr,
-        service_arc.metadata_state(),
-    )));
+    let metadata_state = service_arc.metadata_state();
+    background_tasks.push(tokio::spawn(async move {
+        if let Err(error) = serve_metadata_listener(metadata_listener, metadata_state).await {
+            error!("HTTP metadata server stopped: {error}");
+        }
+    }));
 
     if args.enable_snapshot {
         let svc = service_arc.clone();

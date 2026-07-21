@@ -148,11 +148,22 @@ async fn metadata_handler(State(state): State<MetadataState>) -> Json<MetadataRe
 /// let state = MetadataState::new("localhost:50051");
 /// tokio::spawn(serve_metadata_http("0.0.0.0:8080".parse().unwrap(), state));
 /// ```
-pub async fn serve_metadata_http(addr: SocketAddr, state: MetadataState) {
+pub async fn bind_metadata_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(addr).await
+}
+
+pub async fn serve_metadata_listener(
+    listener: tokio::net::TcpListener,
+    state: MetadataState,
+) -> std::io::Result<()> {
     let app = Router::new()
         .route("/metadata", get(metadata_handler))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await
+}
+
+pub async fn serve_metadata_http(addr: SocketAddr, state: MetadataState) -> std::io::Result<()> {
+    let listener = bind_metadata_listener(addr).await?;
+    serve_metadata_listener(listener, state).await
 }

@@ -13,7 +13,7 @@ use mooncake_store_master::ha::{
     HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle, LeadershipSession,
     MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
 };
-use mooncake_store_master::http_metadata::serve_metadata_http;
+use mooncake_store_master::http_metadata::{bind_metadata_listener, serve_metadata_listener};
 use mooncake_store_master::metrics;
 use mooncake_store_master::MasterServiceImpl;
 use std::net::SocketAddr;

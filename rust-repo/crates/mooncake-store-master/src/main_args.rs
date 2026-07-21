@@ -30,7 +30,7 @@ pub struct Args {
     pub metrics_port: u16,
 
     /// gRPC 服务线程数 / Number of gRPC server threads
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 16)]
     pub rpc_thread_num: usize,
 
     /// Segment 分配策略: "random", "free_ratio_first", "ssd_free_ratio_first" 或 "local_first"；"cxl" 当前会明确拒绝
@@ -44,7 +44,7 @@ pub struct Args {
     pub memory_allocator: String,
 
     /// KV 对象默认租约 TTL（毫秒）/ Default KV lease TTL in milliseconds
-    #[arg(long, default_value_t = 5000)]
+    #[arg(long, default_value_t = 10_000)]
     pub default_kv_lease_ttl_ms: u64,
 
     /// Client heartbeat TTL in seconds.
@@ -61,7 +61,7 @@ pub struct Args {
 
     /// 驱逐高水位比例 (0.0~1.0)，超过后触发自动驱逐
     /// Eviction high watermark ratio: auto-eviction triggers above this
-    #[arg(long, default_value_t = 0.95)]
+    #[arg(long, default_value_t = 0.90)]
     pub eviction_high_watermark_ratio: f64,
 
     /// 每次驱逐释放的内存比例 (0.0~1.0)

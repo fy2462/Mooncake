@@ -82,6 +82,15 @@ fn base_args() -> Args {
 }
 
 #[test]
+fn test_master_cli_defaults_match_rpc_scaling_tuning() {
+    let args = Args::parse_from(["mooncake-master"]);
+
+    assert_eq!(args.rpc_thread_num, 16);
+    assert_eq!(args.default_kv_lease_ttl_ms, 10_000);
+    assert_eq!(args.eviction_high_watermark_ratio, 0.90);
+}
+
+#[test]
 fn test_build_runtime_config_maps_kv_events() {
     let mut args = base_args();
     args.enable_kv_events = true;

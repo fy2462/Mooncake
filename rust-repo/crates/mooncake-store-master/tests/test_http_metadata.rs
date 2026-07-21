@@ -1,4 +1,6 @@
-use mooncake_store_master::http_metadata::{MetadataNodeInfo, MetadataState};
+use mooncake_store_master::http_metadata::{
+    bind_metadata_listener, MetadataNodeInfo, MetadataState,
+};
 
 #[test]
 fn test_metadata_node_info_creation() {
@@ -10,6 +12,16 @@ fn test_metadata_node_info_creation() {
     assert_eq!(node.local_hostname, "node1");
     assert_eq!(node.rpc_port, 50051);
     assert_eq!(node.rdma_devices.len(), 2);
+}
+
+#[tokio::test]
+async fn test_metadata_listener_reports_occupied_port() {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = occupied.local_addr().unwrap();
+
+    let error = bind_metadata_listener(address).await.unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
 }
 
 #[test]
