@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 link-native = []
+link-tent-native = ["link-native"]
 
 [lib]
 name = "transfer_engine_ffi"

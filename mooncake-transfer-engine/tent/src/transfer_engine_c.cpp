@@ -17,6 +17,7 @@
 #include <glog/logging.h>
 
 #include "tent/runtime/transfer_engine_impl.h"
+#include "tent/metrics/tent_metrics.h"
 
 #define CAST(ptr) ((mooncake::tent::TransferEngineImpl*)ptr)
 #define CHECK_POINTER(ptr)                       \
@@ -228,6 +229,47 @@ int tent_submit(tent_engine_t engine, tent_batch_id_t batch_id,
     return 0;
 }
 
+int tent_submit_v2(tent_engine_t engine, tent_batch_id_t batch_id,
+                   const tent_request_v2_t* entries, size_t count) {
+    CHECK_POINTER(engine);
+    if (!entries && count != 0) return -1;
+    std::vector<mooncake::tent::Request> req_list;
+    req_list.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+        const auto& entry = entries[index];
+        if (entry.struct_size < sizeof(tent_request_v2_t) ||
+            entry.version != TENT_REQUEST_V2_VERSION || entry.priority < 0 ||
+            entry.priority > 2 || entry.transport_hint < TRANSPORT_UNSPEC ||
+            entry.transport_hint > TRANSPORT_SUNRISE_LINK ||
+            (entry.opcode != OPCODE_READ && entry.opcode != OPCODE_WRITE) ||
+            entry.intent_type < TENT_INTENT_UNSPEC ||
+            entry.intent_type > TENT_INTENT_STAGING_INTERNAL) {
+            return -1;
+        }
+        mooncake::tent::Request request;
+        request.opcode =
+            static_cast<mooncake::tent::Request::OpCode>(entry.opcode);
+        request.source = entry.source;
+        request.target_id = entry.target_id;
+        request.target_offset = entry.target_offset;
+        request.length = entry.length;
+        request.priority = entry.priority;
+        request.transport_hint =
+            mooncake::tent::c_to_transport_hint(entry.transport_hint);
+        if (entry.policy_name) request.policy_name = entry.policy_name;
+        request.deadline_ns = entry.deadline_ns;
+        request.intent_type =
+            static_cast<mooncake::tent::IntentType>(entry.intent_type);
+        req_list.push_back(std::move(request));
+    }
+    auto status = CAST(engine)->submitTransfer(batch_id, req_list);
+    if (!status.ok()) {
+        LOG(ERROR) << "tent_submit_v2: " << status.ToString();
+        return -1;
+    }
+    return 0;
+}
+
 int tent_submit_notif(tent_engine_t engine, tent_batch_id_t batch_id,
                       tent_request_t* entries, size_t count, const char* name,
                       const char* message) {
@@ -331,6 +373,21 @@ int tent_cancel_task(tent_engine_t engine, tent_batch_id_t batch_id,
         LOG(ERROR) << "tent_cancel_task: " << status.ToString();
         return -1;
     }
+    return 0;
+}
+
+int tent_metrics_status(tent_engine_t engine,
+                        tent_metrics_status_v1_t* metrics_status) {
+    CHECK_POINTER(engine);
+    CHECK_POINTER(metrics_status);
+    if (metrics_status->struct_size < sizeof(tent_metrics_status_v1_t)) {
+        return -1;
+    }
+    auto& metrics = mooncake::tent::TentMetrics::instance();
+    metrics_status->metrics_enabled =
+        mooncake::tent::TentMetrics::isEnabled() ? 1 : 0;
+    metrics_status->metrics_initialized = metrics.isInitialized() ? 1 : 0;
+    metrics_status->http_port = metrics.httpPort();
     return 0;
 }
 

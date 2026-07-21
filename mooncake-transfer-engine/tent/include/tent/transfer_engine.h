@@ -47,6 +47,42 @@ struct tent_request {
 
 typedef struct tent_request tent_request_t;
 
+/* Versioned request extension. Keep tent_request_t unchanged for existing
+ * callers; new fields are translated into the existing C++ Request type. */
+#define TENT_REQUEST_V2_VERSION (2u)
+
+#define TENT_INTENT_UNSPEC (0)
+#define TENT_INTENT_FOREGROUND_GET (1)
+#define TENT_INTENT_BACKGROUND_PREFETCH (2)
+#define TENT_INTENT_MIGRATION (3)
+#define TENT_INTENT_CHECKPOINT (4)
+#define TENT_INTENT_WEIGHT_LOADING (5)
+#define TENT_INTENT_STAGING_INTERNAL (6)
+
+struct tent_request_v2 {
+    uint32_t struct_size;
+    uint32_t version;
+    int opcode;
+    void* source;
+    tent_segment_id_t target_id;
+    uint64_t target_offset;
+    uint64_t length;
+    int priority;
+    int transport_hint;
+    const char* policy_name;
+    uint64_t deadline_ns;
+    int intent_type;
+};
+typedef struct tent_request_v2 tent_request_v2_t;
+
+struct tent_metrics_status_v1 {
+    uint32_t struct_size;
+    int metrics_enabled;
+    int metrics_initialized;
+    uint16_t http_port;
+};
+typedef struct tent_metrics_status_v1 tent_metrics_status_v1_t;
+
 #define STATUS_WAITING (0)
 #define STATUS_PENDING (1)
 #define STATUS_INVALID (2)
@@ -160,6 +196,9 @@ int tent_free_batch(tent_engine_t engine, tent_batch_id_t batch_id);
 int tent_submit(tent_engine_t engine, tent_batch_id_t batch_id,
                 tent_request_t* entries, size_t count);
 
+int tent_submit_v2(tent_engine_t engine, tent_batch_id_t batch_id,
+                   const tent_request_v2_t* entries, size_t count);
+
 int tent_submit_notif(tent_engine_t engine, tent_batch_id_t batch_id,
                       tent_request_t* entries, size_t count, const char* name,
                       const char* message);
@@ -176,6 +215,9 @@ int tent_task_status(tent_engine_t engine, tent_batch_id_t batch_id,
 
 int tent_cancel_task(tent_engine_t engine, tent_batch_id_t batch_id,
                      size_t task_id);
+
+int tent_metrics_status(tent_engine_t engine,
+                        tent_metrics_status_v1_t* status);
 
 int tent_overall_status(tent_engine_t engine, tent_batch_id_t batch_id,
                         tent_status_t* status);
@@ -221,6 +263,13 @@ int tent_task_status_list(tent_engine_t engine, tent_batch_id_t batch_id,
 
 #include "tent/common/status.h"
 #include "tent/common/types.h"
+
+#if INTPTR_MAX == INT64_MAX
+static_assert(sizeof(tent_request_t) == 48,
+              "legacy tent_request_t ABI changed");
+static_assert(offsetof(tent_request_t, transport_hint) == 44,
+              "legacy tent_request_t field layout changed");
+#endif
 
 namespace mooncake {
 namespace tent {

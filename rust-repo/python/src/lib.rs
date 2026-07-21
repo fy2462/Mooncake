@@ -20,6 +20,7 @@ mod engram;
 mod p2p_store;
 pub mod remote_config;
 mod replicate_config;
+mod transfer_engine;
 
 use pyo3::prelude::*;
 use std::sync::OnceLock;
@@ -151,6 +152,12 @@ fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engram::EngramStoreConfigPy>()?;
     m.add_class::<engram::EngramStorePy>()?;
     m.add_class::<p2p_store::P2pStorePy>()?;
+    m.add_class::<transfer_engine::PyTransferIntent>()?;
+    m.add_class::<transfer_engine::PyTransferPriority>()?;
+    m.add_class::<transfer_engine::PyTentMetricsStatus>()?;
+    m.add_class::<transfer_engine::PyTransferStatus>()?;
+    m.add_class::<transfer_engine::PyTransferRequest>()?;
+    m.add_class::<transfer_engine::PyTransferEngine>()?;
     m.add("StoreError", m.py().get_type::<StoreErrorPy>())?;
     m.add_function(wrap_pyfunction!(enable_te_debug_tracing, m)?)?;
     Ok(())

@@ -2597,6 +2597,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "transfer-engine-ffi",
  "uuid",
 ]
 

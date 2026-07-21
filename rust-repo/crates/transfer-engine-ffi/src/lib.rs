@@ -72,12 +72,17 @@ mod ffi {
 mod accelerator;
 mod error;
 mod segment;
+mod tent;
 mod transfer;
 mod transport_hint;
 
 pub use accelerator::{PointerMemoryType, classify_pointer, copy_from_host, copy_to_host};
 pub use error::{TransferEngineError, TransferEngineResult};
 pub use segment::{SegmentDesc, SegmentId};
+pub use tent::{
+    TentEngine, TentIntent, TentMetricsStatus, TentPriority, TentRequestOptions,
+    TentTransferRequest, TentTransport,
+};
 pub use transfer::{
     BatchId, NotifyMsg, NotifyMsgBuf, Opcode, TransferRequest, TransferStatus, TransferStatusEnum,
 };
