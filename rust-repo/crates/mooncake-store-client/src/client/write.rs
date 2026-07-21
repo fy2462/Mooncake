@@ -23,13 +23,13 @@ impl MooncakeClient {
     pub(super) async fn put_end_for_type(
         &mut self,
         key: &str,
-        replica_type: i32,
+        replica_type: ReplicaType,
         tenant_id: &str,
     ) -> StoreResult<()> {
         let end_request = proto::PutEndRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
-            replica_type,
+            replica_type: replica_type.into(),
             tenant_id: tenant_id.to_string(),
         };
         self.master
@@ -42,13 +42,13 @@ impl MooncakeClient {
     pub(super) async fn put_revoke_for_type(
         &mut self,
         key: &str,
-        replica_type: i32,
+        replica_type: ReplicaType,
         tenant_id: &str,
     ) -> StoreResult<()> {
         let revoke_req = proto::PutRevokeRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
-            replica_type,
+            replica_type: replica_type.into(),
             tenant_id: tenant_id.to_string(),
         };
         self.master
@@ -81,8 +81,8 @@ impl MooncakeClient {
         statuses: &mut [i32],
         tenant_id: &str,
     ) {
-        let mut end_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
-        let mut revoke_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
+        let mut end_groups: HashMap<ReplicaType, Vec<(usize, String)>> = HashMap::new();
+        let mut revoke_groups: HashMap<ReplicaType, Vec<(usize, String)>> = HashMap::new();
         for (idx, decision) in decisions {
             if let Some(replica_type) = decision.end_type {
                 end_groups
@@ -101,7 +101,7 @@ impl MooncakeClient {
         for (replica_type, group) in end_groups {
             let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
             match self
-                .batch_put_end(&group_keys, replica_type, tenant_id)
+                .batch_put_end(&group_keys, replica_type.into(), tenant_id)
                 .await
             {
                 Ok(end_statuses) if end_statuses.len() == group.len() => {
@@ -122,7 +122,7 @@ impl MooncakeClient {
         for (replica_type, group) in revoke_groups {
             let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
             match self
-                .batch_put_revoke(&group_keys, replica_type, tenant_id)
+                .batch_put_revoke(&group_keys, replica_type.into(), tenant_id)
                 .await
             {
                 Ok(revoke_statuses) if revoke_statuses.len() == group.len() => {

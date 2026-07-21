@@ -340,6 +340,42 @@ fn test_replica_type_values() {
 }
 
 #[test]
+fn test_replica_status_typed_wire_conversion() {
+    for status in [
+        ReplicaStatus::Undefined,
+        ReplicaStatus::Allocating,
+        ReplicaStatus::Written,
+        ReplicaStatus::Complete,
+        ReplicaStatus::Failed,
+    ] {
+        let wire: i32 = status.into();
+        assert_eq!(ReplicaStatus::try_from(wire).unwrap(), status);
+        assert_eq!(ReplicaStatus::from_replica_wire(wire), status);
+    }
+    assert!(ReplicaStatus::try_from(99).is_err());
+    assert_eq!(
+        ReplicaStatus::from_replica_wire(99),
+        ReplicaStatus::Undefined
+    );
+}
+
+#[test]
+fn test_concrete_replica_type_wire_conversion_keeps_all_fallback() {
+    for replica_type in [
+        ReplicaType::Memory,
+        ReplicaType::Disk,
+        ReplicaType::LocalDisk,
+        ReplicaType::NoFSsd,
+        ReplicaType::All,
+    ] {
+        let wire: i32 = replica_type.into();
+        assert_eq!(ReplicaType::try_from(wire).unwrap(), replica_type);
+    }
+    assert_eq!(ReplicaType::from_replica_wire(4), ReplicaType::Memory);
+    assert_eq!(ReplicaType::from_replica_wire(99), ReplicaType::Memory);
+}
+
+#[test]
 fn test_replica_status_serde_all_variants() {
     for status in &[
         ReplicaStatus::Undefined,

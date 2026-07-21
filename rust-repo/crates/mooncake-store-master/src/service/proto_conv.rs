@@ -48,8 +48,8 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         segment_id: Some(uuid_to_proto(r.segment_id)),
         segment_name: r.segment_name.clone(),
         offset: r.offset,
-        status: r.status as i32,
-        replica_type: r.replica_type as i32,
+        status: r.status.into(),
+        replica_type: r.replica_type.into(),
         slice_key_hash: vec![],
         size: r.size,
         holder_client_id: r.holder_client_id.map(uuid_to_proto),
@@ -74,19 +74,8 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
         offset: p.offset,
         size: p.size,
         base_addr: p.base_addr,
-        status: match p.status {
-            1 => ReplicaStatus::Allocating,
-            2 => ReplicaStatus::Written,
-            3 => ReplicaStatus::Complete,
-            4 => ReplicaStatus::Failed,
-            _ => ReplicaStatus::Undefined,
-        },
-        replica_type: match p.replica_type {
-            1 => ReplicaType::Disk,
-            2 => ReplicaType::LocalDisk,
-            3 => ReplicaType::NoFSsd,
-            _ => ReplicaType::Memory,
-        },
+        status: ReplicaStatus::from_replica_wire(p.status),
+        replica_type: ReplicaType::from_replica_wire(p.replica_type),
         holder_client_id: p.holder_client_id.as_ref().map(uuid_from_proto),
     }
 }

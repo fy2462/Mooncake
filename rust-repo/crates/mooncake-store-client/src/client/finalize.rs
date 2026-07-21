@@ -1,9 +1,5 @@
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig};
 
-pub(crate) const REPLICA_TYPE_MEMORY: i32 = ReplicaType::Memory as i32;
-pub(crate) const REPLICA_TYPE_NOF_SSD: i32 = ReplicaType::NoFSsd as i32;
-pub(crate) const REPLICA_TYPE_ALL: i32 = ReplicaType::All as i32;
-
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ReplicaTransferSummary {
     pub(crate) allocated_memory_replicas: usize,
@@ -46,8 +42,8 @@ impl ReplicaTransferSummary {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplicaFinalizeDecision {
-    pub(crate) end_type: Option<i32>,
-    pub(crate) revoke_type: Option<i32>,
+    pub(crate) end_type: Option<ReplicaType>,
+    pub(crate) revoke_type: Option<ReplicaType>,
     pub(crate) success: bool,
 }
 
@@ -80,14 +76,14 @@ pub(crate) fn determine_finalize_decision(
             && summary.failed_nof_transfers == 0;
         if allocation_satisfied && all_transfers_succeeded {
             return ReplicaFinalizeDecision {
-                end_type: Some(REPLICA_TYPE_ALL),
+                end_type: Some(ReplicaType::All),
                 revoke_type: None,
                 success: true,
             };
         }
         return ReplicaFinalizeDecision {
             end_type: None,
-            revoke_type: Some(REPLICA_TYPE_ALL),
+            revoke_type: Some(ReplicaType::All),
             success: false,
         };
     }
@@ -96,26 +92,26 @@ pub(crate) fn determine_finalize_decision(
     let nof_succeeded = summary.successful_nof_transfers > 0;
     if memory_succeeded && nof_succeeded {
         ReplicaFinalizeDecision {
-            end_type: Some(REPLICA_TYPE_ALL),
+            end_type: Some(ReplicaType::All),
             revoke_type: None,
             success: true,
         }
     } else if memory_succeeded {
         ReplicaFinalizeDecision {
-            end_type: Some(REPLICA_TYPE_MEMORY),
-            revoke_type: Some(REPLICA_TYPE_NOF_SSD),
+            end_type: Some(ReplicaType::Memory),
+            revoke_type: Some(ReplicaType::NoFSsd),
             success: true,
         }
     } else if nof_succeeded {
         ReplicaFinalizeDecision {
-            end_type: Some(REPLICA_TYPE_NOF_SSD),
-            revoke_type: Some(REPLICA_TYPE_MEMORY),
+            end_type: Some(ReplicaType::NoFSsd),
+            revoke_type: Some(ReplicaType::Memory),
             success: true,
         }
     } else {
         ReplicaFinalizeDecision {
             end_type: None,
-            revoke_type: Some(REPLICA_TYPE_ALL),
+            revoke_type: Some(ReplicaType::All),
             success: false,
         }
     }

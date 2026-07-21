@@ -132,8 +132,8 @@ impl MooncakeClient {
         descriptors: &mut [Vec<ReplicaDescriptor>],
         tenant_id: &str,
     ) {
-        let mut end_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
-        let mut revoke_groups: HashMap<i32, Vec<(usize, String)>> = HashMap::new();
+        let mut end_groups: HashMap<ReplicaType, Vec<(usize, String)>> = HashMap::new();
+        let mut revoke_groups: HashMap<ReplicaType, Vec<(usize, String)>> = HashMap::new();
         for (idx, decision) in decisions {
             if let Some(replica_type) = decision.end_type {
                 end_groups
@@ -157,7 +157,7 @@ impl MooncakeClient {
                     key,
                     slice_length: 0,
                     config: cfg.clone(),
-                    replica_type,
+                    replica_type: replica_type.into(),
                     tenant_id,
                 })
                 .collect();
@@ -187,7 +187,7 @@ impl MooncakeClient {
                     key,
                     slice_length: 0,
                     config: cfg.clone(),
-                    replica_type,
+                    replica_type: replica_type.into(),
                     tenant_id,
                 })
                 .collect();

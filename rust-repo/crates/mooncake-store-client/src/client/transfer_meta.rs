@@ -143,19 +143,10 @@ impl MooncakeClient {
                     offset: r.offset,
                     size: r.size,
                     base_addr: r.base_addr,
-                    status: match r.status {
-                        1 => mooncake_store_core::ReplicaStatus::Allocating,
-                        2 => mooncake_store_core::ReplicaStatus::Written,
-                        3 => mooncake_store_core::ReplicaStatus::Complete,
-                        4 => mooncake_store_core::ReplicaStatus::Failed,
-                        _ => mooncake_store_core::ReplicaStatus::Undefined,
-                    },
-                    replica_type: match r.replica_type {
-                        1 => mooncake_store_core::ReplicaType::Disk,
-                        2 => mooncake_store_core::ReplicaType::LocalDisk,
-                        3 => mooncake_store_core::ReplicaType::NoFSsd,
-                        _ => mooncake_store_core::ReplicaType::Memory,
-                    },
+                    status: mooncake_store_core::ReplicaStatus::from_replica_wire(r.status),
+                    replica_type: mooncake_store_core::ReplicaType::from_replica_wire(
+                        r.replica_type,
+                    ),
                     holder_client_id: r
                         .holder_client_id
                         .as_ref()

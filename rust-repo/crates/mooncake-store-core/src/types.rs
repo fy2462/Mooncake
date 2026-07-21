@@ -137,6 +137,34 @@ pub enum ReplicaStatus {
     Failed = 4,
 }
 
+impl ReplicaStatus {
+    /// Decode a replica-descriptor wire value using the historical fallback.
+    pub fn from_replica_wire(value: i32) -> Self {
+        Self::try_from(value).unwrap_or(Self::Undefined)
+    }
+}
+
+impl TryFrom<i32> for ReplicaStatus {
+    type Error = String;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Undefined),
+            1 => Ok(Self::Allocating),
+            2 => Ok(Self::Written),
+            3 => Ok(Self::Complete),
+            4 => Ok(Self::Failed),
+            _ => Err(format!("unknown ReplicaStatus: {value}")),
+        }
+    }
+}
+
+impl From<ReplicaStatus> for i32 {
+    fn from(value: ReplicaStatus) -> Self {
+        value as Self
+    }
+}
+
 /// Storage medium type for a replica.
 ///
 /// Determines where data physically resides and which transfer path to use.
@@ -145,7 +173,7 @@ pub enum ReplicaStatus {
 ///
 /// 决定数据物理存放位置以及使用哪种传输路径。
 /// 对应 C++ ReplicaType 枚举。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReplicaType {
     /// Regular DRAM-backed storage.
     /// 常规 DRAM 内存存储。
@@ -164,6 +192,20 @@ pub enum ReplicaType {
     All = 4,
 }
 
+impl ReplicaType {
+    /// Decode a concrete replica descriptor using the historical fallback.
+    /// `All` is a query selector, not a concrete storage location, so wire
+    /// value 4 and unknown values both retain the existing Memory fallback.
+    pub fn from_replica_wire(value: i32) -> Self {
+        match Self::try_from(value) {
+            Ok(Self::Disk) => Self::Disk,
+            Ok(Self::LocalDisk) => Self::LocalDisk,
+            Ok(Self::NoFSsd) => Self::NoFSsd,
+            Ok(Self::Memory | Self::All) | Err(_) => Self::Memory,
+        }
+    }
+}
+
 /// Convert from the proto wire format (i32) to the internal enum.
 /// Unknown values fall back to Memory.
 /// 从 proto 线格式 (i32) 转换为内部枚举。未知值回退为 Memory。
@@ -178,6 +220,12 @@ impl TryFrom<i32> for ReplicaType {
             4 => Ok(Self::All),
             _ => Err(format!("unknown ReplicaType: {}", v)),
         }
+    }
+}
+
+impl From<ReplicaType> for i32 {
+    fn from(value: ReplicaType) -> Self {
+        value as Self
     }
 }
 

@@ -1,11 +1,10 @@
 use super::background::ClientBackgroundConfig;
 use super::finalize::{
-    determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary, REPLICA_TYPE_ALL,
-    REPLICA_TYPE_MEMORY, REPLICA_TYPE_NOF_SSD,
+    determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary,
 };
 use super::read::scoped_cache_key;
 use super::{CachedQueryResultResponse, MooncakeClient};
-use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::ffi::c_void;
 use std::time::Duration;
 
@@ -264,7 +263,7 @@ fn finalize_decision_reliable_memory_nof_requires_all_transfers() {
         determine_finalize_decision(&config, &summary),
         ReplicaFinalizeDecision {
             end_type: None,
-            revoke_type: Some(REPLICA_TYPE_ALL),
+            revoke_type: Some(ReplicaType::All),
             success: false,
         }
     );
@@ -287,8 +286,8 @@ fn finalize_decision_flexible_dual_can_keep_one_successful_side() {
     assert_eq!(
         determine_finalize_decision(&config, &memory_only),
         ReplicaFinalizeDecision {
-            end_type: Some(REPLICA_TYPE_MEMORY),
-            revoke_type: Some(REPLICA_TYPE_NOF_SSD),
+            end_type: Some(ReplicaType::Memory),
+            revoke_type: Some(ReplicaType::NoFSsd),
             success: true,
         }
     );
@@ -303,8 +302,8 @@ fn finalize_decision_flexible_dual_can_keep_one_successful_side() {
     assert_eq!(
         determine_finalize_decision(&config, &nof_only),
         ReplicaFinalizeDecision {
-            end_type: Some(REPLICA_TYPE_NOF_SSD),
-            revoke_type: Some(REPLICA_TYPE_MEMORY),
+            end_type: Some(ReplicaType::NoFSsd),
+            revoke_type: Some(ReplicaType::Memory),
             success: true,
         }
     );
