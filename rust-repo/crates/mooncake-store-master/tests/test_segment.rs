@@ -131,6 +131,7 @@ fn test_replica_descriptor_full() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        protocol: "rdma".into(),
     };
 
     assert_eq!(rd.segment_id, sid);
@@ -153,6 +154,7 @@ fn test_replica_descriptor_clone() {
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        protocol: "tcp".into(),
     };
     let cloned = rd.clone();
     assert_eq!(rd.segment_id, cloned.segment_id);
@@ -202,6 +204,7 @@ fn test_object_entry_creation() {
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                protocol: "rdma".into(),
             },
             ReplicaDescriptor {
                 base_addr: 0x100000000,
@@ -214,6 +217,7 @@ fn test_object_entry_creation() {
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                protocol: "tcp".into(),
             },
         ],
         size: 256,

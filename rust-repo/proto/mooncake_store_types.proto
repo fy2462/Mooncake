@@ -60,6 +60,7 @@ message ReplicaDescriptor {
   uint64 object_size = 11;
   Uuid local_disk_client_id = 12;
   uint64 base_addr = 13;  // segment buffer physical address on storage node
+  string protocol = 14;  // memory transport protocol; empty for legacy/non-memory replicas
 }
 
 message ReplicateConfig {

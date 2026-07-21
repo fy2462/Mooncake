@@ -58,6 +58,7 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         object_size: r.size,
         local_disk_client_id: r.holder_client_id.map(uuid_to_proto),
         base_addr: r.base_addr,
+        protocol: r.protocol.clone(),
     }
 }
 
@@ -74,6 +75,7 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
         offset: p.offset,
         size: p.size,
         base_addr: p.base_addr,
+        protocol: p.protocol.clone(),
         status: ReplicaStatus::from_replica_wire(p.status),
         replica_type: ReplicaType::from_replica_wire(p.replica_type),
         holder_client_id: p.holder_client_id.as_ref().map(uuid_from_proto),
@@ -181,6 +183,7 @@ mod tests {
             replica_type,
             size: 17,
             base_addr: 19,
+            protocol: "tcp".to_string(),
             holder_client_id: Some(proto::Uuid { high: 23, low: 29 }),
             ..Default::default()
         }
@@ -237,6 +240,7 @@ mod tests {
             refcnt: 0,
             handle_valid: true,
             base_addr: 59,
+            protocol: "rdma".to_string(),
         };
 
         let wire = replica_to_proto(&replica);
@@ -246,6 +250,7 @@ mod tests {
         assert_eq!(wire.object_size, replica.size);
         assert_eq!(wire.local_disk_client_id, wire.holder_client_id);
         assert_eq!(wire.base_addr, replica.base_addr);
+        assert_eq!(wire.protocol, replica.protocol);
 
         let round_trip = replica_from_proto(&wire);
         assert_eq!(round_trip.segment_id, replica.segment_id);
@@ -256,5 +261,6 @@ mod tests {
         assert_eq!(round_trip.replica_type, replica.replica_type);
         assert_eq!(round_trip.holder_client_id, replica.holder_client_id);
         assert_eq!(round_trip.base_addr, replica.base_addr);
+        assert_eq!(round_trip.protocol, replica.protocol);
     }
 }

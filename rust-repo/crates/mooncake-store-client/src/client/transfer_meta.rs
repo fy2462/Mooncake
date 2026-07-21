@@ -143,6 +143,7 @@ impl MooncakeClient {
                     offset: r.offset,
                     size: r.size,
                     base_addr: r.base_addr,
+                    protocol: r.protocol.clone(),
                     status: mooncake_store_core::ReplicaStatus::from_replica_wire(r.status),
                     replica_type: mooncake_store_core::ReplicaType::from_replica_wire(
                         r.replica_type,

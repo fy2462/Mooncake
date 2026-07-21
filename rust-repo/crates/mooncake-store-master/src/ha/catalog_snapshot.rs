@@ -785,6 +785,7 @@ fn decode_replica(
         refcnt: 0,
         handle_valid: true,
         base_addr,
+        protocol: String::new(),
     }))
 }
 

@@ -234,6 +234,7 @@ fn test_etcd_oplog_value_writes_cpp_outer_json_for_put_end() {
         refcnt: 0,
         handle_valid: true,
         base_addr: 4096,
+        protocol: "rdma".into(),
     };
     let entry = OpLogRecord {
         seq: 12,

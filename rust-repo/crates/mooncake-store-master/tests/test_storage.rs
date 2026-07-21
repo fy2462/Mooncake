@@ -80,6 +80,7 @@ fn make_mem_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDesc
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        protocol: "rdma".into(),
     }
 }
 
@@ -95,6 +96,7 @@ fn make_disk_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDes
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+        protocol: String::new(),
     }
 }
 
@@ -391,6 +393,7 @@ fn test_serialize_replica_status_roundtrip() {
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+        protocol: String::new(),
     };
     assert_eq!(rd.segment_name, "node1:12345");
     assert_eq!(rd.offset, 0x2000);

@@ -287,6 +287,7 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
                     refcnt: 0,
                     handle_valid: true,
                     base_addr: 0x1000,
+                    protocol: "tcp".to_string(),
                 }],
                 size: 128,
                 last_access: now,

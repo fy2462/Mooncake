@@ -225,6 +225,7 @@ fn test_batch_put_end_status_transition() {
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                protocol: "rdma".into(),
             }],
         },
     );

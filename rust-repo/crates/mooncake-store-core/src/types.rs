@@ -351,6 +351,10 @@ pub struct ReplicaDescriptor {
     /// 对应 C++ AllocatedBuffer::Descriptor::buffer_address_。
     #[serde(default)]
     pub base_addr: u64,
+    /// Transport protocol used by a memory replica (for example `rdma` or `tcp`).
+    /// Empty for legacy snapshots and replica types without a memory transport.
+    #[serde(default)]
+    pub protocol: String,
 }
 
 /// Default reference count for a freshly-created replica descriptor.
@@ -382,6 +386,7 @@ impl Clone for ReplicaDescriptor {
             refcnt: 0,
             handle_valid: self.handle_valid,
             base_addr: self.base_addr,
+            protocol: self.protocol.clone(),
         }
     }
 }

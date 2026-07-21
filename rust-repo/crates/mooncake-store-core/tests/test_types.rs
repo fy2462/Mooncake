@@ -222,6 +222,7 @@ fn test_replica_descriptor() {
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
         handle_valid: true,
+        protocol: "rdma".into(),
     };
     assert_eq!(rd.offset, 0x1000);
     assert_eq!(rd.size, 256);
@@ -240,6 +241,7 @@ fn test_replica_descriptor_disk() {
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
         handle_valid: true,
+        protocol: String::new(),
     };
     assert_eq!(rd.replica_type, ReplicaType::Disk);
     assert_eq!(rd.status, ReplicaStatus::Written);
@@ -266,6 +268,7 @@ fn test_replica_descriptor_all_statuses() {
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
             handle_valid: true,
+            protocol: "tcp".into(),
         };
         assert_eq!(rd.status, *status);
     }
@@ -284,12 +287,14 @@ fn test_replica_descriptor_clone() {
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
         handle_valid: true,
+        protocol: "rdma".into(),
     };
     let cloned = rd.clone();
     assert_eq!(rd.segment_id, cloned.segment_id);
     assert_eq!(rd.offset, cloned.offset);
     assert_eq!(rd.status, cloned.status);
     assert_eq!(rd.replica_type, cloned.replica_type);
+    assert_eq!(rd.protocol, cloned.protocol);
 }
 
 #[test]
@@ -306,6 +311,7 @@ fn test_replica_descriptor_serde_roundtrip() {
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
         handle_valid: true,
+        protocol: String::new(),
     };
     let json = serde_json::to_string(&rd).unwrap();
     let restored: ReplicaDescriptor = serde_json::from_str(&json).unwrap();
@@ -313,6 +319,12 @@ fn test_replica_descriptor_serde_roundtrip() {
     assert_eq!(rd.segment_name, restored.segment_name);
     assert_eq!(rd.offset, restored.offset);
     assert_eq!(rd.size, restored.size);
+    assert_eq!(rd.protocol, restored.protocol);
+
+    let mut legacy_json = serde_json::to_value(&rd).unwrap();
+    legacy_json.as_object_mut().unwrap().remove("protocol");
+    let legacy: ReplicaDescriptor = serde_json::from_value(legacy_json).unwrap();
+    assert!(legacy.protocol.is_empty());
     assert_eq!(rd.status, restored.status);
     assert_eq!(rd.replica_type, restored.replica_type);
 }

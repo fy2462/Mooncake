@@ -308,6 +308,7 @@ mod tests {
             refcnt: 0,
             handle_valid: true,
             base_addr: 4096,
+            protocol: "rdma".to_string(),
         };
         let payload = serde_json::json!({
             "op": "put_end",
@@ -397,6 +398,7 @@ mod tests {
             refcnt: 0,
             handle_valid: true,
             base_addr: 0,
+            protocol: String::new(),
         };
         state.replication_tasks.insert(
             "k1".to_string(),

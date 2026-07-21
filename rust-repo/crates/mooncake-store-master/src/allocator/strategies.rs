@@ -365,6 +365,7 @@ impl SegmentAllocator {
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
             base_addr: state.segment.base,
+            protocol: state.segment.protocol.clone(),
         })
     }
 }

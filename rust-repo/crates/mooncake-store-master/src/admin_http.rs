@@ -549,6 +549,7 @@ mod tests {
                         object_size: 2048,
                         local_disk_client_id: Some(client_id),
                         base_addr: 0,
+                        protocol: String::new(),
                     }],
                     lease_ttl_ms: 5000,
                 }),

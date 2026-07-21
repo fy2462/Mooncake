@@ -19,6 +19,7 @@ fn test_single_segment_single_replica() {
     let repls = a.allocate("k", 100, 1, &ReplicateConfig::default());
     assert_eq!(repls.len(), 1);
     assert_eq!(repls[0].segment_name, "n:1");
+    assert_eq!(repls[0].protocol, "tcp");
 }
 
 #[test]

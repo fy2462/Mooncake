@@ -140,6 +140,7 @@ impl MasterServiceImpl {
                 replica_type: ReplicaType::LocalDisk,
                 holder_client_id: Some(client_id),
                 base_addr: 0,
+                protocol: String::new(),
             };
             if let Some(mut object) = self.state.objects.get_mut(&key) {
                 if let Some(existing) = object.replicas.iter_mut().find(|existing| {
