@@ -1,6 +1,6 @@
 use super::{BufferHandle, MooncakeClient};
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------

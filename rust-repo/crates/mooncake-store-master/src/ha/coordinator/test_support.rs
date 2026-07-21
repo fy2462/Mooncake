@@ -1,5 +1,5 @@
-use super::coordinator_k8s::{k8s_backoff_delay, k8s_lease_expired, parse_k8s_lease_connstring};
 use super::HaError;
+use super::coordinator_k8s::{k8s_backoff_delay, k8s_lease_expired, parse_k8s_lease_connstring};
 use k8s_openapi::api::coordination::v1::LeaseSpec;
 use std::time::Duration;
 

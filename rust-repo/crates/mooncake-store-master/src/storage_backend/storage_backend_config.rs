@@ -264,15 +264,18 @@ mod tests {
             .map(|key| (*key, std::env::var(key).ok()))
             .collect();
         for key in BUCKET_ENV_KEYS {
-            std::env::remove_var(key);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(key) };
         }
         let result = f();
         for key in BUCKET_ENV_KEYS {
-            std::env::remove_var(key);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var(key) };
         }
         for (key, value) in saved {
             if let Some(value) = value {
-                std::env::set_var(key, value);
+                // FIXME: Audit that the environment access only happens in single-threaded code.
+                unsafe { std::env::set_var(key, value) };
             }
         }
         result
@@ -293,14 +296,22 @@ mod tests {
     #[test]
     fn bucket_config_prefers_offload_env_names() {
         with_clean_bucket_env(|| {
-            std::env::set_var("MOONCAKE_BUCKET_EVICTION_POLICY", "none");
-            std::env::set_var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE", "10");
-            std::env::set_var("MOONCAKE_BUCKET_SIZE_LIMIT", "20");
-            std::env::set_var("MOONCAKE_BUCKET_KEYS_LIMIT", "30");
-            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY", "lru");
-            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE", "40");
-            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES", "50");
-            std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT", "60");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_EVICTION_POLICY", "none") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE", "10") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_SIZE_LIMIT", "20") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_KEYS_LIMIT", "30") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY", "lru") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE", "40") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES", "50") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT", "60") };
 
             let config = BucketBackendConfig::from_environment();
 
@@ -314,10 +325,14 @@ mod tests {
     #[test]
     fn bucket_config_keeps_legacy_env_fallbacks() {
         with_clean_bucket_env(|| {
-            std::env::set_var("MOONCAKE_BUCKET_EVICTION_POLICY", "none");
-            std::env::set_var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE", "70");
-            std::env::set_var("MOONCAKE_BUCKET_SIZE_LIMIT", "80");
-            std::env::set_var("MOONCAKE_BUCKET_KEYS_LIMIT", "90");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_EVICTION_POLICY", "none") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_MAX_TOTAL_SIZE", "70") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_SIZE_LIMIT", "80") };
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("MOONCAKE_BUCKET_KEYS_LIMIT", "90") };
 
             let config = BucketBackendConfig::from_environment();
 

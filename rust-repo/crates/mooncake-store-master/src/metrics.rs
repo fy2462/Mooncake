@@ -28,10 +28,10 @@
 // 所有指标通过 lazy_static 延迟初始化，并在 register_metrics() 中
 // 显式重新注册，以处理 Prometheus 的重复注册策略。
 
-use crate::admin_http::{admin_router, AdminRuntimeState};
-use axum::{routing::get, Router};
+use crate::admin_http::{AdminRuntimeState, admin_router};
+use axum::{Router, routing::get};
 use lazy_static::lazy_static;
-use prometheus::{register_histogram, Encoder, Histogram, IntCounter, IntGauge, TextEncoder};
+use prometheus::{Encoder, Histogram, IntCounter, IntGauge, TextEncoder, register_histogram};
 use std::net::SocketAddr;
 
 mod batch;
@@ -46,7 +46,7 @@ pub use batch::{
     BATCH_UPSERT_END_REQUESTS,
 };
 pub use cache::{
-    FILE_CACHE_HITS, FILE_CACHE_HIT_BYTES, FILE_CACHE_TOTAL, MEM_CACHE_HITS, MEM_CACHE_HIT_BYTES,
+    FILE_CACHE_HIT_BYTES, FILE_CACHE_HITS, FILE_CACHE_TOTAL, MEM_CACHE_HIT_BYTES, MEM_CACHE_HITS,
     MEM_CACHE_TOTAL, VALID_GETS,
 };
 pub use operations::{

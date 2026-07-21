@@ -317,31 +317,39 @@ fn test_build_runtime_config_applies_offload_tuning() {
 fn test_build_runtime_config_rejects_invalid_offload_tuning() {
     let mut args = base_args();
     args.offloading_queue_limit = 0;
-    assert!(build_runtime_config(&args)
-        .unwrap_err()
-        .to_string()
-        .contains("offloading_queue_limit"));
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("offloading_queue_limit")
+    );
 
     let mut args = base_args();
     args.offloading_queue_limit = 100_000_001;
-    assert!(build_runtime_config(&args)
-        .unwrap_err()
-        .to_string()
-        .contains("offloading_queue_limit"));
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("offloading_queue_limit")
+    );
 
     let mut args = base_args();
     args.offload_cap_ratio = -0.1;
-    assert!(build_runtime_config(&args)
-        .unwrap_err()
-        .to_string()
-        .contains("offload_cap_ratio"));
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("offload_cap_ratio")
+    );
 
     let mut args = base_args();
     args.offload_cap_ratio = 1.5;
-    assert!(build_runtime_config(&args)
-        .unwrap_err()
-        .to_string()
-        .contains("offload_cap_ratio"));
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("offload_cap_ratio")
+    );
 }
 
 #[test]

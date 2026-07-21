@@ -39,17 +39,17 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use self::cachelib::{
-    align_up, allocate_cachelib, generate_cachelib_class_sizes, release_cachelib,
-    CachelibSegmentState,
+    CachelibSegmentState, align_up, allocate_cachelib, generate_cachelib_class_sizes,
+    release_cachelib,
 };
 use self::offset_layout::preferred_segment_names;
 use self::strategies::AllocationPlan;
 use self::types::DEFAULT_CACHELIB_POOL_NAME;
 pub use self::types::{
-    cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
-    AllocationStrategy, CachelibAllocInfo, CachelibAllocationVisit, ClassId, MemoryAllocatorKind,
-    PoolId, SlabReleaseContext, SlabReleaseMode, SsdUsageMetrics, CACHELIB_MIN_ALLOC_SIZE,
-    CACHELIB_SLAB_SIZE,
+    AllocationStrategy, CACHELIB_MIN_ALLOC_SIZE, CACHELIB_SLAB_SIZE, CachelibAllocInfo,
+    CachelibAllocationVisit, ClassId, MemoryAllocatorKind, PoolId, SlabReleaseContext,
+    SlabReleaseMode, SsdUsageMetrics, cachelib_allocation_class_id_for_request,
+    cachelib_allocation_class_size_for_request,
 };
 
 const RANDOM_MAX_RETRY_LIMIT: usize = 100;

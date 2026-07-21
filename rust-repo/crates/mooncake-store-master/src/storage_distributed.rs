@@ -1,5 +1,5 @@
 use crate::hf3fs;
-use libc::{c_char, c_int, c_void, dlclose, dlerror, dlopen, dlsym, RTLD_NOW};
+use libc::{RTLD_NOW, c_char, c_int, c_void, dlclose, dlerror, dlopen, dlsym};
 use std::fs;
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -479,7 +479,9 @@ fn last_dl_error() -> String {
 
 unsafe fn load_symbol<T>(handle: *mut c_void, name: &str) -> StorageResult<T> {
     let name = std::ffi::CString::new(name)?;
-    let symbol = dlsym(handle, name.as_ptr());
+    // SAFETY: the caller guarantees that `handle` is a live `dlopen` handle;
+    // `name` is a valid NUL-terminated C string.
+    let symbol = unsafe { dlsym(handle, name.as_ptr()) };
     if symbol.is_null() {
         return Err(format!(
             "missing hf3fs symbol {}: {}",
@@ -488,7 +490,8 @@ unsafe fn load_symbol<T>(handle: *mut c_void, name: &str) -> StorageResult<T> {
         )
         .into());
     }
-    Ok(std::mem::transmute_copy(&symbol))
+    // SAFETY: each caller selects `T` to match the named C function's ABI.
+    Ok(unsafe { std::mem::transmute_copy(&symbol) })
 }
 
 pub fn create_filesystem_adapter(adapter_type: &str) -> StorageResult<Box<dyn FileSystemAdapter>> {

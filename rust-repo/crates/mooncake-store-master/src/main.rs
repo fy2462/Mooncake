@@ -7,15 +7,15 @@
 //! between `run_standalone` (single-node) or `run_ha_loop` (HA leader/standby loop).
 
 use clap::Parser;
+use mooncake_store_master::MasterServiceImpl;
 use mooncake_store_master::admin_http::AdminRuntimeState;
 use mooncake_store_master::ha::{
-    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type, HABackendSpec,
-    HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle, LeadershipSession,
-    MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    HABackendSpec, HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle,
+    LeadershipSession, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
+    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
 };
 use mooncake_store_master::http_metadata::{bind_metadata_listener, serve_metadata_listener};
 use mooncake_store_master::metrics;
-use mooncake_store_master::MasterServiceImpl;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;

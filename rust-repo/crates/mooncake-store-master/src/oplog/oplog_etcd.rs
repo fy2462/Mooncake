@@ -334,14 +334,13 @@ impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
 }
 
 fn block_on_runtime<F: Future>(future: F) -> F::Output {
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(future))
-    } else {
-        tokio::runtime::Builder::new_current_thread()
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
+        _ => tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("failed to create temporary tokio runtime")
-            .block_on(future)
+            .block_on(future),
     }
 }
 

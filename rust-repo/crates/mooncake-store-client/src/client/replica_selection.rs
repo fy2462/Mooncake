@@ -148,7 +148,7 @@ pub(super) fn select_best_replica<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{select_best_replica, ReplicaSelectionPolicy};
+    use super::{ReplicaSelectionPolicy, select_best_replica};
     use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -326,11 +326,13 @@ mod tests {
         let mut incomplete = memory("incomplete", "rdma");
         incomplete.status = ReplicaStatus::Written;
 
-        assert!(select_best_replica(
-            &[incomplete],
-            &HashSet::new(),
-            &ReplicaSelectionPolicy::builtin(),
-        )
-        .is_none());
+        assert!(
+            select_best_replica(
+                &[incomplete],
+                &HashSet::new(),
+                &ReplicaSelectionPolicy::builtin(),
+            )
+            .is_none()
+        );
     }
 }

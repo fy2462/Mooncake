@@ -1,7 +1,7 @@
 use super::{
-    finalize::{determine_finalize_decision, ReplicaTransferSummary},
-    write::BATCH_STATUS_OBJECT_ALREADY_EXISTS,
     MooncakeClient,
+    finalize::{ReplicaTransferSummary, determine_finalize_decision},
+    write::BATCH_STATUS_OBJECT_ALREADY_EXISTS,
 };
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaType, ReplicateConfig, StoreError};

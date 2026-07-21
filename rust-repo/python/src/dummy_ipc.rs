@@ -1,7 +1,7 @@
 use crate::to_py_err;
 use mooncake_store_client::{
-    DummyIpcChannel, ShmRegisterRequest, INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST,
-    IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE,
+    DummyIpcChannel, INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST, IPC_SHM_REGISTER,
+    SHM_SEG_HOT_CACHE, ShmRegisterRequest,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;

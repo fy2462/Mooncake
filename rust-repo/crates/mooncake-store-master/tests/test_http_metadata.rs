@@ -1,5 +1,5 @@
 use mooncake_store_master::http_metadata::{
-    bind_metadata_listener, MetadataNodeInfo, MetadataState,
+    MetadataNodeInfo, MetadataState, bind_metadata_listener,
 };
 
 #[test]

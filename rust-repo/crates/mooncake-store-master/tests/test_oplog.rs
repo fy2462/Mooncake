@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use mooncake_store_core::ReplicaDescriptor;
 use mooncake_store_master::ha::{HaError, OpLogRecord};
 use mooncake_store_master::oplog::test_support::*;
@@ -76,7 +76,7 @@ fn test_local_fs_flush_and_read() {
     store.append(&make_entry(0)).unwrap();
     store.append(&make_entry(0)).unwrap();
     store.append(&make_entry(0)).unwrap(); // flush triggered for entries 1-2
-                                           // Manually flush remaining buffer so entry 3 is on disk
+    // Manually flush remaining buffer so entry 3 is on disk
     store.flush_durable().unwrap();
 
     let entries = store.read_since(1, 10).unwrap();

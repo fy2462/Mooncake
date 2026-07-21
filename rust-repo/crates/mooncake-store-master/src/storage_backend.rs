@@ -26,7 +26,7 @@
 //   FilePerKey：每个 key 独立文件存储（用于 offload 场景）。
 
 use crate::hf3fs;
-use crate::storage_distributed::{create_filesystem_adapter, FileSystemAdapter};
+use crate::storage_distributed::{FileSystemAdapter, create_filesystem_adapter};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{TaskInfo, TaskStatus, TaskType};
@@ -252,7 +252,7 @@ impl StorageBackend {
         match self.backend_type {
             StorageBackendType::Bucket => return self.batch_offload_bucket(entries),
             StorageBackendType::OffsetAllocator => {
-                return self.batch_offload_offset_allocator(entries)
+                return self.batch_offload_offset_allocator(entries);
             }
             _ => {}
         }
@@ -349,7 +349,7 @@ impl StorageBackend {
             StorageBackendType::Distributed => return self.remove_by_regex_distributed(pattern),
             StorageBackendType::Bucket => return self.remove_by_regex_bucket(pattern),
             StorageBackendType::OffsetAllocator => {
-                return self.remove_by_regex_offset_allocator(pattern)
+                return self.remove_by_regex_offset_allocator(pattern);
             }
             _ => {}
         }

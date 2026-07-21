@@ -34,8 +34,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 
 use super::{
-    finalize::{determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary},
     MooncakeClient,
+    finalize::{ReplicaFinalizeDecision, ReplicaTransferSummary, determine_finalize_decision},
 };
 use crate::client::batch_types::BatchUpsertEntry;
 use crate::proto;
@@ -56,6 +56,11 @@ impl MooncakeClient {
         if keys.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
+        let regions = buffers
+            .iter()
+            .zip(sizes)
+            .map(|(&buffer, &size)| self.resolve_writable_buffer_region(buffer, size))
+            .collect::<StoreResult<Vec<_>>>()?;
 
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
@@ -90,12 +95,7 @@ impl MooncakeClient {
                 ) {
                     continue;
                 }
-                if unsafe {
-                    self.zero_copy_write(replica, buffers[idx], sizes[idx])
-                        .await
-                }
-                .is_err()
-                {
+                if self.zero_copy_write(replica, regions[idx]).await.is_err() {
                     transfer_summary.record_failure(replica.replica_type);
                 } else {
                     transfer_summary.record_success(replica.replica_type);
@@ -368,10 +368,11 @@ impl MooncakeClient {
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
+        let buffer = self.resolve_writable_buffer_region(buffer, size)?;
 
         // Phase 2: zero-copy write to each replica. / 阶段 2：零拷贝写入每个副本。
         for replica in &replicas {
-            if let Err(e) = self.zero_copy_write(replica, buffer, size).await {
+            if let Err(e) = self.zero_copy_write(replica, buffer).await {
                 // On failure: revoke. / 失败时：撤销。
                 // C++ 写失败时调用 PutRevoke 撤销已分配的资源
                 let revoke_req = proto::PutRevokeRequest {

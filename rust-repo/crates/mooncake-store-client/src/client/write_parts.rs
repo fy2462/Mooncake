@@ -1,6 +1,6 @@
 use super::{
-    finalize::{determine_finalize_decision, ReplicaTransferSummary},
     MooncakeClient,
+    finalize::{ReplicaTransferSummary, determine_finalize_decision},
 };
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
@@ -50,6 +50,7 @@ impl MooncakeClient {
             }
         };
         let replicas = self.replicas_from_proto(&response.replicas);
+        let buffer = self.resolve_writable_buffer_region(buffer, size)?;
 
         let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
         let mut first_error = None;
@@ -62,7 +63,7 @@ impl MooncakeClient {
             ) {
                 continue;
             }
-            match self.zero_copy_write(replica, buffer, size).await {
+            match self.zero_copy_write(replica, buffer).await {
                 Ok(()) => transfer_summary.record_success(replica.replica_type),
                 Err(e) => {
                     transfer_summary.record_failure(replica.replica_type);
@@ -207,18 +208,10 @@ impl MooncakeClient {
                     let tgt_offset = replica.base_addr + replica.offset + src_offset as u64;
                     // Copy slice into local_buffer at the correct offset.
                     // 将切片拷贝到 local_buffer 的正确偏移位置。
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            data.as_ptr(),
-                            self.local_buffer[src_offset..].as_ptr() as *mut u8,
-                            data.len(),
-                        );
-                    }
+                    self.local_buffer[src_offset..src_offset + data.len()].copy_from_slice(data);
                     TransferRequest {
                         opcode: Opcode::Write,
-                        source: unsafe {
-                            self.local_buffer.as_ptr().add(src_offset) as *mut c_void
-                        },
+                        source: self.local_buffer[src_offset..].as_mut_ptr() as *mut c_void,
                         target_id: segment_id,
                         target_offset: tgt_offset,
                         length: data.len() as u64,

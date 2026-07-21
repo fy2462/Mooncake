@@ -50,26 +50,26 @@ pub mod types;
 // Re-export all public items to preserve the original `pub mod ha` API surface.
 // 重新导出所有 public 项，以保持原始 `pub mod ha` 的 API 表面。
 pub use catalog_snapshot::{
-    create_catalog_backed_snapshot_provider, CatalogBackedSnapshotProvider,
+    CatalogBackedSnapshotProvider, create_catalog_backed_snapshot_provider,
 };
 pub use coordinator::LeaderCoordinator;
 pub use snapshot::{
-    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
     EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalFileSnapshotObjectStore,
     LocalSnapshotProvider, NoopSnapshotProvider, RedisSnapshotCatalogStore, S3SnapshotObjectStore,
     SnapshotCatalogStore, SnapshotCatalogStoreType, SnapshotDescriptor, SnapshotObjectStore,
-    SnapshotObjectStoreType, SnapshotProvider,
+    SnapshotObjectStoreType, SnapshotProvider, parse_snapshot_catalog_store_type,
+    parse_snapshot_object_store_type,
 };
 pub use standby::{
-    build_standby_runtime_capabilities, map_standby_runtime_state,
     CapabilityDrivenStandbyController, MasterServiceSupervisorConfig, NoopStandbyController,
-    StandbyController, StandbyRuntimeCapabilities,
+    StandbyController, StandbyRuntimeCapabilities, build_standby_runtime_capabilities,
+    map_standby_runtime_state,
 };
 pub use state_machine::StandbyStateMachine;
 pub use supervisor::{LeadershipMonitorHandle, MasterServiceSupervisor};
 pub use types::{
-    parse_ha_backend_type, AcquireLeadershipResult, HABackendSpec, HABackendType, HaError,
-    K8sPodIdentity, LeaderRole, LeadershipHandle, LeadershipSession, MasterRuntimeState,
-    MasterView, OpLogPollResult, OpLogRecord, RuntimeStateCallback, StandbyEvent, StandbyState,
-    StandbySyncStatus, StateTransitionResult,
+    AcquireLeadershipResult, HABackendSpec, HABackendType, HaError, K8sPodIdentity, LeaderRole,
+    LeadershipHandle, LeadershipSession, MasterRuntimeState, MasterView, OpLogPollResult,
+    OpLogRecord, RuntimeStateCallback, StandbyEvent, StandbyState, StandbySyncStatus,
+    StateTransitionResult, parse_ha_backend_type,
 };

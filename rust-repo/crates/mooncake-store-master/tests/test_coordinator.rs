@@ -1,9 +1,9 @@
 use k8s_openapi::api::coordination::v1::LeaseSpec;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+use mooncake_store_master::ha::HaError;
 use mooncake_store_master::ha::coordinator::test_support::{
     k8s_backoff_delay_for_test, k8s_lease_expired_for_test, parse_k8s_lease_connstring_for_test,
 };
-use mooncake_store_master::ha::HaError;
 use std::time::Duration;
 
 #[test]

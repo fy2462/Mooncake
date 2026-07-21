@@ -46,9 +46,10 @@ fn test_cachelib_like_allocator_pool_lifecycle() {
     let main_pool = pool_ids[0];
     assert_eq!(a.pool_name(&seg_id, main_pool).as_deref(), Some("main"));
 
-    assert!(a
-        .shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE)
-        .unwrap());
+    assert!(
+        a.shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE)
+            .unwrap()
+    );
     let extra_pool = a
         .add_pool(&seg_id, "secondary", CACHELIB_SLAB_SIZE)
         .unwrap();
@@ -57,12 +58,14 @@ fn test_cachelib_like_allocator_pool_lifecycle() {
         Some("secondary")
     );
 
-    assert!(a
-        .resize_pools(&seg_id, main_pool, extra_pool, CACHELIB_SLAB_SIZE)
-        .unwrap());
-    assert!(a
-        .shrink_pool(&seg_id, extra_pool, CACHELIB_SLAB_SIZE)
-        .unwrap());
+    assert!(
+        a.resize_pools(&seg_id, main_pool, extra_pool, CACHELIB_SLAB_SIZE)
+            .unwrap()
+    );
+    assert!(
+        a.shrink_pool(&seg_id, extra_pool, CACHELIB_SLAB_SIZE)
+            .unwrap()
+    );
     assert!(a.grow_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE).unwrap());
 
     let pool_ids = a.pool_ids(&seg_id).unwrap();
@@ -96,9 +99,10 @@ fn test_cachelib_like_slab_release_resize_requires_freeing_active_allocations() 
     a.release(&replica);
     a.complete_slab_release(&seg_id, &ctx).unwrap();
 
-    assert!(a
-        .shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE)
-        .unwrap());
+    assert!(
+        a.shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE)
+            .unwrap()
+    );
     let secondary = a
         .add_pool(&seg_id, "secondary", CACHELIB_SLAB_SIZE)
         .unwrap();
@@ -148,9 +152,10 @@ fn test_cachelib_like_pool_over_limit_and_helper_queries() {
     assert_eq!(replica.len(), 1);
     assert_eq!(a.bytes_unreserved(&seg_id), Some(0));
 
-    assert!(a
-        .shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE * 2)
-        .unwrap());
+    assert!(
+        a.shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE * 2)
+            .unwrap()
+    );
     assert_eq!(a.pool_is_over_limit(&seg_id, main_pool), Some(true));
     assert_eq!(a.pools_over_limit(&seg_id).unwrap(), vec![main_pool]);
 }
@@ -163,9 +168,10 @@ fn test_cachelib_like_add_pool_with_ensure_provisionable() {
     a.add_segment(seg, used_u, cid_u);
     let main_pool = a.pool_ids(&seg_id).unwrap()[0];
 
-    assert!(a
-        .shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE * 4)
-        .unwrap());
+    assert!(
+        a.shrink_pool(&seg_id, main_pool, CACHELIB_SLAB_SIZE * 4)
+            .unwrap()
+    );
     let err = a
         .add_pool_with_options(&seg_id, "tiny", CACHELIB_SLAB_SIZE, true)
         .unwrap_err();

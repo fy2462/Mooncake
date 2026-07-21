@@ -1,9 +1,9 @@
 use crate::allocator::{AllocationStrategy, MemoryAllocatorKind};
 use crate::ha::{
-    create_catalog_backed_snapshot_provider, parse_ha_backend_type,
-    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
     CatalogBackedSnapshotProvider, HABackendSpec, HABackendType, HaError, K8sPodIdentity,
     LeaderCoordinator, MasterServiceSupervisor, MasterServiceSupervisorConfig,
+    create_catalog_backed_snapshot_provider, parse_ha_backend_type,
+    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
 };
 use crate::main_args::Args;
 use crate::{MasterRuntimeConfig, MasterServiceImpl};

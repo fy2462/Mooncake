@@ -24,15 +24,17 @@ async fn test_upsert_and_batch_upsert_follow_two_phase_semantics() {
     .unwrap()
     .into_inner();
     assert_eq!(upsert.replicas.len(), 1);
-    assert!(MasterService::get_replica_list(
-        &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "upsert-key".into(),
-            tenant_id: String::new(),
-        }),
-    )
-    .await
-    .is_err());
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "upsert-key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
 
     let end = MasterService::batch_upsert_end(
         &service,
@@ -49,15 +51,17 @@ async fn test_upsert_and_batch_upsert_follow_two_phase_semantics() {
     .unwrap()
     .into_inner();
     assert_eq!(end.statuses, vec![0]);
-    assert!(MasterService::get_replica_list(
-        &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "upsert-key".into(),
-            tenant_id: String::new(),
-        }),
-    )
-    .await
-    .is_ok());
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "upsert-key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_ok()
+    );
 
     MasterService::upsert(
         &service,
@@ -71,15 +75,17 @@ async fn test_upsert_and_batch_upsert_follow_two_phase_semantics() {
     )
     .await
     .unwrap();
-    assert!(MasterService::get_replica_list(
-        &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "upsert-key".into(),
-            tenant_id: String::new(),
-        }),
-    )
-    .await
-    .is_err());
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "upsert-key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
     let same_size_end = MasterService::batch_upsert_end(
         &service,
         Request::new(proto::BatchUpsertEndRequest {

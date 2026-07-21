@@ -54,9 +54,9 @@ use tonic::transport::Channel;
 use tracing;
 
 use super::{RemoteSource, RemoteSourceError, RemoteSourceResult};
-use crate::proto::{self, master_service_client::MasterServiceClient};
 use crate::MissHandler;
 use crate::RemoteSourceConfig;
+use crate::proto::{self, master_service_client::MasterServiceClient};
 
 /// 包装 [`MissHandler`] 增加 Master 协调的分布式未命中处理器。
 /// (Wraps [`MissHandler`] with cross-node coordination via the Master.)

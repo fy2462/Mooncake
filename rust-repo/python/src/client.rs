@@ -89,8 +89,8 @@
 
 use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
-use mooncake_store_client::proto::StorageObjectMetadata;
 use mooncake_store_client::MooncakeClient;
+use mooncake_store_client::proto::StorageObjectMetadata;
 use mooncake_store_client::{LocalStorageBackend, LocalStorageConfig};
 use mooncake_store_core::NoFSegment;
 use parking_lot::Mutex;

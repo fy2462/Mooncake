@@ -59,13 +59,13 @@ pub mod offload;
 pub mod remote_source;
 
 pub use client::{
-    builtin_remote_replica_score, BufferHandle, CachedQueryResultResponse, ClientBackgroundConfig,
-    ClientBackgroundHandle, ClientHttpConfig, MooncakeClient, OffloadTaskItem, PromotionTaskItem,
-    ReplicaScorer, ReplicaSelectionPolicy, SegmentDetail,
+    BufferHandle, CachedQueryResultResponse, ClientBackgroundConfig, ClientBackgroundHandle,
+    ClientHttpConfig, MooncakeClient, OffloadTaskItem, PromotionTaskItem, ReplicaScorer,
+    ReplicaSelectionPolicy, SegmentDetail, builtin_remote_replica_score,
 };
 pub use dummy::{
-    DummyIpcChannel, DummyMemoryPool, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
-    INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST, IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE,
+    DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST,
+    IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
 };
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
@@ -74,12 +74,12 @@ pub use local_storage_backend::{
     OffsetEvictionPolicy,
 };
 pub use remote_source::{
+    RemoteSource,
     config::{RemoteSourceConfig, S3Config},
     distributed::DistributedMissHandler,
     error::{RemoteSourceError, RemoteSourceResult},
     local_fs::LocalFsSource,
     miss_handler::{MissHandler, MissHandlerSnapshot, MissHandlerStats},
-    RemoteSource,
 };
 
 #[cfg(feature = "s3")]

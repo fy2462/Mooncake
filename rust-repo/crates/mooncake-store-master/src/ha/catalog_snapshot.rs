@@ -390,7 +390,7 @@ fn encode_replica(
             return Err(snapshot_error(format!(
                 "unsupported replica type for C++ catalog snapshot write: {:?}",
                 replica.replica_type
-            )))
+            )));
         }
     };
     Ok(Value::Array(vec![

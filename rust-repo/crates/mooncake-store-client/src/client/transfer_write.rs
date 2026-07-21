@@ -1,4 +1,5 @@
 use super::MooncakeClient;
+use super::transfer_local::RegisteredBufferRegion;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
@@ -201,12 +202,13 @@ impl MooncakeClient {
     /// `buffer` must point to at least `size` bytes of valid memory that has
     /// been registered with the TE. / buffer 必须指向至少 size 字节的已向 TE
     /// 注册的有效内存。
-    pub(crate) async unsafe fn zero_copy_write(
+    pub(crate) async fn zero_copy_write(
         &self,
         replica: &ReplicaDescriptor,
-        buffer: *mut c_void,
-        size: usize,
+        buffer: RegisteredBufferRegion,
     ) -> StoreResult<()> {
+        let size = buffer.len();
+        let buffer = buffer.as_mut_ptr();
         tracing::info!(
             target: "te_debug",
             seg_name = %replica.segment_name,

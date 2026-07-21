@@ -5,7 +5,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use super::buffer::{OffloadBatch, OffloadBufferPool};
-use crate::local_storage_backend::{local_storage_key, AttachedLocalStorage};
+use crate::local_storage_backend::{AttachedLocalStorage, local_storage_key};
 use crate::offload_proto::offload_read_service_server::{
     OffloadReadService, OffloadReadServiceServer,
 };

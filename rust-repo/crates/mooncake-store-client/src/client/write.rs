@@ -12,8 +12,8 @@ use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest};
 
 use super::{
-    finalize::{determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary},
     MooncakeClient,
+    finalize::{ReplicaFinalizeDecision, ReplicaTransferSummary, determine_finalize_decision},
 };
 use crate::proto;
 

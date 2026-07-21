@@ -20,26 +20,29 @@ impl MasterServiceImpl {
                 "evict_disk_replica only supports Disk or LocalDisk",
             ));
         }
-        if let Some(mut entry) = self.state.objects.get_mut(&key) {
-            entry.replicas.retain(|r| match target {
-                ReplicaType::Disk => r.replica_type != ReplicaType::Disk,
-                ReplicaType::LocalDisk => {
-                    !(r.replica_type == ReplicaType::LocalDisk
-                        && r.holder_client_id == Some(client_id))
-                }
-                _ => true,
-            });
-            sync_cache_total_accounting(&mut entry);
-            let remove_object = entry.replicas.is_empty();
-            drop(entry);
-            if remove_object {
-                if let Some((_, object)) = self.state.objects.remove(&key) {
-                    self.publish_kv_removed_with_medium(&key, &object, "disk");
-                    account_removed_object_quota(&self.state, &object);
+        match self.state.objects.get_mut(&key) {
+            Some(mut entry) => {
+                entry.replicas.retain(|r| match target {
+                    ReplicaType::Disk => r.replica_type != ReplicaType::Disk,
+                    ReplicaType::LocalDisk => {
+                        !(r.replica_type == ReplicaType::LocalDisk
+                            && r.holder_client_id == Some(client_id))
+                    }
+                    _ => true,
+                });
+                sync_cache_total_accounting(&mut entry);
+                let remove_object = entry.replicas.is_empty();
+                drop(entry);
+                if remove_object {
+                    if let Some((_, object)) = self.state.objects.remove(&key) {
+                        self.publish_kv_removed_with_medium(&key, &object, "disk");
+                        account_removed_object_quota(&self.state, &object);
+                    }
                 }
             }
-        } else {
-            return Err(Status::not_found("key not found"));
+            _ => {
+                return Err(Status::not_found("key not found"));
+            }
         }
         Ok(Response::new(proto::EvictDiskReplicaResponse {}))
     }

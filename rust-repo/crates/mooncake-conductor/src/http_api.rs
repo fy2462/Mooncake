@@ -17,11 +17,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::Json,
     routing::{get, post},
-    Router,
 };
 use serde_json::json;
 use tracing::{debug, info, warn};
@@ -153,7 +153,7 @@ async fn query_handler(
             .indexer
             .cache_hit_compute(&model_ctx, &req.token_ids, instance_id);
         let tenant_map = response.entry(tenant_id).or_insert_with(|| json!({}));
-        if let serde_json::Value::Object(ref mut map) = tenant_map {
+        if let serde_json::Value::Object(map) = tenant_map {
             map.insert(
                 instance_id.clone(),
                 serde_json::to_value(&result).unwrap_or_default(),
@@ -171,7 +171,7 @@ async fn query_handler(
                 let tenant_map = response
                     .entry(tenant_id.clone())
                     .or_insert_with(|| json!({}));
-                if let serde_json::Value::Object(ref mut map) = tenant_map {
+                if let serde_json::Value::Object(map) = tenant_map {
                     map.insert(
                         instance_id.clone(),
                         serde_json::to_value(&result).unwrap_or_default(),

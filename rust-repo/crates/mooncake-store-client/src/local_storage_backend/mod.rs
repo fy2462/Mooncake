@@ -5,12 +5,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use parking_lot::RwLock;
 
 pub use config::{LocalStorageConfig, OffsetAllocatorConfig, OffsetEvictionPolicy};
@@ -867,8 +867,8 @@ unsafe impl Sync for LocalStorageBackend {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn backend_with_available_space_sequence(
         quota: u64,

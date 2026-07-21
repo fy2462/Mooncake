@@ -19,8 +19,8 @@
 // Ported from Go: mooncake-conductor/conductor-ctrl/kvevent/event_manager.go
 // ============================================================================
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use dashmap::DashMap;

@@ -43,8 +43,8 @@ use mooncake_store_core::{NoFSegment, ObjectDataType, ReplicaDescriptor, TaskInf
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 

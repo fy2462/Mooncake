@@ -253,7 +253,7 @@ fn split_nof_key_value(token: &str) -> Option<(&str, &str)> {
 
 #[cfg(feature = "spdk-nof-probe")]
 mod spdk_probe {
-    use super::{parse_nof_transport_spec, NoFTransportKind};
+    use super::{NoFTransportKind, parse_nof_transport_spec};
     use futures_util::task::noop_waker_ref;
     use spdk_io::nvme::{NvmeController, TransportId};
     use spdk_io::{DmaBuf, LogLevel, SpdkEnv, SpdkThread};
@@ -354,8 +354,8 @@ mod spdk_probe {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_nof_probe_target, parse_nof_transport_spec, probe_nof_endpoint,
-        run_nof_probe_command, NoFTransportKind,
+        NoFTransportKind, parse_nof_probe_target, parse_nof_transport_spec, probe_nof_endpoint,
+        run_nof_probe_command,
     };
     use std::time::Duration;
 

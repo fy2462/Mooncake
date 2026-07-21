@@ -38,7 +38,7 @@ pub(crate) mod state;
 mod workers;
 
 use crate::allocator::{
-    MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator, CACHELIB_SLAB_SIZE,
+    CACHELIB_SLAB_SIZE, MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator,
 };
 use crate::count_min_sketch::CountMinSketch;
 use crate::ha::LoadedSnapshot;
@@ -51,7 +51,7 @@ use crate::storage_backend::LocalDiskSnapshotEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use crate::tenant_quota::{TenantQuotaError, TenantQuotaSnapshot, TenantQuotaTable};
 use crate::tenant_quota_policy_store::{
-    load_tenant_quota_policy, save_tenant_quota_policy, TenantQuotaPolicySnapshot,
+    TenantQuotaPolicySnapshot, load_tenant_quota_policy, save_tenant_quota_policy,
 };
 use chrono::Utc;
 use dashmap::DashMap;
@@ -63,8 +63,8 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -658,21 +658,28 @@ impl MasterServiceImpl {
                             )
                         })
                         .collect::<DashMap<_, _>>();
-                    if let Err(e) = backend.save_with_local_disk(
+                    match backend.save_with_local_disk(
                         &state.segments,
                         &state.nof_segments,
                         &state.objects,
                         &state.tasks,
                         &local_disk_segments,
                     ) {
-                        metrics::SNAPSHOT_FAIL_COUNT.inc();
-                        tracing::error!("Failed to save snapshot: {}", e);
-                    } else if let Err(e) = backend.retain_latest_snapshot(retention_count) {
-                        metrics::SNAPSHOT_FAIL_COUNT.inc();
-                        tracing::error!("Failed to retain snapshot history: {}", e);
-                    } else {
-                        metrics::SNAPSHOT_DURATION_MS.set(start.elapsed().as_millis() as i64);
-                        metrics::SNAPSHOT_SUCCESS_COUNT.inc();
+                        Err(e) => {
+                            metrics::SNAPSHOT_FAIL_COUNT.inc();
+                            tracing::error!("Failed to save snapshot: {}", e);
+                        }
+                        _ => match backend.retain_latest_snapshot(retention_count) {
+                            Err(e) => {
+                                metrics::SNAPSHOT_FAIL_COUNT.inc();
+                                tracing::error!("Failed to retain snapshot history: {}", e);
+                            }
+                            _ => {
+                                metrics::SNAPSHOT_DURATION_MS
+                                    .set(start.elapsed().as_millis() as i64);
+                                metrics::SNAPSHOT_SUCCESS_COUNT.inc();
+                            }
+                        },
                     }
                 }
             });

@@ -2,9 +2,9 @@ mod common;
 
 use common::proto_uuid;
 use mooncake_store_core::ReplicaType;
+use mooncake_store_master::MasterServiceImpl;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
-use mooncake_store_master::MasterServiceImpl;
 use tonic::Request;
 use uuid::Uuid;
 
@@ -112,9 +112,11 @@ async fn test_move_end_invalid_source_releases_refcnt_and_keeps_source() {
     )
     .await
     .unwrap();
-    assert!(service
-        .replica_refcnts_for_test(key, ReplicaType::Memory, "")
-        .contains(&1));
+    assert!(
+        service
+            .replica_refcnts_for_test(key, ReplicaType::Memory, "")
+            .contains(&1)
+    );
     assert!(service.set_replica_handle_valid_for_test(key, "move-src:1", "", false));
 
     let err = MasterService::move_end(
@@ -128,10 +130,12 @@ async fn test_move_end_invalid_source_releases_refcnt_and_keeps_source() {
     .await
     .unwrap_err();
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(service
-        .replica_refcnts_for_test(key, ReplicaType::Memory, "")
-        .iter()
-        .all(|refcnt| *refcnt == 0));
+    assert!(
+        service
+            .replica_refcnts_for_test(key, ReplicaType::Memory, "")
+            .iter()
+            .all(|refcnt| *refcnt == 0)
+    );
 
     let replicas = MasterService::get_replica_list(
         &service,
@@ -144,13 +148,19 @@ async fn test_move_end_invalid_source_releases_refcnt_and_keeps_source() {
     .unwrap()
     .into_inner()
     .replicas;
-    assert!(replicas
-        .iter()
-        .any(|replica| replica.segment_name == "move-src:1"));
-    assert!(replicas
-        .iter()
-        .any(|replica| replica.segment_name == "move-keep:1"));
-    assert!(!replicas
-        .iter()
-        .any(|replica| replica.segment_name == "move-dst:1"));
+    assert!(
+        replicas
+            .iter()
+            .any(|replica| replica.segment_name == "move-src:1")
+    );
+    assert!(
+        replicas
+            .iter()
+            .any(|replica| replica.segment_name == "move-keep:1")
+    );
+    assert!(
+        !replicas
+            .iter()
+            .any(|replica| replica.segment_name == "move-dst:1")
+    );
 }

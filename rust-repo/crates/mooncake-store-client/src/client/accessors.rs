@@ -1,6 +1,6 @@
 use super::MooncakeClient;
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::ReplicaDescriptor;
+use mooncake_store_core::error::StoreResult;
 use std::ffi::c_void;
 use uuid::Uuid;
 

@@ -5,8 +5,8 @@
 // C++ equivalent: real_client.cpp Get() / BatchGet() / GetInto()
 // ============================================================================
 
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use std::borrow::Cow;
 use std::ffi::c_void;
 
@@ -167,6 +167,15 @@ impl MooncakeClient {
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<usize> {
+        self.get_into_registered(key, buffer, size).await
+    }
+
+    pub(crate) async fn get_into_registered(
+        &mut self,
+        key: &str,
+        buffer: *mut c_void,
+        size: usize,
+    ) -> StoreResult<usize> {
         let tenant_id = self.tenant_id.clone();
         let replicas = self.fetch_replicas(key).await?;
         let replica = self
@@ -178,18 +187,18 @@ impl MooncakeClient {
                 "buffer too small for key {key}: required={object_size}, available={size}"
             )));
         }
-        self.resolve_writable_buffer_region(buffer, object_size)?;
+        let buffer = self.resolve_writable_buffer_region(buffer, object_size)?;
         if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
             && !self.local_endpoints.read().contains(&replica.segment_name)
         {
             let data = self
                 .read_from_replica_for_tenant(key, &tenant_id, replica)
                 .await?;
-            unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), buffer as *mut u8, data.len());
-            }
+            buffer.copy_from_slice(&data)?;
             return Ok(data.len());
         }
-        self.zero_copy_read(replica, buffer, object_size).await
+        // SAFETY: the caller guarantees the buffer lifetime; its writable
+        // extent was validated above.
+        self.zero_copy_read(replica, buffer).await
     }
 }

@@ -272,40 +272,45 @@ impl MasterServiceImpl {
             .as_ref()
             .map(replica_from_proto)
             .ok_or(Status::invalid_argument("missing replica"))?;
-        if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
-            if replica.replica_type == ReplicaType::LocalDisk {
-                if let Some(existing) = entry.replicas.iter_mut().find(|existing| {
-                    existing.replica_type == ReplicaType::LocalDisk
-                        && existing.holder_client_id == replica.holder_client_id
-                }) {
-                    *existing = replica;
+        match self.state.objects.get_mut(&scoped_key) {
+            Some(mut entry) => {
+                if replica.replica_type == ReplicaType::LocalDisk {
+                    if let Some(existing) = entry.replicas.iter_mut().find(|existing| {
+                        existing.replica_type == ReplicaType::LocalDisk
+                            && existing.holder_client_id == replica.holder_client_id
+                    }) {
+                        *existing = replica;
+                    } else {
+                        entry.replicas.push(replica);
+                    }
                 } else {
                     entry.replicas.push(replica);
                 }
-            } else {
-                entry.replicas.push(replica);
+                sync_cache_total_accounting(&mut entry);
             }
-            sync_cache_total_accounting(&mut entry);
-        } else if replica.replica_type == ReplicaType::LocalDisk {
-            let mut entry = ObjectEntry {
-                size: replica.size,
-                replicas: vec![replica],
-                last_access: SystemTime::now(),
-                hard_pinned: false,
-                data_type: ObjectDataType::Unknown,
-                client_id,
-                put_start_time: None,
-                lease_timeout: None,
-                soft_pin_timeout: None,
-                tenant_id,
-                group_id: String::new(),
-                quota_committed: false,
-                memory_cache_total_accounted: false,
-                disk_cache_total_accounted: false,
-                user_key: req.key.clone(),
-            };
-            sync_cache_total_accounting(&mut entry);
-            self.state.objects.insert(scoped_key.clone(), entry);
+            _ => {
+                if replica.replica_type == ReplicaType::LocalDisk {
+                    let mut entry = ObjectEntry {
+                        size: replica.size,
+                        replicas: vec![replica],
+                        last_access: SystemTime::now(),
+                        hard_pinned: false,
+                        data_type: ObjectDataType::Unknown,
+                        client_id,
+                        put_start_time: None,
+                        lease_timeout: None,
+                        soft_pin_timeout: None,
+                        tenant_id,
+                        group_id: String::new(),
+                        quota_committed: false,
+                        memory_cache_total_accounted: false,
+                        disk_cache_total_accounted: false,
+                        user_key: req.key.clone(),
+                    };
+                    sync_cache_total_accounting(&mut entry);
+                    self.state.objects.insert(scoped_key.clone(), entry);
+                }
+            }
         }
         Ok(Response::new(proto::AddReplicaResponse {}))
     }

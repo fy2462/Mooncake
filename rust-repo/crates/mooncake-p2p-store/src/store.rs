@@ -1,7 +1,7 @@
 use crate::catalog::{Catalog, CatalogEntry};
 use crate::error::P2pStoreError;
 use crate::memory::RegisteredMemory;
-use crate::metadata::{Location, MetadataStore, Payload, PayloadInfo, METADATA_KEY_PREFIX};
+use crate::metadata::{Location, METADATA_KEY_PREFIX, MetadataStore, Payload, PayloadInfo};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use transfer_engine_ffi::TransferEngine;
@@ -209,7 +209,7 @@ impl P2pStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{transport_install_plan, TransportInstallPlan};
+    use super::{TransportInstallPlan, transport_install_plan};
 
     #[test]
     fn transport_plan_uses_tcp_without_matrix_or_env_filter() {

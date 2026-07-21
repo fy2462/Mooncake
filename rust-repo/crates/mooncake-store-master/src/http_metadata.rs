@@ -24,7 +24,7 @@
 // - Simpler operational overhead compared to running etcd cluster.
 //   相比运行 etcd 集群，运维开销更简单。
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{Json, Router, extract::State, routing::get};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;

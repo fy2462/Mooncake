@@ -4,10 +4,10 @@ use mooncake_store_core::{
     TaskType,
 };
 use mooncake_store_master::ha::{
-    create_catalog_backed_snapshot_provider, CatalogBackedSnapshotProvider,
-    EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalFileSnapshotObjectStore,
-    SnapshotCatalogStore, SnapshotCatalogStoreType, SnapshotDescriptor, SnapshotObjectStore,
-    SnapshotObjectStoreType, SnapshotProvider,
+    CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, LoadedSnapshot,
+    LocalFileSnapshotObjectStore, SnapshotCatalogStore, SnapshotCatalogStoreType,
+    SnapshotDescriptor, SnapshotObjectStore, SnapshotObjectStoreType, SnapshotProvider,
+    create_catalog_backed_snapshot_provider,
 };
 use mooncake_store_master::proto::SegmentStatus;
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry, TaskEntry};
@@ -373,18 +373,22 @@ fn test_embedded_catalog_scopes_object_keys_by_cluster_id() {
         catalog.get_snapshot_root(),
         "mooncake_master_snapshot/cluster-a/"
     );
-    assert!(root
-        .path()
-        .join("mooncake_master_snapshot/cluster-a/latest.txt")
-        .exists());
-    assert!(root
-        .path()
-        .join("mooncake_master_snapshot/cluster-a/20260610_120001_002/descriptor.txt")
-        .exists());
-    assert!(!root
-        .path()
-        .join("mooncake_master_snapshot/latest.txt")
-        .exists());
+    assert!(
+        root.path()
+            .join("mooncake_master_snapshot/cluster-a/latest.txt")
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join("mooncake_master_snapshot/cluster-a/20260610_120001_002/descriptor.txt")
+            .exists()
+    );
+    assert!(
+        !root
+            .path()
+            .join("mooncake_master_snapshot/latest.txt")
+            .exists()
+    );
 }
 
 #[test]
@@ -414,18 +418,22 @@ fn test_catalog_provider_factory_publishes_cluster_scoped_snapshot_objects() {
         descriptor.object_prefix,
         "mooncake_master_snapshot/cluster-a/20260610_120003_004/"
     );
-    assert!(root
-        .path()
-        .join("mooncake_master_snapshot/cluster-a/latest.txt")
-        .exists());
-    assert!(root
-        .path()
-        .join("mooncake_master_snapshot/cluster-a/20260610_120003_004/manifest.txt")
-        .exists());
-    assert!(!root
-        .path()
-        .join("mooncake_master_snapshot/20260610_120003_004/manifest.txt")
-        .exists());
+    assert!(
+        root.path()
+            .join("mooncake_master_snapshot/cluster-a/latest.txt")
+            .exists()
+    );
+    assert!(
+        root.path()
+            .join("mooncake_master_snapshot/cluster-a/20260610_120003_004/manifest.txt")
+            .exists()
+    );
+    assert!(
+        !root
+            .path()
+            .join("mooncake_master_snapshot/20260610_120003_004/manifest.txt")
+            .exists()
+    );
 }
 
 #[test]

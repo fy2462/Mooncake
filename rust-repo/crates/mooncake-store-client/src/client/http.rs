@@ -1,12 +1,12 @@
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use parking_lot::RwLock;
 use prometheus::{Encoder, Gauge, Registry, TextEncoder};
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const DEFAULT_CLIENT_HTTP_PORT: u16 = 9300;
 
@@ -162,8 +162,8 @@ async fn metrics_handler(State(snapshot): State<ClientHttpSnapshot>) -> impl Int
 #[cfg(test)]
 mod tests {
     use super::{ClientHttpConfig, ClientHttpServerState, ClientHttpSnapshot};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     async fn get(port: u16, path: &str) -> String {

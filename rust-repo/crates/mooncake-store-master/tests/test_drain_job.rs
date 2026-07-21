@@ -1,6 +1,6 @@
 mod common;
 use common::proto_uuid;
-use mooncake_store_master::{proto::master_service_server::MasterService, MasterServiceImpl};
+use mooncake_store_master::{MasterServiceImpl, proto::master_service_server::MasterService};
 use tonic::Request;
 
 #[tokio::test]

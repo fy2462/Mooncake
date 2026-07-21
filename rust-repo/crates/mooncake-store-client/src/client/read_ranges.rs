@@ -1,7 +1,7 @@
 use super::CachedQueryResultResponse;
 use super::MooncakeClient;
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
@@ -73,7 +73,7 @@ impl MooncakeClient {
         .await
     }
 
-    async unsafe fn get_into_ranges_internal(
+    async fn get_into_ranges_internal(
         &mut self,
         buffers: &[*mut c_void],
         keys: &[Vec<String>],
@@ -154,7 +154,7 @@ impl MooncakeClient {
                         let src_end = src_offsets[buf_idx][key_idx][ri].checked_add(sz)?;
                         let dst = dst_offsets[buf_idx][key_idx][ri];
                         let _dst_end = dst.checked_add(sz)?;
-                        let target = unsafe { buffers[buf_idx].byte_add(dst) };
+                        let target = buffers[buf_idx].wrapping_byte_add(dst);
                         (src_end as u64 <= replica.size
                             && self.resolve_writable_buffer_region(target, sz).is_ok())
                         .then_some(ri)
@@ -187,9 +187,8 @@ impl MooncakeClient {
                         let sz = sizes[buf_idx][key_idx][ri];
                         TransferRequest {
                             opcode: Opcode::Read,
-                            source: unsafe {
-                                buffers[buf_idx].byte_add(dst_offsets[buf_idx][key_idx][ri])
-                            },
+                            source: buffers[buf_idx]
+                                .wrapping_byte_add(dst_offsets[buf_idx][key_idx][ri]),
                             target_id: seg,
                             target_offset: replica.base_addr
                                 + replica.offset

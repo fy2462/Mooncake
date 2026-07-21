@@ -39,7 +39,7 @@
 
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use crate::metrics;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use mooncake_store_core::ReplicaDescriptor;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

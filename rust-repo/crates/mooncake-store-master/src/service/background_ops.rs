@@ -100,19 +100,20 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
     if !inc_refcnt_for_replica(state, key, &source) {
         return;
     }
-    let queued = if let Some(mut local_disk) = state.local_disk_segments.get_mut(&client_id) {
-        if local_disk.enable_offloading
-            && local_disk.offloading_objects.len() < state.runtime_config.offloading_queue_limit
-        {
-            local_disk
-                .offloading_objects
-                .insert(key.to_string(), size as i64);
-            true
-        } else {
-            false
+    let queued = match state.local_disk_segments.get_mut(&client_id) {
+        Some(mut local_disk) => {
+            if local_disk.enable_offloading
+                && local_disk.offloading_objects.len() < state.runtime_config.offloading_queue_limit
+            {
+                local_disk
+                    .offloading_objects
+                    .insert(key.to_string(), size as i64);
+                true
+            } else {
+                false
+            }
         }
-    } else {
-        false
+        _ => false,
     };
     if !queued {
         dec_refcnt_for_replica(state, key, &source);

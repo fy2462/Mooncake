@@ -1,6 +1,6 @@
 use crate::dummy::{
-    DummyIpcChannel, DummyMemoryPool, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
-    INVALID_PHYSICAL_DEVICE_ID,
+    DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, ShmFdRequest, ShmFdResponse,
+    ShmRegisterRequest,
 };
 use std::fs;
 use std::io::{Read, Write};

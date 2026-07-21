@@ -143,56 +143,58 @@ impl GracefulUnmountScheduler {
             condvar: Condvar::new(),
         });
         let worker_inner = inner.clone();
-        let worker = thread::spawn(move || loop {
-            let mut guard = worker_inner.state.lock().expect("scheduler mutex poisoned");
-            // 队列空时无限等待，有新记录加入时被 notify 唤醒
-            // Wait indefinitely when queue is empty; woken by notify on new records
-            while !guard.stopping && guard.queue.is_empty() {
-                guard = worker_inner
-                    .condvar
-                    .wait(guard)
-                    .expect("scheduler condvar wait failed");
-            }
-            if guard.stopping {
-                break;
-            }
-
-            // 计算到下一个到期时间的间隔，带超时等待避免空转
-            // Compute interval to next expiry, wait with timeout to avoid busy-wait
-            let Some(next) = guard.queue.peek().cloned() else {
-                continue;
-            };
-            let now = Instant::now();
-            if next.expire_at > now {
-                let timeout = next.expire_at.saturating_duration_since(now);
-                let (g, timeout_res) = worker_inner
-                    .condvar
-                    .wait_timeout(guard, timeout)
-                    .expect("scheduler condvar timeout failed");
-                guard = g;
+        let worker = thread::spawn(move || {
+            loop {
+                let mut guard = worker_inner.state.lock().expect("scheduler mutex poisoned");
+                // 队列空时无限等待，有新记录加入时被 notify 唤醒
+                // Wait indefinitely when queue is empty; woken by notify on new records
+                while !guard.stopping && guard.queue.is_empty() {
+                    guard = worker_inner
+                        .condvar
+                        .wait(guard)
+                        .expect("scheduler condvar wait failed");
+                }
                 if guard.stopping {
                     break;
                 }
-                if !timeout_res.timed_out() {
-                    continue; // 被新记录提前唤醒，重新检查队列 / Woken early by new record; re-check queue
-                }
-            }
 
-            // 批量收集所有已到期的记录，一次性释放锁后再执行卸载
-            // Batch-collect all expired records, release lock, then execute unmounts
-            let mut expired = Vec::new();
-            let now = Instant::now();
-            while let Some(record) = guard.queue.peek().cloned() {
-                if record.expire_at > now {
-                    break;
+                // 计算到下一个到期时间的间隔，带超时等待避免空转
+                // Compute interval to next expiry, wait with timeout to avoid busy-wait
+                let Some(next) = guard.queue.peek().cloned() else {
+                    continue;
+                };
+                let now = Instant::now();
+                if next.expire_at > now {
+                    let timeout = next.expire_at.saturating_duration_since(now);
+                    let (g, timeout_res) = worker_inner
+                        .condvar
+                        .wait_timeout(guard, timeout)
+                        .expect("scheduler condvar timeout failed");
+                    guard = g;
+                    if guard.stopping {
+                        break;
+                    }
+                    if !timeout_res.timed_out() {
+                        continue; // 被新记录提前唤醒，重新检查队列 / Woken early by new record; re-check queue
+                    }
                 }
-                expired.push(record);
-                guard.queue.pop();
-            }
-            drop(guard); // 尽早释放锁，卸载操作可能耗时 / Release lock early; unmount may take time
 
-            for record in expired {
-                unmount_segment_owned(&state, record.segment_id, record.client_id);
+                // 批量收集所有已到期的记录，一次性释放锁后再执行卸载
+                // Batch-collect all expired records, release lock, then execute unmounts
+                let mut expired = Vec::new();
+                let now = Instant::now();
+                while let Some(record) = guard.queue.peek().cloned() {
+                    if record.expire_at > now {
+                        break;
+                    }
+                    expired.push(record);
+                    guard.queue.pop();
+                }
+                drop(guard); // 尽早释放锁，卸载操作可能耗时 / Release lock early; unmount may take time
+
+                for record in expired {
+                    unmount_segment_owned(&state, record.segment_id, record.client_id);
+                }
             }
         });
         Self {
@@ -243,11 +245,13 @@ impl ProcessingReaper {
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.reaper_interval;
-        let worker = thread::spawn(move || loop {
-            match rx.recv_timeout(interval) {
-                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    reap_expired_background_tasks(&state, Instant::now());
+        let worker = thread::spawn(move || {
+            loop {
+                match rx.recv_timeout(interval) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        reap_expired_background_tasks(&state, Instant::now());
+                    }
                 }
             }
         });
@@ -274,11 +278,13 @@ impl EvictionWorker {
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.eviction_interval;
-        let worker = thread::spawn(move || loop {
-            match rx.recv_timeout(interval) {
-                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let _ = run_automatic_eviction_once(&state);
+        let worker = thread::spawn(move || {
+            loop {
+                match rx.recv_timeout(interval) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let _ = run_automatic_eviction_once(&state);
+                    }
                 }
             }
         });
@@ -361,23 +367,25 @@ impl ClientMonitorWorker {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let interval = state.runtime_config.client_monitor_interval;
         let ttl = state.runtime_config.client_live_ttl;
-        let worker = thread::spawn(move || loop {
-            match rx.recv_timeout(interval) {
-                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    let now = SystemTime::now();
-                    let expired = state
-                        .clients
-                        .iter()
-                        .filter_map(|entry| {
-                            now.duration_since(entry.last_ping)
-                                .ok()
-                                .filter(|elapsed| *elapsed >= ttl)
-                                .map(|_| *entry.key())
-                        })
-                        .collect::<Vec<_>>();
-                    for client_id in expired {
-                        purge_expired_client(&state, &metadata_state, client_id);
+        let worker = thread::spawn(move || {
+            loop {
+                match rx.recv_timeout(interval) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let now = SystemTime::now();
+                        let expired = state
+                            .clients
+                            .iter()
+                            .filter_map(|entry| {
+                                now.duration_since(entry.last_ping)
+                                    .ok()
+                                    .filter(|elapsed| *elapsed >= ttl)
+                                    .map(|_| *entry.key())
+                            })
+                            .collect::<Vec<_>>();
+                        for client_id in expired {
+                            purge_expired_client(&state, &metadata_state, client_id);
+                        }
                     }
                 }
             }
@@ -417,11 +425,13 @@ pub(crate) struct DrainWorker {
 impl DrainWorker {
     pub(crate) fn new(state: Arc<MasterState>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let worker = thread::spawn(move || loop {
-            match rx.recv_timeout(Duration::from_millis(500)) {
-                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    crate::service::background_ops::process_drain_jobs(&state);
+        let worker = thread::spawn(move || {
+            loop {
+                match rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        crate::service::background_ops::process_drain_jobs(&state);
+                    }
                 }
             }
         });

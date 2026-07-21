@@ -1,7 +1,7 @@
 use super::coordinator_common::{clear_active_owner_token_if_matches, validate_session};
 use super::*;
 use crate::ha::types::K8sPodIdentity;
-use futures_util::{pin_mut, StreamExt};
+use futures_util::{StreamExt, pin_mut};
 use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
 use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
@@ -434,7 +434,7 @@ pub(super) async fn wait_for_k8s_view_change(
         Err(e) => {
             return Err(HaError::InvalidBackend(format!(
                 "k8s get lease for watch: {e}"
-            )))
+            )));
         }
     };
 

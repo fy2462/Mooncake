@@ -18,8 +18,8 @@
 // ReadFromReplica, local memcpy paths)
 // ============================================================================
 
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use transfer_engine_ffi::{BatchId, TransferStatusEnum};
 
 use super::MooncakeClient;

@@ -1,6 +1,6 @@
 use super::{OffsetAllocatorConfig, OffsetEvictionPolicy};
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};

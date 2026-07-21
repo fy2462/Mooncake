@@ -18,8 +18,8 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::batch_types::{BatchPutStartResult, BatchUpsertEntry};
 use super::MooncakeClient;
+use super::batch_types::{BatchPutStartResult, BatchUpsertEntry};
 use crate::proto;
 
 impl MooncakeClient {
@@ -399,13 +399,11 @@ impl MooncakeClient {
                 } else {
                     Vec::new()
                 };
-                let status = response.statuses.get(idx).copied().unwrap_or_else(|| {
-                    if key_replicas.is_empty() {
-                        -6
-                    } else {
-                        0
-                    }
-                });
+                let status = response
+                    .statuses
+                    .get(idx)
+                    .copied()
+                    .unwrap_or_else(|| if key_replicas.is_empty() { -6 } else { 0 });
                 BatchPutStartResult {
                     key: key.clone(),
                     status,

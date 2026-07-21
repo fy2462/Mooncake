@@ -1,5 +1,5 @@
-use super::storage::PromotionTaskItem;
 use super::MooncakeClient;
+use super::storage::PromotionTaskItem;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};

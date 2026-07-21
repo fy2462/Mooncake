@@ -92,8 +92,8 @@ static TRACING_INIT: OnceLock<()> = OnceLock::new();
 #[pyfunction]
 fn enable_te_debug_tracing() {
     TRACING_INIT.get_or_init(|| {
-        use tracing_subscriber::fmt::format::FmtSpan;
         use tracing_subscriber::EnvFilter;
+        use tracing_subscriber::fmt::format::FmtSpan;
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_target(true)

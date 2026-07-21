@@ -129,14 +129,18 @@ async fn test_batch_put_start_supports_nof_replicas() {
     assert_eq!(response.results[0].status, 0);
     assert_eq!(response.replicas.len(), 2);
     assert_eq!(response.results[0].replicas.len(), 2);
-    assert!(response.results[0]
-        .replicas
-        .iter()
-        .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32));
-    assert!(response.results[0]
-        .replicas
-        .iter()
-        .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32));
+    assert!(
+        response.results[0]
+            .replicas
+            .iter()
+            .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+    );
+    assert!(
+        response.results[0]
+            .replicas
+            .iter()
+            .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::NofSsd as i32)
+    );
 }
 
 #[tokio::test]

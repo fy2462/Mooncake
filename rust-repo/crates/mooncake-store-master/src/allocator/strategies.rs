@@ -1,7 +1,7 @@
 use super::*;
+use rand::Rng;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use rand::Rng;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};

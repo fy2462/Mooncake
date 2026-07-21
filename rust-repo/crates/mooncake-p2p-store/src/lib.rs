@@ -75,5 +75,5 @@ mod replica;
 pub mod store;
 
 pub use error::P2pStoreError;
-pub use metadata::{Location, MetadataStore, Payload, PayloadInfo, Shard, METADATA_KEY_PREFIX};
-pub use store::{Buffer, P2pStore, MAX_CHUNK_SIZE};
+pub use metadata::{Location, METADATA_KEY_PREFIX, MetadataStore, Payload, PayloadInfo, Shard};
+pub use store::{Buffer, MAX_CHUNK_SIZE, P2pStore};

@@ -136,7 +136,7 @@ impl PrefixCacheTable {
         if env_seed != -1 {
             env_seed as u64
         } else {
-            rand::thread_rng().gen()
+            rand::thread_rng().r#gen()
         }
     }
     fn get_context_data(&self, model_context: &ModelContext) {

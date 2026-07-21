@@ -1,4 +1,4 @@
-use mooncake_p2p_store::{Location, MetadataStore, Payload, Shard, METADATA_KEY_PREFIX};
+use mooncake_p2p_store::{Location, METADATA_KEY_PREFIX, MetadataStore, Payload, Shard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unique_name(prefix: &str) -> String {

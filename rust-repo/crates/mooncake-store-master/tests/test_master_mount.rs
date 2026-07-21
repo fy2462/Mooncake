@@ -1,4 +1,4 @@
-use mooncake_store_master::allocator::{MemoryAllocatorKind, CACHELIB_SLAB_SIZE};
+use mooncake_store_master::allocator::{CACHELIB_SLAB_SIZE, MemoryAllocatorKind};
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
@@ -400,10 +400,12 @@ async fn test_graceful_unmount_segment_removes_after_delay() {
             .unwrap()
             .into_inner();
 
-    assert!(!segments
-        .segments
-        .iter()
-        .any(|segment| segment == "host-g:3333"));
+    assert!(
+        !segments
+            .segments
+            .iter()
+            .any(|segment| segment == "host-g:3333")
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
-use super::storage::OffloadTaskItem;
 use super::MooncakeClient;
+use super::storage::OffloadTaskItem;
 use crate::proto;
 use mooncake_store_core::error::StoreResult;
 use std::collections::HashMap;

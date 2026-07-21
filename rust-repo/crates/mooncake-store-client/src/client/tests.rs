@@ -1,7 +1,7 @@
 use super::background::ClientBackgroundConfig;
 use super::config::ClientConfig;
 use super::finalize::{
-    determine_finalize_decision, ReplicaFinalizeDecision, ReplicaTransferSummary,
+    ReplicaFinalizeDecision, ReplicaTransferSummary, determine_finalize_decision,
 };
 use super::read::scoped_cache_key;
 use super::{CachedQueryResultResponse, ClientHttpConfig, MooncakeClient};

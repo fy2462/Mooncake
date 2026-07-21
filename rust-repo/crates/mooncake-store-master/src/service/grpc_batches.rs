@@ -382,45 +382,46 @@ impl MasterServiceImpl {
                 if self.state.replication_tasks.contains_key(&key) {
                     return BatchStatus::HasReplicationTask.into();
                 }
-                if let Some(mut object) = self.state.objects.get_mut(&key) {
-                    if let Some(cid) = client_id {
-                        if object.client_id != cid {
-                            return BatchStatus::IllegalClient.into();
+                match self.state.objects.get_mut(&key) {
+                    Some(mut object) => {
+                        if let Some(cid) = client_id {
+                            if object.client_id != cid {
+                                return BatchStatus::IllegalClient.into();
+                            }
                         }
-                    }
-                    let has_matching = object
-                        .replicas
-                        .iter()
-                        .any(|replica| Self::put_revoke_matches_target(replica, target));
-                    let has_non_complete_matching = object.replicas.iter().any(|replica| {
-                        Self::put_revoke_matches_target(replica, target)
-                            && replica.status != ReplicaStatus::Complete
-                    });
-                    if has_matching && !has_non_complete_matching {
-                        return BatchStatus::InvalidState.into();
-                    }
-                    let mut removed = Vec::new();
-                    object.replicas.retain(|replica| {
-                        let matched = Self::put_revoke_matches_target(replica, target)
-                            && replica.status != ReplicaStatus::Complete;
-                        if matched {
-                            removed.push(replica.clone());
+                        let has_matching = object
+                            .replicas
+                            .iter()
+                            .any(|replica| Self::put_revoke_matches_target(replica, target));
+                        let has_non_complete_matching = object.replicas.iter().any(|replica| {
+                            Self::put_revoke_matches_target(replica, target)
+                                && replica.status != ReplicaStatus::Complete
+                        });
+                        if has_matching && !has_non_complete_matching {
+                            return BatchStatus::InvalidState.into();
                         }
-                        !matched
-                    });
-                    let remove_object = object.replicas.is_empty();
-                    drop(object);
-                    release_object_replicas(&self.state, &key, &removed);
-                    if remove_object {
-                        if let Some((_, removed_object)) = self.state.objects.remove(&key) {
-                            account_removed_object_quota(&self.state, &removed_object);
+                        let mut removed = Vec::new();
+                        object.replicas.retain(|replica| {
+                            let matched = Self::put_revoke_matches_target(replica, target)
+                                && replica.status != ReplicaStatus::Complete;
+                            if matched {
+                                removed.push(replica.clone());
+                            }
+                            !matched
+                        });
+                        let remove_object = object.replicas.is_empty();
+                        drop(object);
+                        release_object_replicas(&self.state, &key, &removed);
+                        if remove_object {
+                            if let Some((_, removed_object)) = self.state.objects.remove(&key) {
+                                account_removed_object_quota(&self.state, &removed_object);
+                            }
+                            self.state.processing_keys.remove(&key);
+                            self.oplog_manager.lock().record_put_revoke(&key);
                         }
-                        self.state.processing_keys.remove(&key);
-                        self.oplog_manager.lock().record_put_revoke(&key);
+                        BatchStatus::Success.into()
                     }
-                    BatchStatus::Success.into()
-                } else {
-                    BatchStatus::KeyNotFound.into()
+                    _ => BatchStatus::KeyNotFound.into(),
                 }
             })
             .collect();

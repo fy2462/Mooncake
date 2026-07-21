@@ -1,6 +1,6 @@
-use super::{read::scoped_cache_key, MooncakeClient};
-use mooncake_store_core::error::StoreResult;
+use super::{MooncakeClient, read::scoped_cache_key};
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use std::ffi::c_void;
 use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
 
@@ -131,7 +131,7 @@ impl MooncakeClient {
         }
         let mut results = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
-            match self.get_into(key, buffers[i], sizes[i]).await {
+            match self.get_into_registered(key, buffers[i], sizes[i]).await {
                 Ok(n) => results.push(n as i64),
                 Err(_) => results.push(-1), // per-key error tolerance / 按 key 容错
             }

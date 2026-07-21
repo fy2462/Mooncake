@@ -1,10 +1,10 @@
+use super::MooncakeClient;
 use super::buffer::OwnedBuffer;
 use super::config::ClientConfig;
 use super::http::{ClientHttpConfig, ClientHttpServerState, ClientHttpSnapshot};
-use super::MooncakeClient;
 use crate::proto;
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;

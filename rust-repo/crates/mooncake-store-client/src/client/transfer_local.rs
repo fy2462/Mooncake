@@ -3,18 +3,63 @@ use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
 
+/// A Store-validated region of memory registered with the Transfer Engine.
+///
+/// The fields are private so data-plane operations cannot be invoked with an
+/// arbitrary raw pointer. The unsafe registration API establishes the memory
+/// lifetime invariant; region resolution enforces bounds for each operation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RegisteredBufferRegion {
+    address: usize,
+    len: usize,
+}
+
+impl RegisteredBufferRegion {
+    pub(crate) fn as_mut_ptr(self) -> *mut c_void {
+        self.address as *mut c_void
+    }
+
+    pub(crate) fn len(self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn copy_from_slice(self, source: &[u8]) -> StoreResult<()> {
+        if source.len() > self.len {
+            return Err(StoreError::InvalidParams(format!(
+                "source length {} exceeds registered region length {}",
+                source.len(),
+                self.len
+            )));
+        }
+        // SAFETY: region construction proves the destination is Store-managed
+        // writable memory of `self.len` bytes, and the bounds check above
+        // limits the copy to that extent.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                source.as_ptr(),
+                self.as_mut_ptr() as *mut u8,
+                source.len(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl MooncakeClient {
     pub(crate) fn resolve_writable_buffer_region(
         &self,
         buffer: *mut c_void,
         requested_size: usize,
-    ) -> StoreResult<usize> {
+    ) -> StoreResult<RegisteredBufferRegion> {
         let target = buffer as usize;
         for (&base, &(size, _)) in self.registered_buffers.read().iter() {
             if target >= base {
                 let offset = target - base;
                 if offset < size && offset.saturating_add(requested_size) <= size {
-                    return Ok(offset);
+                    return Ok(RegisteredBufferRegion {
+                        address: target,
+                        len: requested_size,
+                    });
                 }
             }
         }
@@ -25,7 +70,10 @@ impl MooncakeClient {
             if offset < self.local_buffer.len()
                 && offset.saturating_add(requested_size) <= self.local_buffer.len()
             {
-                return Ok(offset);
+                return Ok(RegisteredBufferRegion {
+                    address: target,
+                    len: requested_size,
+                });
             }
         }
 
@@ -167,5 +215,37 @@ impl MooncakeClient {
         }
         self.registered_buffers.write().remove(&(buffer as usize));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod registered_buffer_region_tests {
+    use super::*;
+
+    #[test]
+    fn copy_from_slice_stays_within_validated_region() {
+        let mut destination = [0_u8; 4];
+        let region = RegisteredBufferRegion {
+            address: destination.as_mut_ptr() as usize,
+            len: destination.len(),
+        };
+
+        region.copy_from_slice(&[1, 2, 3, 4]).unwrap();
+
+        assert_eq!(destination, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn copy_from_slice_rejects_oversized_source() {
+        let mut destination = [0_u8; 2];
+        let region = RegisteredBufferRegion {
+            address: destination.as_mut_ptr() as usize,
+            len: destination.len(),
+        };
+
+        let error = region.copy_from_slice(&[1, 2, 3]).unwrap_err();
+
+        assert!(matches!(error, StoreError::InvalidParams(_)));
+        assert_eq!(destination, [0, 0]);
     }
 }

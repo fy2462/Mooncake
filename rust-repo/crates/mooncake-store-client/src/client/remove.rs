@@ -14,8 +14,8 @@
 
 use mooncake_store_core::error::StoreResult;
 
-use super::read::scoped_cache_key;
 use super::MooncakeClient;
+use super::read::scoped_cache_key;
 use crate::local_storage_backend::AttachedLocalStorage;
 use crate::proto;
 

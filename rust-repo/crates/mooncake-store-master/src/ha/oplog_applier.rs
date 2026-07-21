@@ -6,15 +6,15 @@
 //! to the shared MasterState.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
 
 use crate::ha::types::OpLogRecord;
-use crate::oplog::{decode_record_payload_value, OpLogStore};
+use crate::oplog::{OpLogStore, decode_record_payload_value};
 use crate::service::helpers::release_object_replicas;
 use crate::service::state::{MasterState, ObjectEntry};
 use crate::service::sync_cache_total_accounting;
@@ -153,43 +153,50 @@ impl OpLogApplier {
                 let size = v["size"].as_u64().unwrap_or(0);
                 // PutEnd: mark Allocating replicas as Complete.
                 // The actual size is recorded on the object entry.
-                if let Some(mut entry) = state.objects.get_mut(key) {
-                    for replica in &mut entry.replicas {
-                        if replica.status == mooncake_store_core::ReplicaStatus::Allocating {
-                            replica.status = mooncake_store_core::ReplicaStatus::Complete;
+                match state.objects.get_mut(key) {
+                    Some(mut entry) => {
+                        for replica in &mut entry.replicas {
+                            if replica.status == mooncake_store_core::ReplicaStatus::Allocating {
+                                replica.status = mooncake_store_core::ReplicaStatus::Complete;
+                            }
+                        }
+                        entry.size = entry.size.max(size);
+                        sync_cache_total_accounting(&mut entry);
+                    }
+                    _ => {
+                        if let Some(replicas_value) = v.get("replicas") {
+                            let Ok(replicas) = serde_json::from_value(replicas_value.clone())
+                            else {
+                                return false;
+                            };
+                            let client_id = v["client_id"]
+                                .as_str()
+                                .and_then(|id| Uuid::parse_str(id).ok())
+                                .unwrap_or_else(Uuid::nil);
+                            let tenant_id =
+                                v["tenant_id"].as_str().unwrap_or("default").to_string();
+                            let user_key = v["user_key"].as_str().unwrap_or(key).to_string();
+                            let mut object = ObjectEntry {
+                                replicas,
+                                size,
+                                last_access: SystemTime::now(),
+                                hard_pinned: false,
+                                data_type: mooncake_store_core::ObjectDataType::General,
+                                client_id,
+                                put_start_time: None,
+                                lease_timeout: None,
+                                soft_pin_timeout: None,
+                                tenant_id,
+                                group_id: v["group_id"].as_str().unwrap_or_default().to_string(),
+                                quota_committed: true,
+                                memory_cache_total_accounted: false,
+                                disk_cache_total_accounted: false,
+                                user_key,
+                            };
+                            sync_cache_total_accounting(&mut object);
+                            state.objects.insert(key.to_string(), object);
                         }
                     }
-                    entry.size = entry.size.max(size);
-                    sync_cache_total_accounting(&mut entry);
-                } else if let Some(replicas_value) = v.get("replicas") {
-                    let Ok(replicas) = serde_json::from_value(replicas_value.clone()) else {
-                        return false;
-                    };
-                    let client_id = v["client_id"]
-                        .as_str()
-                        .and_then(|id| Uuid::parse_str(id).ok())
-                        .unwrap_or_else(Uuid::nil);
-                    let tenant_id = v["tenant_id"].as_str().unwrap_or("default").to_string();
-                    let user_key = v["user_key"].as_str().unwrap_or(key).to_string();
-                    let mut object = ObjectEntry {
-                        replicas,
-                        size,
-                        last_access: SystemTime::now(),
-                        hard_pinned: false,
-                        data_type: mooncake_store_core::ObjectDataType::General,
-                        client_id,
-                        put_start_time: None,
-                        lease_timeout: None,
-                        soft_pin_timeout: None,
-                        tenant_id,
-                        group_id: v["group_id"].as_str().unwrap_or_default().to_string(),
-                        quota_committed: true,
-                        memory_cache_total_accounted: false,
-                        disk_cache_total_accounted: false,
-                        user_key,
-                    };
-                    sync_cache_total_accounting(&mut object);
-                    state.objects.insert(key.to_string(), object);
                 }
                 state.processing_keys.remove(key);
                 true
@@ -239,8 +246,8 @@ mod tests {
     use crate::ha::OpLogRecord;
     use dashmap::DashMap;
     use parking_lot::RwLock;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     fn make_state() -> Arc<MasterState> {
         Arc::new(MasterState {

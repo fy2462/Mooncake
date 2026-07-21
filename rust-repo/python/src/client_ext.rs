@@ -1,4 +1,4 @@
-use crate::client::{get_buffer_ptr, replicas_to_py, take_client, PythonMooncakeClient};
+use crate::client::{PythonMooncakeClient, get_buffer_ptr, replicas_to_py, take_client};
 use crate::to_py_err;
 use mooncake_store_client::CachedQueryResultResponse;
 use pyo3::prelude::*;

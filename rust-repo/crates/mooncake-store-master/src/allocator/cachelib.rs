@@ -32,9 +32,9 @@ mod cachelib_pools;
 mod cachelib_slab;
 
 use super::types::{
-    CachelibAllocInfo, CachelibAllocationVisit, ClassId, PoolId, SlabReleaseContext,
-    SlabReleaseMode, CACHELIB_ALIGNMENT, CACHELIB_CLASS_MIN_SIZE, CACHELIB_MAX_ALLOC_SIZE,
-    CACHELIB_MIN_ALLOC_SIZE, CACHELIB_SLAB_SIZE,
+    CACHELIB_ALIGNMENT, CACHELIB_CLASS_MIN_SIZE, CACHELIB_MAX_ALLOC_SIZE, CACHELIB_MIN_ALLOC_SIZE,
+    CACHELIB_SLAB_SIZE, CachelibAllocInfo, CachelibAllocationVisit, ClassId, PoolId,
+    SlabReleaseContext, SlabReleaseMode,
 };
 
 // =============================================================================

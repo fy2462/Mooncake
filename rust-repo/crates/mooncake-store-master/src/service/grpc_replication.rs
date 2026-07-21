@@ -382,46 +382,49 @@ impl MasterServiceImpl {
         let mut source_invalid = false;
         // C++ master_service.cpp:1985-1994 CopyEnd 时检查 source replica 的 handle 有效性
         // 如果 source handle 已失效，中止操作并撤销 targets
-        if let Some(mut object) = self.state.objects.get_mut(&key) {
-            // C++ master_service.cpp:1985-1988 检查 source replica 是否 still present 且 handle_valid
-            match object
-                .replicas
-                .iter()
-                .find(|r| same_replica(r, &task.source))
-            {
-                Some(source_replica) => {
-                    if !source_replica.handle_valid
-                        || source_replica.status != ReplicaStatus::Complete
-                    {
+        match self.state.objects.get_mut(&key) {
+            Some(mut object) => {
+                // C++ master_service.cpp:1985-1988 检查 source replica 是否 still present 且 handle_valid
+                match object
+                    .replicas
+                    .iter()
+                    .find(|r| same_replica(r, &task.source))
+                {
+                    Some(source_replica) => {
+                        if !source_replica.handle_valid
+                            || source_replica.status != ReplicaStatus::Complete
+                        {
+                            source_invalid = true;
+                        }
+                    }
+                    None => {
+                        all_present = false;
                         source_invalid = true;
                     }
                 }
-                None => {
-                    all_present = false;
-                    source_invalid = true;
-                }
-            }
-            if !source_invalid {
-                for target in &task.targets {
-                    match object
-                        .replicas
-                        .iter_mut()
-                        .find(|replica| same_replica(replica, target))
-                    {
-                        // C++ master_service.cpp:1990-1994 检查每个 target 的 handle_valid
-                        // handle 无效的 target 不标记为 Complete，保持在当前状态
-                        Some(replica) => {
-                            if replica.handle_valid {
-                                replica.status = ReplicaStatus::Complete;
+                if !source_invalid {
+                    for target in &task.targets {
+                        match object
+                            .replicas
+                            .iter_mut()
+                            .find(|replica| same_replica(replica, target))
+                        {
+                            // C++ master_service.cpp:1990-1994 检查每个 target 的 handle_valid
+                            // handle 无效的 target 不标记为 Complete，保持在当前状态
+                            Some(replica) => {
+                                if replica.handle_valid {
+                                    replica.status = ReplicaStatus::Complete;
+                                }
                             }
+                            None => all_present = false,
                         }
-                        None => all_present = false,
                     }
                 }
+                sync_cache_total_accounting(&mut object);
             }
-            sync_cache_total_accounting(&mut object);
-        } else {
-            all_present = false;
+            _ => {
+                all_present = false;
+            }
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&key) {
@@ -638,47 +641,51 @@ impl MasterServiceImpl {
         let mut source_invalid = false;
         let mut source_present = false;
         let remove_object;
-        if let Some(mut object) = self.state.objects.get_mut(&key) {
-            // C++ master_service.cpp:2238-2240 检查 source replica handle 是否仍然有效
-            if let Some(source_replica) = object
-                .replicas
-                .iter()
-                .find(|r| same_replica(r, &task.source))
-            {
-                source_present = true;
-                if !source_replica.handle_valid || source_replica.status != ReplicaStatus::Complete
+        match self.state.objects.get_mut(&key) {
+            Some(mut object) => {
+                // C++ master_service.cpp:2238-2240 检查 source replica handle 是否仍然有效
+                if let Some(source_replica) = object
+                    .replicas
+                    .iter()
+                    .find(|r| same_replica(r, &task.source))
                 {
+                    source_present = true;
+                    if !source_replica.handle_valid
+                        || source_replica.status != ReplicaStatus::Complete
+                    {
+                        source_invalid = true;
+                    }
+                } else {
                     source_invalid = true;
                 }
-            } else {
-                source_invalid = true;
-            }
-            if !source_invalid {
-                for target in &task.targets {
-                    if let Some(replica) =
-                        object.replicas.iter_mut().find(|r| same_replica(r, target))
-                    {
-                        // C++ master_service.cpp:2240-2243 检查 target handle_valid
-                        // handle 无效的 target 不标记为 Complete
-                        if replica.handle_valid {
-                            replica.status = ReplicaStatus::Complete;
+                if !source_invalid {
+                    for target in &task.targets {
+                        if let Some(replica) =
+                            object.replicas.iter_mut().find(|r| same_replica(r, target))
+                        {
+                            // C++ master_service.cpp:2240-2243 检查 target handle_valid
+                            // handle 无效的 target 不标记为 Complete
+                            if replica.handle_valid {
+                                replica.status = ReplicaStatus::Complete;
+                            }
                         }
                     }
-                }
-                let mut idx = 0;
-                while idx < object.replicas.len() {
-                    if same_replica(&object.replicas[idx], &task.source) {
-                        object.replicas[idx].dec_refcnt();
-                        removed_source.push(object.replicas.remove(idx));
-                    } else {
-                        idx += 1;
+                    let mut idx = 0;
+                    while idx < object.replicas.len() {
+                        if same_replica(&object.replicas[idx], &task.source) {
+                            object.replicas[idx].dec_refcnt();
+                            removed_source.push(object.replicas.remove(idx));
+                        } else {
+                            idx += 1;
+                        }
                     }
+                    sync_cache_total_accounting(&mut object);
                 }
-                sync_cache_total_accounting(&mut object);
+                remove_object = object.replicas.is_empty();
             }
-            remove_object = object.replicas.is_empty();
-        } else {
-            return Err(Status::not_found("key not found"));
+            _ => {
+                return Err(Status::not_found("key not found"));
+            }
         }
 
         if source_invalid {

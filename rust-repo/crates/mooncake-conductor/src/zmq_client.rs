@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
-use zmq::{Context, SocketType, POLLIN};
+use zmq::{Context, POLLIN, SocketType};
 
 use crate::msg_decoder::{decode_mooncake_event_batch, decode_vllm_event_batch};
 use crate::types::*;

@@ -1,6 +1,6 @@
 mod common;
 
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use common::proto_uuid;
 use mooncake_store_master::oplog::{InMemoryOpLog, OpLogManager};
 use mooncake_store_master::proto;
@@ -531,8 +531,10 @@ async fn test_batch_put_start_rejects_mismatched_group_ids_per_key() {
     assert_eq!(response.results[0].key, "batch-group-a");
     assert_eq!(response.results[1].key, "batch-group-b");
     assert!(response.results.iter().all(|result| result.status < 0));
-    assert!(response
-        .results
-        .iter()
-        .all(|result| result.replicas.is_empty()));
+    assert!(
+        response
+            .results
+            .iter()
+            .all(|result| result.replicas.is_empty())
+    );
 }

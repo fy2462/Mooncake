@@ -7,8 +7,8 @@ use crate::{
     LocalHotCache, MissHandler, MissHandlerSnapshot, MissHandlerStats, RemoteSource,
     RemoteSourceConfig,
 };
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use std::sync::Arc;
 
 impl MooncakeClient {

@@ -81,7 +81,7 @@ pub use transfer::{
 };
 pub use transport_hint::{HintedTransferRequest, TransportHint};
 
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 use std::ptr::NonNull;
 
 // ---------------------------------------------------------------------------

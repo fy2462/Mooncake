@@ -13,7 +13,10 @@ fn main() {
     let te_c_header = te_include.join("transfer_engine_c.h");
 
     if !te_c_header.exists() {
-        println!("cargo:warning=Transfer Engine C header not found at {}; FFI bindings will be generated from stub declarations.", te_c_header.display());
+        println!(
+            "cargo:warning=Transfer Engine C header not found at {}; FFI bindings will be generated from stub declarations.",
+            te_c_header.display()
+        );
     }
 
     let bindings = bindgen::Builder::default()
@@ -74,9 +77,13 @@ fn main() {
         .expect("Failed to generate Transfer Engine bindings");
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap()).join("transfer_engine_bindings.rs");
-    bindings
-        .write_to_file(out_path)
-        .expect("Failed to write Transfer Engine bindings");
+    // bindgen 0.70 predates Edition 2024's requirement that extern blocks are
+    // explicitly unsafe. Keep the generated declarations compatible without
+    // requiring an unrelated dependency upgrade.
+    let bindings = bindings
+        .to_string()
+        .replace("extern \"C\" {", "unsafe extern \"C\" {");
+    std::fs::write(out_path, bindings).expect("Failed to write Transfer Engine bindings");
 
     // Link against the Transfer Engine shared library only when the
     // "link-native" feature is enabled.  Tests and type-level code

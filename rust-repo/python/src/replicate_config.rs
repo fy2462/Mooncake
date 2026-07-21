@@ -138,7 +138,11 @@ impl ReplicateConfigPy {
     fn __repr__(&self) -> String {
         format!(
             "ReplicateConfig(replica_num={}, nof_replica_num={}, data_type={}, preferred_segment='{}', group_ids={:?})",
-            self.replica_num, self.nof_replica_num, self.data_type, self.preferred_segment, self.group_ids
+            self.replica_num,
+            self.nof_replica_num,
+            self.data_type,
+            self.preferred_segment,
+            self.group_ids
         )
     }
 }

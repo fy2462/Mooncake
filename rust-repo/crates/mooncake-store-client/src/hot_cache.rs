@@ -118,7 +118,7 @@ impl LocalHotCache {
             // Evict the entry with the smallest offset (oldest write)
             let oldest_key = entries
                 .iter()
-                .min_by_key(|(_, &(off, _))| off)
+                .min_by_key(|&(_, &(off, _))| off)
                 .map(|(k, _)| k.clone());
             if let Some(k) = oldest_key {
                 entries.remove(&k);

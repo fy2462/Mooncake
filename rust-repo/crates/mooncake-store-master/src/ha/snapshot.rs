@@ -6,8 +6,8 @@ use crate::service::TaskEntry;
 use crate::storage_backend::LocalDiskSnapshotEntry;
 use crate::storage_backend::{StorageBackend, StorageBackendType};
 use aws_sdk_s3::config::{
-    timeout::TimeoutConfig, Credentials, Region, RequestChecksumCalculation,
-    ResponseChecksumValidation,
+    Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+    timeout::TimeoutConfig,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -459,7 +459,7 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
         {
             Ok(value) => value.trim().to_string(),
             Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
-                return Ok(None)
+                return Ok(None);
             }
             Err(error) => return Err(error),
         };

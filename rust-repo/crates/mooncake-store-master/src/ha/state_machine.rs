@@ -13,8 +13,8 @@
 
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use super::types::{
@@ -276,7 +276,7 @@ impl StandbyStateMachine {
                     old_state: from,
                     new_state: from,
                     reason: format!("invalid transition from {from:?} on event {event:?}"),
-                }
+                };
             }
         };
 

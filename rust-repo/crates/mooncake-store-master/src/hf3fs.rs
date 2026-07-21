@@ -23,7 +23,7 @@
 // - LoadedHf3fsApi: concrete implementation via dynamically loaded C symbols.
 //   LoadedHf3fsApi：通过动态加载 C 符号的具体实现。
 
-use libc::{c_char, c_int, c_void, dlclose, dlerror, dlopen, dlsym, RTLD_NOW};
+use libc::{RTLD_NOW, c_char, c_int, c_void, dlclose, dlerror, dlopen, dlsym};
 use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::RawFd;
@@ -143,7 +143,9 @@ fn last_dl_error() -> String {
 /// Safely load a symbol from a dlopen'd handle, returning a typed function pointer.
 /// 安全地从 dlopen'd 句柄加载符号，返回类型化的函数指针。
 unsafe fn load_symbol<T>(handle: *mut c_void, name: &CStr) -> io::Result<T> {
-    let symbol = dlsym(handle, name.as_ptr());
+    // SAFETY: the caller guarantees that `handle` is a live `dlopen` handle;
+    // `name` is a valid NUL-terminated C string.
+    let symbol = unsafe { dlsym(handle, name.as_ptr()) };
     if symbol.is_null() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -154,7 +156,8 @@ unsafe fn load_symbol<T>(handle: *mut c_void, name: &CStr) -> io::Result<T> {
             ),
         ));
     }
-    Ok(std::mem::transmute_copy(&symbol))
+    // SAFETY: each caller selects `T` to match the named C function's ABI.
+    Ok(unsafe { std::mem::transmute_copy(&symbol) })
 }
 
 /// Candidate library paths to try when loading the HF3FS shared library.

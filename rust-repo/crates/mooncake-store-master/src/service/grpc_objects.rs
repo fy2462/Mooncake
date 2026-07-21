@@ -132,70 +132,74 @@ impl MasterServiceImpl {
         client_id: Uuid,
         target: ReplicaType,
     ) -> Result<(), Status> {
-        if let Some(mut entry) = self.state.objects.get_mut(scoped_key) {
-            if entry.client_id != client_id {
-                return Err(Status::permission_denied("illegal client"));
-            }
-            for r in &mut entry.replicas {
-                let matches_type = target == ReplicaType::All || r.replica_type == target;
-                if matches_type && r.status == ReplicaStatus::Allocating && r.handle_valid {
-                    r.status = ReplicaStatus::Complete;
+        match self.state.objects.get_mut(scoped_key) {
+            Some(mut entry) => {
+                if entry.client_id != client_id {
+                    return Err(Status::permission_denied("illegal client"));
                 }
-            }
-            sync_cache_total_accounting(&mut entry);
-            // C++ PutEnd grants ttl=0: the object starts without a hard read lease,
-            // while soft pin is extended when enabled.
-            entry.grant_lease(Duration::ZERO, self.state.runtime_config.soft_pin_ttl);
-            let all_complete = entry
-                .replicas
-                .iter()
-                .all(|r| r.status == ReplicaStatus::Complete);
-            let size = entry.size;
-            let tenant_id = entry.tenant_id.clone();
-            let should_commit_quota = all_complete
-                && !entry.quota_committed
-                && self.state.processing_keys.contains_key(scoped_key);
-            if should_commit_quota {
-                entry.quota_committed = true;
-            }
-            let offload_enabled = !self.state.runtime_config.offload_on_evict;
-            drop(entry);
+                for r in &mut entry.replicas {
+                    let matches_type = target == ReplicaType::All || r.replica_type == target;
+                    if matches_type && r.status == ReplicaStatus::Allocating && r.handle_valid {
+                        r.status = ReplicaStatus::Complete;
+                    }
+                }
+                sync_cache_total_accounting(&mut entry);
+                // C++ PutEnd grants ttl=0: the object starts without a hard read lease,
+                // while soft pin is extended when enabled.
+                entry.grant_lease(Duration::ZERO, self.state.runtime_config.soft_pin_ttl);
+                let all_complete = entry
+                    .replicas
+                    .iter()
+                    .all(|r| r.status == ReplicaStatus::Complete);
+                let size = entry.size;
+                let tenant_id = entry.tenant_id.clone();
+                let should_commit_quota = all_complete
+                    && !entry.quota_committed
+                    && self.state.processing_keys.contains_key(scoped_key);
+                if should_commit_quota {
+                    entry.quota_committed = true;
+                }
+                let offload_enabled = !self.state.runtime_config.offload_on_evict;
+                drop(entry);
 
-            if should_commit_quota {
-                self.commit_tenant_quota(&tenant_id, size)?;
-            }
-            if offload_enabled {
-                push_offloading_queue(&self.state, client_id, scoped_key, size);
-            }
-            if all_complete && self.state.processing_keys.contains_key(scoped_key) {
-                self.state.processing_keys.remove(scoped_key);
-            }
-            if all_complete {
-                self.state
-                    .client_objects
-                    .entry(client_id)
-                    .or_default()
-                    .insert(scoped_key.to_string());
-            }
-            if let Some(entry) = self.state.objects.get(scoped_key) {
-                if all_complete {
-                    self.publish_kv_stored(scoped_key, target, &entry);
+                if should_commit_quota {
+                    self.commit_tenant_quota(&tenant_id, size)?;
                 }
-                self.oplog_manager.lock().record_put_end_with_metadata(
-                    scoped_key,
-                    size,
-                    Some(entry.client_id),
-                    &entry.tenant_id,
-                    &entry.group_id,
-                    &entry.user_key,
-                    &entry.replicas,
-                );
-            } else {
-                self.oplog_manager.lock().record_put_end(scoped_key, size);
+                if offload_enabled {
+                    push_offloading_queue(&self.state, client_id, scoped_key, size);
+                }
+                if all_complete && self.state.processing_keys.contains_key(scoped_key) {
+                    self.state.processing_keys.remove(scoped_key);
+                }
+                if all_complete {
+                    self.state
+                        .client_objects
+                        .entry(client_id)
+                        .or_default()
+                        .insert(scoped_key.to_string());
+                }
+                match self.state.objects.get(scoped_key) {
+                    Some(entry) => {
+                        if all_complete {
+                            self.publish_kv_stored(scoped_key, target, &entry);
+                        }
+                        self.oplog_manager.lock().record_put_end_with_metadata(
+                            scoped_key,
+                            size,
+                            Some(entry.client_id),
+                            &entry.tenant_id,
+                            &entry.group_id,
+                            &entry.user_key,
+                            &entry.replicas,
+                        );
+                    }
+                    _ => {
+                        self.oplog_manager.lock().record_put_end(scoped_key, size);
+                    }
+                }
+                Ok(())
             }
-            Ok(())
-        } else {
-            Err(Status::not_found("key not found"))
+            _ => Err(Status::not_found("key not found")),
         }
     }
 

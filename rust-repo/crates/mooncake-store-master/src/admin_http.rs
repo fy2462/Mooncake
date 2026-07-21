@@ -1,14 +1,14 @@
+use crate::MasterServiceImpl;
 use crate::ha::{MasterRuntimeState, MasterView};
 use crate::proto;
-use crate::MasterServiceImpl;
 use axum::{
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     routing::get,
-    Json, Router,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::Code;

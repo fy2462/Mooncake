@@ -358,18 +358,24 @@ async fn test_copy_move_and_revoke_workflow() {
     .unwrap()
     .into_inner();
     assert_eq!(after_move.replicas.len(), 2);
-    assert!(after_move
-        .replicas
-        .iter()
-        .any(|r| r.segment_name == "copy-dst:1"));
-    assert!(after_move
-        .replicas
-        .iter()
-        .any(|r| r.segment_name == "move-dst:1"));
-    assert!(!after_move
-        .replicas
-        .iter()
-        .any(|r| r.segment_name == "copy-src:1"));
+    assert!(
+        after_move
+            .replicas
+            .iter()
+            .any(|r| r.segment_name == "copy-dst:1")
+    );
+    assert!(
+        after_move
+            .replicas
+            .iter()
+            .any(|r| r.segment_name == "move-dst:1")
+    );
+    assert!(
+        !after_move
+            .replicas
+            .iter()
+            .any(|r| r.segment_name == "copy-src:1")
+    );
 
     MasterService::copy_start(
         &service,
@@ -405,10 +411,12 @@ async fn test_copy_move_and_revoke_workflow() {
     .unwrap()
     .into_inner();
     assert_eq!(after_revoke.replicas.len(), 2);
-    assert!(!after_revoke
-        .replicas
-        .iter()
-        .any(|r| r.segment_name == "copy-src:1"));
+    assert!(
+        !after_revoke
+            .replicas
+            .iter()
+            .any(|r| r.segment_name == "copy-src:1")
+    );
 }
 
 #[tokio::test]
@@ -544,15 +552,17 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     )
     .await
     .unwrap();
-    assert!(MasterService::get_replica_list(
-        &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "revoke-key".into(),
-            tenant_id: String::new(),
-        }),
-    )
-    .await
-    .is_err());
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "revoke-key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
 
     let removed = MasterService::remove_all(
         &service,
@@ -565,15 +575,17 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     .unwrap()
     .into_inner();
     assert_eq!(removed.removed_count, 3);
-    assert!(MasterService::get_replica_list(
-        &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "remove-all-tenant".into(),
-            tenant_id: "tenant-a".into(),
-        }),
-    )
-    .await
-    .is_err());
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "remove-all-tenant".into(),
+                tenant_id: "tenant-a".into(),
+            }),
+        )
+        .await
+        .is_err()
+    );
 
     let storage = MasterService::get_storage_config(
         &service,

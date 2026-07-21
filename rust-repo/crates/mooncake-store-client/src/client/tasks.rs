@@ -24,8 +24,8 @@
 // QueryTask() / FetchTasks() / MarkTaskToComplete()
 // ============================================================================
 
-use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::StoreError;
+use mooncake_store_core::error::StoreResult;
 use serde::Deserialize;
 use uuid::Uuid;
 

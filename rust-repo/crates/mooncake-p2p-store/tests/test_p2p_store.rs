@@ -1,4 +1,4 @@
-use mooncake_p2p_store::{error::P2pStoreError, metadata::*, Buffer, PayloadInfo, MAX_CHUNK_SIZE};
+use mooncake_p2p_store::{Buffer, MAX_CHUNK_SIZE, PayloadInfo, error::P2pStoreError, metadata::*};
 
 // =========================================================================
 // Location

@@ -6,9 +6,9 @@ use common::{make_seg, make_seg_with_usage};
 
 use mooncake_store_core::{ReplicateConfig, Segment};
 use mooncake_store_master::allocator::{
-    cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
-    AllocationStrategy, MemoryAllocatorKind, SegmentAllocationError, SegmentAllocator,
-    SlabReleaseMode, SsdUsageMetrics, CACHELIB_SLAB_SIZE,
+    AllocationStrategy, CACHELIB_SLAB_SIZE, MemoryAllocatorKind, SegmentAllocationError,
+    SegmentAllocator, SlabReleaseMode, SsdUsageMetrics, cachelib_allocation_class_id_for_request,
+    cachelib_allocation_class_size_for_request,
 };
 use uuid::Uuid;
 

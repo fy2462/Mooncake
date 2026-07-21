@@ -4,7 +4,7 @@ use common::proto_uuid;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::tenant_quota_policy_store::{
-    load_tenant_quota_policy, save_tenant_quota_policy, TenantQuotaPolicySnapshot,
+    TenantQuotaPolicySnapshot, load_tenant_quota_policy, save_tenant_quota_policy,
 };
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::os::unix::fs::PermissionsExt;
@@ -208,10 +208,12 @@ fn test_tenant_quota_policy_save_failure_does_not_mutate_memory_state() {
         .upsert_tenant_quota_policy("tenant-b", 600)
         .unwrap_err();
     assert_eq!(upsert_err.code(), Code::Internal);
-    assert!(service
-        .get_tenant_quota_snapshot("tenant-b")
-        .unwrap()
-        .is_none());
+    assert!(
+        service
+            .get_tenant_quota_snapshot("tenant-b")
+            .unwrap()
+            .is_none()
+    );
 
     let delete_err = service.delete_tenant_quota_policy("tenant-a").unwrap_err();
     assert_eq!(delete_err.code(), Code::Internal);

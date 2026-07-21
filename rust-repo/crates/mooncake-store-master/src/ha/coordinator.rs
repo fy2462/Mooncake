@@ -16,9 +16,9 @@ pub mod test_support;
 
 use coordinator_common::{resolve_cluster_namespace, validate_session};
 use coordinator_k8s::{
-    acquire_k8s_lease, parse_k8s_lease_connstring, read_k8s_view, release_k8s_lease,
-    renew_k8s_lease, set_k8s_leader_label, start_k8s_keepalive, wait_for_k8s_view_change,
-    K8sLeaderLabelReconciler,
+    K8sLeaderLabelReconciler, acquire_k8s_lease, parse_k8s_lease_connstring, read_k8s_view,
+    release_k8s_lease, renew_k8s_lease, set_k8s_leader_label, start_k8s_keepalive,
+    wait_for_k8s_view_change,
 };
 
 // LeaderCoordinator —— 核心选举基础设施（C++: ha_service.h）。

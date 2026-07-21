@@ -1,4 +1,4 @@
-use futures_util::{pin_mut, StreamExt};
+use futures_util::{StreamExt, pin_mut};
 use k8s_openapi::api::authorization::v1::{
     ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
 };
@@ -71,8 +71,7 @@ async fn assert_lease_rbac(client: Client, namespace: &str) {
         assert!(
             status.allowed,
             "K8s RBAC denies coordination.k8s.io/v1 leases verb={verb} in namespace={namespace}: reason={:?} evaluation_error={:?}",
-            status.reason,
-            status.evaluation_error
+            status.reason, status.evaluation_error
         );
     }
 }

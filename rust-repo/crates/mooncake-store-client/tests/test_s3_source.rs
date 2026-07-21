@@ -1,12 +1,12 @@
 #[cfg(feature = "s3")]
 mod s3_tests {
     use axum::{
+        Router,
         body::Body,
         extract::{Request, State},
         http::{Method, StatusCode},
         response::Response,
         routing::get,
-        Router,
     };
     use mooncake_store_client::{RemoteSource, RemoteSourceError, S3Config, S3RemoteSource};
     use parking_lot::Mutex;

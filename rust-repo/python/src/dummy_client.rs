@@ -1,9 +1,9 @@
-use crate::client::{take_client, PythonMooncakeClient};
+use crate::client::{PythonMooncakeClient, take_client};
 use crate::replicate_config::ReplicateConfigPy;
 use crate::to_py_err;
 use mooncake_store_client::{
-    DummyIpcChannel, DummyMemoryPool, MooncakeClient, ShmRegisterRequest,
-    INVALID_PHYSICAL_DEVICE_ID,
+    DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, MooncakeClient,
+    ShmRegisterRequest,
 };
 use parking_lot::Mutex;
 use pyo3::prelude::*;

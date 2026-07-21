@@ -441,18 +441,21 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        if let Some(mut entry) = self.state.local_disk_segments.get_mut(&client_id) {
-            entry.enable_offloading = req.enable_offloading;
-        } else {
-            self.state.local_disk_segments.insert(
-                client_id,
-                LocalDiskSegmentEntry {
-                    enable_offloading: req.enable_offloading,
-                    offloading_objects: HashMap::new(),
-                    promotion_objects: HashMap::new(),
-                    ssd_total_capacity_bytes: 0,
-                },
-            );
+        match self.state.local_disk_segments.get_mut(&client_id) {
+            Some(mut entry) => {
+                entry.enable_offloading = req.enable_offloading;
+            }
+            _ => {
+                self.state.local_disk_segments.insert(
+                    client_id,
+                    LocalDiskSegmentEntry {
+                        enable_offloading: req.enable_offloading,
+                        offloading_objects: HashMap::new(),
+                        promotion_objects: HashMap::new(),
+                        ssd_total_capacity_bytes: 0,
+                    },
+                );
+            }
         }
         upsert_client_addresses(&self.state, client_id, Vec::new());
         Ok(Response::new(proto::MountLocalDiskSegmentResponse {}))

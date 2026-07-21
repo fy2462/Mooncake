@@ -104,9 +104,10 @@ async fn test_put_start_rejects_same_node_preference_with_nof_replicas() {
     .unwrap_err();
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert!(err
-        .message()
-        .contains("prefer_alloc_in_same_node is not supported with NoF replicas"));
+    assert!(
+        err.message()
+            .contains("prefer_alloc_in_same_node is not supported with NoF replicas")
+    );
 }
 
 #[tokio::test]
@@ -167,9 +168,10 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
     .unwrap_err();
 
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    assert!(err
-        .message()
-        .contains("prefer_alloc_in_same_node is not supported with NoF replicas"));
+    assert!(
+        err.message()
+            .contains("prefer_alloc_in_same_node is not supported with NoF replicas")
+    );
 }
 
 #[tokio::test]
@@ -247,22 +249,26 @@ async fn test_client_monitor_reaps_expired_clients() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    assert!(MasterService::query_ip(
-        &service,
-        Request::new(proto::QueryIpRequest {
-            client_id: Some(proto_uuid(client_id)),
-        }),
-    )
-    .await
-    .is_err());
+    assert!(
+        MasterService::query_ip(
+            &service,
+            Request::new(proto::QueryIpRequest {
+                client_id: Some(proto_uuid(client_id)),
+            }),
+        )
+        .await
+        .is_err()
+    );
     assert!(!metadata_state.nodes.read().await.contains_key("ttl"));
-    assert!(MasterService::get_replica_list(
-        &service,
-        Request::new(proto::GetReplicaListRequest {
-            key: "ttl-key".into(),
-            tenant_id: String::new(),
-        }),
-    )
-    .await
-    .is_err());
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "ttl-key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
 }
