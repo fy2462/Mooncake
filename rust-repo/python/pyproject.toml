@@ -15,7 +15,11 @@ classifiers = [
     "Programming Language :: Rust",
     "Operating System :: POSIX :: Linux",
 ]
-dependencies = []
+dependencies = ["aiohttp>=3.9"]
+
+[project.scripts]
+mc_store_rest_server = "mooncake_store.service:sync_main"
+mooncake_http_metadata_server = "mooncake_store.http_metadata_server:sync_main"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "numpy"]
@@ -28,3 +32,4 @@ Source = "https://github.com/kvcache-ai/Mooncake"
 features = ["pyo3/extension-module", "link-native"]
 module-name = "mooncake_store._mooncake_store"
 bindings = "pyo3"
+exclude = ["mooncake_store/**/*.pyc", "mooncake_store/**/__pycache__/**"]
