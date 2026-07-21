@@ -6,13 +6,62 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 
+pub(super) struct AllocationPlan {
+    target_count: usize,
+    replicas: Vec<ReplicaDescriptor>,
+    used_segment_names: HashSet<String>,
+}
+
+impl AllocationPlan {
+    pub(super) fn with_capacity(target_count: usize) -> Self {
+        Self {
+            target_count,
+            replicas: Vec::with_capacity(target_count),
+            used_segment_names: HashSet::new(),
+        }
+    }
+
+    pub(super) fn is_complete(&self) -> bool {
+        self.replicas.len() >= self.target_count
+    }
+
+    pub(super) fn remaining(&self) -> usize {
+        self.target_count.saturating_sub(self.replicas.len())
+    }
+
+    pub(super) fn contains_segment(&self, segment_name: &str) -> bool {
+        self.used_segment_names.contains(segment_name)
+    }
+
+    pub(super) fn push(&mut self, replica: ReplicaDescriptor) {
+        self.used_segment_names.insert(replica.segment_name.clone());
+        self.replicas.push(replica);
+    }
+
+    pub(super) fn into_replicas(self) -> Vec<ReplicaDescriptor> {
+        self.replicas
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AllocationPlan;
+
+    #[test]
+    fn allocation_plan_tracks_target_and_partial_progress() {
+        let plan = AllocationPlan::with_capacity(3);
+
+        assert_eq!(plan.remaining(), 3);
+        assert!(!plan.is_complete());
+        assert!(plan.into_replicas().is_empty());
+    }
+}
+
 impl SegmentAllocator {
     pub(super) fn allocate_random_remaining(
         &mut self,
         slice_size: u64,
-        replica_count: usize,
-        replicas: &mut Vec<ReplicaDescriptor>,
-        used_segment_names: &mut HashSet<String>,
+        plan: &mut AllocationPlan,
         excluded_segments: &HashSet<String>,
     ) {
         let names = self.segment_names();
@@ -25,20 +74,17 @@ impl SegmentAllocator {
         let mut start_idx = rng.gen_range(0..names.len());
 
         for _ in 0..max_retry {
-            if replicas.len() >= replica_count {
+            if plan.is_complete() {
                 return;
             }
             let segment_name = names[start_idx % names.len()].clone();
             start_idx += 1;
 
-            if excluded_segments.contains(&segment_name)
-                || used_segment_names.contains(&segment_name)
-            {
+            if excluded_segments.contains(&segment_name) || plan.contains_segment(&segment_name) {
                 continue;
             }
             if let Some(replica) = self.allocate_from_segment_name(&segment_name, slice_size) {
-                used_segment_names.insert(replica.segment_name.clone());
-                replicas.push(replica);
+                plan.push(replica);
             }
         }
     }
@@ -46,9 +92,7 @@ impl SegmentAllocator {
     pub(super) fn allocate_free_ratio_remaining(
         &mut self,
         slice_size: u64,
-        replica_count: usize,
-        replicas: &mut Vec<ReplicaDescriptor>,
-        used_segment_names: &mut HashSet<String>,
+        plan: &mut AllocationPlan,
         excluded_segments: &HashSet<String>,
     ) {
         let names = self.segment_names();
@@ -56,7 +100,7 @@ impl SegmentAllocator {
             return;
         }
 
-        let remaining = replica_count.saturating_sub(replicas.len());
+        let remaining = plan.remaining();
         let sample_count = (FREE_RATIO_CANDIDATE_MULTIPLIER * remaining).min(names.len());
         let mut rng = thread_rng();
         let mut start_idx = rng.gen_range(0..names.len());
@@ -76,37 +120,26 @@ impl SegmentAllocator {
         });
 
         for (segment_name, _) in candidates {
-            if replicas.len() >= replica_count {
+            if plan.is_complete() {
                 return;
             }
-            if excluded_segments.contains(&segment_name)
-                || used_segment_names.contains(&segment_name)
-            {
+            if excluded_segments.contains(&segment_name) || plan.contains_segment(&segment_name) {
                 continue;
             }
             if let Some(replica) = self.allocate_from_segment_name(&segment_name, slice_size) {
-                used_segment_names.insert(replica.segment_name.clone());
-                replicas.push(replica);
+                plan.push(replica);
             }
         }
 
-        if replicas.len() < replica_count {
-            self.allocate_random_remaining(
-                slice_size,
-                replica_count,
-                replicas,
-                used_segment_names,
-                excluded_segments,
-            );
+        if !plan.is_complete() {
+            self.allocate_random_remaining(slice_size, plan, excluded_segments);
         }
     }
 
     pub(super) fn allocate_ssd_free_ratio_remaining(
         &mut self,
         slice_size: u64,
-        replica_count: usize,
-        replicas: &mut Vec<ReplicaDescriptor>,
-        used_segment_names: &mut HashSet<String>,
+        plan: &mut AllocationPlan,
         excluded_segments: &HashSet<String>,
         ssd_metrics: Option<&HashMap<Uuid, SsdUsageMetrics>>,
     ) {
@@ -115,7 +148,7 @@ impl SegmentAllocator {
             return;
         }
 
-        let remaining = replica_count.saturating_sub(replicas.len());
+        let remaining = plan.remaining();
         let sample_count = (FREE_RATIO_CANDIDATE_MULTIPLIER * remaining).min(names.len());
         let mut rng = thread_rng();
         let mut start_idx = rng.gen_range(0..names.len());
@@ -139,28 +172,19 @@ impl SegmentAllocator {
         });
 
         for (segment_name, _, _) in candidates {
-            if replicas.len() >= replica_count {
+            if plan.is_complete() {
                 return;
             }
-            if excluded_segments.contains(&segment_name)
-                || used_segment_names.contains(&segment_name)
-            {
+            if excluded_segments.contains(&segment_name) || plan.contains_segment(&segment_name) {
                 continue;
             }
             if let Some(replica) = self.allocate_from_segment_name(&segment_name, slice_size) {
-                used_segment_names.insert(replica.segment_name.clone());
-                replicas.push(replica);
+                plan.push(replica);
             }
         }
 
-        if replicas.len() < replica_count {
-            self.allocate_random_remaining(
-                slice_size,
-                replica_count,
-                replicas,
-                used_segment_names,
-                excluded_segments,
-            );
+        if !plan.is_complete() {
+            self.allocate_random_remaining(slice_size, plan, excluded_segments);
         }
     }
 
@@ -169,46 +193,29 @@ impl SegmentAllocator {
         key: &str,
         client_id: Option<Uuid>,
         slice_size: u64,
-        replica_count: usize,
-        replicas: &mut Vec<ReplicaDescriptor>,
-        used_segment_names: &mut HashSet<String>,
+        plan: &mut AllocationPlan,
         excluded_segments: &HashSet<String>,
     ) {
-        if replica_count != 1 {
-            self.allocate_random_remaining(
-                slice_size,
-                replica_count,
-                replicas,
-                used_segment_names,
-                excluded_segments,
-            );
+        if plan.target_count != 1 {
+            self.allocate_random_remaining(slice_size, plan, excluded_segments);
             return;
         }
 
         for segment_name in self.host_ordered_segment_names(client_id, key) {
-            if replicas.len() >= replica_count {
+            if plan.is_complete() {
                 return;
             }
-            if excluded_segments.contains(&segment_name)
-                || used_segment_names.contains(&segment_name)
-            {
+            if excluded_segments.contains(&segment_name) || plan.contains_segment(&segment_name) {
                 continue;
             }
             if let Some(replica) = self.allocate_from_segment_name(&segment_name, slice_size) {
-                used_segment_names.insert(replica.segment_name.clone());
-                replicas.push(replica);
+                plan.push(replica);
                 return;
             }
         }
 
-        if replicas.len() < replica_count {
-            self.allocate_random_remaining(
-                slice_size,
-                replica_count,
-                replicas,
-                used_segment_names,
-                excluded_segments,
-            );
+        if !plan.is_complete() {
+            self.allocate_random_remaining(slice_size, plan, excluded_segments);
         }
     }
 

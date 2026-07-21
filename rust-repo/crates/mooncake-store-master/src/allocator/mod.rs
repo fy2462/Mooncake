@@ -43,6 +43,7 @@ use self::cachelib::{
     CachelibSegmentState,
 };
 use self::offset_layout::preferred_segment_names;
+use self::strategies::AllocationPlan;
 use self::types::DEFAULT_CACHELIB_POOL_NAME;
 pub use self::types::{
     cachelib_allocation_class_id_for_request, cachelib_allocation_class_size_for_request,
@@ -383,54 +384,38 @@ impl SegmentAllocator {
         }
 
         let preferred_names = preferred_segment_names(config);
-        let mut replicas = Vec::with_capacity(replica_count);
-        let mut used_segment_names = HashSet::new();
+        let mut plan = AllocationPlan::with_capacity(replica_count);
 
         // C++ tries preferred_segment(s) first. If preferred_segment is set, it
         // wins over preferred_segments; the plural list is used only as fallback
         // when the singular field is empty.
         for preferred_name in preferred_names {
-            if replicas.len() >= replica_count
+            if plan.is_complete()
                 || excluded_segments.contains(preferred_name)
-                || used_segment_names.contains(preferred_name)
+                || plan.contains_segment(preferred_name)
             {
                 continue;
             }
             if let Some(replica) = self.allocate_from_segment_name(preferred_name, slice_size) {
-                used_segment_names.insert(replica.segment_name.clone());
-                replicas.push(replica);
+                plan.push(replica);
             }
         }
 
-        if replicas.len() >= replica_count {
-            return replicas;
+        if plan.is_complete() {
+            return plan.into_replicas();
         }
 
         match self.strategy {
             AllocationStrategy::Random => {
-                self.allocate_random_remaining(
-                    slice_size,
-                    replica_count,
-                    &mut replicas,
-                    &mut used_segment_names,
-                    excluded_segments,
-                );
+                self.allocate_random_remaining(slice_size, &mut plan, excluded_segments);
             }
             AllocationStrategy::FreeRatioFirst => {
-                self.allocate_free_ratio_remaining(
-                    slice_size,
-                    replica_count,
-                    &mut replicas,
-                    &mut used_segment_names,
-                    excluded_segments,
-                );
+                self.allocate_free_ratio_remaining(slice_size, &mut plan, excluded_segments);
             }
             AllocationStrategy::SsdFreeRatioFirst => {
                 self.allocate_ssd_free_ratio_remaining(
                     slice_size,
-                    replica_count,
-                    &mut replicas,
-                    &mut used_segment_names,
+                    &mut plan,
                     excluded_segments,
                     ssd_metrics,
                 );
@@ -440,14 +425,12 @@ impl SegmentAllocator {
                     key,
                     client_id,
                     slice_size,
-                    replica_count,
-                    &mut replicas,
-                    &mut used_segment_names,
+                    &mut plan,
                     excluded_segments,
                 );
             }
         }
-        replicas
+        plan.into_replicas()
     }
 
     /// Release a set of replicas, returning their space to the respective segments.
