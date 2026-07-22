@@ -33,14 +33,19 @@ async def run_scenario(client, config=None, evidence=None) -> int:
             if len({replica.get("segment_name") for replica in remote}) < 2:
                 return 2
             actual = await client.get(key)
-            if len(actual) != size or hashlib.sha256(actual).digest() != hashlib.sha256(expected).digest():
+            if (
+                len(actual) != size
+                or hashlib.sha256(actual).digest() != hashlib.sha256(expected).digest()
+            ):
                 return 3
             for _ in range(3):
                 if await client.get(key) != expected:
                     return 4
             evidence[key] = {
                 "sha256": hashlib.sha256(expected).hexdigest(),
-                "remote_segments": sorted(replica["segment_name"] for replica in remote),
+                "remote_segments": sorted(
+                    replica["segment_name"] for replica in remote
+                ),
                 "repeat_reads": 3,
             }
         if not await client.exists("rdma-4k"):
@@ -76,7 +81,10 @@ async def main() -> int:
     config = store.ReplicateConfig(replica_num=2)
     rc = await run_scenario(client, config, evidence)
     with open(args.result, "w", encoding="utf-8") as stream:
-        json.dump({"status": "PASS" if rc == 0 else "FAIL", "rc": rc, "evidence": evidence}, stream)
+        json.dump(
+            {"status": "PASS" if rc == 0 else "FAIL", "rc": rc, "evidence": evidence},
+            stream,
+        )
         stream.write("\n")
     return rc
 

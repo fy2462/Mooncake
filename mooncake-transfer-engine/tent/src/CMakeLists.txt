@@ -28,7 +28,8 @@ if(USE_HIP)
   list(APPEND CMAKE_PREFIX_PATH "/opt/rocm/lib/cmake")
   find_package(HIP REQUIRED)
   message(STATUS "ROCm/HIP: Enabled")
-  target_compile_definitions(tent_interface INTERFACE USE_HIP __HIP_PLATFORM_AMD__)
+  target_compile_definitions(tent_interface INTERFACE USE_HIP
+                                                      __HIP_PLATFORM_AMD__)
   target_include_directories(tent_interface INTERFACE ${HIP_INCLUDE_DIRS})
   target_link_libraries(tent_interface INTERFACE hip::host)
 else()
@@ -80,9 +81,9 @@ endif()
 if(USE_SUNRISE)
   target_compile_definitions(tent_interface INTERFACE USE_SUNRISE)
   target_include_directories(tent_interface INTERFACE ${MC_TANGRT_ROOT}/include)
-  target_link_directories(tent_interface INTERFACE
-                          ${MC_TANGRT_ROOT}/lib/linux-x86_64
-                          ${MC_TANGRT_ROOT}/lib)
+  target_link_directories(
+    tent_interface INTERFACE ${MC_TANGRT_ROOT}/lib/linux-x86_64
+    ${MC_TANGRT_ROOT}/lib)
   target_link_libraries(tent_interface INTERFACE tangrt_shared ptml_shared dl)
 endif()
 
@@ -154,9 +155,16 @@ target_link_libraries(tent_link_group INTERFACE "-Wl,--end-group")
 # `tent_runtime` leaves symbols such as Json::CharReader and mooncake::Status
 # unresolved until process startup.
 target_link_libraries(
-  tent_shared PRIVATE tent_link_group tent_common "-Wl,--whole-archive" base
-                      "-Wl,--no-whole-archive" "-Wl,--no-as-needed"
-                      mooncake_common "-Wl,--as-needed" ${JSONCPP_TARGET})
+  tent_shared
+  PRIVATE tent_link_group
+          tent_common
+          "-Wl,--whole-archive"
+          base
+          "-Wl,--no-whole-archive"
+          "-Wl,--no-as-needed"
+          mooncake_common
+          "-Wl,--as-needed"
+          ${JSONCPP_TARGET})
 install(
   TARGETS tent_shared
   ARCHIVE DESTINATION lib

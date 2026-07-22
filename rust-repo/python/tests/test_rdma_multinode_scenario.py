@@ -25,8 +25,18 @@ class FakeClient:
 
     def get_replica_desc(self, key):
         return [
-            {"segment_name": "node-a", "protocol": "rdma", "status": "Complete", "handle_valid": True},
-            {"segment_name": "node-b", "protocol": "rdma", "status": "Complete", "handle_valid": True},
+            {
+                "segment_name": "node-a",
+                "protocol": "rdma",
+                "status": "Complete",
+                "handle_valid": True,
+            },
+            {
+                "segment_name": "node-b",
+                "protocol": "rdma",
+                "status": "Complete",
+                "handle_valid": True,
+            },
         ]
 
     async def exists(self, key):

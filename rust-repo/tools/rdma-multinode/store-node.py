@@ -25,7 +25,9 @@ async def main() -> None:
         local_buffer_size=32 * 1024 * 1024,
     )
     with open(args.ready, "w", encoding="utf-8") as stream:
-        json.dump({"node": args.node, "device": args.device, "protocol": "rdma"}, stream)
+        json.dump(
+            {"node": args.node, "device": args.device, "protocol": "rdma"}, stream
+        )
         stream.write("\n")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
