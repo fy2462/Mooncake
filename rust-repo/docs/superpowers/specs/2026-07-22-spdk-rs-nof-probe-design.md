@@ -3,9 +3,9 @@
 ## Objective
 
 Replace the locally patched `spdk-io` and `spdk-io-sys` crates with the
-OpenEBS `spdk-rs` crate fetched directly by Cargo. Align the native SPDK
-dependency with the version pinned by `spdk-rs`, and remove SPDK and Rust SPDK
-wrapper source trees from the Mooncake repository.
+OpenEBS `spdk-rs` crate fetched directly by Cargo. Standardize Mooncake on one
+native storage stack—SPDK 26.01 with DPDK 25.11.0—and remove the legacy Rust
+SPDK wrapper source trees and duplicate native installations.
 
 ## Dependency model
 
@@ -22,25 +22,35 @@ spdk-rs = {
 Cargo owns its checkout under the normal global Cargo Git cache. Mooncake does
 not vendor `spdk-rs`, add an `extern/spdk-rs` submodule, or patch its source.
 
-The selected `spdk-rs` revision pins OpenEBS SPDK commit
-`bc57f3ea7933b0965c09e9d751c21a3968c6cc11`, identified by that project's Nix
-package as its compatible 25.05 SPDK build. Mooncake's dependency installer
-clones that exact native commit under `/opt/mooncake/spdk`, initializes its
-submodules, builds it with RDMA support, and installs the resulting libraries
-and pkg-config metadata. Cargo builds set:
+The selected `spdk-rs` revision officially pins SPDK 25.05, but its build
+generates bindings from `SPDK_ROOT_DIR` rather than shipping fixed bindings.
+Mooncake validates that revision against its newer native stack and treats the
+following three revisions as one tested dependency unit:
+
+- `spdk-rs`: `77ef361d236ccac00ba0dd11a37c0b14b85ba730`;
+- SPDK 26.01: `2ef883ef96e79c3cc16da02f667a7a58c2453f2f`;
+- DPDK 25.11.0: `e01bfcd05fe39f628392c8b29b880f5692de2224`.
+
+The dependency installer clones the exact SPDK revision with its pinned DPDK
+submodule into a caller-selected shared workspace, builds it with the modules
+required by `spdk-rs`, and installs one set of headers, static libraries, and
+pkg-config metadata under `/usr/local`. Cargo builds set:
 
 ```text
-SPDK_ROOT_DIR=/opt/mooncake/spdk
+SPDK_ROOT_DIR=$HOME/workspace/tmp/mooncake/spdk-26.01
 ```
 
-The source directory remains available because `spdk-rs` consumes SPDK
-internal and module headers that are not all installed under `/usr/local`.
+The source directory remains available on the shared filesystem because
+`spdk-rs` consumes SPDK internal and module headers that are not all installed
+under `/usr/local`. Build output and temporary data also stay on the shared
+filesystem; only the final single-version SDK is installed locally.
 
 ## Repository cleanup
 
 Remove:
 
-- the `extern/spdk` Git submodule and its `.gitmodules` entry;
+- the `extern/spdk` Git submodule and its `.gitmodules` entry after the shared
+  SPDK 26.01 source checkout passes the feature suite;
 - `rust-repo/third-party/spdk-io`;
 - `rust-repo/third-party/spdk-io-sys`;
 - the workspace `[patch.crates-io]` overrides for both crates;
@@ -81,15 +91,19 @@ command override behavior, and service decisions stay safe Rust in
 ## Installer behavior
 
 `dependencies.sh --with-spdk` becomes idempotent and must not recursively
-delete a repository path. It validates the existing `/opt/mooncake/spdk`
-checkout, fetches or checks out the required commit, initializes nested
-submodules, configures the supported OpenEBS build, and installs it. A
-different checkout or local modification is reported before replacement
-rather than silently erased.
+delete a repository path. It accepts `SPDK_ROOT_DIR`, defaulting to
+`$HOME/workspace/tmp/mooncake/spdk-26.01`, validates the existing checkout,
+fetches or checks out the required commit, initializes nested submodules,
+configures SPDK with RDMA and io_uring support, and installs it. A different
+checkout or local modification is reported before replacement rather than
+silently erased.
 
-The installer and documentation print the exact `SPDK_ROOT_DIR` required for
-Cargo builds. Normal builds without `spdk-nof-probe` require neither SPDK nor
-the environment variable.
+Before installation, the script identifies existing SPDK/DPDK files under the
+managed `/usr/local` prefixes. It replaces that set without mixing versions and
+verifies SPDK 26.01 plus DPDK 25.11.0 afterward. It never deletes distro-owned
+files under `/usr`. The installer and documentation print the exact
+`SPDK_ROOT_DIR` required for Cargo builds. Normal builds without
+`spdk-nof-probe` require neither SPDK nor the environment variable.
 
 ## Testing
 
@@ -104,8 +118,10 @@ Acceptance requires:
 - no tracked `extern/spdk` or `rust-repo/third-party/spdk-io*` paths;
 - no `spdk-io` package in Cargo metadata or `Cargo.lock`;
 - `cargo test -p mooncake-store-master --features spdk-nof-probe` compiling
-  and passing against the compatible OpenEBS SPDK installation;
+  and passing against the pinned SPDK 26.01/DPDK 25.11.0 installation;
 - unchanged tests without the feature;
+- version assertions proving SPDK 26.01 and DPDK 25.11.0 are the only selected
+  pkg-config stack;
 - a real NVMe-oF read when a target is available, otherwise an exact target,
   device, HugeTLB, or privilege gate;
 - the full Rust Store to Linux TE/TENT validation matrix remaining independent

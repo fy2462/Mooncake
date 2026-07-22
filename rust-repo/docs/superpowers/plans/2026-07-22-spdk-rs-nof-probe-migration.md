@@ -2,20 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace local `spdk-io` patches with a remote pinned `spdk-rs` dependency and a compatible system-managed OpenEBS SPDK 25.05 installation.
+**Goal:** Replace local `spdk-io` patches with a remote pinned `spdk-rs` dependency and one system-managed SPDK 26.01/DPDK 25.11.0 installation.
 
-**Architecture:** Cargo fetches `spdk-rs` directly from GitHub at a fixed revision. `/opt/mooncake/spdk` holds the exact compatible native source/build tree; a narrow Mooncake adapter owns raw NVMe probe operations while the existing safe parser and policy remain unchanged.
+**Architecture:** Cargo fetches `spdk-rs` directly from GitHub at a fixed revision. A shared-filesystem checkout holds the exact SPDK 26.01 source/build tree and its DPDK 25.11.0 submodule, while `/usr/local` contains one installed SDK. A narrow Mooncake adapter owns raw NVMe probe operations while the existing safe parser and policy remain unchanged.
 
-**Tech Stack:** Rust 2024, Cargo Git dependencies, OpenEBS `spdk-rs` 0.2.0, OpenEBS SPDK 25.05, C FFI, pkg-config, Ubuntu AArch64.
+**Tech Stack:** Rust 2024, Cargo Git dependencies, OpenEBS `spdk-rs` 0.2.0, SPDK 26.01, DPDK 25.11.0, C FFI, pkg-config, Ubuntu AArch64.
 
 ## Global Constraints
 
 - Do not vendor `spdk-rs`, `spdk-io`, or SPDK source in Mooncake.
 - Do not compile, link, or call the C++ Store.
 - Preserve `spdk-nof-probe` as the public feature name and preserve existing error categories.
-- Pin both remote revisions exactly; do not depend on a moving branch.
+- Pin all three remote revisions exactly; do not depend on a moving branch.
+- Keep build output and temporary data under `$HOME/workspace/tmp`.
+- Keep one selected SPDK/DPDK installation; never mix pkg-config files,
+  headers, or archives from different revisions.
 - Establish a compiling replacement before removing the currently working backend.
-- Never silently delete a modified `/opt/mooncake/spdk` checkout.
+- Never silently delete a modified `SPDK_ROOT_DIR` checkout.
 
 ---
 
@@ -26,14 +29,14 @@
 - Modify: `scripts/test_dependencies_installer.py`
 
 **Interfaces:**
-- Consumes: `--with-spdk`, `/opt/mooncake/spdk`, OpenEBS SPDK commit `bc57f3ea7933b0965c09e9d751c21a3968c6cc11`.
+- Consumes: `--with-spdk`, caller-selected `SPDK_ROOT_DIR`, SPDK commit `2ef883ef96e79c3cc16da02f667a7a58c2453f2f`, and DPDK commit `e01bfcd05fe39f628392c8b29b880f5692de2224`.
 - Produces: compatible headers, archives, pkg-config files, and `SPDK_ROOT_DIR` guidance.
 
 - [ ] **Step 1: Add failing installer assertions**
 
-Assert that the script contains the OpenEBS repository, exact revision, and
-`/opt/mooncake/spdk`, and no longer clones into `${REPO_ROOT}/extern` or runs
-`rm -rf spdk`.
+Assert that the script contains the exact SPDK and DPDK revisions, honors an
+existing `SPDK_ROOT_DIR`, defaults its checkout beneath `$HOME/workspace/tmp`,
+and no longer clones into `${REPO_ROOT}/extern` or runs `rm -rf spdk`.
 
 - [ ] **Step 2: Run the installer unit test and verify RED**
 
@@ -48,14 +51,17 @@ Expected: the new SPDK location/revision assertions fail.
 Set:
 
 ```bash
-SPDK_REPOSITORY=openebs/spdk
-SPDK_COMMIT=bc57f3ea7933b0965c09e9d751c21a3968c6cc11
-SPDK_ROOT_DIR=/opt/mooncake/spdk
+SPDK_REPOSITORY=spdk/spdk
+SPDK_COMMIT=2ef883ef96e79c3cc16da02f667a7a58c2453f2f
+DPDK_COMMIT=e01bfcd05fe39f628392c8b29b880f5692de2224
+SPDK_ROOT_DIR=${SPDK_ROOT_DIR:-$HOME/workspace/tmp/mooncake/spdk-26.01}
 ```
 
 Clone only when absent. For an existing checkout, reject local modifications,
-fetch the exact commit, checkout detached, update nested submodules, configure
-with RDMA and the OpenEBS-supported options, build, and install. Print the
+fetch the exact commit, checkout detached, update nested submodules, assert the
+DPDK gitlink, configure with RDMA and io_uring support, build, and install.
+Remove only previously managed `/usr/local` SPDK/DPDK files before installation
+so headers, archives, and pkg-config metadata cannot be mixed. Print the
 required `SPDK_ROOT_DIR` export.
 
 - [ ] **Step 4: Verify unit test and perform system install**
@@ -63,11 +69,13 @@ required `SPDK_ROOT_DIR` export.
 Run the installer test, then execute the SPDK install path. Verify:
 
 ```bash
-git -C /opt/mooncake/spdk rev-parse HEAD
-SPDK_ROOT_DIR=/opt/mooncake/spdk pkg-config --modversion spdk_nvme libdpdk
+git -C "$SPDK_ROOT_DIR" rev-parse HEAD
+git -C "$SPDK_ROOT_DIR/dpdk" rev-parse HEAD
+pkg-config --modversion libdpdk
+rg 'SPDK_VERSION_(MAJOR|MINOR)' /usr/local/include/spdk/version.h
 ```
 
-Expected: exact commit and compatible package versions.
+Expected: exact commits, SPDK 26.01, and DPDK 25.11.0.
 
 ### Task 2: Remote `spdk-rs` compile spike
 
@@ -90,7 +98,7 @@ exact Git revision. Add a compile-only test importing `DmaBuf`, `Thread`, and
 - [ ] **Step 2: Verify RED before replacing the old backend**
 
 ```bash
-SPDK_ROOT_DIR=/opt/mooncake/spdk cargo check -p mooncake-store-master --features spdk-nof-probe
+SPDK_ROOT_DIR=$HOME/workspace/tmp/mooncake/spdk-26.01 cargo check -p mooncake-store-master --features spdk-nof-probe
 ```
 
 Expected: `nof_probe.rs` still references missing `spdk_io` APIs.
@@ -139,7 +147,7 @@ poll with the existing deadline, and clean up controller/bdev resources.
 - [ ] **Step 4: Verify focused tests and feature suite**
 
 ```bash
-SPDK_ROOT_DIR=/opt/mooncake/spdk \
+SPDK_ROOT_DIR=$HOME/workspace/tmp/mooncake/spdk-26.01 \
   cargo test -p mooncake-store-master --features spdk-nof-probe --no-fail-fast
 ```
 
@@ -162,8 +170,8 @@ Expected: all software tests pass; real target access remains environment-gated.
 
 - [ ] **Step 1: Remove patches, directories, and gitlink**
 
-Use Git-aware removal only after Task 3 is green. Do not delete the system
-checkout under `/opt/mooncake/spdk`.
+Use Git-aware removal only after Task 3 is green. Keep the shared source
+checkout because `spdk-rs` consumes internal headers from `SPDK_ROOT_DIR`.
 
 - [ ] **Step 2: Regenerate and assert dependency metadata**
 
@@ -190,10 +198,10 @@ Run workspace tests without SPDK, then the complete master feature suite with
 - Consumes: completed migration and remaining TE/Open-RDMA/clang-format tasks.
 - Produces: accurate validation commands and status.
 
-- [ ] **Step 1: Replace stale SPDK 26.01/spdk-io instructions**
+- [ ] **Step 1: Replace stale spdk-io and SPDK 25.05 instructions**
 
-Record the remote revisions, `/opt` system dependency, software test result,
-and exact real-NVMe environment gate.
+Record all three remote revisions, the shared source checkout, the single
+installed SDK, software test result, and exact real-NVMe environment gate.
 
 - [ ] **Step 2: Run hygiene checks on migration files**
 
