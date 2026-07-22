@@ -61,14 +61,18 @@ class RustStoreAdapter:
     def remove(self, key: str, force: bool = False) -> int:
         return self._call("remove", key, force)
 
-    def put_batch(self, keys: list[str], values: list[bytes], config: Any = None) -> Any:
+    def put_batch(
+        self, keys: list[str], values: list[bytes], config: Any = None
+    ) -> Any:
         return self._call("put_batch", keys, values, config)
 
     def batch_remove(self, keys: list[str], force: bool = False) -> Any:
         result = self._call("batch_remove", keys, force)
         return [0] * len(keys) if result is None else result
 
-    def batch_put(self, keys: list[str], values: list[bytes], config: Any = None) -> Any:
+    def batch_put(
+        self, keys: list[str], values: list[bytes], config: Any = None
+    ) -> Any:
         result = self._call("batch_put", keys, values, config)
         return [0] * len(keys) if result is None else result
 
@@ -186,6 +190,10 @@ def adapt_store(store: Any) -> Any:
 
 def adapt_buffer_pool(pool: Any) -> Any:
     """Wrap only buffer pools provided by this package's Rust extension."""
-    if pool is None or isinstance(pool, RustBufferPoolAdapter) or not _is_rust_binding(pool):
+    if (
+        pool is None
+        or isinstance(pool, RustBufferPoolAdapter)
+        or not _is_rust_binding(pool)
+    ):
         return pool
     return RustBufferPoolAdapter(pool)

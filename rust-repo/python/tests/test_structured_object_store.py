@@ -37,9 +37,7 @@ class InMemoryStore:
 
 def test_structured_manifest_bytes_match_upstream_format() -> None:
     store = InMemoryStore()
-    transfer = MooncakeBundleTransfer(
-        store, key_prefix="compat", default_chunk_bytes=4
-    )
+    transfer = MooncakeBundleTransfer(store, key_prefix="compat", default_chunk_bytes=4)
     ref = transfer.put_structured_object(
         StructuredObjectPayload(
             metadata={"epoch": 3},
@@ -60,9 +58,7 @@ def test_structured_manifest_bytes_match_upstream_format() -> None:
         "dtype": "<i2",
         "shape": [4],
     }
-    assert [
-        chunk["bytes"] for chunk in manifest["buffers"]["x"]["chunks"]
-    ] == [4, 4]
+    assert [chunk["bytes"] for chunk in manifest["buffers"]["x"]["chunks"]] == [4, 4]
 
 
 def test_structured_api_is_exported_from_package() -> None:
