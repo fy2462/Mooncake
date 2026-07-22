@@ -8,6 +8,13 @@
 
 **Tech Stack:** Rust, Tokio, Tonic, Axum, serde/rmp-serde, libc, transfer-engine-ffi, PyO3, Cargo tests.
 
+**Migration boundary:** Follow
+[`../../rust-store-migration-scope.md`](../../rust-store-migration-scope.md).
+The Rust Store replaces the C++ `mooncake-store`; it may depend on the native
+Transfer Engine through `transfer-engine-ffi`, but must not use the C++ Store
+as a build or runtime dependency. Missing Store capabilities are implemented
+in `rust-repo`.
+
 ## Global Constraints
 
 - Audit range is `110bfa47aabc713ef1cdf..38c5d726` (82 upstream commits). The later `7e39ebf1` is a Rust migration result, not an upstream input.
