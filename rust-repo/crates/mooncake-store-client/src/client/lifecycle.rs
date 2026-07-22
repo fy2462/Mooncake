@@ -16,6 +16,27 @@ use uuid::Uuid;
 const MIN_SEGMENT_SIZE: u64 = 1024;
 const MAX_SEGMENT_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
 
+fn release_failed_store_segment(
+    engine: &TransferEngine,
+    segment_name: &str,
+    mut buffer: crate::memory_ffi::OwnedSegmentBuffer,
+) {
+    let _ = engine.remove_local_segment(segment_name);
+    let unregistered =
+        unsafe { engine.unregister_local_memory(buffer.as_ptr() as *mut std::ffi::c_void) };
+    if let Err(error) = unregistered {
+        tracing::error!(
+            %error,
+            "leaking partially created Store segment because Transfer Engine unregister failed"
+        );
+        std::mem::forget(buffer);
+    } else if !buffer.release() {
+        tracing::error!(
+            "leaking partially created Store segment because CUDA host unregister failed"
+        );
+    }
+}
+
 impl MooncakeClient {
     /// Create a new Mooncake client, bootstrapping the TransferEngine,
     /// registering memory, and mounting a segment if needed.
@@ -284,7 +305,7 @@ impl MooncakeClient {
         // Step 7: If this node is a storage node (global_segment_size > 0),
         // allocate, register, open, and mount a segment.
         // 如果本节点是存储节点（global_segment_size > 0），分配、注册、打开并挂载 segment。
-        let mut segment_buffer: Option<OwnedBuffer> = None;
+        let mut segment_buffer: Option<crate::memory_ffi::OwnedSegmentBuffer> = None;
         if global_segment_size > 0 {
             let global_segment_size_usize = usize::try_from(global_segment_size).map_err(|_| {
                 StoreError::InvalidParams(
@@ -295,14 +316,15 @@ impl MooncakeClient {
             // remote nodes can read from / write to this segment via RDMA/TCP.
             //
             // 分配 segment 内存并向 TE 注册，使远端节点可以通过 RDMA/TCP 读写此 segment。
-            let mut seg_buf = OwnedBuffer::allocate(global_segment_size_usize);
-            seg_buf
-                .populate_before_registration(effective_protocol)
-                .map_err(|error| {
-                    StoreError::Internal(format!(
-                        "failed to populate segment HugeTLB buffer before registration: {error}"
-                    ))
-                })?;
+            let seg_buf = crate::memory_ffi::allocate_store_segment(
+                global_segment_size_usize,
+                effective_protocol,
+            )
+            .map_err(|error| {
+                StoreError::Internal(format!(
+                    "failed to populate segment HugeTLB buffer before registration: {error}"
+                ))
+            })?;
             let base_addr = seg_buf.as_ptr() as u64;
             crate::memory_ffi::register_local_memory(&engine, &seg_buf, "cpu:0", true)?;
 
@@ -314,11 +336,10 @@ impl MooncakeClient {
             // 创建本地 TE segment，使传输引擎能够发现并解析此节点的 segment 内存
             // 以进行远程传输。没有此 open_segment，本节点上的 TE 不知道
             // 哪块注册内存支撑此 segment。C++ 等价：`TransferEngine::openSegment(...)`。
-            engine.open_segment(local_host)?;
-
-            segment_buffer = Some(seg_buf);
-            segment_name = local_host.to_string();
-            segment_size = global_segment_size;
+            if let Err(error) = engine.open_segment(local_host) {
+                release_failed_store_segment(&engine, local_host, seg_buf);
+                return Err(error.into());
+            }
 
             // Notify master about this segment so peers can discover it.
             // 通知 master 此 segment，使对等节点可以发现它。
@@ -327,21 +348,29 @@ impl MooncakeClient {
                     high: client_id.as_u64_pair().0,
                     low: client_id.as_u64_pair().1,
                 }),
-                segment_name: segment_name.clone(),
+                segment_name: local_host.to_string(),
                 size: global_segment_size,
                 base_addr,
                 te_endpoint: local_host.to_string(),
                 protocol: effective_protocol.to_string(),
             };
-            let mount_response = master
+            let mount_response = match master
                 .mount_segment(Self::rpc_request_with_timeout(request, rpc_request_timeout))
                 .await
-                .map_err(Self::rpc_status_to_error)?
-                .into_inner();
+            {
+                Ok(response) => response.into_inner(),
+                Err(status) => {
+                    release_failed_store_segment(&engine, local_host, seg_buf);
+                    return Err(Self::rpc_status_to_error(status));
+                }
+            };
             if let Some(id) = mount_response.segment_id {
                 mounted_segment_ids
-                    .insert(segment_name.clone(), Uuid::from_u64_pair(id.high, id.low));
+                    .insert(local_host.to_string(), Uuid::from_u64_pair(id.high, id.low));
             }
+            segment_buffer = Some(seg_buf);
+            segment_name = local_host.to_string();
+            segment_size = global_segment_size;
         }
 
         // Step 8: Register the current node's hostname as a local endpoint.

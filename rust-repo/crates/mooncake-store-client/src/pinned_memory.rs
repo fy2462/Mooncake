@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg_attr(not(feature = "cuda-host-pin"), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnregisterResult {
     Success,
@@ -236,6 +237,63 @@ pub(crate) struct PinnedRegion {
     size: usize,
     released: bool,
     release_succeeded: bool,
+}
+
+/// Owns an allocation whose backing memory may be registered with CUDA.
+/// A failed unregister intentionally leaks `allocation` to prevent a dangling
+/// CUDA mapping.
+pub(crate) struct PinnedAllocation<T> {
+    allocation: std::mem::ManuallyDrop<T>,
+    pin: Option<PinnedRegion>,
+    released: bool,
+    release_succeeded: bool,
+}
+
+impl<T> PinnedAllocation<T> {
+    pub(crate) fn new(allocation: T, pin: Option<PinnedRegion>) -> Self {
+        Self {
+            allocation: std::mem::ManuallyDrop::new(allocation),
+            pin,
+            released: false,
+            release_succeeded: true,
+        }
+    }
+
+    pub(crate) fn release(&mut self) -> bool {
+        if self.released {
+            return self.release_succeeded;
+        }
+        if let Some(mut pin) = self.pin.take()
+            && !pin.release()
+        {
+            self.released = true;
+            self.release_succeeded = false;
+            return false;
+        }
+        unsafe { std::mem::ManuallyDrop::drop(&mut self.allocation) };
+        self.released = true;
+        true
+    }
+}
+
+impl<T> std::ops::Deref for PinnedAllocation<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.allocation
+    }
+}
+
+impl<T> std::ops::DerefMut for PinnedAllocation<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.allocation
+    }
+}
+
+impl<T> Drop for PinnedAllocation<T> {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
 }
 
 impl PinnedMemoryManager {
@@ -508,5 +566,27 @@ mod tests {
             parse_pinned_memory_limit(Some("18446744073709551616")),
             None
         );
+    }
+
+    #[test]
+    fn pinned_allocation_frees_only_after_safe_unregister() {
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (manager, ops) = manager(16);
+        let pin = manager.try_pin(0x1000, 16, "allocation");
+        drop(PinnedAllocation::new(DropProbe(drops.clone()), pin));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+        let pin = manager.try_pin(0x2000, 16, "leaked allocation");
+        *ops.unregister_result.lock().unwrap() = UnregisterResult::Error;
+        drop(PinnedAllocation::new(DropProbe(drops.clone()), pin));
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(manager.pinned_bytes_for_test(), 16);
     }
 }

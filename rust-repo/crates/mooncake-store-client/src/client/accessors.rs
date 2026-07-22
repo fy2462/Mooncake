@@ -1,4 +1,5 @@
 use super::MooncakeClient;
+use crate::proto;
 use mooncake_store_core::ReplicaDescriptor;
 use mooncake_store_core::error::StoreResult;
 use std::ffi::c_void;
@@ -83,6 +84,48 @@ impl MooncakeClient {
         // Stop offload RPC server if running.
         self.offload_server_state.stop();
         self.client_http_server_state.stop();
+
+        // Stop publishing/using the Store segment before releasing its CUDA
+        // registration and backing allocation.
+        if !self.segment_name.is_empty() {
+            let segment_id = {
+                self.mounted_segment_ids
+                    .read()
+                    .get(&self.segment_name)
+                    .copied()
+            };
+            if let Some(segment_id) = segment_id {
+                let result = self
+                    .master
+                    .unmount_segment(self.rpc_request(proto::UnmountSegmentRequest {
+                        segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
+                        client_id: Some(self.client_id_proto()),
+                    }))
+                    .await;
+                if let Err(error) = result {
+                    tracing::warn!(%error, "failed to unmount Store segment during teardown");
+                }
+            }
+            if let Err(error) = self.engine.remove_local_segment(&self.segment_name) {
+                tracing::warn!(%error, "failed to remove local Transfer Engine segment");
+            }
+        }
+
+        if let Some(mut segment_buffer) = self.segment_buffer.take() {
+            let te_unregistered = unsafe {
+                self.engine
+                    .unregister_local_memory(segment_buffer.as_ptr() as *mut c_void)
+            };
+            if let Err(error) = te_unregistered {
+                tracing::error!(
+                    %error,
+                    "leaking Store segment because Transfer Engine unregister failed"
+                );
+                std::mem::forget(segment_buffer);
+            } else if !segment_buffer.release() {
+                tracing::error!("leaking Store segment because CUDA host unregister failed");
+            }
+        }
 
         // unregister local buffer / 取消注册本地缓冲区
         unsafe {

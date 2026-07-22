@@ -142,7 +142,7 @@ pub struct MooncakeClient {
     ///
     /// Segment 内存缓冲区（仅当 global_segment_size > 0 时分配，用于存储节点）。
     /// 必须在客户端整个生命周期内保持存活，以便 TE 能够访问。
-    pub(crate) segment_buffer: Option<OwnedBuffer>,
+    pub(crate) segment_buffer: Option<crate::memory_ffi::OwnedSegmentBuffer>,
 
     /// Map of externally-registered user buffers: `ptr_addr → (size, location)`.
     /// Populated via [`register_buffer`](MooncakeClient::register_buffer) for

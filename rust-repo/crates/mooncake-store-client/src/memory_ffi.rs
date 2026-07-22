@@ -10,6 +10,10 @@ use std::io;
 use std::ops::{Deref, DerefMut, Range};
 use transfer_engine_ffi::TransferEngine;
 
+use crate::pinned_memory::{PinnedAllocation, global_pinned_memory_manager};
+
+pub(crate) type OwnedSegmentBuffer = PinnedAllocation<OwnedBuffer>;
+
 /// Client-owned memory used for TE-registered local and segment buffers.
 pub(crate) enum OwnedBuffer {
     Vec(Vec<u8>),
@@ -131,6 +135,28 @@ pub(crate) fn register_local_memory(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn allocate_store_segment(
+    size: usize,
+    protocol: &str,
+) -> io::Result<OwnedSegmentBuffer> {
+    let mut buffer = OwnedBuffer::allocate(size);
+    buffer.populate_before_registration(protocol)?;
+    let pin = is_host_store_segment_protocol(protocol)
+        .then(|| {
+            global_pinned_memory_manager().try_pin(
+                buffer.as_ptr() as usize,
+                buffer.len(),
+                "Rust Store setup segment",
+            )
+        })
+        .flatten();
+    Ok(PinnedAllocation::new(buffer, pin))
+}
+
+fn is_host_store_segment_protocol(protocol: &str) -> bool {
+    matches!(protocol, "" | "tcp" | "rdma" | "efa" | "cxi" | "rpc_only")
 }
 
 impl Deref for OwnedBuffer {
