@@ -396,6 +396,8 @@ impl MasterServiceImpl {
             promotion_tasks: DashMap::new(),
             // CountMinSketch 频率统计：approximate 访问次数，用于 promotion 准入控制
             promotion_sketch: RwLock::new(CountMinSketch::new()),
+            // Transient promotion candidates rejected by watermark/capacity gates.
+            promotion_candidates: DashMap::new(),
             // Drain job 表：job_id → DrainJobEntry
             drain_jobs: DashMap::new(),
 
@@ -420,6 +422,8 @@ impl MasterServiceImpl {
             // ── 全局计数器 / global counters ──
             // 全局在途 promotion 计数：CAS 式限流，防止并发 promotion 打爆内存
             promotion_in_flight: AtomicUsize::new(0),
+            promotion_candidate_count: AtomicUsize::new(0),
+            promotion_retry_cursor: AtomicUsize::new(0),
             // 全局视图版本号：段拓扑变更时 +1，Client Ping 时返回，Client 感知版本变化后重新 discover
             view_version: AtomicI64::new(0),
 
@@ -865,6 +869,13 @@ impl MasterServiceImpl {
     /// Testing helper: run one automatic eviction cycle.
     pub fn run_automatic_eviction_once_for_test(&self) -> Vec<String> {
         run_automatic_eviction_once(&self.state)
+    }
+
+    #[doc(hidden)]
+    pub fn promotion_candidate_count_for_test(&self) -> usize {
+        self.state
+            .promotion_candidate_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 获取 oplog 管理器的可变引用 / Returns mutable reference to oplog manager.

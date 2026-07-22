@@ -24,6 +24,7 @@
 //! | `offloading_tasks` | `DashMap<String, OffloadingTaskEntry>` | 进行中的下沉任务：内存 → 本地磁盘 |
 //! | `promotion_tasks` | `DashMap<String, PromotionTaskEntry>` | 进行中的提升任务：本地磁盘 → 内存 |
 //! | `promotion_sketch` | `RwLock<CountMinSketch>` | Count-Min Sketch 频率统计：promotion 准入控制 |
+//! | `promotion_candidates` | `DashMap<String, PromotionCandidate>` | 因瞬时限制等待后台重试的提升候选 |
 //! | `drain_jobs` | `DashMap<Uuid, DrainJobEntry>` | Drain 任务：segment 下线前的数据迁移 |
 //! | `allocator` | `RwLock<SegmentAllocator>` | Memory segment 分配器：管理内存段的空间分配 |
 //! | `nof_allocator` | `RwLock<SegmentAllocator>` | NoF segment 分配器：管理远程 SSD 段的空间分配 |
@@ -52,6 +53,24 @@ mod state_config;
 mod state_drain;
 pub use state_config::MasterRuntimeConfig;
 pub(crate) use state_drain::{ActiveDrainTask, DrainJobEntry};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromotionCandidateReason {
+    Watermark,
+    QueueCap,
+    PushFailed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PromotionCandidate {
+    pub(crate) sketch_score: u8,
+    pub(crate) first_seen: Instant,
+    pub(crate) last_seen: Instant,
+    pub(crate) retry_after: Instant,
+    pub(crate) last_reason: PromotionCandidateReason,
+    pub(crate) last_error_code: Option<i32>,
+    pub(crate) retry_count: u32,
+}
 
 /// Master 服务的全局状态容器。
 /// processing_keys 跟踪正在 PutStart 但未 Complete 的 key，防止并发冲突。
@@ -88,6 +107,8 @@ pub(crate) struct MasterState {
     pub(crate) promotion_tasks: DashMap<String, PromotionTaskEntry>,
     /// Count-Min Sketch 频率统计 / Frequency sketch: approximate access counts for promotion gating.
     pub(crate) promotion_sketch: RwLock<CountMinSketch>,
+    /// Transient promotion candidates waiting for bounded background retry.
+    pub(crate) promotion_candidates: DashMap<String, PromotionCandidate>,
     /// Drain 任务注册表 / Drain job registry: job_id → DrainJobEntry.
     pub(crate) drain_jobs: DashMap<Uuid, DrainJobEntry>,
     /// Memory 分配器 / Memory segment allocator: manages space allocation within Memory segments.
@@ -98,6 +119,10 @@ pub(crate) struct MasterState {
     pub(crate) storage_backend: RwLock<Option<StorageBackend>>,
     /// 全局在途晋升计数 / Global in-flight promotion counter: prevents exceeding queue limit.
     pub(crate) promotion_in_flight: AtomicUsize,
+    /// Exact number of entries reserved in `promotion_candidates`.
+    pub(crate) promotion_candidate_count: AtomicUsize,
+    /// Fair partition cursor used by promotion retry scanning.
+    pub(crate) promotion_retry_cursor: AtomicUsize,
     /// 全局视图版本号 / Global view version: notifies clients of topology changes.
     pub(crate) view_version: AtomicI64,
     /// 运行时配置 / Runtime configuration: all tunable parameters.
@@ -136,11 +161,14 @@ impl MasterState {
             offloading_tasks: DashMap::new(),
             promotion_tasks: DashMap::new(),
             promotion_sketch: RwLock::new(CountMinSketch::new()),
+            promotion_candidates: DashMap::new(),
             drain_jobs: DashMap::new(),
             allocator: RwLock::new(SegmentAllocator::new()),
             nof_allocator: RwLock::new(SegmentAllocator::new()),
             storage_backend: RwLock::new(None),
             promotion_in_flight: AtomicUsize::new(0),
+            promotion_candidate_count: AtomicUsize::new(0),
+            promotion_retry_cursor: AtomicUsize::new(0),
             view_version: AtomicI64::new(0),
             runtime_config: MasterRuntimeConfig::default(),
             service_available: AtomicBool::new(true),
