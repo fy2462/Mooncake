@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnregisterResult {
@@ -11,6 +11,197 @@ pub(crate) enum UnregisterResult {
 pub(crate) trait PinOps: Send + Sync {
     fn register_region(&self, address: usize, size: usize) -> Result<(), String>;
     fn unregister_region(&self, address: usize) -> (UnregisterResult, Option<String>);
+}
+
+struct UnavailablePinOps;
+
+impl PinOps for UnavailablePinOps {
+    fn register_region(&self, _address: usize, _size: usize) -> Result<(), String> {
+        Err("CUDA host pin runtime is unavailable".into())
+    }
+
+    fn unregister_region(&self, _address: usize) -> (UnregisterResult, Option<String>) {
+        (
+            UnregisterResult::Error,
+            Some("CUDA host pin runtime is unavailable".into()),
+        )
+    }
+}
+
+fn parse_pinned_memory_limit(value: Option<&str>) -> Option<usize> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let limit = value.parse::<u64>().ok()?;
+    if limit == 0 {
+        return None;
+    }
+    usize::try_from(limit).ok()
+}
+
+pub(crate) fn global_pinned_memory_manager() -> &'static PinnedMemoryManager {
+    static MANAGER: OnceLock<PinnedMemoryManager> = OnceLock::new();
+    MANAGER.get_or_init(|| {
+        let raw = std::env::var("MC_STORE_PIN_MEMORY_MAX_BYTES").ok();
+        let limit = parse_pinned_memory_limit(raw.as_deref());
+        let ops = default_pin_ops();
+        let enabled = limit.is_some() && ops.is_some();
+        if raw
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty() && value.trim() != "0" && limit.is_none())
+        {
+            tracing::warn!(
+                value = raw.as_deref().unwrap_or_default(),
+                "invalid MC_STORE_PIN_MEMORY_MAX_BYTES; Store segment pinning disabled"
+            );
+        }
+        if limit.is_some() && ops.is_none() {
+            tracing::info!("Store segment pinning requested but CUDA runtime is unavailable");
+        }
+        PinnedMemoryManager::new(
+            enabled,
+            limit.unwrap_or(0),
+            ops.unwrap_or_else(|| Arc::new(UnavailablePinOps)),
+        )
+    })
+}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+fn default_pin_ops() -> Option<Arc<dyn PinOps>> {
+    CudaPinOps::load().map(|ops| Arc::new(ops) as Arc<dyn PinOps>)
+}
+
+#[cfg(not(all(feature = "cuda-host-pin", target_os = "linux")))]
+fn default_pin_ops() -> Option<Arc<dyn PinOps>> {
+    None
+}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+struct CudaPinOps {
+    handle: *mut std::ffi::c_void,
+    host_register: unsafe extern "C" fn(*mut std::ffi::c_void, usize, u32) -> i32,
+    host_unregister: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32,
+    get_error_string: unsafe extern "C" fn(i32) -> *const std::ffi::c_char,
+    get_last_error: unsafe extern "C" fn() -> i32,
+}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+unsafe impl Send for CudaPinOps {}
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+unsafe impl Sync for CudaPinOps {}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+impl CudaPinOps {
+    fn load() -> Option<Self> {
+        use std::ffi::CString;
+
+        let mut handle = std::ptr::null_mut();
+        for soname in [
+            "libcudart.so",
+            "libcudart.so.13",
+            "libcudart.so.12",
+            "libcudart.so.11.0",
+        ] {
+            let name = CString::new(soname).expect("CUDA soname contains no NUL");
+            handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            if !handle.is_null() {
+                break;
+            }
+        }
+        if handle.is_null() {
+            return None;
+        }
+
+        let host_register = unsafe { load_symbol(handle, b"cudaHostRegister\0") };
+        let host_unregister = unsafe { load_symbol(handle, b"cudaHostUnregister\0") };
+        let get_error_string = unsafe { load_symbol(handle, b"cudaGetErrorString\0") };
+        let get_last_error = unsafe { load_symbol(handle, b"cudaGetLastError\0") };
+        match (
+            host_register,
+            host_unregister,
+            get_error_string,
+            get_last_error,
+        ) {
+            (
+                Some(host_register),
+                Some(host_unregister),
+                Some(get_error_string),
+                Some(get_last_error),
+            ) => Some(Self {
+                handle,
+                host_register,
+                host_unregister,
+                get_error_string,
+                get_last_error,
+            }),
+            _ => {
+                unsafe { libc::dlclose(handle) };
+                None
+            }
+        }
+    }
+
+    fn error_string(&self, code: i32) -> String {
+        let ptr = unsafe { (self.get_error_string)(code) };
+        if ptr.is_null() {
+            return format!("CUDA error {code}");
+        }
+        unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+unsafe fn load_symbol<T: Copy>(handle: *mut std::ffi::c_void, name: &[u8]) -> Option<T> {
+    let symbol = unsafe { libc::dlsym(handle, name.as_ptr().cast()) };
+    if symbol.is_null() {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute_copy(&symbol) })
+    }
+}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+impl PinOps for CudaPinOps {
+    fn register_region(&self, address: usize, size: usize) -> Result<(), String> {
+        const CUDA_HOST_REGISTER_PORTABLE: u32 = 1;
+        let result = unsafe {
+            (self.host_register)(
+                address as *mut std::ffi::c_void,
+                size,
+                CUDA_HOST_REGISTER_PORTABLE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            let error = self.error_string(result);
+            unsafe { (self.get_last_error)() };
+            Err(error)
+        }
+    }
+
+    fn unregister_region(&self, address: usize) -> (UnregisterResult, Option<String>) {
+        const CUDA_ERROR_CUDART_UNLOADING: i32 = 29;
+        let result = unsafe { (self.host_unregister)(address as *mut std::ffi::c_void) };
+        match result {
+            0 => (UnregisterResult::Success, None),
+            CUDA_ERROR_CUDART_UNLOADING => (
+                UnregisterResult::RuntimeUnloading,
+                Some(self.error_string(result)),
+            ),
+            _ => (UnregisterResult::Error, Some(self.error_string(result))),
+        }
+    }
+}
+
+#[cfg(all(feature = "cuda-host-pin", target_os = "linux"))]
+impl Drop for CudaPinOps {
+    fn drop(&mut self) {
+        unsafe { libc::dlclose(self.handle) };
+    }
 }
 
 struct ActiveRegion {
@@ -302,5 +493,20 @@ mod tests {
         let disabled = PinnedMemoryManager::new(false, usize::MAX, ops.clone());
         assert!(disabled.try_pin(0x1000, 4, "disabled").is_none());
         assert_eq!(ops.register_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn pinned_memory_limit_parsing_matches_cpp_configuration() {
+        assert_eq!(parse_pinned_memory_limit(None), None);
+        assert_eq!(parse_pinned_memory_limit(Some("")), None);
+        assert_eq!(parse_pinned_memory_limit(Some("  \t\n")), None);
+        assert_eq!(parse_pinned_memory_limit(Some("0")), None);
+        assert_eq!(parse_pinned_memory_limit(Some(" 4096 ")), Some(4096));
+        assert_eq!(parse_pinned_memory_limit(Some("-1")), None);
+        assert_eq!(parse_pinned_memory_limit(Some("4KiB")), None);
+        assert_eq!(
+            parse_pinned_memory_limit(Some("18446744073709551616")),
+            None
+        );
     }
 }

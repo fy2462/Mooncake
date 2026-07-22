@@ -33,6 +33,7 @@ bytes = { version = "1", optional = true }
 
 [features]
 default = []
+cuda-host-pin = []
 s3 = ["aws-sdk-s3", "aws-config", "bytes"]
 link-native = [
     "mooncake-store-core/link-native",
