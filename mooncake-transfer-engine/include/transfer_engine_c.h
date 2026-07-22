@@ -182,6 +182,17 @@ void setAutoDiscover(transfer_engine_t engine, int auto_discover);
 
 void *getBaseAddr(transfer_engine_t engine);
 
+struct nic_load_stat {
+    char device_name[64];
+    uint64_t inflight_bytes;
+    double ewma_bandwidth_bps;
+};
+
+typedef struct nic_load_stat nic_load_stat_t;
+
+int getNicLoadStats(transfer_engine_t engine, nic_load_stat_t *stats,
+                    size_t *count);
+
 void enableGracefulShutdown(transfer_engine_t engine);
 int showLinks(transfer_engine_t engine, char *buf_out, size_t buf_len,
               int json);

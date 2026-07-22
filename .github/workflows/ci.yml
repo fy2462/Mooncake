@@ -2,9 +2,13 @@ name: 'Build & Test (Linux)'
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - "main"
+      - "release/**"
   pull_request:
-    branches: [ "main" ]
+    branches:
+      - "main"
+      - "release/**"
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch: {}
 
@@ -971,7 +975,7 @@ jobs:
     secrets: inherit
 
   integration-test:
-    needs: [build, check-paths]
+    needs: [build, build-wheel-cu13, check-paths]
     if: needs.check-paths.outputs.should-run-downstream == 'true'
     uses: ./.github/workflows/integration-test.yml
     secrets: inherit
