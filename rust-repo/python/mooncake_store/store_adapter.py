@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import importlib
 import inspect
 import threading
 from typing import Any
@@ -162,7 +163,18 @@ class RustBufferPoolAdapter:
 
 
 def _is_rust_binding(value: Any) -> bool:
-    return type(value).__module__.startswith("mooncake_store._mooncake_store")
+    if type(value).__module__.startswith("mooncake_store._mooncake_store"):
+        return True
+    try:
+        extension = importlib.import_module("mooncake_store._mooncake_store")
+    except ImportError:
+        return False
+    rust_types = tuple(
+        rust_type
+        for name in ("MooncakeClient", "BufferPool", "RegisteredBufferPool")
+        if isinstance((rust_type := getattr(extension, name, None)), type)
+    )
+    return bool(rust_types) and isinstance(value, rust_types)
 
 
 def adapt_store(store: Any) -> Any:
