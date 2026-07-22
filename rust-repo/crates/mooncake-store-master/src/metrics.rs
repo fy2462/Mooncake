@@ -101,6 +101,40 @@ lazy_static! {
     .unwrap();
 }
 
+// Promotion retry lifecycle counters. Names intentionally match the C++ master.
+lazy_static! {
+    pub static ref PROMOTION_CANDIDATE_RECORDED: IntCounter = IntCounter::new(
+        "master_promotion_candidate_recorded_total",
+        "promotion candidates recorded for background retry"
+    )
+    .unwrap();
+    pub static ref PROMOTION_CANDIDATE_ADMITTED: IntCounter = IntCounter::new(
+        "master_promotion_candidate_admitted_total",
+        "promotion candidates admitted by background retry"
+    )
+    .unwrap();
+    pub static ref PROMOTION_CANDIDATE_ADMISSION_REJECTED: IntCounter = IntCounter::new(
+        "master_promotion_candidate_admission_rejected_total",
+        "promotion candidates transiently rejected during background retry"
+    )
+    .unwrap();
+    pub static ref PROMOTION_CANDIDATE_EXPIRED_EVALUATED: IntCounter = IntCounter::new(
+        "master_promotion_candidate_expired_evaluated_total",
+        "evaluated promotion candidates removed by age or retry budget"
+    )
+    .unwrap();
+    pub static ref PROMOTION_CANDIDATE_EXPIRED_UNEVALUATED: IntCounter = IntCounter::new(
+        "master_promotion_candidate_expired_unevaluated_total",
+        "unevaluated promotion candidates removed by age"
+    )
+    .unwrap();
+    pub static ref PROMOTION_CANDIDATE_DROPPED_LIMIT: IntCounter = IntCounter::new(
+        "master_promotion_candidate_dropped_limit_total",
+        "promotion candidates refused because the candidate table is full"
+    )
+    .unwrap();
+}
+
 // =============================================================================
 // Transfer latency histograms (microseconds) — 传输延迟直方图（微秒）
 // =============================================================================
@@ -374,6 +408,13 @@ pub fn register_metrics() {
     register_gauge(&MEM_CACHE_TOTAL);
     register_gauge(&FILE_CACHE_TOTAL);
     register_counter(&VALID_GETS);
+
+    register_counter(&PROMOTION_CANDIDATE_RECORDED);
+    register_counter(&PROMOTION_CANDIDATE_ADMITTED);
+    register_counter(&PROMOTION_CANDIDATE_ADMISSION_REJECTED);
+    register_counter(&PROMOTION_CANDIDATE_EXPIRED_EVALUATED);
+    register_counter(&PROMOTION_CANDIDATE_EXPIRED_UNEVALUATED);
+    register_counter(&PROMOTION_CANDIDATE_DROPPED_LIMIT);
 
     // Transfer bytes
     register_counter(&TRANSFER_READ_BYTES);

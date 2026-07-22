@@ -5,6 +5,7 @@ use mooncake_store_master::metrics;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use prometheus::{Encoder, TextEncoder};
 use std::sync::Mutex;
 use tonic::Request;
 use uuid::Uuid;
@@ -145,6 +146,79 @@ async fn mount_local_disk_and_notify_success(
     )
     .await
     .unwrap();
+}
+
+async fn trigger_promotion_lookup(service: &MasterServiceImpl, key: &str) {
+    MasterService::get_replica_list(
+        service,
+        Request::new(proto::GetReplicaListRequest {
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn test_promotion_candidate_metrics_are_registered_and_incremented() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    metrics::register_metrics();
+    let recorded = metrics::PROMOTION_CANDIDATE_RECORDED.get();
+    let admitted = metrics::PROMOTION_CANDIDATE_ADMITTED.get();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        promotion_on_hit: true,
+        promotion_admission_threshold: 1,
+        promotion_queue_limit: 1,
+        ..Default::default()
+    });
+    let holder_id = Uuid::new_v4();
+    mount_local_disk_and_notify_success(&service, holder_id, "metric-first").await;
+    mount_local_disk_and_notify_success(&service, holder_id, "metric-retry").await;
+    for key in ["metric-first", "metric-retry"] {
+        trigger_promotion_lookup(&service, key).await;
+        trigger_promotion_lookup(&service, key).await;
+    }
+    assert_eq!(metrics::PROMOTION_CANDIDATE_RECORDED.get(), recorded + 1);
+
+    MasterService::promotion_object_heartbeat(
+        &service,
+        Request::new(proto::PromotionObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(holder_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::notify_promotion_failure(
+        &service,
+        Request::new(proto::NotifyPromotionFailureRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            key: "metric-first".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    service.make_promotion_candidates_due_for_test();
+    service.run_promotion_candidate_retry_for_test();
+    assert_eq!(metrics::PROMOTION_CANDIDATE_ADMITTED.get(), admitted + 1);
+
+    let mut output = Vec::new();
+    TextEncoder::new()
+        .encode(&prometheus::gather(), &mut output)
+        .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    for name in [
+        "master_promotion_candidate_recorded_total",
+        "master_promotion_candidate_admitted_total",
+        "master_promotion_candidate_admission_rejected_total",
+        "master_promotion_candidate_expired_evaluated_total",
+        "master_promotion_candidate_expired_unevaluated_total",
+        "master_promotion_candidate_dropped_limit_total",
+    ] {
+        assert!(output.contains(name), "missing metric {name}");
+    }
 }
 
 #[tokio::test]

@@ -3,6 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use crate::metrics;
+
 use super::{MasterState, erase_promotion_candidate, try_push_promotion_queue};
 
 const MAX_RETRIES: u32 = 8;
@@ -55,6 +57,11 @@ pub(crate) fn run_promotion_candidate_retry(state: &MasterState, partitions: usi
         if now.saturating_duration_since(candidate.first_seen) >= CANDIDATE_TTL
             || candidate.retry_count >= MAX_RETRIES
         {
+            if candidate.retry_count == 0 {
+                metrics::PROMOTION_CANDIDATE_EXPIRED_UNEVALUATED.inc();
+            } else {
+                metrics::PROMOTION_CANDIDATE_EXPIRED_EVALUATED.inc();
+            }
             drop(candidate);
             erase_promotion_candidate(state, &key);
             continue;
@@ -62,14 +69,19 @@ pub(crate) fn run_promotion_candidate_retry(state: &MasterState, partitions: usi
         drop(candidate);
 
         let result = try_push_promotion_queue(state, &key, false);
+        if result == super::PromotionQueueResult::Queued {
+            metrics::PROMOTION_CANDIDATE_ADMITTED.inc();
+        }
         if !result.is_transient() {
             erase_promotion_candidate(state, &key);
             continue;
         }
 
         if let Some(mut candidate) = state.promotion_candidates.get_mut(&key) {
+            metrics::PROMOTION_CANDIDATE_ADMISSION_REJECTED.inc();
             candidate.retry_count += 1;
             if candidate.retry_count >= MAX_RETRIES {
+                metrics::PROMOTION_CANDIDATE_EXPIRED_EVALUATED.inc();
                 drop(candidate);
                 erase_promotion_candidate(state, &key);
             } else {

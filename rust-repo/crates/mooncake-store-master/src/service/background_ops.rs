@@ -4,6 +4,7 @@
 //! Reaper and drain processing live in sibling submodules.
 
 use crate::eviction::EvictionManager;
+use crate::metrics;
 use crate::proto;
 use dashmap::mapref::entry::Entry;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, TaskStatus};
@@ -86,6 +87,7 @@ fn record_or_refresh_candidate(
         })
         .is_ok();
     if !reserved {
+        metrics::PROMOTION_CANDIDATE_DROPPED_LIMIT.inc();
         return;
     }
 
@@ -100,6 +102,7 @@ fn record_or_refresh_candidate(
                 last_error_code,
                 retry_count: 0,
             });
+            metrics::PROMOTION_CANDIDATE_RECORDED.inc();
         }
         Entry::Occupied(mut entry) => {
             decrement_candidate_count(state);
