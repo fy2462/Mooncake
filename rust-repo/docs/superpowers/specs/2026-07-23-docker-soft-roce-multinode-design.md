@@ -1,5 +1,14 @@
 # Docker Soft-RoCE Multi-Node Validation Design
 
+## Validated topology note
+
+On the ARM64 validation host, `rdma system show` reports `netns shared`.
+Per-container RXE links therefore reached ACTIVE but failed their first data
+completion. The validated fallback is explicitly labeled
+`shared-rdma-device`: separate host-network processes share one suite-owned
+RXE device. This fallback still requires verbs data transfer and an explicit
+Transfer Engine RDMA Write/Read compare; TCP is never accepted as a pass.
+
 ## Goal
 
 Create a repeatable Docker environment that gives two logical Mooncake nodes
