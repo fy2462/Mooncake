@@ -15,7 +15,7 @@ classifiers = [
     "Programming Language :: Rust",
     "Operating System :: POSIX :: Linux",
 ]
-dependencies = ["aiohttp>=3.9"]
+dependencies = ["aiohttp>=3.9", "msgpack>=1.0", "numpy>=1.24"]
 
 [project.scripts]
 mc_store_rest_server = "mooncake_store.service:sync_main"
