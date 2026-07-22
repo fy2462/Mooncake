@@ -58,6 +58,7 @@ pub mod hot_cache;
 pub mod local_storage_backend;
 mod memory_ffi;
 pub mod offload;
+mod pinned_memory;
 pub mod remote_source;
 
 pub use client::{
