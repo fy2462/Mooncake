@@ -74,7 +74,7 @@ use uuid::Uuid;
 use self::background_ops::{
     clear_offloading_task, clear_promotion_task, push_offloading_queue,
     release_staged_promotion_replica, run_automatic_eviction_once, run_eviction_cycle,
-    try_push_promotion_queue,
+    run_promotion_candidate_retry, try_push_promotion_queue,
 };
 pub(crate) use self::helpers::sync_cache_total_accounting;
 use self::helpers::{
@@ -883,6 +883,45 @@ impl MasterServiceImpl {
         self.state
             .promotion_candidates
             .contains_key(&make_tenant_scoped_key(tenant_id, key))
+    }
+
+    #[doc(hidden)]
+    pub fn make_promotion_candidates_due_for_test(&self) {
+        let now = std::time::Instant::now();
+        for mut candidate in self.state.promotion_candidates.iter_mut() {
+            candidate.retry_after = now;
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn age_promotion_candidates_for_test(&self, age: Duration) {
+        for mut candidate in self.state.promotion_candidates.iter_mut() {
+            candidate.first_seen = candidate
+                .first_seen
+                .checked_sub(age)
+                .unwrap_or(candidate.first_seen);
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn set_promotion_candidate_retry_count_for_test(
+        &self,
+        key: &str,
+        tenant_id: &str,
+        retry_count: u32,
+    ) {
+        if let Some(mut candidate) = self
+            .state
+            .promotion_candidates
+            .get_mut(&make_tenant_scoped_key(tenant_id, key))
+        {
+            candidate.retry_count = retry_count;
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn run_promotion_candidate_retry_for_test(&self) {
+        run_promotion_candidate_retry(&self.state, 256);
     }
 
     /// 获取 oplog 管理器的可变引用 / Returns mutable reference to oplog manager.

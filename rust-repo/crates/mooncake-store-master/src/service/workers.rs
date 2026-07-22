@@ -22,7 +22,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
-use super::background_ops::{reap_expired_background_tasks, run_automatic_eviction_once};
+use super::background_ops::{
+    reap_expired_background_tasks, run_automatic_eviction_once,
+    run_default_promotion_candidate_retry,
+};
 use super::helpers::{
     clear_invalid_handles, get_alive_clients_snapshot, host_from_segment_name,
     sync_client_segments, unmount_nof_segment_owned, unmount_segment_owned,
@@ -284,6 +287,7 @@ impl EvictionWorker {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         let _ = run_automatic_eviction_once(&state);
+                        run_default_promotion_candidate_retry(&state);
                     }
                 }
             }

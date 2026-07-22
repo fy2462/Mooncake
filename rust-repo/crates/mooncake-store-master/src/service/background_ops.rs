@@ -116,9 +116,13 @@ fn record_or_refresh_candidate(
 
 mod background_drain;
 mod background_reaper;
+mod promotion_retry;
 pub(crate) use background_drain::process_drain_jobs;
 pub(crate) use background_reaper::{
     reap_expired_background_tasks, release_staged_promotion_replica,
+};
+pub(crate) use promotion_retry::{
+    run_default_promotion_candidate_retry, run_promotion_candidate_retry,
 };
 
 fn same_replica_location(a: &ReplicaDescriptor, b: &ReplicaDescriptor) -> bool {
