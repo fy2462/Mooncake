@@ -35,14 +35,14 @@
 | `49c9081a` | Snapshot codec extraction | Equivalent architecture | No additional wire behavior beyond the Rust snapshot modules. |
 | `711fac99` | Layered snapshot restore | Equivalent behavior | Rust catalog restore supports candidates/fallback and state application. |
 | `cc745659` | Snapshot cleanup/documentation | Not a new capability | Keep the current Rust layering; no class-for-class rewrite. |
-| `70ba3158` | Parallel HugeTLB population | Gap | Implement opt-in deferred, parallel page touching before TE registration. |
+| `70ba3158` | Parallel HugeTLB population | Migrated | Deferred bounded parallel page touching before TE registration landed in `91a90098`; real HugeTLB + RDMA registration remains environment-gated. |
 | `12304b92` | Client metrics HTTP config exposed to Python | Migrated | Rust client owns optional health/Prometheus endpoints; PyO3 exposes appended configuration arguments. |
 | `b996ac4b` | Opt-in topology-aware remote replica scoring | Migrated | Rust has opt-in scoring with protocol propagation and verification logs `2026-07-21-009..011`. |
 | `a5b938cd` | SSD publish-before-commit race | Migrated | Covered by migration log `2026-07-20-001`. |
 | `63bcc646` | FIFO eviction for OffsetAllocator backend | Migrated | Client SSD OffsetAllocator has quota/key watermarks, FIFO eviction, persistence, and extent reuse; commit `eb4eb1eb`. |
 | `f6cc5625` | Master default tuning | Migrated | Rust defaults now match upstream; commit `c7c52fd9`. |
 | `f7299ff3` | Batch-evict benchmark knobs | Benchmark-only | No runtime port; add a Rust benchmark only if benchmark parity becomes a separate goal. |
-| `ea5fd923` | GPU-address-aware local copies | Gap | Rust byte-slice paths do not provide the upstream pointer classification and host staging behavior. |
+| `ea5fd923` | GPU-address-aware local copies | Migrated | Pointer classification and registered-host staging landed in `eff1b3ee`; a real CUDA smoke test remains environment-gated. |
 | `f5bc1c15` | Proactive disk watermark eviction | Migrated | Covered by migration log `2026-07-20-001`. |
 | `52dfb1c6` | SPDK DMA buffer teardown | Not applicable today | Rust client does not allocate its client buffer with `spdk_zmalloc`; reassess if that allocation path is added. |
 | `7e39f640` | Surface metadata HTTP bind failure | Migrated | Rust binds before spawning and propagates startup errors; commit `c7c52fd9`. |
@@ -55,13 +55,13 @@ Rust links the repository's native `libtransfer_engine` through `transfer-engine
 
 | Upstream | Change | Rust status | Action |
 |---|---|---|---|
-| `4d1116ad` | Deadline-infeasible drop/degradation | Native code present, Rust opt-in blocked | Include in the TENT C-ABI task. |
+| `4d1116ad` | Deadline-infeasible drop/degradation | Migrated | Versioned TENT request/configuration bindings landed in `75d311b7`. |
 | `74a52a1f` | Cross-NUMA same-device rail mapping | Inherited native behavior | Rebuild/link current native TE; add no duplicate Rust algorithm. |
-| `ab89448f` | Per-entry priority promotion | Native code present, Rust opt-in blocked | Include in the TENT C-ABI task. |
-| `88be9e92` | Expose deadline and policy to Python | Missing from Rust Python API | Include in the TENT C-ABI/PyO3 task. |
+| `ab89448f` | Per-entry priority promotion | Migrated | Rust and Python priority controls landed in `75d311b7`. |
+| `88be9e92` | Expose deadline and policy to Python | Migrated | Python request deadline and policy controls landed in `75d311b7`. |
 | `469a85ce` | TPU staging corruption fix | Inherited native behavior | Native TE regression suite is the acceptance gate. |
-| `9cd1277a` | Transfer intent enum | Missing from C ABI | Include in the TENT C-ABI task. |
-| `cc9e5250` | Deadline-proximity admission promotion | Native code present, Rust opt-in blocked | Include in the TENT C-ABI task. |
+| `9cd1277a` | Transfer intent enum | Migrated | The versioned C ABI plus Rust/Python intent enums landed in `75d311b7`. |
+| `cc9e5250` | Deadline-proximity admission promotion | Migrated | Absolute deadline and policy controls landed in `75d311b7`. |
 | `f1cf2e06` | `show-link` diagnostic tool | Tooling gap, not Store runtime | Expose/port only as the diagnostic subtask. |
 | `7423c7c7` | TE signal shutdown | Inherited by native executable, library teardown already explicit | Verify Rust owns and destroys the engine cleanly. |
 | `5e955b95` | Batch memory-registration validation | Inherited through called C APIs | Add Rust negative-input wrapper tests. |
@@ -71,23 +71,23 @@ Rust links the repository's native `libtransfer_engine` through `transfer-engine
 | `cd60091f` | Reserve in-flight registrations | Inherited native behavior | Native concurrency regression test. |
 | `3649d368` | MACA P2P optimization | Inherited native behavior | Hardware-gated verification only. |
 | `725e9c54` | RDMA rail failure handling/diagnostics | Inherited native behavior | Hardware-gated failover verification. |
-| `2b5a1f92` | Best-effort RDMA cancellation | Missing from Rust API | Add cancellation to the TENT C ABI only if Store can submit intent requests. |
+| `2b5a1f92` | Best-effort RDMA cancellation | Migrated | Rust/Python cancellation through the existing native API landed in `75d311b7`. |
 | `5fccdc9e` | Gate sends until QP confirmation | Inherited native behavior | RDMA regression smoke. |
-| `6aa0ae65` | Causal latency stage metrics | Native code present, Rust configuration visibility missing | Expose through TENT configuration/status bindings. |
+| `6aa0ae65` | Causal latency stage metrics | Migrated | TENT configuration and metrics visibility landed in `75d311b7`. |
 | `3a962002` | Segment-cache metadata refresh polling | Inherited native behavior | Rust uses the same native segment cache. |
-| `6a4627f5` | Bind policies to intent type | Missing Rust intent configuration | Include in the TENT C-ABI task. |
-| `e68b30d0` | Deadline-aware NIC bandwidth arbitration | Native code present, Rust opt-in blocked | Include in the TENT C-ABI task. |
+| `6a4627f5` | Bind policies to intent type | Migrated | Intent and generic TENT configuration controls landed in `75d311b7`. |
+| `e68b30d0` | Deadline-aware NIC bandwidth arbitration | Migrated | Transport, deadline, and generic TENT configuration controls landed in `75d311b7`. |
 | `d687d670` | Refresh RDMA metadata on HCA/GID changes | Inherited native behavior | Hardware-gated refresh test. |
 | `1fadb9ca` | Reuse/release SHM relocation mappings | Inherited native behavior | Native lifetime tests. |
 | `407ccc47` | Reject empty RDMA completion resources | Inherited through install/setup | Rust must propagate the native setup error. |
-| `6d92ac1c` | Feed live bandwidth into admission degradation | Native code present, Rust opt-in blocked | Include in TENT configuration bindings. |
+| `6d92ac1c` | Feed live bandwidth into admission degradation | Migrated | Generic TENT configuration overrides landed in `75d311b7`. |
 | `b8e63a63` | ARM64 atomic portability | Inherited native compile fix | Validate in aarch64 CI, no Rust port. |
 | `5295215f` | Reject unsupported NVMe-oF batches/correlate completions | Inherited native behavior | NVMe-oF native/Rust integration test. |
 | `85e724f8` | Receiver-credit ledger/invariants | Inherited native behavior | Native protocol tests. |
-| `cdba6f8a` | TENT QoS metrics baseline | Native metrics present, Rust status/config missing | Include in TENT bindings. |
+| `cdba6f8a` | TENT QoS metrics baseline | Migrated | Rust/Python metrics status and TENT configuration bindings landed in `75d311b7`. |
 | `74f7177c` | Correct GDS batch-status semantics | Inherited native behavior | Hardware-gated GDS verification. |
 | `f8d363ff` | Share dma-buf fd across NICs | Inherited native behavior | Hardware-gated registration test. |
-| `6223076c` | QoS contract schema resolver | Native code present, Rust configuration missing | Include in TENT bindings. |
+| `6223076c` | QoS contract schema resolver | Migrated | Native-owned QoS contract selection is reachable through configuration overrides from `75d311b7`. |
 | `87716175` | Surface terminal NVMe-oF slice failures | Inherited status through C API | Verify Rust maps failed terminal status. |
 | `49fc6f50` | QP teardown before MR deregistration | Inherited native behavior | RDMA shutdown smoke. |
 | `4915a2c5` | Propagate batch memory-operation errors | Inherited through batch C APIs | Add wrapper error-propagation tests. |
@@ -95,7 +95,7 @@ Rust links the repository's native `libtransfer_engine` through `transfer-engine
 | `e18f70ef` | Roll back partial local registration | Inherited through C APIs | Add Rust partial-registration failure test. |
 | `4fe38289` | MNNVL Device API support | Native implementation present, Rust exposure incomplete | Confirm the C install path can select MNNVL; extend FFI only if required. |
 | `c812aa8c` | RDMA NIC failover recovery | Inherited native behavior | Hardware-gated failover smoke. |
-| `8009138b` | TENT metrics bind failure reporting | Inherited internally; status not visible to Rust | Expose bound-port/log-only status in TENT bindings. |
+| `8009138b` | TENT metrics bind failure reporting | Migrated | Bound-port versus unavailable/log-only status is exposed by `75d311b7`. |
 
 ### Wheel, Python service, p2p, EP, build, CI, docs, and benchmarks
 
@@ -103,7 +103,7 @@ Rust links the repository's native `libtransfer_engine` through `transfer-engine
 |---|---|---|---|
 | `db5a86f8` | SSD benchmark replay/multithreading | Benchmark-only | Record as non-runtime; optional Rust benchmark project. |
 | `b2cc26f5` | Go p2p `x/net` bump | Different implementation/dependency graph | No Rust port; audit Rust dependency advisories separately. |
-| `33016145` | Reject blank keys in Python HTTP metadata server | Python service parity gap | Add equivalent validation if the service is shipped with the Rust package. |
+| `33016145` | Reject blank keys in Python HTTP metadata server | Migrated | Rust-wheel-owned service validation landed in `402f66ee`. |
 | `fab88a1e` | vLLM benchmark documentation | Documentation-only | No runtime port. |
 | `4c41eace` | Go `x/crypto` bump | No Rust dependency equivalent | No port. |
 | `fbebc515` | Performance docs reorganization | Documentation-only | No runtime port. |
@@ -114,7 +114,7 @@ Rust links the repository's native `libtransfer_engine` through `transfer-engine
 | `093149cc` | Kubernetes deployment guide | Documentation-only | Check Rust binary flags against examples during release docs work. |
 | `82d16086` | README news | Documentation-only | No runtime port. |
 | `7da9a730` | MUSA EP/PG image | EP/build-only | No Store port. |
-| `6aa80e25` | Graceful Store REST SIGTERM | Python service parity gap | Implement in the Rust-backed REST service/package. |
+| `6aa80e25` | Graceful Store REST SIGTERM | Migrated | Signal-driven shutdown and exactly-once close landed in `402f66ee`. |
 | `6b9a221a` | SGLang PD benchmark docs | Documentation-only | No runtime port. |
 | `53bd12de` | aarch64 wheel build | CI/package coverage | Add Rust wheel aarch64 job when publishing Rust wheels. |
 | `7889a143` | Pre-release artifact naming | CI-only | Apply only to Rust release workflow artifacts. |
@@ -461,24 +461,24 @@ Commit: `fix(store-rust): align python service shutdown and metadata validation`
 - Consumes: Tasks 1–7.
 - Produces: evidence that every audited commit has a final disposition.
 
-- [ ] **Step 1: Re-enumerate the source range**
+- [x] **Step 1: Re-enumerate the source range**
 
-Run: `git log --format='%H %s' 110bfa47aab..HEAD -- mooncake-store`
+Run: `git log --format='%H %s' 110bfa47aabc713ef1cdf..38c5d726`
 
 Expected: every resulting commit appears exactly once in the audit matrix.
 
-- [ ] **Step 2: Run repository formatting and package suites**
+- [x] **Step 2: Run repository formatting and package suites**
 
-Run: `cd rust-repo && cargo fmt --all -- --check && CARGO_BUILD_JOBS=1 cargo test -p mooncake-store-master --no-fail-fast && CARGO_BUILD_JOBS=1 cargo test -p mooncake-store-client --no-fail-fast`
+Run: `cd rust-repo && cargo fmt --all -- --check && cargo test -p mooncake-store-master --no-fail-fast && cargo test -p mooncake-store-client --no-fail-fast`
 
-- [ ] **Step 3: Run lint and available pre-commit checks**
+- [x] **Step 3: Run lint and available pre-commit checks**
 
-Run: `cd rust-repo && CARGO_BUILD_JOBS=1 cargo clippy -p mooncake-store-master -p mooncake-store-client --all-targets`; from repository root run pre-commit on touched files if installed.
+Run: `cd rust-repo && cargo clippy -p mooncake-store-master -p mooncake-store-client --all-targets`; from repository root run pre-commit on touched files if installed.
 
-- [ ] **Step 4: Review scope and record environment-gated checks**
+- [x] **Step 4: Review scope and record environment-gated checks**
 
 Run: `git diff --check && git status --short`. Record CUDA/HugeTLB tests as passed, failed, or unavailable; never silently treat unavailable hardware as passing.
 
-- [ ] **Step 5: Commit the audit summary**
+- [x] **Step 5: Commit the audit summary**
 
 Commit: `docs(store-rust): record post-baseline parity audit`
