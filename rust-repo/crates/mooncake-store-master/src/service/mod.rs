@@ -878,6 +878,13 @@ impl MasterServiceImpl {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    #[doc(hidden)]
+    pub fn has_promotion_candidate_for_test(&self, key: &str, tenant_id: &str) -> bool {
+        self.state
+            .promotion_candidates
+            .contains_key(&make_tenant_scoped_key(tenant_id, key))
+    }
+
     /// 获取 oplog 管理器的可变引用 / Returns mutable reference to oplog manager.
     pub fn oplog_manager(&self) -> &parking_lot::Mutex<crate::oplog::OpLogManager> {
         &self.oplog_manager

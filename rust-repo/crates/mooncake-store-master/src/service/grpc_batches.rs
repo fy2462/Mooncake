@@ -170,7 +170,7 @@ impl MasterServiceImpl {
 
         for hit in hits {
             if hit.promotion_eligible {
-                try_push_promotion_queue(&self.state, &hit.scoped_key);
+                let _ = try_push_promotion_queue(&self.state, &hit.scoped_key, true);
             }
             metrics::GET_REQUESTS.inc();
             record_batch_cache_hit_metrics(hit.first_replica_type, hit.object_size);

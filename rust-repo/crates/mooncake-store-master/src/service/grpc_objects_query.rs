@@ -77,7 +77,7 @@ impl MasterServiceImpl {
         // Phase 3: promotion after all locks released.
         // 阶段 3：锁释放后进行 promotion 条件检查和入队
         if promotion_eligible {
-            try_push_promotion_queue(&self.state, &scoped_key);
+            let _ = try_push_promotion_queue(&self.state, &scoped_key, true);
         }
         metrics::GET_REQUESTS.inc();
         record_cache_hit_metrics(first_replica_type, object_size);

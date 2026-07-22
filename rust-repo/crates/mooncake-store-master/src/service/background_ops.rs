@@ -5,6 +5,7 @@
 
 use crate::eviction::EvictionManager;
 use crate::proto;
+use dashmap::mapref::entry::Entry;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, TaskStatus};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -16,7 +17,102 @@ use super::helpers::{
     default_drain_target_segments, has_pending_task_capacity, is_lease_expired, memory_usage_ratio,
     release_replicas, sync_cache_total_accounting,
 };
-use super::state::{MasterState, ObjectEntry, OffloadingTaskEntry, PromotionTaskEntry};
+use super::state::{
+    MasterState, ObjectEntry, OffloadingTaskEntry, PromotionCandidate, PromotionCandidateReason,
+    PromotionTaskEntry,
+};
+
+const PROMOTION_CANDIDATE_LIMIT: usize = 50_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PromotionQueueResult {
+    Queued,
+    Disabled,
+    FrequencyRejected,
+    WatermarkRejected,
+    QueueCapRejected,
+    AlreadyInFlight,
+    MemoryReplicaPresent,
+    NoLocalDiskSource,
+    NotFound,
+    PushFailed,
+}
+
+impl PromotionQueueResult {
+    pub(crate) fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::WatermarkRejected | Self::QueueCapRejected | Self::PushFailed
+        )
+    }
+}
+
+fn decrement_candidate_count(state: &MasterState) {
+    let _ = state.promotion_candidate_count.fetch_update(
+        AtomicOrdering::Relaxed,
+        AtomicOrdering::Relaxed,
+        |count| count.checked_sub(1),
+    );
+}
+
+pub(crate) fn erase_promotion_candidate(state: &MasterState, key: &str) {
+    if state.promotion_candidates.remove(key).is_some() {
+        decrement_candidate_count(state);
+    }
+}
+
+fn record_or_refresh_candidate(
+    state: &MasterState,
+    key: &str,
+    sketch_score: u8,
+    reason: PromotionCandidateReason,
+    last_error_code: Option<i32>,
+) {
+    let now = Instant::now();
+    if let Some(mut candidate) = state.promotion_candidates.get_mut(key) {
+        candidate.sketch_score = candidate.sketch_score.max(sketch_score);
+        candidate.last_seen = now;
+        candidate.retry_after = now;
+        candidate.last_reason = reason;
+        candidate.last_error_code = last_error_code;
+        candidate.retry_count = 0;
+        return;
+    }
+
+    let reserved = state
+        .promotion_candidate_count
+        .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |count| {
+            (count < PROMOTION_CANDIDATE_LIMIT).then_some(count + 1)
+        })
+        .is_ok();
+    if !reserved {
+        return;
+    }
+
+    match state.promotion_candidates.entry(key.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(PromotionCandidate {
+                sketch_score,
+                first_seen: now,
+                last_seen: now,
+                retry_after: now,
+                last_reason: reason,
+                last_error_code,
+                retry_count: 0,
+            });
+        }
+        Entry::Occupied(mut entry) => {
+            decrement_candidate_count(state);
+            let candidate = entry.get_mut();
+            candidate.sketch_score = candidate.sketch_score.max(sketch_score);
+            candidate.last_seen = now;
+            candidate.retry_after = now;
+            candidate.last_reason = reason;
+            candidate.last_error_code = last_error_code;
+            candidate.retry_count = 0;
+        }
+    }
+}
 
 mod background_drain;
 mod background_reaper;
@@ -411,9 +507,13 @@ pub(crate) fn run_automatic_eviction_once(state: &MasterState) -> Vec<String> {
 /// Uses CountMinSketch to track access frequency; only triggers promotion after reaching
 /// the admission_threshold, preventing transient hotspots from causing unnecessary overhead.
 /// Also limits global in-flight promotions to prevent memory exhaustion.
-pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
+pub(crate) fn try_push_promotion_queue(
+    state: &MasterState,
+    key: &str,
+    record_candidate: bool,
+) -> PromotionQueueResult {
     if !state.runtime_config.enable_offload || !state.runtime_config.promotion_on_hit {
-        return;
+        return PromotionQueueResult::Disabled;
     }
 
     // CountMinSketch 近似统计访问频次，达到阈值后才考虑晋升
@@ -421,10 +521,19 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
     let current_freq = state.promotion_sketch.write().increment(key);
     let threshold = state.runtime_config.promotion_admission_threshold.max(1);
     if current_freq < threshold {
-        return;
+        return PromotionQueueResult::FrequencyRejected;
     }
     if memory_usage_ratio(state) >= state.runtime_config.eviction_high_watermark_ratio {
-        return;
+        if record_candidate && state.objects.contains_key(key) {
+            record_or_refresh_candidate(
+                state,
+                key,
+                current_freq,
+                PromotionCandidateReason::Watermark,
+                None,
+            );
+        }
+        return PromotionQueueResult::WatermarkRejected;
     }
 
     // 检查对象状态：必须有完整 LocalDisk 副本且无 Memory 副本才有晋升价值
@@ -436,14 +545,16 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
                     && replica.status == ReplicaStatus::Complete
             });
             if any_memory {
-                return; // 已在内存中，无需晋升 / Already in memory, no promotion needed
+                erase_promotion_candidate(state, key);
+                return PromotionQueueResult::MemoryReplicaPresent;
             }
             let Some(local_disk) = object.replicas.iter().find(|replica| {
                 replica.replica_type == ReplicaType::LocalDisk
                     && replica.status == ReplicaStatus::Complete
                     && replica.holder_client_id.is_some()
             }) else {
-                return; // 无可用的磁盘副本来源 / No usable disk replica source
+                erase_promotion_candidate(state, key);
+                return PromotionQueueResult::NoLocalDiskSource;
             };
             (
                 local_disk.holder_client_id.unwrap(),
@@ -451,14 +562,27 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
                 local_disk.clone(),
             )
         }
-        None => return,
+        None => {
+            erase_promotion_candidate(state, key);
+            return PromotionQueueResult::NotFound;
+        }
     };
 
     if state.promotion_tasks.contains_key(key) {
-        return; // 已在晋升队列中 / Already in promotion queue
+        erase_promotion_candidate(state, key);
+        return PromotionQueueResult::AlreadyInFlight;
     }
     if !state.local_disk_segments.contains_key(&holder_id) {
-        return;
+        if record_candidate {
+            record_or_refresh_candidate(
+                state,
+                key,
+                current_freq,
+                PromotionCandidateReason::PushFailed,
+                None,
+            );
+        }
+        return PromotionQueueResult::PushFailed;
     }
     // CAS 式限流：原子递增在途计数，超过上限则回退并放弃本次晋升
     // CAS-style rate limiting: atomically increment in-flight count; if over limit, rollback and abandon
@@ -470,7 +594,16 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
         state
             .promotion_in_flight
             .fetch_sub(1, AtomicOrdering::Relaxed);
-        return;
+        if record_candidate {
+            record_or_refresh_candidate(
+                state,
+                key,
+                current_freq,
+                PromotionCandidateReason::QueueCap,
+                None,
+            );
+        }
+        return PromotionQueueResult::QueueCapRejected;
     }
     if let Some(mut local_disk) = state.local_disk_segments.get_mut(&holder_id) {
         local_disk
@@ -485,7 +618,16 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
         state
             .promotion_in_flight
             .fetch_sub(1, AtomicOrdering::Relaxed);
-        return;
+        if record_candidate {
+            record_or_refresh_candidate(
+                state,
+                key,
+                current_freq,
+                PromotionCandidateReason::PushFailed,
+                None,
+            );
+        }
+        return PromotionQueueResult::PushFailed;
     }
     state.promotion_tasks.insert(
         key.to_string(),
@@ -498,4 +640,6 @@ pub(crate) fn try_push_promotion_queue(state: &MasterState, key: &str) {
             start_time: Instant::now(),
         },
     );
+    erase_promotion_candidate(state, key);
+    PromotionQueueResult::Queued
 }
