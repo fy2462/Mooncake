@@ -54,7 +54,8 @@ pub(crate) fn run_promotion_candidate_retry(state: &MasterState, partitions: usi
         let Some(candidate) = state.promotion_candidates.get(&key) else {
             continue;
         };
-        if now.saturating_duration_since(candidate.first_seen) >= CANDIDATE_TTL
+        debug_assert!(candidate.first_seen <= candidate.last_seen);
+        if now.saturating_duration_since(candidate.last_seen) >= CANDIDATE_TTL
             || candidate.retry_count >= MAX_RETRIES
         {
             if candidate.retry_count == 0 {

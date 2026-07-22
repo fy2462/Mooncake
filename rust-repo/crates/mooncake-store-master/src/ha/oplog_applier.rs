@@ -43,6 +43,7 @@ impl OpLogApplier {
     /// Set the expected sequence ID after snapshot restore.
     /// C++ equivalent: `OpLogApplier::Recover(base_seq)`
     pub fn recover(&self, base_seq: u64) {
+        self.state.clear_transient_promotion_candidates();
         self.expected_seq.store(base_seq + 1, Ordering::Release);
         self.pending_entries.lock().clear();
     }
@@ -299,6 +300,62 @@ mod tests {
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 1);
         assert!(!state.processing_keys.contains_key("k1"));
+    }
+
+    #[test]
+    fn test_recover_clears_transient_promotion_candidates_only() {
+        use crate::service::state::{
+            PromotionCandidate, PromotionCandidateReason, PromotionTaskEntry,
+        };
+        use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
+        use std::time::Instant;
+
+        let state = make_state();
+        let now = Instant::now();
+        state.promotion_candidates.insert(
+            "tenant/key".into(),
+            PromotionCandidate {
+                sketch_score: 2,
+                first_seen: now,
+                last_seen: now,
+                retry_after: now,
+                last_reason: PromotionCandidateReason::QueueCap,
+                last_error_code: None,
+                retry_count: 1,
+            },
+        );
+        state.promotion_candidate_count.store(1, Ordering::Relaxed);
+        state.promotion_retry_cursor.store(77, Ordering::Relaxed);
+        state.promotion_tasks.insert(
+            "tenant/in-flight".into(),
+            PromotionTaskEntry {
+                holder_id: Uuid::new_v4(),
+                object_size: 8,
+                source: ReplicaDescriptor {
+                    segment_id: Uuid::new_v4(),
+                    segment_name: "disk".into(),
+                    offset: 0,
+                    size: 8,
+                    status: ReplicaStatus::Complete,
+                    replica_type: ReplicaType::LocalDisk,
+                    holder_client_id: Some(Uuid::new_v4()),
+                    refcnt: 1,
+                    handle_valid: true,
+                    base_addr: 0,
+                    protocol: String::new(),
+                },
+                staged_segment_id: None,
+                staged_offset: None,
+                start_time: now,
+            },
+        );
+
+        OpLogApplier::new(state.clone()).recover(12);
+
+        assert!(state.promotion_candidates.is_empty());
+        assert_eq!(state.promotion_candidate_count.load(Ordering::Relaxed), 0);
+        assert_eq!(state.promotion_retry_cursor.load(Ordering::Relaxed), 0);
+        assert!(state.promotion_tasks.contains_key("tenant/in-flight"));
     }
 
     #[test]

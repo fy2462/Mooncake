@@ -45,7 +45,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
@@ -141,6 +141,13 @@ pub(crate) struct MasterState {
 }
 
 impl MasterState {
+    /// Clear retry-only promotion state that is intentionally absent from snapshots/oplogs.
+    pub(crate) fn clear_transient_promotion_candidates(&self) {
+        self.promotion_candidates.clear();
+        self.promotion_candidate_count.store(0, Ordering::Relaxed);
+        self.promotion_retry_cursor.store(0, Ordering::Relaxed);
+    }
+
     /// Create a completely empty MasterState (for standby bootstrap).
     pub(crate) fn empty() -> Self {
         use crate::allocator::SegmentAllocator;

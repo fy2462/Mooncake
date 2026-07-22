@@ -198,3 +198,24 @@ Every slice follows red-green TDD. Final acceptance requires:
 7. a dependency audit proving Rust Store artifacts do not link
    `libmooncake_store.so` or compile C++ Store sources.
 
+## Implementation status
+
+As of 2026-07-23, the promotion retry and metrics slice is implemented on
+`rust_repo_main` by commits `520ebab0`, `881d057e`, `5d511ef1`, and
+`b5137921`. The implementation includes bounded candidate recording,
+partitioned retry with backoff and expiry, eviction-worker integration, the
+six compatible Prometheus counters, and transient-state reset during snapshot
+or oplog recovery. The remaining CUDA pinning, structured-object, and NIC load
+statistics slices are unchanged and still required.
+
+Focused verification used:
+
+```text
+cargo test -p mooncake-store-master --test test_promotion_retry
+cargo test -p mooncake-store-master --test test_master_metrics
+cargo test -p mooncake-store-master --test test_master_eviction_offload --test test_master_promotion --test test_service_cluster_parity_p1_p2
+cargo test -p mooncake-store-master --lib test_recover_clears_transient_promotion_candidates_only
+```
+
+All Cargo commands used `CARGO_BUILD_JOBS=5` and the shared target directory
+`/home/fy2462/workspace/tmp/mooncake/cargo-target`.

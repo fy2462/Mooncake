@@ -900,6 +900,10 @@ impl MasterServiceImpl {
                 .first_seen
                 .checked_sub(age)
                 .unwrap_or(candidate.first_seen);
+            candidate.last_seen = candidate
+                .last_seen
+                .checked_sub(age)
+                .unwrap_or(candidate.last_seen);
         }
     }
 

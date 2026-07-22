@@ -292,6 +292,7 @@ impl HotStandbyService {
 
                 match provider.load_latest_snapshot(&self.config.cluster_id) {
                     Ok(Some(snapshot)) => {
+                        self.state.clear_transient_promotion_candidates();
                         // Restore memory segments into allocator
                         // 恢复内存 segment 到分配器
                         for seg in &snapshot.segments {
