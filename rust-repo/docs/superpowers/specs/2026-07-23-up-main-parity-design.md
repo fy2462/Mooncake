@@ -219,3 +219,27 @@ cargo test -p mooncake-store-master --lib test_recover_clears_transient_promotio
 
 All Cargo commands used `CARGO_BUILD_JOBS=5` and the shared target directory
 `/home/fy2462/workspace/tmp/mooncake/cargo-target`.
+
+The Host CUDA pinned-memory slice is implemented by commits `51f9d148`,
+`27a87cf3`, and `074a9b59`. It provides process-wide quota and overlap
+tracking, optional run-time CUDA symbol loading behind `cuda-host-pin`, and an
+owned Store-segment wrapper that preserves Master/Transfer Engine → CUDA →
+allocation teardown ordering. Registration failures fall back to pageable
+memory; unregister failures retain the reservation and intentionally leak the
+backing allocation. The current Rust API has no Store-owned
+`allocateAndMountSegment` equivalent, so the reusable wrapper is applied to
+the setup/global segment while externally owned `mount_segment` mappings stay
+excluded.
+
+CUDA slice verification used:
+
+```text
+cargo test -p mooncake-store-client
+cargo test -p mooncake-store-client --features cuda-host-pin
+cargo check -p mooncake-store-client
+cargo check -p mooncake-store-client --features cuda-host-pin
+```
+
+The crate-wide `clippy -D warnings` baseline still contains unrelated warnings
+from the merged branch; filtered Clippy output for the new pin manager,
+memory wrapper, and teardown path is clean.
