@@ -1,5 +1,8 @@
 # Task 10 Validation Repair Design
 
+> Its SPDK 26.01 section is superseded by
+> `2026-07-22-spdk-rs-nof-probe-design.md`.
+
 ## Objective
 
 Repair every software failure found by the 2026-07-22 Task 10 validation run,

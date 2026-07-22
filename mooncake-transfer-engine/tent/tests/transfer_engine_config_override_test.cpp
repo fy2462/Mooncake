@@ -40,7 +40,7 @@ namespace tent {
 namespace {
 
 constexpr char kLoopbackHostname[] = "127.0.0.1";
-constexpr char kInvalidHostname[] = "256.256.256.256";
+constexpr char kInvalidHostname[] = "invalid hostname";
 constexpr char kSegmentName[] = "store-segment-A";
 constexpr char kMetadataKeyPrefix[] = "mooncake/tent/";
 
@@ -403,12 +403,15 @@ TEST(TransferEngineConfigOverrideTest,
 
 TEST(TransferEngineConfigOverrideTest,
      MissingExplicitKeysContinueUsingMcTentConfValuesThroughConstructor) {
-    TempConfigFile conf_file(R"({
-        "metadata_type": "p2p",
-        "metadata_servers": "127.0.0.1:2379",
-        "rpc_server_hostname": "256.256.256.256",
-        "rpc_server_port": 15012
-    })");
+    TempConfigFile conf_file(
+        "{\n"
+        "  \"metadata_type\": \"p2p\",\n"
+        "  \"metadata_servers\": \"127.0.0.1:2379\",\n"
+        "  \"rpc_server_hostname\": \"" +
+        std::string(kInvalidHostname) +
+        "\",\n"
+        "  \"rpc_server_port\": 15012\n"
+        "}");
     EnvVarGuard guard("MC_TENT_CONF", conf_file.path());
 
     auto config = std::make_shared<Config>();

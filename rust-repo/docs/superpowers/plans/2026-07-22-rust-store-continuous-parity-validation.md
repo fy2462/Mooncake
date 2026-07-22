@@ -1,5 +1,9 @@
 # Rust Store Continuous Parity Validation Implementation Plan
 
+> Superseded for SPDK work by `2026-07-22-spdk-rs-nof-probe-migration.md`.
+> The v26.01 and local `spdk-io` instructions below are retained only as
+> historical context and must not be executed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Upgrade the repository SPDK default to v26.01, restore all Rust Store quality gates, and produce a complete Task 10 validation record covering Rust and the native Transfer Engine/TENT boundary.

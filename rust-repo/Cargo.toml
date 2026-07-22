@@ -47,9 +47,3 @@ rand = "0.8"
 tonic-build = "0.12"
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"] }
 pyo3-async-runtimes = { version = "0.28", features = ["attributes", "tokio-runtime"] }
-
-[patch.crates-io]
-# spdk-io 0.1.0 assumes C `char` is always signed. Keep the patch local until
-# upstream supports targets such as aarch64 where bindgen maps `char` to `u8`.
-spdk-io = { path = "third-party/spdk-io" }
-spdk-io-sys = { path = "third-party/spdk-io-sys" }

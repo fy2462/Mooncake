@@ -1,0 +1,8 @@
+[build]
+target-dir = "/home/fy2462/workspace/tmp/mooncake/cargo-target"
+jobs = 5
+
+[env]
+# spdk-rs links SPDK/DPDK and their system zstd dependency statically. Reuse
+# that system zstd here instead of embedding a second copy through zstd-sys.
+ZSTD_SYS_USE_PKG_CONFIG = "1"

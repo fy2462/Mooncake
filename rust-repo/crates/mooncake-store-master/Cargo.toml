@@ -13,7 +13,7 @@ name = "mooncake_store_master"
 
 [features]
 default = []
-spdk-nof-probe = ["dep:spdk-io"]
+spdk-nof-probe = ["dep:spdk-rs"]
 
 [dependencies]
 mooncake-store-core = { path = "../mooncake-store-core" }
@@ -50,7 +50,7 @@ chrono.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 libc.workspace = true
-spdk-io = { version = "0.1.0", optional = true }
+spdk-rs = { git = "https://github.com/openebs/spdk-rs.git", rev = "78d6018af041e80a42e222165b86070bae631821", optional = true }
 fs2 = "0.4"
 
 [dev-dependencies]

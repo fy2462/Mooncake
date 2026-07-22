@@ -92,7 +92,10 @@ The script first verifies steady-state `put/get` success with `memory + nof` rep
 - `BUILD_DIR` points to a build tree that already contains:
   - `mooncake-store/src/mooncake_master`
   - `mooncake-integration/store*.so`
-- SPDK has already been built under `extern/spdk`
+- The pinned SPDK SDK is installed under `/usr/local`, including
+  `/usr/local/bin/nvmf_tgt`, and `SPDK_SOURCE_DIR` points to the matching
+  OpenEBS SPDK 25.05 source checkout (defaults to
+  `~/workspace/tmp/mooncake/spdk-25.05`) for `scripts/rpc.py`
 - Python environment contains `aiohttp` because the script launches a standalone metadata process with `mooncake-wheel/mooncake/http_metadata_server.py`
 - The script uses `sudo -n` to set hugepages and mount `/dev/hugepages`, so the current user must have passwordless sudo
 

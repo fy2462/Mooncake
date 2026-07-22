@@ -65,7 +65,8 @@ does not validate the Rust replacement.
 The Rust implementation has its own NoF control-plane model, registration,
 allocation, replica selection, status handling, and master probing. The Rust
 master's optional direct SPDK probe is selected with the `spdk-nof-probe`
-Cargo feature and uses the Rust `spdk-io` crate. NoF data transfers exposed by
+Cargo feature and uses OpenEBS `spdk-rs` v2.11.0 with its pinned OpenEBS SPDK
+25.05 and DPDK 25.03.0 SDK. NoF data transfers exposed by
 the native Transfer Engine are consumed through `transfer-engine-ffi`.
 
 Therefore:
@@ -112,4 +113,3 @@ At the start of future migration sessions:
 - Put newly discovered Store gaps and their tests in `rust-repo`.
 - Keep changes and validation reports explicit about what is Rust-owned,
   Transfer-Engine-inherited, hardware-gated, or still missing.
-

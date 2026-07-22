@@ -6,7 +6,7 @@
 
 **Architecture:** Keep Store behavior in Rust and native transfer behavior in TE/TENT. Fix each failure at its owning layer with a focused red-green cycle; external Open-RDMA changes remain isolated in its own repository.
 
-**Tech Stack:** Rust 2024, Cargo, CMake/Ninja/CTest, C++20/GTest, SPDK v26.01/pkg-config, clang-format 20, Open-RDMA Rust driver.
+**Tech Stack:** Rust 2024, Cargo, CMake/Ninja/CTest, C++20/GTest, spdk-rs v2.11.0, OpenEBS SPDK 25.05, DPDK 25.03.0, clang-format 20, Open-RDMA Rust driver.
 
 ## Global Constraints
 
@@ -28,7 +28,7 @@
 - Consumes: Rust 1.96 rustfmt and edition-2024 `std::env` contract.
 - Produces: formatting-clean tests and serialized, restored process-environment mutation.
 
-- [ ] **Step 1: Reproduce both failures**
+- [x] **Step 1: Reproduce both failures**
 
 Run from `rust-repo`:
 
@@ -39,7 +39,7 @@ cargo test -p mooncake-store-client --features s3 --test test_s3_source --no-fai
 
 Expected: rustfmt diff in `test_engram.rs`; E0133 on four environment calls.
 
-- [ ] **Step 2: Apply rustfmt and add a scoped environment guard**
+- [x] **Step 2: Apply rustfmt and add a scoped environment guard**
 
 Keep `ENV_LOCK` held for the guard lifetime. Use a test-only guard that saves
 the prior value, performs edition-2024 unsafe mutation with a safety comment,
@@ -73,7 +73,7 @@ impl Drop for ScopedEnvVar {
 }
 ```
 
-- [ ] **Step 3: Verify focused and package tests**
+- [x] **Step 3: Verify focused and package tests**
 
 ```bash
 cargo fmt --all -- --check
@@ -82,49 +82,40 @@ cargo test -p mooncake-store-client --features s3 --test test_s3_source --no-fai
 
 Expected: both exit 0.
 
-### Task 2: SPDK v26.01 static link closure
+### Task 2: spdk-rs v2.11.0 probe and static link closure
 
 **Files:**
-- Modify: `rust-repo/third-party/spdk-io-sys/build.rs`
-- Test: `rust-repo/third-party/spdk-io-sys/tests/pkg_config_link.rs` or an equivalent build-script unit test beside `build.rs`.
+- Modify: `rust-repo/crates/mooncake-store-master/build.rs`
+- Test: `rust-repo/crates/mooncake-store-master/src/service/spdk_rs_probe.rs`
 
 **Interfaces:**
-- Consumes: installed `spdk_event_nvmf.pc`, `libdpdk.pc`, and `libspdk_env_dpdk.a`.
-- Produces: a Cargo link line containing `spdk_env_dpdk` inside the static linker group.
+- Consumes: the manifest-controlled SPDK 25.05 SDK under `/usr/local` and Ubuntu static RDMA dependencies.
+- Produces: a tested raw NVMe-oF probe adapter and a complete static link.
 
-- [ ] **Step 1: Capture the failing link output**
+- [x] **Step 1: Capture the failing link output**
 
 ```bash
-PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:../extern/spdk/dpdk/build/lib/pkgconfig \
+SPDK_ROOT_DIR=/usr/local \
+PKG_CONFIG_PATH=$SPDK_ROOT_DIR/lib/pkgconfig \
   cargo test -p mooncake-store-master --features spdk-nof-probe --no-fail-fast -vv
 ```
 
-Expected: unresolved `spdk_ring_*`, `spdk_zmalloc`, and `spdk_get_ticks`, with no emitted `-lspdk_env_dpdk`.
+Expected before repair: missing jitterentropy, duplicate zstd, or unresolved
+private libibverbs symbols on current Ubuntu.
 
-- [ ] **Step 2: Add a failing link-closure assertion**
+- [x] **Step 2: Fix the Ubuntu static dependency closure**
 
-Extract the ordered root package list into a small pure function and assert
-that the explicit roots include the environment archive:
+Install `libjitterentropy3-dev`, make `zstd-sys` reuse pkg-config zstd, and
+append the pkg-config-discovered `libibverbs.a` archive after the RDMA provider
+archives. This keeps the upstream `spdk-rs` revision unchanged.
 
-```rust
-fn spdk_pkg_config_roots() -> [&'static str; 3] {
-    ["spdk_event_nvmf", "spdk_env_dpdk", "libdpdk"]
-}
+- [x] **Step 3: Cover the raw adapter without hardware**
 
-#[test]
-fn link_roots_include_spdk_environment_archive() {
-    assert!(spdk_pkg_config_roots().contains(&"spdk_env_dpdk"));
-}
-```
+Test TCP/RDMA and IPv4/IPv6 transport conversion, namespace propagation,
+initialization/attach/allocation/submission/completion errors, timeout, and
+cleanup through the injectable operation seam.
 
-Verify the test fails before changing `main` to consume the function.
-
-- [ ] **Step 3: Probe the explicit environment root in linker order**
-
-Use `spdk_pkg_config_roots()` for both include discovery and
-`probe_and_emit`, retaining `spdk_env_dpdk` in `force_whole_archive`.
-
-- [ ] **Step 4: Verify the feature build and tests**
+- [x] **Step 4: Verify the feature build and tests**
 
 Repeat the Task 2 Step 1 command. Expected: final link succeeds and all
 executed master tests pass.
@@ -139,15 +130,15 @@ executed master tests pass.
 - Consumes: CMake source directory for `mooncake-common/tests`.
 - Produces: an absolute, build-layout-independent test fixture directory.
 
-- [ ] **Step 1: Reproduce the focused failure**
+- [x] **Step 1: Reproduce the focused failure**
 
 ```bash
-ctest --test-dir /tmp/mooncake-te-validation -R '^default_config_test$' --output-on-failure
+ctest --test-dir /home/fy2462/workspace/tmp/mooncake/mooncake-te-validation -R '^default_config_test$' --output-on-failure
 ```
 
 Expected: four fixture-backed cases fail to load `test.json` or `test.yaml`.
 
-- [ ] **Step 2: Inject and consume the fixture directory**
+- [x] **Step 2: Inject and consume the fixture directory**
 
 Add:
 
@@ -160,11 +151,11 @@ Set `path_ = MOONCAKE_COMMON_TEST_DATA_DIR` and replace
 `path_ + "/../../mooncake-common/tests/test.json"` with
 `path_ + "/test.json"` (and likewise for YAML).
 
-- [ ] **Step 3: Rebuild and verify**
+- [x] **Step 3: Rebuild and verify**
 
 ```bash
-cmake --build /tmp/mooncake-te-validation -j5 --target default_config_test
-ctest --test-dir /tmp/mooncake-te-validation -R '^default_config_test$' --output-on-failure
+cmake --build /home/fy2462/workspace/tmp/mooncake/mooncake-te-validation -j5 --target default_config_test
+ctest --test-dir /home/fy2462/workspace/tmp/mooncake/mooncake-te-validation -R '^default_config_test$' --output-on-failure
 ```
 
 Expected: 1/1 target passes, including all seven cases.
@@ -179,16 +170,16 @@ Expected: 1/1 target passes, including all seven cases.
 - Consumes: P2P handshake metadata backend and loopback TCP endpoints.
 - Produces: deterministic default configuration and collision-free local endpoints.
 
-- [ ] **Step 1: Reproduce both failures without environment overrides**
+- [x] **Step 1: Reproduce both failures without environment overrides**
 
 ```bash
-ctest --test-dir /tmp/mooncake-te-validation \
+ctest --test-dir /home/fy2462/workspace/tmp/mooncake/mooncake-te-validation \
   -R '^(tcp_transport_test|transfer_metadata_test)$' --output-on-failure
 ```
 
 Expected: empty metadata plugin initialization fails.
 
-- [ ] **Step 2: Correct the fixture default and reserve local ports**
+- [x] **Step 2: Correct the fixture default and reserve local ports**
 
 Replace both self-assignments with:
 
@@ -201,7 +192,7 @@ construct `local_server_name` by joining `127.0.0.1:` with the decimal port
 returned by `getsockname` when `MC_LOCAL_SERVER_NAME` is absent. Keep the
 reservation alive until the test component is ready, then close it explicitly.
 
-- [ ] **Step 3: Verify tests individually and together**
+- [x] **Step 3: Verify tests individually and together**
 
 Rebuild both targets, run each with `-R`, then run the combined regex from
 Step 1. Expected: both pass without external environment variables.
@@ -215,22 +206,22 @@ Step 1. Expected: both pass without external environment variables.
 - Consumes: TENT RPC bind validation.
 - Produces: a failure case independent of DNS wildcard interception.
 
-- [ ] **Step 1: Reproduce the isolated failure**
+- [x] **Step 1: Reproduce the isolated failure**
 
 ```bash
-ctest --test-dir /tmp/mooncake-te-validation \
+ctest --test-dir /home/fy2462/workspace/tmp/mooncake/mooncake-te-validation \
   -R '^transfer_engine_config_override_test$' --output-on-failure
 ```
 
 Expected: invalid hostname resolves synthetically and the engine reports available.
 
-- [ ] **Step 2: Replace DNS-dependent invalid input**
+- [x] **Step 2: Replace DNS-dependent invalid input**
 
 Use a syntactically invalid bind literal that the resolver cannot reinterpret,
 such as `"[invalid"`, and retain assertions that availability is false, the
 configured value is preserved, and the bound RPC port is zero.
 
-- [ ] **Step 3: Rebuild and verify all ten cases**
+- [x] **Step 3: Rebuild and verify all ten cases**
 
 Expected: focused CTest passes 10/10 cases.
 
@@ -239,13 +230,14 @@ Expected: focused CTest passes 10/10 cases.
 **Files:**
 - Modify: `/home/fy2462/workspace/PFS/open-rdma-driver/rust-driver/src/rdma_utils/pagemaps.rs`
 - Modify: `/home/fy2462/workspace/PFS/open-rdma-driver/rust-driver/src/ring/spec.rs`
+- Modify: `/home/fy2462/workspace/PFS/open-rdma-driver/rust-driver/src/verbs/mock.rs`
 - Modify: the focused meta-report worker test module identified by the hanging test names.
 
 **Interfaces:**
 - Consumes: emulated device, optional HugeTLB mappings, and Linux pagemap visibility.
 - Produces: terminating pure mock tests and explicit ignored hardware tests.
 
-- [ ] **Step 1: Reproduce each failing or hanging test by exact name with a 60-second process timeout**
+- [x] **Step 1: Reproduce each failing or hanging test by exact name with a 60-second process timeout**
 
 Run the following exact tests separately with a 60-second process timeout:
 
@@ -264,26 +256,26 @@ done
 Record whether each depends on HugeTLB, privileged PFNs, or a missing
 producer/consumer.
 
-- [ ] **Step 2: Make hardware prerequisites explicit**
+- [x] **Step 2: Make hardware prerequisites explicit**
 
-For HugeTLB/PFN tests, return early with an `eprintln!` containing the exact
-missing prerequisite when `mmap` returns `MAP_FAILED` or the kernel masks PFNs.
-Always `munmap` successful mappings through a scoped guard.
+Mark HugeTLB/PFN tests ignored with the exact prerequisite so unavailable
+hardware is not counted as a pass. Run them explicitly with `--ignored` on a
+capable host, and always `munmap` successful mappings through a scoped guard.
 
-- [ ] **Step 3: Remove mock deadlocks at their source**
+- [x] **Step 3: Remove mock deadlocks at their source**
 
 For ring/meta-report tests, construct finite emulated producer/consumer state
 or use the existing shutdown channel before joining workers. Add bounded
 `recv_timeout`/completion assertions so a regression fails rather than hangs.
 
-- [ ] **Step 4: Verify the complete Open-RDMA library suite**
+- [x] **Step 4: Verify the complete Open-RDMA library suite**
 
 ```bash
 timeout 300 cargo test --lib --no-default-features --features 'mock page_size_2m'
 ```
 
-Expected: all pure software tests pass, hardware cases print exact skips, and
-the process exits normally before the timeout.
+Expected: all pure software tests pass, hardware cases are reported as ignored,
+and the process exits normally before the timeout.
 
 ### Task 7: Install and exercise clang-format 20
 
@@ -294,7 +286,7 @@ the process exits normally before the timeout.
 - Consumes: official clang-format major version 20.
 - Produces: a discoverable `clang-format-20` or version-20 `clang-format` binary.
 
-- [ ] **Step 1: Confirm the existing negative gate**
+- [x] **Step 1: Confirm the existing negative gate**
 
 ```bash
 ./scripts/code_format.sh --check
@@ -302,12 +294,12 @@ the process exits normally before the timeout.
 
 Expected before installation: `clang-format version 20 not found`.
 
-- [ ] **Step 2: Install official LLVM 20 tooling**
+- [x] **Step 2: Install official LLVM 20 tooling**
 
 Use the Ubuntu LLVM repository/package route documented by the script. Do not
 replace the repository version check with an older formatter.
 
-- [ ] **Step 3: Verify discovery and format touched C/C++ files**
+- [x] **Step 3: Verify discovery and format touched C/C++ files**
 
 ```bash
 clang-format-20 --version
@@ -326,31 +318,33 @@ clang-format 20 only to touched C/C++ files, then rerun check mode.
 - Consumes: all repaired software gates and exact hardware inventory.
 - Produces: final Task 10 evidence with no stale failure descriptions.
 
-- [ ] **Step 1: Run the complete Rust and optional-feature matrix**
+- [x] **Step 1: Run the complete Rust and optional-feature matrix**
 
 Run formatting, workspace tests, clippy, S3, SPDK, native FFI/client, and
 Python tests using the clean Linux native libraries.
 
-- [ ] **Step 2: Reconfigure and rebuild TE/TENT from a clean temporary directory**
+- [x] **Step 2: Reconfigure and rebuild TE/TENT from a clean temporary directory**
 
 Use the approved Linux flags from the design and run all 54 CTest targets with
 `--output-on-failure`.
 
-- [ ] **Step 3: Run Open-RDMA and inventory hardware gates**
+- [x] **Step 3: Run Open-RDMA and inventory hardware gates**
 
 Run the complete software suite and record exact device, HugeTLB, service, or
 permission prerequisites for tests that cannot execute.
 
-- [ ] **Step 4: Run repository hygiene gates**
+- [x] **Step 4: Run repository hygiene gates**
 
 ```bash
 git diff --check
-VIRTUAL_ENV=.venv UV_CACHE_DIR=/tmp/mooncake-uv-cache \
-  PRE_COMMIT_HOME=/tmp/mooncake-pre-commit \
+VIRTUAL_ENV=.venv \
+  UV_CACHE_DIR=/home/fy2462/workspace/tmp/mooncake/uv-cache \
+  PRE_COMMIT_HOME=/home/fy2462/workspace/tmp/mooncake/pre-commit \
   uv run --active pre-commit run --files \
   rust-repo/crates/mooncake-store-client/tests/test_engram.rs \
   rust-repo/crates/mooncake-store-client/tests/test_s3_source.rs \
-  rust-repo/third-party/spdk-io-sys/build.rs \
+  rust-repo/crates/mooncake-store-client/build.rs \
+  rust-repo/crates/transfer-engine-ffi/src/lib.rs \
   mooncake-common/tests/CMakeLists.txt \
   mooncake-common/tests/default_config_test.cpp \
   mooncake-transfer-engine/tests/tcp_transport_test.cpp \
@@ -361,7 +355,7 @@ VIRTUAL_ENV=.venv UV_CACHE_DIR=/tmp/mooncake-uv-cache \
 
 Expected: all applicable hooks pass using clang-format 20.
 
-- [ ] **Step 5: Update the migration log and review both repositories**
+- [x] **Step 5: Update the migration log and review both repositories**
 
 Record commands, counts, and remaining hardware gates. Review `git diff` and
 `git status` separately in Mooncake and Open-RDMA; do not stage unrelated

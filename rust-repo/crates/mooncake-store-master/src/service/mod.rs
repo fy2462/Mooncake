@@ -34,6 +34,8 @@ mod grpc_trait;
 pub(crate) mod helpers;
 pub(crate) mod nof_probe;
 mod proto_conv;
+#[cfg(feature = "spdk-nof-probe")]
+mod spdk_rs_probe;
 pub(crate) mod state;
 mod workers;
 

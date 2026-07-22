@@ -25,8 +25,19 @@ REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.25.9
 SPDK_REPOSITORY=openebs/spdk
-SPDK_COMMIT=bc57f3ea7933b0965c09e9d751c21a3968c6cc11
-SPDK_ROOT_DIR=/opt/mooncake/spdk
+SPDK_RS_REPOSITORY=openebs/spdk-rs
+SPDK_COMMIT=cc090cd2b64775545eb38022bb0ec8f37f4741a6
+DPDK_COMMIT=cf36799c473a686fa14fde9af97f917a2125d3d5
+SPDK_RS_COMMIT=78d6018af041e80a42e222165b86070bae631821
+SPDK_ISAL_CRYPTO_CONFIGURE_SHA256=1e30f91190895a6b4f189035ce7361cf52b74a315d1c20030675f79097d15ba3
+INSTALL_USER=${SUDO_USER:-$(id -un)}
+INSTALL_HOME=${INSTALL_HOME:-$(getent passwd "$INSTALL_USER" | cut -d: -f6)}
+SHARED_BUILD_ROOT=${SHARED_BUILD_ROOT:-"$INSTALL_HOME/workspace/tmp/mooncake"}
+SPDK_SOURCE_DIR=${SPDK_SOURCE_DIR:-"$SHARED_BUILD_ROOT/spdk-25.05"}
+SPDK_RS_SOURCE_DIR=${SPDK_RS_SOURCE_DIR:-"$SHARED_BUILD_ROOT/spdk-rs-v2.11.0"}
+SPDK_STAGING_DIR=${SPDK_STAGING_DIR:-"$SHARED_BUILD_ROOT/spdk-sdk-25.05"}
+SPDK_INSTALL_PREFIX=${SPDK_INSTALL_PREFIX:-/usr/local}
+SPDK_INSTALL_MANIFEST=${SPDK_INSTALL_MANIFEST:-"$SPDK_INSTALL_PREFIX/share/mooncake/spdk-25.05.manifest"}
 OS_RELEASE_FILE=${OS_RELEASE_FILE:-/etc/os-release}
 
 # Function to print section headers
@@ -51,6 +62,167 @@ check_success() {
         print_error "$1"
     fi
 }
+
+# spdk-rs v2.11.0 intentionally applies one tracked isa-l-crypto fix during
+# configure. Accept that exact post-build state on reinstall, but reject every
+# other tracked source modification.
+is_expected_spdk_build_patch() {
+    local spdk_status
+    local isal_crypto_status
+    local configure_sha256
+
+    spdk_status=$(git -C "$SPDK_SOURCE_DIR" status --porcelain --untracked-files=no)
+    [ "$spdk_status" = " m isa-l-crypto" ] || return 1
+
+    isal_crypto_status=$(git -C "$SPDK_SOURCE_DIR/isa-l-crypto" status --porcelain --untracked-files=no)
+    [ "$isal_crypto_status" = " M configure.ac" ] || return 1
+
+    configure_sha256=$(sha256sum "$SPDK_SOURCE_DIR/isa-l-crypto/configure.ac" | awk '{print $1}')
+    [ "$configure_sha256" = "$SPDK_ISAL_CRYPTO_CONFIGURE_SHA256" ]
+}
+
+deploy_spdk_sdk() {
+    local staging_dir="$1"
+    local manifest_dir
+    local manifest_tmp
+    local installed_path
+    local normalized_path
+    local normalized_prefix
+    local relative_path
+    local source_path
+    local physical_staging_dir
+    local physical_source_dir
+    declare -A owned_paths=()
+
+    assert_safe_spdk_parent() {
+        local candidate="$1"
+        local parent
+        local relative_parent
+        local component
+        local current="$normalized_prefix"
+
+        parent=$(dirname "$candidate")
+        [ ! -L "$normalized_prefix" ] || print_error "SPDK_INSTALL_PREFIX must not be a symlink"
+        [ "$parent" = "$normalized_prefix" ] && return
+        relative_parent=${parent#"$normalized_prefix/"}
+        IFS=/ read -r -a components <<< "$relative_parent"
+        for component in "${components[@]}"; do
+            current="$current/$component"
+            [ ! -L "$current" ] || print_error "Symlink parent is unsafe for SPDK deployment: $current"
+        done
+    }
+
+    case "$SPDK_INSTALL_PREFIX" in
+        /*) ;;
+        *) print_error "SPDK_INSTALL_PREFIX must be an absolute path" ;;
+    esac
+    [ "$SPDK_INSTALL_PREFIX" != "/" ] || print_error "Refusing to install SPDK into /"
+    [ -d "$staging_dir/include/spdk" ] || print_error "SPDK staging directory is incomplete: $staging_dir"
+    normalized_prefix=$(realpath -ms "$SPDK_INSTALL_PREFIX")
+    [ "$normalized_prefix" = "$SPDK_INSTALL_PREFIX" ] || print_error "SPDK_INSTALL_PREFIX must be normalized"
+    normalized_path=$(realpath -ms "$SPDK_INSTALL_MANIFEST")
+    case "$normalized_path" in
+        "$normalized_prefix"/*) ;;
+        *) print_error "SPDK_INSTALL_MANIFEST must be inside SPDK_INSTALL_PREFIX" ;;
+    esac
+    [ "$normalized_path" = "$SPDK_INSTALL_MANIFEST" ] || print_error "SPDK_INSTALL_MANIFEST must be normalized"
+    [ ! -L "$SPDK_INSTALL_MANIFEST" ] || print_error "SPDK_INSTALL_MANIFEST must not be a symlink"
+    assert_safe_spdk_parent "$SPDK_INSTALL_MANIFEST"
+
+    if [ -f "$SPDK_INSTALL_MANIFEST" ]; then
+        while IFS= read -r installed_path; do
+            [ -n "$installed_path" ] || continue
+            normalized_path=$(realpath -ms "$installed_path")
+            case "$normalized_path" in
+                "$normalized_prefix"/*) ;;
+                *) print_error "Unsafe path in SPDK install manifest: $installed_path" ;;
+            esac
+            [ "$normalized_path" = "$installed_path" ] || print_error "Non-normalized path in SPDK install manifest: $installed_path"
+            assert_safe_spdk_parent "$installed_path"
+            owned_paths["$installed_path"]=1
+        done < "$SPDK_INSTALL_MANIFEST"
+    fi
+
+    while IFS= read -r -d '' relative_path; do
+        relative_path=${relative_path#./}
+        installed_path="$SPDK_INSTALL_PREFIX/$relative_path"
+        assert_safe_spdk_parent "$installed_path"
+        if { [ -e "$installed_path" ] || [ -L "$installed_path" ]; } && [ -z "${owned_paths["$installed_path"]+owned}" ]; then
+            print_error "Refusing to overwrite unmanaged path: $installed_path"
+        fi
+    done < <(cd "$staging_dir" && find . \( -type f -o -type l \) -print0)
+
+    # Publish a union ownership journal before mutating the installation. If a
+    # later copy or metadata rewrite fails, the next run can safely remove both
+    # old files and any partially deployed new files instead of treating them
+    # as unmanaged collisions.
+    manifest_dir=$(dirname "$SPDK_INSTALL_MANIFEST")
+    mkdir -p "$manifest_dir"
+    manifest_tmp=$(mktemp "$manifest_dir/.spdk-25.05.manifest.XXXXXX")
+    {
+        [ ! -f "$SPDK_INSTALL_MANIFEST" ] || cat "$SPDK_INSTALL_MANIFEST"
+        (
+            cd "$staging_dir" || exit 1
+            find . \( -type f -o -type l \) -print | sed "s|^\.|$SPDK_INSTALL_PREFIX|"
+        )
+    } | LC_ALL=C sort -u > "$manifest_tmp"
+    check_success "Failed to create the SPDK deployment journal"
+    chmod 0644 "$manifest_tmp"
+    mv -f "$manifest_tmp" "$SPDK_INSTALL_MANIFEST"
+    check_success "Failed to publish the SPDK deployment journal"
+
+    if [ -f "$SPDK_INSTALL_MANIFEST" ]; then
+        while IFS= read -r installed_path; do
+            [ -n "$installed_path" ] || continue
+            assert_safe_spdk_parent "$installed_path"
+            if [ -f "$installed_path" ] || [ -L "$installed_path" ]; then
+                unlink "$installed_path"
+                check_success "Failed to remove prior SPDK SDK file $installed_path"
+            fi
+        done < "$SPDK_INSTALL_MANIFEST"
+    fi
+
+    while IFS= read -r -d '' source_path; do
+        relative_path=${source_path#"$staging_dir/"}
+        installed_path="$SPDK_INSTALL_PREFIX/$relative_path"
+        assert_safe_spdk_parent "$installed_path"
+        mkdir -p "$(dirname "$installed_path")"
+        cp -a "$source_path" "$installed_path"
+        check_success "Failed to deploy SPDK SDK file $installed_path"
+    done < <(find "$staging_dir" \( -type f -o -type l \) -print0)
+
+    physical_staging_dir=$(realpath -m "$staging_dir")
+    physical_source_dir=$(realpath -m "$SPDK_SOURCE_DIR")
+    while IFS= read -r -d '' installed_path; do
+        installed_path="$SPDK_INSTALL_PREFIX/${installed_path#"$staging_dir/"}"
+        sed -i \
+            -e "s|$staging_dir|$SPDK_INSTALL_PREFIX|g" \
+            -e "s|$physical_staging_dir|$SPDK_INSTALL_PREFIX|g" \
+            -e "s|$SPDK_SOURCE_DIR/build/include|$SPDK_INSTALL_PREFIX/include|g" \
+            -e "s|$physical_source_dir/build/include|$SPDK_INSTALL_PREFIX/include|g" \
+            "$installed_path"
+        check_success "Failed to rewrite pkg-config prefix in $installed_path"
+    done < <(find "$staging_dir/lib/pkgconfig" -type f -name '*.pc' -print0)
+    if grep -R -F -e "$staging_dir" -e "$physical_staging_dir" -e "$SPDK_SOURCE_DIR" -e "$physical_source_dir" "$SPDK_INSTALL_PREFIX/lib/pkgconfig"; then
+        print_error "Installed SPDK pkg-config metadata still references shared build paths"
+    fi
+
+    manifest_tmp=$(mktemp "$manifest_dir/.spdk-25.05.manifest.XXXXXX")
+    (
+        cd "$staging_dir" || exit 1
+        find . \( -type f -o -type l \) -print | LC_ALL=C sort | sed "s|^\.|$SPDK_INSTALL_PREFIX|"
+    ) > "$manifest_tmp"
+    check_success "Failed to create the SPDK install manifest"
+    chmod 0644 "$manifest_tmp"
+    mv -f "$manifest_tmp" "$SPDK_INSTALL_MANIFEST"
+    check_success "Failed to install the SPDK install manifest"
+}
+
+# Allow installer deployment behavior to be exercised in an isolated prefix
+# without running package installation or source builds.
+if [ "${MOONCAKE_DEPENDENCIES_LIBRARY_ONLY:-0}" = 1 ]; then
+    return 0
+fi
 
 read_os_release_value() {
     local key="$1"
@@ -181,6 +353,7 @@ if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
                      libmsgpack-cxx-dev \
                      libzmq3-dev \
                      libzstd-dev \
+                     libjitterentropy3-dev \
                      libasio-dev \
                      libxxhash-dev \
                      pkg-config \
@@ -379,73 +552,86 @@ fi
 if [ "$INSTALL_SPDK" = true ]; then
     print_section "Installing SPDK"
 
-    mkdir -p "$(dirname "$SPDK_ROOT_DIR")"
-    check_success "Failed to create the SPDK parent directory"
+    mkdir -p "$SHARED_BUILD_ROOT"
+    check_success "Failed to create the shared SPDK build directory"
 
-    if [ -e "$SPDK_ROOT_DIR" ] && [ ! -d "$SPDK_ROOT_DIR/.git" ]; then
-        print_error "$SPDK_ROOT_DIR exists but is not a Git checkout"
+    if [ -e "$SPDK_SOURCE_DIR" ] && [ ! -d "$SPDK_SOURCE_DIR/.git" ]; then
+        print_error "$SPDK_SOURCE_DIR exists but is not a Git checkout"
     fi
 
-    if [ ! -d "$SPDK_ROOT_DIR/.git" ]; then
+    if [ ! -d "$SPDK_SOURCE_DIR/.git" ]; then
         echo "Cloning SPDK from ${GITHUB_PROXY}/${SPDK_REPOSITORY}.git..."
-        git clone "${GITHUB_PROXY}/${SPDK_REPOSITORY}.git" "$SPDK_ROOT_DIR"
+        git clone "${GITHUB_PROXY}/${SPDK_REPOSITORY}.git" "$SPDK_SOURCE_DIR"
         check_success "Failed to clone SPDK"
-    elif [ -n "$(git -C "$SPDK_ROOT_DIR" status --porcelain --untracked-files=no)" ]; then
-        print_error "$SPDK_ROOT_DIR has modified tracked files; preserve or revert them before reinstalling"
+    elif [ -n "$(git -C "$SPDK_SOURCE_DIR" status --porcelain --untracked-files=no)" ]; then
+        if ! is_expected_spdk_build_patch; then
+            print_error "$SPDK_SOURCE_DIR has modified tracked files; preserve or revert them before reinstalling"
+        fi
+        echo -e "${YELLOW}Keeping the pinned spdk-rs isa-l-crypto build patch.${NC}"
     fi
 
     echo "Checking out OpenEBS SPDK commit $SPDK_COMMIT..."
-    git -C "$SPDK_ROOT_DIR" fetch origin "$SPDK_COMMIT"
+    git -C "$SPDK_SOURCE_DIR" fetch origin "$SPDK_COMMIT"
     check_success "Failed to fetch SPDK commit $SPDK_COMMIT"
-    git -C "$SPDK_ROOT_DIR" checkout --detach "$SPDK_COMMIT"
+    git -C "$SPDK_SOURCE_DIR" checkout --detach "$SPDK_COMMIT"
     check_success "Failed to checkout SPDK commit $SPDK_COMMIT"
 
     echo "Initializing SPDK submodules..."
-    git -C "$SPDK_ROOT_DIR" submodule update --init --recursive
+    git -C "$SPDK_SOURCE_DIR" submodule update --init --recursive
     check_success "Failed to initialize SPDK submodules"
+    test "$(git -C "$SPDK_SOURCE_DIR/dpdk" rev-parse HEAD)" = "$DPDK_COMMIT"
+    check_success "SPDK checkout contains an unexpected DPDK revision"
 
-    cd "$SPDK_ROOT_DIR"
-    check_success "Failed to change to $SPDK_ROOT_DIR"
+    if [ -e "$SPDK_RS_SOURCE_DIR" ] && [ ! -d "$SPDK_RS_SOURCE_DIR/.git" ]; then
+        print_error "$SPDK_RS_SOURCE_DIR exists but is not a Git checkout"
+    fi
+
+    if [ ! -d "$SPDK_RS_SOURCE_DIR/.git" ]; then
+        echo "Cloning spdk-rs from ${GITHUB_PROXY}/${SPDK_RS_REPOSITORY}.git..."
+        git clone "${GITHUB_PROXY}/${SPDK_RS_REPOSITORY}.git" "$SPDK_RS_SOURCE_DIR"
+        check_success "Failed to clone spdk-rs"
+    elif [ -n "$(git -C "$SPDK_RS_SOURCE_DIR" status --porcelain --untracked-files=no)" ]; then
+        print_error "$SPDK_RS_SOURCE_DIR has modified tracked files; preserve or revert them before reinstalling"
+    fi
+
+    git -C "$SPDK_RS_SOURCE_DIR" fetch origin "$SPDK_RS_COMMIT"
+    check_success "Failed to fetch spdk-rs commit $SPDK_RS_COMMIT"
+    git -C "$SPDK_RS_SOURCE_DIR" checkout --detach "$SPDK_RS_COMMIT"
+    check_success "Failed to checkout spdk-rs commit $SPDK_RS_COMMIT"
 
     # Install SPDK dependencies
     echo "Installing SPDK dependencies..."
-    ./scripts/pkgdep.sh
+    "$SPDK_SOURCE_DIR/scripts/pkgdep.sh"
     check_success "Failed to install SPDK dependencies"
 
-    echo "Configuring SPDK for the pinned spdk-rs build..."
-    ./configure \
-        --without-shared \
-        --with-uring \
-        --without-uring-zns \
-        --without-nvme-cuse \
-        --without-fuse \
-        --disable-unit-tests \
-        --disable-tests \
-        --with-rdma \
-        --with-crypto \
-        --max-lcores=256
+    case "$(uname -m)" in
+        x86_64) SPDK_TARGET=x86_64-unknown-linux-gnu ;;
+        aarch64) SPDK_TARGET=aarch64-unknown-linux-gnu ;;
+        *) print_error "Unsupported SPDK architecture: $(uname -m)" ;;
+    esac
+    SPDK_BUILD_SCRIPT="$SPDK_RS_SOURCE_DIR/build_scripts/build_spdk.sh"
+    SPDK_BUILD_ARGS=(-b release -t "$SPDK_TARGET" -s "$SPDK_SOURCE_DIR" --without-fio --no-log)
+
+    echo "Configuring SPDK with the pinned spdk-rs build helper..."
+    "$SPDK_BUILD_SCRIPT" "${SPDK_BUILD_ARGS[@]}" configure
     check_success "Failed to configure SPDK"
 
-    # Build SPDK
     echo "Building SPDK (using $(nproc) cores)..."
-    make -j$(nproc)
+    "$SPDK_BUILD_SCRIPT" "${SPDK_BUILD_ARGS[@]}" make
     check_success "Failed to build SPDK"
 
-    # Install SPDK
-    echo "Installing SPDK..."
-    make install
-    check_success "Failed to install SPDK"
+    echo "Staging the SPDK SDK in $SPDK_STAGING_DIR..."
+    "$SPDK_BUILD_SCRIPT" "${SPDK_BUILD_ARGS[@]}" install "$SPDK_STAGING_DIR"
+    check_success "Failed to install the SPDK SDK"
 
-    # Copy DPDK libraries to system library path
-    if ls dpdk/build/lib/*.a >/dev/null 2>&1; then
-        echo "Copying DPDK libraries to /usr/local/lib..."
-        cp dpdk/build/lib/*.a /usr/local/lib/
-        check_success "Failed to copy DPDK libraries"
-    fi
+    echo "Deploying the SPDK SDK to $SPDK_INSTALL_PREFIX..."
+    deploy_spdk_sdk "$SPDK_STAGING_DIR"
 
     print_success "SPDK installed successfully"
-    export SPDK_ROOT_DIR="$SPDK_ROOT_DIR"
-    echo -e "${YELLOW}For Rust SPDK builds, run: export SPDK_ROOT_DIR=$SPDK_ROOT_DIR${NC}"
+    export SPDK_ROOT_DIR="$SPDK_INSTALL_PREFIX"
+    export PKG_CONFIG_PATH="$SPDK_INSTALL_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    echo -e "${YELLOW}For Rust SPDK builds, run: export SPDK_ROOT_DIR=$SPDK_INSTALL_PREFIX${NC}"
+    echo -e "${YELLOW}export PKG_CONFIG_PATH=$SPDK_INSTALL_PREFIX/lib/pkgconfig\${PKG_CONFIG_PATH:+:\$PKG_CONFIG_PATH}${NC}"
     cd "${REPO_ROOT}"
 fi
 

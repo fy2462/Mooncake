@@ -1,3 +1,4 @@
+#[cfg(not(feature = "spdk-nof-probe"))]
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -30,7 +31,7 @@ pub(crate) fn probe_nof_endpoint(te_endpoint: &str, timeout: Duration) -> Result
 
 #[cfg(feature = "spdk-nof-probe")]
 fn probe_nof_endpoint_default(endpoint: &str, timeout: Duration) -> Result<(), String> {
-    spdk_probe::probe_nof_endpoint_with_spdk_io(endpoint, timeout)
+    super::spdk_rs_probe::probe_nof_endpoint_with_spdk_rs(endpoint, timeout)
 }
 
 #[cfg(not(feature = "spdk-nof-probe"))]
@@ -75,6 +76,7 @@ fn run_nof_probe_command(command: &str, endpoint: &str, timeout: Duration) -> Re
     }
 }
 
+#[cfg(not(feature = "spdk-nof-probe"))]
 fn probe_nof_endpoint_with_tcp(endpoint: &str, timeout: Duration) -> Result<(), String> {
     let mut last_error = None;
     let target = parse_nof_probe_target(endpoint)?;
@@ -97,6 +99,7 @@ fn probe_nof_endpoint_with_tcp(endpoint: &str, timeout: Duration) -> Result<(), 
     })
 }
 
+#[cfg(any(not(feature = "spdk-nof-probe"), test))]
 fn parse_nof_probe_target(endpoint: &str) -> Result<String, String> {
     let endpoint = endpoint.trim();
     if endpoint.is_empty() {
@@ -249,106 +252,6 @@ fn split_nof_key_value(token: &str) -> Option<(&str, &str)> {
         .split_once('=')
         .or_else(|| token.split_once(':'))
         .filter(|(key, _)| !key.trim().is_empty())
-}
-
-#[cfg(feature = "spdk-nof-probe")]
-mod spdk_probe {
-    use super::{NoFTransportKind, parse_nof_transport_spec};
-    use futures_util::task::noop_waker_ref;
-    use spdk_io::nvme::{NvmeController, TransportId};
-    use spdk_io::{DmaBuf, LogLevel, SpdkEnv, SpdkThread};
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::OnceLock;
-    use std::task::{Context, Poll};
-    use std::time::{Duration, Instant};
-
-    static SPDK_ENV: OnceLock<Result<SpdkEnv, String>> = OnceLock::new();
-
-    pub(super) fn probe_nof_endpoint_with_spdk_io(
-        endpoint: &str,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        ensure_spdk_env()?;
-        let _thread = SpdkThread::new("mooncake-nof-probe")
-            .map_err(|e| format!("spdk_thread_init_fail: {e}"))?;
-        let spec = parse_nof_transport_spec(endpoint)?;
-        let ns_id = spec.as_ref().map(|spec| spec.ns).unwrap_or(1);
-        let trid = TransportId::parse(endpoint)
-            .or_else(|parse_err| {
-                let Some(spec) = spec.as_ref() else {
-                    return Err(parse_err);
-                };
-                match spec.kind {
-                    NoFTransportKind::Tcp => {
-                        TransportId::tcp(&spec.traddr, &spec.trsvcid, &spec.subnqn)
-                    }
-                    NoFTransportKind::Rdma => {
-                        TransportId::rdma(&spec.traddr, &spec.trsvcid, &spec.subnqn)
-                    }
-                }
-            })
-            .map_err(|e| format!("transport_id_parse_fail: {e}"))?;
-
-        let ctrlr = NvmeController::connect(&trid, None).map_err(|e| format!("open_fail: {e}"))?;
-        let ns = ctrlr
-            .namespace(ns_id)
-            .ok_or_else(|| format!("open_fail: namespace {ns_id} is not active"))?;
-        let block_size = ns.sector_size();
-        if block_size == 0 {
-            return Err("invalid_block_size".to_string());
-        }
-        let qpair = ctrlr
-            .alloc_io_qpair(None)
-            .map_err(|e| format!("open_fail: alloc qpair: {e}"))?;
-        let mut buffer = DmaBuf::alloc(block_size as usize, block_size as usize)
-            .map_err(|e| format!("probe_buffer_alloc_fail: {e}"))?;
-        let mut read = Box::pin(ns.read(&qpair, &mut buffer, 0, 1));
-        poll_read_until_complete(read.as_mut(), &qpair, timeout)
-    }
-
-    fn ensure_spdk_env() -> Result<(), String> {
-        SPDK_ENV
-            .get_or_init(|| {
-                SpdkEnv::builder()
-                    .name("mooncake")
-                    .log_level(LogLevel::Notice)
-                    .build()
-                    .map_err(|e| format!("spdk_env_init_fail: {e}"))
-            })
-            .as_ref()
-            .map(|_| ())
-            .map_err(Clone::clone)
-    }
-
-    fn poll_read_until_complete(
-        mut read: Pin<&mut dyn Future<Output = spdk_io::Result<()>>>,
-        qpair: &spdk_io::nvme::NvmeQpair,
-        timeout: Duration,
-    ) -> Result<(), String> {
-        let deadline = Instant::now() + timeout;
-        let waker = noop_waker_ref();
-        let mut cx = Context::from_waker(waker);
-        let mut submitted = false;
-        loop {
-            match read.as_mut().poll(&mut cx) {
-                Poll::Ready(Ok(())) => return Ok(()),
-                Poll::Ready(Err(e)) if !submitted => return Err(format!("submit_fail: {e}")),
-                Poll::Ready(Err(e)) => return Err(format!("completion_error: {e}")),
-                Poll::Pending => submitted = true,
-            }
-            let completions = qpair.process_completions(0);
-            if completions < 0 {
-                return Err(format!(
-                    "completion_error: process_completions={completions}"
-                ));
-            }
-            if Instant::now() >= deadline {
-                return Err("completion_timeout".to_string());
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
 }
 
 #[cfg(test)]

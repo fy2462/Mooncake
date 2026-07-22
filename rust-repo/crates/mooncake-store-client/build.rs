@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .to_str()
                     .unwrap(),
             ],
-            &[proto_path.clone()],
+            std::slice::from_ref(&proto_path),
         )?;
 
     // Offload RPC proto — both client and server.
@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .join("mooncake_offload_rpc.proto")
                 .to_str()
                 .unwrap()],
-            &[proto_path],
+            std::slice::from_ref(&proto_path),
         )?;
 
     Ok(())

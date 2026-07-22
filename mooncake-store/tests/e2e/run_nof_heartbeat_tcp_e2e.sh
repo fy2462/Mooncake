@@ -4,7 +4,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../../.." && pwd)
 BUILD_DIR=${BUILD_DIR:-"$REPO_ROOT/build"}
-LOG_DIR=${LOG_DIR:-/tmp/mooncake_nof_heartbeat_e2e}
+SHARED_BUILD_ROOT=${SHARED_BUILD_ROOT:-"$HOME/workspace/tmp/mooncake"}
+LOG_DIR=${LOG_DIR:-"$SHARED_BUILD_ROOT/nof-heartbeat-e2e"}
+SPDK_SOURCE_DIR=${SPDK_SOURCE_DIR:-"$SHARED_BUILD_ROOT/spdk-25.05"}
+SPDK_NVMF_TGT=${SPDK_NVMF_TGT:-/usr/local/bin/nvmf_tgt}
+SPDK_RPC_PY=${SPDK_RPC_PY:-"$SPDK_SOURCE_DIR/scripts/rpc.py"}
 MASTER_RPC=${MASTER_RPC:-127.0.0.1:50051}
 MASTER_HOST=${MASTER_RPC%:*}
 MASTER_PORT=${MASTER_RPC##*:}
@@ -61,6 +65,15 @@ count_pattern() {
   grep -c "$pattern" "$file" 2>/dev/null || true
 }
 
+[[ -x "$SPDK_NVMF_TGT" ]] || {
+  echo "SPDK nvmf_tgt is not executable: $SPDK_NVMF_TGT" >&2
+  exit 1
+}
+[[ -f "$SPDK_RPC_PY" ]] || {
+  echo "SPDK RPC client is missing: $SPDK_RPC_PY" >&2
+  exit 1
+}
+
 rm -rf "$LOG_DIR"
 mkdir -p "$LOG_DIR"
 
@@ -75,17 +88,17 @@ pkill -f 'mooncake_master' >/dev/null 2>&1 || true
 pkill -f 'http_metadata_server.py' >/dev/null 2>&1 || true
 sleep 1
 
-"$REPO_ROOT/extern/spdk/build/bin/nvmf_tgt" -m 0x1 -u --iova-mode=va --wait-for-rpc >"$LOG_DIR/target.log" 2>&1 &
+"$SPDK_NVMF_TGT" -m 0x1 -u --iova-mode=va --wait-for-rpc >"$LOG_DIR/target.log" 2>&1 &
 TARGET_PID=$!
 sleep 3
 
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" framework_start_init >/dev/null
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" framework_wait_init >/dev/null
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" bdev_malloc_create -b Malloc0 64 4096 >/dev/null
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" nvmf_create_transport -t TCP >/dev/null || true
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" nvmf_create_subsystem "$TARGET_NQN" -a -s SPDK00000000000001 >/dev/null || true
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" nvmf_subsystem_add_ns "$TARGET_NQN" Malloc0 >/dev/null || true
-python3 "$REPO_ROOT/extern/spdk/scripts/rpc.py" nvmf_subsystem_add_listener "$TARGET_NQN" -t tcp -a "$TARGET_HOST" -s "$TARGET_PORT" >/dev/null || true
+python3 "$SPDK_RPC_PY" framework_start_init >/dev/null
+python3 "$SPDK_RPC_PY" framework_wait_init >/dev/null
+python3 "$SPDK_RPC_PY" bdev_malloc_create -b Malloc0 64 4096 >/dev/null
+python3 "$SPDK_RPC_PY" nvmf_create_transport -t TCP >/dev/null || true
+python3 "$SPDK_RPC_PY" nvmf_create_subsystem "$TARGET_NQN" -a -s SPDK00000000000001 >/dev/null || true
+python3 "$SPDK_RPC_PY" nvmf_subsystem_add_ns "$TARGET_NQN" Malloc0 >/dev/null || true
+python3 "$SPDK_RPC_PY" nvmf_subsystem_add_listener "$TARGET_NQN" -t tcp -a "$TARGET_HOST" -s "$TARGET_PORT" >/dev/null || true
 
 python3 "$REPO_ROOT/mooncake-wheel/mooncake/http_metadata_server.py" --host "$METADATA_HOST" --port "$METADATA_PORT" >"$LOG_DIR/metadata.log" 2>&1 &
 META_PID=$!

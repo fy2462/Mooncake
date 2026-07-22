@@ -1,5 +1,7 @@
 # Rust Store Continuous Parity and Validation Design
 
+> Superseded for SPDK work by `2026-07-22-spdk-rs-nof-probe-design.md`.
+
 ## Objective
 
 Use the completed Task 10 audit as the baseline for continuously porting
@@ -87,4 +89,3 @@ Failures are attributed to one of four categories:
 
 The full goal is complete only when every required software gate passes and
 every hardware/service gate has either passed or has an evidence-backed skip.
-
