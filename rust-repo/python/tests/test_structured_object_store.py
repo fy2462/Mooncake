@@ -5,6 +5,8 @@ import threading
 
 import numpy as np
 
+import mooncake_store
+
 from mooncake_store.structured_object_store import (
     MooncakeBundleTransfer,
     StructuredObjectPayload,
@@ -61,3 +63,9 @@ def test_structured_manifest_bytes_match_upstream_format() -> None:
     assert [
         chunk["bytes"] for chunk in manifest["buffers"]["x"]["chunks"]
     ] == [4, 4]
+
+
+def test_structured_api_is_exported_from_package() -> None:
+    assert mooncake_store.MooncakeBundleTransfer is MooncakeBundleTransfer
+    assert mooncake_store.StructuredObjectPayload is StructuredObjectPayload
+    assert "export_ref" in mooncake_store.__all__
