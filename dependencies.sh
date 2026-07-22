@@ -24,6 +24,7 @@ NC="\033[0m" # No Color
 REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.25.9
+SPDK_VERSION=v26.01
 OS_RELEASE_FILE=${OS_RELEASE_FILE:-/etc/os-release}
 
 # Function to print section headers
@@ -175,6 +176,7 @@ if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
                      liburing-dev \
                      libjemalloc-dev \
                      libmsgpack-dev \
+                     libmsgpack-cxx-dev \
                      libzmq3-dev \
                      libzstd-dev \
                      libasio-dev \
@@ -394,13 +396,13 @@ if [ "$INSTALL_SPDK" = true ]; then
     check_success "Failed to change to SPDK directory"
 
     # Checkout specific version
-    echo "Checking out SPDK version v23.01.1..."
-    git checkout v23.01.1
-    check_success "Failed to checkout SPDK version v23.01.1"
+    echo "Checking out SPDK version $SPDK_VERSION..."
+    git checkout "$SPDK_VERSION"
+    check_success "Failed to checkout SPDK version $SPDK_VERSION"
 
     # Initialize submodules
     echo "Initializing SPDK submodules..."
-    git submodule update --init
+    git submodule update --init --recursive
     check_success "Failed to initialize SPDK submodules"
 
     # Install SPDK dependencies
@@ -446,7 +448,7 @@ echo -e "  ${GREEN}✓${NC} yalantinglibs"
 echo -e "  ${GREEN}✓${NC} Git submodules"
 echo -e "  ${GREEN}✓${NC} Go $GOVER"
 if [ "$INSTALL_SPDK" = true ]; then
-    echo -e "  ${GREEN}✓${NC} SPDK (v23.01.1)"
+    echo -e "  ${GREEN}✓${NC} SPDK ($SPDK_VERSION)"
 fi
 echo
 echo -e "You can now build and run Mooncake."
