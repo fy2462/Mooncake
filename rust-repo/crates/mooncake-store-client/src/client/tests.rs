@@ -212,11 +212,11 @@ fn metadata_value_buffers_preserve_metadata_only_zero_data() {
 fn transport_topology_matrix_matches_cpp_protocol_rules() {
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("rdma", "mlx5_0", None),
-        Some("mlx5_0".to_string())
+        Some(r#"{"cpu:0":[["mlx5_0"],[]]}"#.to_string())
     );
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("efa", "efa0", None),
-        Some("efa0".to_string())
+        Some(r#"{"cpu:0":[["efa0"],[]]}"#.to_string())
     );
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("ub", "bonding_dev_0", None),
@@ -249,15 +249,15 @@ fn transport_topology_matrix_matches_cpp_protocol_rules() {
 fn transport_topology_matrix_env_fallback_matches_cpp_filters() {
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("rdma", "mlx5_0", Some("mlx5_1")),
-        Some("mlx5_0".to_string())
+        Some(r#"{"cpu:0":[["mlx5_0"],[]]}"#.to_string())
     );
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("rdma", "", Some(" mlx5_0 , mlx5_1 ,")),
-        Some("mlx5_0,mlx5_1".to_string())
+        Some(r#"{"cpu:0":[["mlx5_0","mlx5_1"],[]]}"#.to_string())
     );
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("efa", "  ", Some("efa0")),
-        Some("efa0".to_string())
+        Some(r#"{"cpu:0":[["efa0"],[]]}"#.to_string())
     );
     assert_eq!(
         MooncakeClient::transport_topology_matrix_from_env("rdma", "", Some(" ,  ")),

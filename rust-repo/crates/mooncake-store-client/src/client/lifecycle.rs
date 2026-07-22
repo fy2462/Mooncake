@@ -575,11 +575,17 @@ impl MooncakeClient {
         match protocol {
             "rdma" | "efa" => {
                 let explicit = device.trim();
-                if !explicit.is_empty() {
+                let filters = if !explicit.is_empty() {
                     Some(explicit.to_string())
                 } else {
                     Self::trim_filter_list(ms_filters_env)
-                }
+                }?;
+                let devices: Vec<&str> = filters
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .collect();
+                Some(serde_json::json!({"cpu:0": [devices, []]}).to_string())
             }
             "ub" => {
                 let explicit = device.trim();

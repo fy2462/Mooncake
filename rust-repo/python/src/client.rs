@@ -302,6 +302,18 @@ pub(crate) fn replicas_to_py(replicas: Vec<mooncake_store_core::ReplicaDescripto
             d.set_item("segment_name", &r.segment_name).ok();
             d.set_item("offset", r.offset).ok();
             d.set_item("segment_id", r.segment_id.to_string()).ok();
+            d.set_item("size", r.size).ok();
+            d.set_item("status", format!("{:?}", r.status)).ok();
+            d.set_item("replica_type", format!("{:?}", r.replica_type))
+                .ok();
+            d.set_item(
+                "holder_client_id",
+                r.holder_client_id.map(|id| id.to_string()),
+            )
+            .ok();
+            d.set_item("handle_valid", r.handle_valid).ok();
+            d.set_item("base_addr", r.base_addr).ok();
+            d.set_item("protocol", &r.protocol).ok();
             d.into()
         })
         .collect();
@@ -1481,7 +1493,7 @@ impl PythonMooncakeClient {
     /// Return replica descriptors for one key as dictionaries.
     fn get_replica_desc(slf: &Bound<'_, Self>, key: String) -> PyResult<Py<PyAny>> {
         let inner = slf.borrow().inner.clone();
-        let replicas = tokio::runtime::Handle::current().block_on(async {
+        let replicas = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner)?;
             let result = client.get_replica_list(&key).await;
             *inner.lock() = Some(client);
@@ -1493,7 +1505,7 @@ impl PythonMooncakeClient {
     /// Return replica descriptors for multiple keys as a dict keyed by object key.
     fn batch_get_replica_desc(slf: &Bound<'_, Self>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
         let inner = slf.borrow().inner.clone();
-        let results = tokio::runtime::Handle::current().block_on(async {
+        let results = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner)?;
             let result = client.batch_get_replica_list(&keys).await;
             *inner.lock() = Some(client);
