@@ -759,6 +759,26 @@ def test_structured_object_ndarray_read_can_use_buffer_pool() -> None:
     assert pool.release_count == 1
 
 
+def test_structured_object_ndarray_read_uses_real_rust_buffer_pool() -> None:
+    rust_binding = pytest.importorskip("mooncake_store._mooncake_store")
+    pool = rust_binding.BufferPool(1024 * 1024)
+    store, transfer = make_transfer(buffer_pool=pool)
+    array = np.arange(64, dtype=np.int16).reshape(8, 8)
+
+    ref = transfer.put_structured_object(
+        structured_payload(weights=array), chunk_bytes=32
+    )
+    result = transfer.materialize(transfer.read_spec(ref))
+
+    assert np.array_equal(result.objects["weights"], array)
+    assert hasattr(result.objects["weights"], "_mooncake_pool_owner")
+    assert pool.borrowed_bytes > 0
+    MooncakeBundleTransfer.release_result(result.objects)
+    assert pool.borrowed_bytes == 0
+    MooncakeBundleTransfer.release_result(result.objects)
+    assert pool.borrowed_bytes == 0
+
+
 def test_structured_object_multi_buffer_payload_uses_pool_batch_put() -> None:
     pool = FakeBufferPool()
     store, transfer = make_transfer(buffer_pool=pool)
