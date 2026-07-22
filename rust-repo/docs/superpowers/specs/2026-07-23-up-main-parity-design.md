@@ -205,8 +205,7 @@ As of 2026-07-23, the promotion retry and metrics slice is implemented on
 `b5137921`. The implementation includes bounded candidate recording,
 partitioned retry with backoff and expiry, eviction-worker integration, the
 six compatible Prometheus counters, and transient-state reset during snapshot
-or oplog recovery. The remaining CUDA pinning, structured-object, and NIC load
-statistics slices are unchanged and still required.
+or oplog recovery.
 
 Focused verification used:
 
@@ -243,3 +242,33 @@ cargo check -p mooncake-store-client --features cuda-host-pin
 The crate-wide `clippy -D warnings` baseline still contains unrelated warnings
 from the merged branch; filtered Clippy output for the new pin manager,
 memory wrapper, and teardown path is clean.
+
+The Python structured-object slice is implemented by commits `26bd0d3e`,
+`98b8d15f`, `72a20826`, and `17e60655`. It ports the authoritative merged
+wire format, adapts Rust PyO3 awaitables through a persistent event loop,
+provides Rust BufferPool pointer leases, exports the public structured/DataProto
+API, and contains the upstream behavior vectors under the Rust package path.
+The installed extension reports its PyO3 classes as `builtins`, so adapter
+detection uses exact extension class identities rather than relying only on
+`__module__`.
+
+Structured-object verification used:
+
+```text
+maturin develop --manifest-path python/Cargo.toml
+python -m pytest python/tests
+```
+
+The final Python run passed 87 tests plus 9 subtests; 25 tests requiring the
+legacy C++ `mooncake.store` extension or optional Torch integration skipped.
+A real Rust BufferPool integration test proves pool-backed ndarray ownership
+and deterministic borrowed-byte release.
+
+The Transfer Engine NIC-load-stat slice is implemented by commit `103b1428`.
+Both classic and TENT bindgen surfaces expose their native functions through
+`nic_load_stats() -> Vec<NicLoadStats>`. The shared collector supports an empty
+count query with a non-null pointer, retries count growth, validates NUL
+termination and UTF-8, and preserves the native operation name and status code.
+The 25.05 validation libraries export both `getNicLoadStats` and
+`tent_get_nic_load_stats`; native-feature linking and all 65 FFI unit tests
+pass.
