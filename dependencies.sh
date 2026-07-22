@@ -24,7 +24,9 @@ NC="\033[0m" # No Color
 REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.25.9
-SPDK_VERSION=v26.01
+SPDK_REPOSITORY=openebs/spdk
+SPDK_COMMIT=bc57f3ea7933b0965c09e9d751c21a3968c6cc11
+SPDK_ROOT_DIR=/opt/mooncake/spdk
 OS_RELEASE_FILE=${OS_RELEASE_FILE:-/etc/os-release}
 
 # Function to print section headers
@@ -377,33 +379,33 @@ fi
 if [ "$INSTALL_SPDK" = true ]; then
     print_section "Installing SPDK"
 
-    cd "${REPO_ROOT}/extern"
-    check_success "Failed to change to extern directory"
+    mkdir -p "$(dirname "$SPDK_ROOT_DIR")"
+    check_success "Failed to create the SPDK parent directory"
 
-    # Remove existing SPDK if present
-    if [ -d "spdk" ]; then
-        echo -e "${YELLOW}SPDK directory already exists. Removing for fresh install...${NC}"
-        rm -rf spdk
-        check_success "Failed to remove existing SPDK directory"
+    if [ -e "$SPDK_ROOT_DIR" ] && [ ! -d "$SPDK_ROOT_DIR/.git" ]; then
+        print_error "$SPDK_ROOT_DIR exists but is not a Git checkout"
     fi
 
-    # Clone SPDK
-    echo "Cloning SPDK from ${GITHUB_PROXY}/spdk/spdk.git..."
-    git clone ${GITHUB_PROXY}/spdk/spdk.git
-    check_success "Failed to clone SPDK"
+    if [ ! -d "$SPDK_ROOT_DIR/.git" ]; then
+        echo "Cloning SPDK from ${GITHUB_PROXY}/${SPDK_REPOSITORY}.git..."
+        git clone "${GITHUB_PROXY}/${SPDK_REPOSITORY}.git" "$SPDK_ROOT_DIR"
+        check_success "Failed to clone SPDK"
+    elif [ -n "$(git -C "$SPDK_ROOT_DIR" status --porcelain --untracked-files=no)" ]; then
+        print_error "$SPDK_ROOT_DIR has modified tracked files; preserve or revert them before reinstalling"
+    fi
 
-    cd spdk
-    check_success "Failed to change to SPDK directory"
+    echo "Checking out OpenEBS SPDK commit $SPDK_COMMIT..."
+    git -C "$SPDK_ROOT_DIR" fetch origin "$SPDK_COMMIT"
+    check_success "Failed to fetch SPDK commit $SPDK_COMMIT"
+    git -C "$SPDK_ROOT_DIR" checkout --detach "$SPDK_COMMIT"
+    check_success "Failed to checkout SPDK commit $SPDK_COMMIT"
 
-    # Checkout specific version
-    echo "Checking out SPDK version $SPDK_VERSION..."
-    git checkout "$SPDK_VERSION"
-    check_success "Failed to checkout SPDK version $SPDK_VERSION"
-
-    # Initialize submodules
     echo "Initializing SPDK submodules..."
-    git submodule update --init --recursive
+    git -C "$SPDK_ROOT_DIR" submodule update --init --recursive
     check_success "Failed to initialize SPDK submodules"
+
+    cd "$SPDK_ROOT_DIR"
+    check_success "Failed to change to $SPDK_ROOT_DIR"
 
     # Install SPDK dependencies
     echo "Installing SPDK dependencies..."
@@ -433,6 +435,8 @@ if [ "$INSTALL_SPDK" = true ]; then
     fi
 
     print_success "SPDK installed successfully"
+    export SPDK_ROOT_DIR="$SPDK_ROOT_DIR"
+    echo -e "${YELLOW}For Rust SPDK builds, run: export SPDK_ROOT_DIR=$SPDK_ROOT_DIR${NC}"
     cd "${REPO_ROOT}"
 fi
 
@@ -448,7 +452,7 @@ echo -e "  ${GREEN}✓${NC} yalantinglibs"
 echo -e "  ${GREEN}✓${NC} Git submodules"
 echo -e "  ${GREEN}✓${NC} Go $GOVER"
 if [ "$INSTALL_SPDK" = true ]; then
-    echo -e "  ${GREEN}✓${NC} SPDK ($SPDK_VERSION)"
+    echo -e "  ${GREEN}✓${NC} OpenEBS SPDK ($SPDK_COMMIT)"
 fi
 echo
 echo -e "You can now build and run Mooncake."

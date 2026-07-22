@@ -3,12 +3,31 @@ import unittest
 
 
 class DependenciesInstallerTest(unittest.TestCase):
-    def test_spdk_version_has_one_v26_source_of_truth(self) -> None:
+    def test_spdk_uses_pinned_openebs_system_checkout(self) -> None:
         script = Path(__file__).parents[1].joinpath("dependencies.sh").read_text()
-        self.assertEqual(script.count("SPDK_VERSION=v26.01"), 1)
-        self.assertIn('git checkout "$SPDK_VERSION"', script)
-        self.assertIn('SPDK ($SPDK_VERSION)', script)
-        self.assertNotIn("v23.01.1", script)
+        self.assertEqual(script.count("SPDK_REPOSITORY=openebs/spdk"), 1)
+        self.assertEqual(
+            script.count(
+                "SPDK_COMMIT=bc57f3ea7933b0965c09e9d751c21a3968c6cc11"
+            ),
+            1,
+        )
+        self.assertEqual(script.count("SPDK_ROOT_DIR=/opt/mooncake/spdk"), 1)
+        self.assertIn('${GITHUB_PROXY}/${SPDK_REPOSITORY}.git', script)
+        self.assertIn(
+            'git -C "$SPDK_ROOT_DIR" checkout --detach "$SPDK_COMMIT"', script
+        )
+        self.assertIn(
+            'git -C "$SPDK_ROOT_DIR" status --porcelain --untracked-files=no',
+            script,
+        )
+        self.assertIn('export SPDK_ROOT_DIR="$SPDK_ROOT_DIR"', script)
+
+    def test_spdk_install_does_not_mutate_repository_checkout(self) -> None:
+        script = Path(__file__).parents[1].joinpath("dependencies.sh").read_text()
+        self.assertNotIn('cd "${REPO_ROOT}/extern"', script)
+        self.assertNotIn("rm -rf spdk", script)
+        self.assertNotIn("SPDK_VERSION=v26.01", script)
 
 
 if __name__ == "__main__":
