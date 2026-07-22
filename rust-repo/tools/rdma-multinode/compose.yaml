@@ -8,6 +8,7 @@ x-rdma-node: &rdma-node
     memlock: {soft: -1, hard: -1}
   volumes:
     - ${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}:/artifacts
+    - /dev/infiniband:/dev/infiniband
   command: [sleep, infinity]
   networks: [rdma]
 
