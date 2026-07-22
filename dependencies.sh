@@ -412,9 +412,18 @@ if [ "$INSTALL_SPDK" = true ]; then
     ./scripts/pkgdep.sh
     check_success "Failed to install SPDK dependencies"
 
-    # Configure SPDK with RDMA support
-    echo "Configuring SPDK with RDMA support..."
-    ./configure --with-rdma
+    echo "Configuring SPDK for the pinned spdk-rs build..."
+    ./configure \
+        --without-shared \
+        --with-uring \
+        --without-uring-zns \
+        --without-nvme-cuse \
+        --without-fuse \
+        --disable-unit-tests \
+        --disable-tests \
+        --with-rdma \
+        --with-crypto \
+        --max-lcores=256
     check_success "Failed to configure SPDK"
 
     # Build SPDK

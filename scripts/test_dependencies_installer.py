@@ -22,6 +22,19 @@ class DependenciesInstallerTest(unittest.TestCase):
             script,
         )
         self.assertIn('export SPDK_ROOT_DIR="$SPDK_ROOT_DIR"', script)
+        for option in (
+            "--without-shared",
+            "--with-uring",
+            "--without-uring-zns",
+            "--without-nvme-cuse",
+            "--without-fuse",
+            "--disable-unit-tests",
+            "--disable-tests",
+            "--with-rdma",
+            "--with-crypto",
+            "--max-lcores=256",
+        ):
+            self.assertIn(option, script)
 
     def test_spdk_install_does_not_mutate_repository_checkout(self) -> None:
         script = Path(__file__).parents[1].joinpath("dependencies.sh").read_text()
