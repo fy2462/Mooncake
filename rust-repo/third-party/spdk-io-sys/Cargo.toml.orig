@@ -1,0 +1,19 @@
+[package]
+name = "spdk-io-sys"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+documentation.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Low-level FFI bindings for SPDK"
+build = "build.rs"
+links = "spdk"
+include = ["/src", "/build.rs", "/wrapper.h"]
+
+[dependencies]
+
+[build-dependencies]
+bindgen.workspace = true
+pkg-config.workspace = true
+pkgconf.workspace = true
