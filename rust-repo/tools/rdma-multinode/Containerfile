@@ -1,0 +1,29 @@
+FROM ubuntu:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ibverbs-providers \
+    ibverbs-utils \
+    iproute2 \
+    kmod \
+    libgflags2.2 \
+    libgoogle-glog0v6t64 \
+    libibverbs1 \
+    libcurl4t64 \
+    libhiredis1.1.0 \
+    libjsoncpp26 \
+    libnuma1 \
+    librdmacm1t64 \
+    liburing2 \
+    libyaml-cpp0.8 \
+    perftest \
+    python3 \
+    rdma-core \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . /opt/mooncake-rdma/
+ENV LD_LIBRARY_PATH=/opt/mooncake-rdma/te
+ENV PYTHONPATH=/opt/mooncake-rdma/store
+WORKDIR /opt/mooncake-rdma
+CMD ["sleep", "infinity"]

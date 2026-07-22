@@ -1,0 +1,66 @@
+name: mc-rdma
+
+x-rdma-node: &rdma-node
+  image: ${RDMA_IMAGE:-mc-rdma-runtime:latest}
+  privileged: true
+  cap_add: [NET_ADMIN, SYS_ADMIN, IPC_LOCK]
+  ulimits:
+    memlock: {soft: -1, hard: -1}
+  volumes:
+    - ${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}:/artifacts
+  command: [sleep, infinity]
+  networks: [rdma]
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.17
+    container_name: mc-rdma-etcd
+    command:
+      - etcd
+      - --data-dir=/tmp/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://10.89.10.10:2379
+    networks:
+      rdma: {ipv4_address: 10.89.10.10}
+
+  te-a:
+    <<: *rdma-node
+    container_name: mc-rdma-te-a
+    networks:
+      rdma: {ipv4_address: 10.89.10.21}
+
+  te-b:
+    <<: *rdma-node
+    container_name: mc-rdma-te-b
+    networks:
+      rdma: {ipv4_address: 10.89.10.22}
+
+  master:
+    <<: *rdma-node
+    container_name: mc-rdma-master
+    networks:
+      rdma: {ipv4_address: 10.89.10.30}
+
+  store-a:
+    <<: *rdma-node
+    container_name: mc-rdma-store-a
+    networks:
+      rdma: {ipv4_address: 10.89.10.31}
+
+  store-b:
+    <<: *rdma-node
+    container_name: mc-rdma-store-b
+    networks:
+      rdma: {ipv4_address: 10.89.10.32}
+
+  client:
+    <<: *rdma-node
+    container_name: mc-rdma-client
+    networks:
+      rdma: {ipv4_address: 10.89.10.40}
+
+networks:
+  rdma:
+    name: mc-rdma-net
+    ipam:
+      config: [{subnet: 10.89.10.0/24}]

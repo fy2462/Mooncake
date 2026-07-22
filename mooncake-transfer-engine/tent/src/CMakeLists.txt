@@ -149,6 +149,14 @@ foreach(
   endif()
 endforeach()
 target_link_libraries(tent_link_group INTERFACE "-Wl,--end-group")
+# A shared Tent library must carry the same concrete transport/metastore
+# dependency closure as static consumers of `tent_link_group`.  Linking only
+# `tent_runtime` leaves symbols such as Json::CharReader and mooncake::Status
+# unresolved until process startup.
+target_link_libraries(
+  tent_shared PRIVATE tent_link_group tent_common "-Wl,--whole-archive" base
+                      "-Wl,--no-whole-archive" "-Wl,--no-as-needed"
+                      mooncake_common "-Wl,--as-needed" ${JSONCPP_TARGET})
 install(
   TARGETS tent_shared
   ARCHIVE DESTINATION lib
