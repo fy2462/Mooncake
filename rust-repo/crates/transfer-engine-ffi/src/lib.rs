@@ -71,6 +71,7 @@ mod ffi {
 
 mod accelerator;
 mod error;
+mod nic_stats;
 mod segment;
 mod tent;
 mod transfer;
@@ -78,6 +79,7 @@ mod transport_hint;
 
 pub use accelerator::{PointerMemoryType, classify_pointer, copy_from_host, copy_to_host};
 pub use error::{TransferEngineError, TransferEngineResult};
+pub use nic_stats::NicLoadStats;
 pub use segment::{SegmentDesc, SegmentId};
 pub use tent::{
     TentEngine, TentIntent, TentMetricsStatus, TentPriority, TentRequestOptions,
@@ -219,6 +221,15 @@ impl TransferEngine {
             return Err(TransferEngineError::InstallTransportFailed);
         }
         Ok(())
+    }
+
+    /// Return the current per-NIC scheduler load observed by the native engine.
+    pub fn nic_load_stats(&self) -> TransferEngineResult<Vec<NicLoadStats>> {
+        nic_stats::query_nic_load_stats(
+            "getNicLoadStats",
+            |stats, count| unsafe { ffi::getNicLoadStats(self.handle.as_ptr(), stats, count) },
+            nic_stats::decode_classic,
+        )
     }
 
     /// Uninstall a previously installed transport protocol.

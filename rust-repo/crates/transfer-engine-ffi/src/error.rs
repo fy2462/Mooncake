@@ -40,6 +40,18 @@ pub enum TransferEngineError {
     #[error("Transfer Engine operation failed with code {0}")]
     OperationFailed(i32),
 
+    /// A named native operation failed; preserves both ABI entry point and code.
+    #[error("Transfer Engine operation {operation} failed with code {code}")]
+    NativeOperationFailed { operation: &'static str, code: i32 },
+
+    /// A native NIC statistic did not contain a terminated device name.
+    #[error("Invalid NIC device name: {0}")]
+    InvalidDeviceName(&'static str),
+
+    /// The native count kept changing and no stable snapshot could be read.
+    #[error("Transfer Engine operation {0} returned an unstable result count")]
+    UnstableResultCount(&'static str),
+
     /// `installTransport` returned a null transport handle.
     /// This occurs when the requested transport protocol (e.g., RDMA) is
     /// not available or when the topology matrix is malformed.

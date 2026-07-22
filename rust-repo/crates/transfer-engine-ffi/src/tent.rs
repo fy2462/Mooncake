@@ -439,6 +439,17 @@ impl TentEngine {
             http_port: (raw.http_port != 0).then_some(raw.http_port),
         })
     }
+
+    /// Return the current per-NIC scheduler load observed by TENT.
+    pub fn nic_load_stats(&self) -> TransferEngineResult<Vec<crate::NicLoadStats>> {
+        crate::nic_stats::query_nic_load_stats(
+            "tent_get_nic_load_stats",
+            |stats, count| unsafe {
+                ffi::tent_get_nic_load_stats(self.handle.as_ptr(), stats, count)
+            },
+            crate::nic_stats::decode_tent,
+        )
+    }
 }
 
 impl Drop for TentEngine {
