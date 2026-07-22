@@ -4,6 +4,9 @@ target_link_libraries(default_config_test PUBLIC
     gtest
     pthread
 )
+target_compile_definitions(default_config_test PRIVATE
+    MOONCAKE_COMMON_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 add_test(NAME default_config_test COMMAND default_config_test)
 
 add_executable(environ_test environ_test.cpp)
