@@ -20,7 +20,7 @@ fn main() {
     // the dependency order encoded by the installed SPDK release. Listing
     // every leaf package here moved dependencies ahead of their consumers and
     // breaks static linking with SPDK 26.01.
-    let spdk_libs = ["spdk_event_nvmf", "libdpdk"];
+    let spdk_libs = ["spdk_event_nvmf", "spdk_env_dpdk", "libdpdk"];
 
     // Get include paths using pkg_config crate (for bindgen)
     let mut include_paths = Vec::new();
@@ -48,7 +48,12 @@ fn main() {
     // Bdev modules also use SPDK_BDEV_MODULE_REGISTER() with constructors.
     // Accel modules use SPDK_ACCEL_MODULE_REGISTER() with constructors.
     // NVMe transports use SPDK_NVME_TRANSPORT_REGISTER() with constructors.
-    let parser = PkgConfigParser::new().force_whole_archive([
+    let parser = PkgConfigParser::new()
+        // SPDK and DPDK are installed under /usr/local. Treat only the actual
+        // distro library directories as system roots so their archives remain
+        // static while libc/OpenSSL and other system dependencies stay dynamic.
+        .system_roots(["/usr/lib", "/lib"])
+        .force_whole_archive([
         "spdk_event_bdev",
         "spdk_event_nvmf",
         "spdk_event_accel",
@@ -66,7 +71,7 @@ fn main() {
         // the environment library, so retain all of env_dpdk regardless of
         // its position in pkg-config's dependency list.
         "spdk_env_dpdk",
-    ]);
+        ]);
 
     parser
         .probe_and_emit(spdk_libs, Some(&pkg_config_path))
