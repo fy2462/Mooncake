@@ -157,14 +157,8 @@ async fn test_engram_lookup_rows_contiguous_builds_range_layout() {
     assert_eq!(s.unregistrations.len(), 1);
     assert_eq!(s.get_src_offsets[0][0].len(), 4);
     assert_eq!(s.get_src_offsets[0][1].len(), 4);
-    assert_eq!(
-        s.get_src_offsets[0][0],
-        vec![0, 5 * 64, 64, 3 * 64]
-    );
-    assert_eq!(
-        s.get_src_offsets[0][1],
-        vec![0, 10 * 64, 0, 20 * 64]
-    );
+    assert_eq!(s.get_src_offsets[0][0], vec![0, 5 * 64, 64, 3 * 64]);
+    assert_eq!(s.get_src_offsets[0][1], vec![0, 10 * 64, 0, 20 * 64]);
 }
 
 #[tokio::test]

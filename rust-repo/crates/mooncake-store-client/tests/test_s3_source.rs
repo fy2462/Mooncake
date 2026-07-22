@@ -15,7 +15,7 @@ mod s3_tests {
     use std::sync::Arc;
 
     const TEST_BUCKET: &str = "test-bucket";
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const ENV_FALLBACK_CHILD: &str = "MOONCAKE_S3_ENV_FALLBACK_CHILD";
 
     // -------------------------------------------------------------------
     // In-memory S3 mock (single catch-all handler)
@@ -176,17 +176,25 @@ mod s3_tests {
 
     #[test]
     fn test_s3_config_env_fallbacks_include_checksum_modes() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION", "when_required");
-        std::env::set_var(
-            "MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION",
-            "when_supported",
-        );
+        if std::env::var_os(ENV_FALLBACK_CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("s3_tests::test_s3_config_env_fallbacks_include_checksum_modes")
+                .arg("--nocapture")
+                .env(ENV_FALLBACK_CHILD, "1")
+                .env("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION", "when_required")
+                .env(
+                    "MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION",
+                    "when_supported",
+                )
+                .status()
+                .unwrap();
+
+            assert!(status.success());
+            return;
+        }
 
         let config = S3Config::default().with_mooncake_env_fallbacks();
-
-        std::env::remove_var("MOONCAKE_AWS_REQUEST_CHECKSUM_CALCULATION");
-        std::env::remove_var("MOONCAKE_AWS_RESPONSE_CHECKSUM_VALIDATION");
 
         assert_eq!(
             config.request_checksum_calculation.as_deref(),
