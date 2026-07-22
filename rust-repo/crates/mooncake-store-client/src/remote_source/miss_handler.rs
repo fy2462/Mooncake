@@ -34,11 +34,11 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use tokio::sync::{oneshot, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, oneshot};
 
 use super::config::RemoteSourceConfig;
 use super::{RemoteSource, RemoteSourceError, RemoteSourceResult};
