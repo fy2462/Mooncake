@@ -78,7 +78,11 @@ def validate_toctrees(errors: list[str], path: Path, text: str) -> None:
                 entry = entry.rsplit("<", 1)[1][:-1].strip()
             if entry.startswith(("http://", "https://")):
                 continue
-            target = SOURCE_ROOT / entry.lstrip("/") if entry.startswith("/") else path.parent / entry
+            target = (
+                SOURCE_ROOT / entry.lstrip("/")
+                if entry.startswith("/")
+                else path.parent / entry
+            )
             candidates = (target.with_suffix(".md"), target / "index.md")
             if not any(candidate.is_file() for candidate in candidates):
                 fail(
