@@ -12,18 +12,17 @@ if [[ ! -f $json_manifest ]]; then
     exit 0
 fi
 
-manifest_value() {
-    sed -nE "s/.*\\\"$1\\\":\\\"([^\\\"]*)\\\".*/\\1/p" "$json_manifest"
-}
+mapfile -t manifest_lines <"$json_manifest"
+manifest_pattern='^\{"device":"(mc-rdma-rxe)","veth":"(mc-rdma-net-a)","peer_veth":"(mc-rdma-net-b)","address":"(10\.90\.0\.1/30)","gid":"([[:xdigit:].:]+)","owned_rxe":(true|false),"owned_veth":(true|false)\}$'
+if (( ${#manifest_lines[@]} != 1 )) || ! [[ ${manifest_lines[0]} =~ $manifest_pattern ]]; then
+    printf 'refusing malformed host RDMA ownership manifest\n' >&2
+    exit 1
+fi
 
-manifest_flag() {
-    sed -nE "s/.*\\\"$1\\\":(true|false).*/\\1/p" "$json_manifest"
-}
-
-manifest_device=$(manifest_value device)
-manifest_veth=$(manifest_value veth)
-owned_rxe=$(manifest_flag owned_rxe)
-owned_veth=$(manifest_flag owned_veth)
+manifest_device=${BASH_REMATCH[1]}
+manifest_veth=${BASH_REMATCH[2]}
+owned_rxe=${BASH_REMATCH[6]}
+owned_veth=${BASH_REMATCH[7]}
 
 if [[ $owned_rxe == true && $manifest_device == "$device" ]]; then
     if sudo rdma link show "$device/1" >/dev/null 2>&1; then

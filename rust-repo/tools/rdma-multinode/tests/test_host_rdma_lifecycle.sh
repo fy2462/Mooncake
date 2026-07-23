@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 
 suite_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-tmp_dir=$(mktemp -d)
+test_artifact_root=${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}
+mkdir -p -- "$test_artifact_root"
+tmp_dir=$(mktemp -d "$test_artifact_root/test-host-rdma-lifecycle.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT
 fake_bin="$tmp_dir/bin"
 artifact_root="$tmp_dir/artifacts"
@@ -87,6 +89,15 @@ hca_id: mc-rdma-rxe
 OUT
 EOF
 
+cat >"$fake_bin/mv" <<'EOF'
+#!/usr/bin/env bash
+destination=${!#}
+if [[ ${FAKE_MV_FAIL_JSON:-0} == 1 && $destination == "$RDMA_ARTIFACT_ROOT/host-rdma.json" ]]; then
+    exit 1
+fi
+exec /bin/mv "$@"
+EOF
+
 chmod +x "$fake_bin"/*
 export PATH="$fake_bin:$PATH" FAKE_LOG="$tmp_dir/commands.log" FAKE_STATE="$state_dir"
 export RDMA_ARTIFACT_ROOT="$artifact_root"
@@ -127,9 +138,20 @@ test ! -e "$artifact_root/host-rdma.json"
 bash "$suite_dir/cleanup-host-rdma.sh"
 test ! -s "$FAKE_LOG"
 
-printf 'device=mc-rdma-rxe\nveth=mc-rdma-net-a\nowned_rxe=true\nowned_veth=true\n' \
+rm -rf -- "$artifact_root" "$state_dir"
+mkdir -p "$artifact_root" "$state_dir"
+if FAKE_MV_FAIL_JSON=1 bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
+    printf 'accepted a host-rdma.json publication failure\n' >&2
+    exit 1
+fi
+test ! -e "$artifact_root/host-rdma.env"
+test ! -e "$artifact_root/host-rdma.json"
+test ! -e "$state_dir/rxe"
+test ! -e "$state_dir/veth"
+
+printf 'device=mc-rdma-rxe\nveth=mc-rdma-net-a\npeer_veth=mc-rdma-net-b\naddress=10.90.0.1/30\ngid=fe80::90\nowned_rxe=false\nowned_veth=false\n' \
     >"$artifact_root/host-rdma.env"
-printf '{"device":"mc-rdma-rxe","veth":"mc-rdma-net-a","owned_rxe":false,"owned_veth":false}\n' \
+printf '{"device":"mc-rdma-rxe","veth":"mc-rdma-net-a","peer_veth":"mc-rdma-net-b","address":"10.90.0.1/30","gid":"fe80::90","owned_rxe":false,"owned_veth":false}\n' \
     >"$artifact_root/host-rdma.json"
 : >"$state_dir/rxe"
 : >"$state_dir/veth"
@@ -139,8 +161,28 @@ bash "$suite_dir/cleanup-host-rdma.sh"
 test -e "$state_dir/rxe"
 test -e "$state_dir/veth"
 
+printf '{"device":"mc-rdma-rxe","veth":"mc-rdma-net-a","peer_veth":"mc-rdma-net-b","address":"10.90.0.1/30","gid":"fe80::90","owned_rxe":true,"owned_veth":true,"extra":true}\n' \
+    >"$artifact_root/host-rdma.json"
+: >"$FAKE_LOG"
+if bash "$suite_dir/cleanup-host-rdma.sh" >/dev/null 2>&1; then
+    printf 'accepted a malformed ownership manifest\n' >&2
+    exit 1
+fi
+! grep -Fq ' link delete ' "$FAKE_LOG"
+test -e "$state_dir/rxe"
+test -e "$state_dir/veth"
+
 rm -rf -- "$artifact_root" "$state_dir"
 mkdir -p "$artifact_root" "$state_dir"
+if FAKE_PORT_STATE=PORT_DOWN bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
+    printf 'accepted an inactive RXE port\n' >&2
+    exit 1
+fi
+test ! -e "$artifact_root/host-rdma.env"
+test ! -e "$artifact_root/host-rdma.json"
+test ! -e "$state_dir/rxe"
+test ! -e "$state_dir/veth"
+
 if FAKE_GID= bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
     printf 'accepted an empty RXE GID\n' >&2
     exit 1

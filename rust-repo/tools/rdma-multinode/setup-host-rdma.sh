@@ -45,9 +45,17 @@ fi
 created_rxe=false
 created_veth=false
 completed=false
+env_tmp=
+json_tmp=
+env_published=false
 cleanup_incomplete_setup() {
     status=$?
     trap - EXIT
+    [[ -z $env_tmp ]] || rm -f -- "$env_tmp" || true
+    [[ -z $json_tmp ]] || rm -f -- "$json_tmp" || true
+    if "$env_published" && ! "$completed"; then
+        rm -f -- "$env_manifest" || true
+    fi
     if ! "$completed"; then
         if "$created_rxe"; then
             sudo rdma link delete "$device/1" >/dev/null 2>&1 || true
@@ -110,11 +118,11 @@ gid=${gid%,}
 
 env_tmp=$(mktemp "$artifact_root/.host-rdma.env.XXXXXX")
 json_tmp=$(mktemp "$artifact_root/.host-rdma.json.XXXXXX")
-trap 'rm -f -- "$env_tmp" "$json_tmp"; cleanup_incomplete_setup' EXIT
 printf 'device=%s\nveth=%s\npeer_veth=%s\naddress=%s\ngid=%s\nowned_rxe=%s\nowned_veth=%s\n' \
     "$device" "$veth" "$peer_veth" "$address" "$gid" "$owned_rxe" "$owned_veth" >"$env_tmp"
 printf '{"device":"%s","veth":"%s","peer_veth":"%s","address":"%s","gid":"%s","owned_rxe":%s,"owned_veth":%s}\n' \
     "$device" "$veth" "$peer_veth" "$address" "$gid" "$owned_rxe" "$owned_veth" >"$json_tmp"
 mv -f -- "$env_tmp" "$env_manifest"
+env_published=true
 mv -f -- "$json_tmp" "$json_manifest"
 completed=true
