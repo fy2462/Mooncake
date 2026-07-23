@@ -40,6 +40,7 @@ templates_path: list[str] = []
 html_theme = "pydata_sphinx_theme"
 html_title = project
 html_static_path = ["_static"]
+html_extra_path = ["../diagrams"]
 html_css_files = ["css/custom.css"]
 html_show_sourcelink = False
 html_search_language = "zh"

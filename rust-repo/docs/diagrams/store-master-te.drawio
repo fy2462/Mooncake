@@ -1,0 +1,33 @@
+<mxfile host="app.diagrams.net" modified="2026-07-24T00:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="store-master-te" name="Code Boundaries">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" /><mxCell id="1" parent="0" />
+        <mxCell id="title" value="Rust Store / Master / TE 代码与 ABI 边界" style="text;html=1;fontSize=24;fontStyle=1;align=center;" vertex="1" parent="1"><mxGeometry x="350" y="20" width="700" height="40" as="geometry" /></mxCell>
+        <mxCell id="rust" value="Rust 安全域" style="swimlane;html=1;rounded=1;startSize=35;fillColor=#eff6ff;strokeColor=#1d4ed8;fontStyle=1;fontSize=16;" vertex="1" parent="1"><mxGeometry x="50" y="80" width="760" height="620" as="geometry" /></mxCell>
+        <mxCell id="native" value="Native C++ 域" style="swimlane;html=1;rounded=1;startSize=35;fillColor=#fff7ed;strokeColor=#c2410c;fontStyle=1;fontSize=16;" vertex="1" parent="1"><mxGeometry x="850" y="80" width="500" height="620" as="geometry" /></mxCell>
+        <mxCell id="core" value="mooncake-store-core&#xa;Segment / Replica / Config" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1d4ed8;" vertex="1" parent="rust"><mxGeometry x="35" y="70" width="210" height="75" as="geometry" /></mxCell>
+        <mxCell id="client" value="mooncake-store-client&#xa;Put / Get / Remove / cache" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#1d4ed8;" vertex="1" parent="rust"><mxGeometry x="280" y="70" width="220" height="75" as="geometry" /></mxCell>
+        <mxCell id="master" value="mooncake-store-master&#xa;tonic service / allocator / HA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#15803d;" vertex="1" parent="rust"><mxGeometry x="35" y="210" width="250" height="85" as="geometry" /></mxCell>
+        <mxCell id="ffi" value="transfer-engine-ffi&#xa;NonNull handle / RAII / error map" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffedd5;strokeColor=#c2410c;" vertex="1" parent="rust"><mxGeometry x="390" y="210" width="280" height="85" as="geometry" /></mxCell>
+        <mxCell id="unsafe" value="unsafe 边界&#xa;raw pointer + caller lifetime contract" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#b91c1c;fontStyle=1;" vertex="1" parent="rust"><mxGeometry x="390" y="360" width="280" height="80" as="geometry" /></mxCell>
+        <mxCell id="proto" value="Protobuf / tonic gRPC&#xa;控制面" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0fdf4;strokeColor=#15803d;" vertex="1" parent="rust"><mxGeometry x="35" y="360" width="250" height="80" as="geometry" /></mxCell>
+        <mxCell id="cabi" value="C ABI&#xa;transfer_engine_c.h / generated bindings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffedd5;strokeColor=#c2410c;fontStyle=1;" vertex="1" parent="native"><mxGeometry x="80" y="90" width="340" height="80" as="geometry" /></mxCell>
+        <mxCell id="te" value="C++ TransferEngine / TENT&#xa;metadata + batch + transport dispatch" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fed7aa;strokeColor=#c2410c;" vertex="1" parent="native"><mxGeometry x="80" y="230" width="340" height="85" as="geometry" /></mxCell>
+        <mxCell id="transports" value="Transports&#xa;RDMA / TCP / SHM / NoF" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#a16207;" vertex="1" parent="native"><mxGeometry x="80" y="380" width="340" height="80" as="geometry" /></mxCell>
+        <mxCell id="hardware" value="RNIC / registered memory / QP / CQ" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fefce8;strokeColor=#a16207;" vertex="1" parent="native"><mxGeometry x="80" y="510" width="340" height="65" as="geometry" /></mxCell>
+        <mxCell id="nostore" value="C++ Store：不编译、不链接、不调用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#b91c1c;dashed=1;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="455" y="750" width="490" height="60" as="geometry" /></mxCell>
+        <mxCell id="b1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#1d4ed8;endArrow=block;" edge="1" parent="1" source="client" target="core"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#15803d;endArrow=block;" edge="1" parent="1" source="master" target="core"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b3" value="gRPC" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#15803d;strokeWidth=3;endArrow=block;" edge="1" parent="1" source="client" target="proto"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#15803d;strokeWidth=3;endArrow=block;" edge="1" parent="1" source="proto" target="master"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b5" value="安全 API" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#c2410c;strokeWidth=3;endArrow=block;" edge="1" parent="1" source="client" target="ffi"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b6" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#b91c1c;strokeWidth=3;endArrow=block;" edge="1" parent="1" source="ffi" target="unsafe"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b7" value="bindgen" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#c2410c;strokeWidth=3;endArrow=block;" edge="1" parent="1" source="unsafe" target="cabi"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b8" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#c2410c;strokeWidth=3;endArrow=block;" edge="1" parent="1" source="cabi" target="te"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b9" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#a16207;endArrow=block;" edge="1" parent="1" source="te" target="transports"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="b10" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#a16207;endArrow=block;" edge="1" parent="1" source="transports" target="hardware"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

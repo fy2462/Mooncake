@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="820" viewBox="0 0 1400 820" role="img" aria-labelledby="title desc">
+  <title id="title">Mooncake Rust Store 控制面与数据面</title>
+  <desc id="desc">应用、Rust Client、Master、etcd、Transfer Engine 与三个 Store Node 的架构关系。</desc>
+  <defs>
+    <marker id="blueArrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#15803d"/></marker>
+    <marker id="orangeArrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#c2410c"/></marker>
+    <marker id="goldArrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#a16207"/></marker>
+    <style>
+      .title{font:700 28px sans-serif;fill:#0f172a}.head{font:700 17px sans-serif;fill:#0f172a}.body{font:14px sans-serif;fill:#334155}.label{font:13px sans-serif;fill:#334155}.box{stroke-width:2}.control{fill:none;stroke:#15803d;stroke-width:3;marker-end:url(#blueArrow)}.data{fill:none;stroke:#c2410c;stroke-width:4;marker-end:url(#orangeArrow)}.storage{fill:none;stroke:#a16207;stroke-width:2.5;marker-end:url(#goldArrow)}
+    </style>
+  </defs>
+  <rect width="1400" height="820" fill="#fff"/>
+  <text x="700" y="42" text-anchor="middle" class="title">Mooncake Rust Store：控制面与数据面</text>
+  <g id="application"><rect class="box" x="550" y="75" width="300" height="60" rx="12" fill="#e0f2fe" stroke="#0369a1"/><text x="700" y="112" text-anchor="middle" class="head">应用 / Python API</text></g>
+  <g id="client"><rect class="box" x="500" y="175" width="400" height="80" rx="12" fill="#dbeafe" stroke="#1d4ed8"/><text x="700" y="208" text-anchor="middle" class="head">Rust MooncakeClient</text><text x="700" y="232" text-anchor="middle" class="body">对象 API · buffer 生命周期 · Replica 选择</text></g>
+  <g id="master"><rect class="box" x="70" y="330" width="370" height="90" rx="12" fill="#dcfce7" stroke="#15803d"/><text x="255" y="365" text-anchor="middle" class="head">Rust Master</text><text x="255" y="390" text-anchor="middle" class="body">元数据 · 分配 · Replica 状态 · HA</text></g>
+  <g id="etcd"><path class="box" d="M125 510 q135 -25 270 0 v75 q-135 25 -270 0z" fill="#f0fdf4" stroke="#15803d"/><ellipse class="box" cx="260" cy="510" rx="135" ry="25" fill="#f0fdf4" stroke="#15803d"/><text x="260" y="545" text-anchor="middle" class="head">etcd</text><text x="260" y="568" text-anchor="middle" class="body">选主 · oplog · 协调元数据</text></g>
+  <g id="ffi"><rect class="box" x="500" y="330" width="400" height="90" rx="12" fill="#ffedd5" stroke="#c2410c"/><text x="700" y="365" text-anchor="middle" class="head">transfer-engine-ffi</text><text x="700" y="390" text-anchor="middle" class="body">安全句柄 · C ABI · unsafe 边界</text></g>
+  <g id="te"><rect class="box" x="500" y="490" width="400" height="90" rx="12" fill="#fed7aa" stroke="#c2410c"/><text x="700" y="525" text-anchor="middle" class="head">C++ Transfer Engine / TENT</text><text x="700" y="550" text-anchor="middle" class="body">Segment · batch · transport 选择</text></g>
+  <g id="stores"><rect class="box" x="960" y="330" width="370" height="90" rx="12" fill="#fef3c7" stroke="#a16207"/><text x="1145" y="365" text-anchor="middle" class="head">Store Node A / B / C</text><text x="1145" y="390" text-anchor="middle" class="body">注册内存 Segment + RustFilePerKey</text></g>
+  <g id="memory"><rect class="box" x="950" y="515" width="190" height="75" rx="10" fill="#fefce8" stroke="#a16207"/><text x="1045" y="547" text-anchor="middle" class="head">DRAM Replica</text><text x="1045" y="570" text-anchor="middle" class="body">3 / 2 / 1 副本</text></g>
+  <g id="disk"><path class="box" d="M1170 515 q80 -20 160 0 v60 q-80 20 -160 0z" fill="#fefce8" stroke="#a16207"/><ellipse class="box" cx="1250" cy="515" rx="80" ry="20" fill="#fefce8" stroke="#a16207"/><text x="1250" y="547" text-anchor="middle" class="head">LocalDisk</text><text x="1250" y="570" text-anchor="middle" class="body">fallback / promotion</text></g>
+  <path d="M700 135 V175" stroke="#1d4ed8" stroke-width="2.5" marker-end="url(#orangeArrow)"/><text x="715" y="160" class="label">对象 API</text>
+  <path class="control" d="M500 215 H255 V330"/><text x="285" y="200" class="label">put_start / query / put_end</text>
+  <path class="control" d="M255 420 V485"/><text x="275" y="465" class="label">leader / oplog / snapshot</text>
+  <path class="control" d="M440 375 H960"/><text x="755" y="355" class="label">分配与状态</text>
+  <path class="data" d="M700 255 V330"/><text x="715" y="298" class="label">register / open / submit</text>
+  <path class="data" d="M700 420 V490"/><text x="715" y="462" class="label">C ABI</text>
+  <path class="data" d="M900 535 H925 V430 H1145 V420"/><text x="925" y="505" class="label">RDMA Read / Write：对象字节不经过 Master</text>
+  <path class="storage" d="M1080 420 L1050 515"/><path class="storage" d="M1210 420 L1245 495"/><text x="1160" y="475" class="label">offload / load</text>
+  <g transform="translate(70 700)"><rect width="220" height="48" rx="8" fill="#dcfce7" stroke="#15803d"/><text x="110" y="30" text-anchor="middle" class="body">控制面：gRPC / etcd</text></g>
+  <g transform="translate(320 700)"><rect width="220" height="48" rx="8" fill="#ffedd5" stroke="#c2410c"/><text x="110" y="30" text-anchor="middle" class="body">数据面：RDMA / TCP</text></g>
+</svg>

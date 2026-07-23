@@ -4,29 +4,29 @@
 
 不要一开始遍历所有模块。按顺序阅读下列文件，并用旁边的问题约束注意力。
 
-1. `rust-repo/crates/mooncake-store-core/src/types.rs`  
+1. `rust-repo/crates/mooncake-store-core/src/types.rs`<br>
    Segment、Replica 和状态如何表达？
-2. `rust-repo/proto/mooncake_store_grpc.proto`  
+2. `rust-repo/proto/mooncake_store_grpc.proto`<br>
    哪些 RPC 属于元数据控制？
-3. `rust-repo/crates/mooncake-store-client/src/client/mod.rs`  
+3. `rust-repo/crates/mooncake-store-client/src/client/mod.rs`<br>
    一个 Client 长期持有哪些资源？
-4. `rust-repo/crates/mooncake-store-client/src/client/lifecycle.rs`  
+4. `rust-repo/crates/mooncake-store-client/src/client/lifecycle.rs`<br>
    TE、buffer、Master channel 和后台任务按什么顺序建立？
-5. `rust-repo/crates/mooncake-store-client/src/client/write.rs`  
+5. `rust-repo/crates/mooncake-store-client/src/client/write.rs`<br>
    Put 的控制面和数据面在哪里分开？
-6. `rust-repo/crates/mooncake-store-client/src/client/read.rs`  
+6. `rust-repo/crates/mooncake-store-client/src/client/read.rs`<br>
    Get 怎样选择读取路径？
-7. `rust-repo/crates/mooncake-store-master/src/service/grpc_trait.rs`  
+7. `rust-repo/crates/mooncake-store-master/src/service/grpc_trait.rs`<br>
    tonic handler 如何转发到业务实现？
-8. `rust-repo/crates/mooncake-store-master/src/service/grpc_objects_put.rs`  
+8. `rust-repo/crates/mooncake-store-master/src/service/grpc_objects_put.rs`<br>
    分配和完成状态如何改变？
-9. `rust-repo/crates/transfer-engine-ffi/src/lib.rs`  
+9. `rust-repo/crates/transfer-engine-ffi/src/lib.rs`<br>
    raw handle 和 native 资源由谁释放？
-10. `rust-repo/crates/transfer-engine-ffi/src/transfer.rs`  
+10. `rust-repo/crates/transfer-engine-ffi/src/transfer.rs`<br>
     一个 batch/request/status 在 Rust 中如何表示？
-11. `mooncake-transfer-engine/src/transfer_engine.cpp`  
+11. `mooncake-transfer-engine/src/transfer_engine.cpp`<br>
     façade 如何选择 transport？
-12. `mooncake-transfer-engine/src/transport/rdma_transport/rdma_transport.cpp`  
+12. `mooncake-transfer-engine/src/transport/rdma_transport/rdma_transport.cpp`<br>
     RDMA 请求怎样进入 worker 和 completion 路径？
 
 第一遍只记入口和边界，不追每个 helper。
