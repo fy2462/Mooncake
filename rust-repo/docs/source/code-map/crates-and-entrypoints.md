@@ -1,5 +1,13 @@
 # Crate、进程与入口
 
+## 前置章节
+
+- “环境与构建”
+
+## 本章目标
+
+区分 crate、进程与 native 边界，并为每个组件找到第一份应读源码。
+
 ## 先分清 crate 和进程
 
 一个 crate 不一定对应独立进程。`mooncake-store-client` 既可被应用嵌入，
@@ -83,3 +91,12 @@ Master RPC 与共享消息来自：
 
 生成的 Rust 客户端和服务端代码通过 `tonic::include_proto!` 引入。阅读 RPC
 时先看 proto 字段，再看 Client 构造请求、Master 转换类型的两端实现。
+
+## 自检问题
+
+1. Store Node 是否对应一个独立 production crate？
+2. Rust Store 唯一的主要 native 数据传输边界在哪里？
+
+## 下一步
+
+进入“推荐源码阅读顺序”，按依赖逐步下钻。

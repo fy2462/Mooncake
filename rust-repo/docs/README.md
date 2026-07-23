@@ -31,5 +31,6 @@ make serve
   -W --keep-going -b html source build/html
 ```
 
-`make check` 会检查章节入口、源码路径、占位符以及 Draw.io/SVG 配对。
+`make check` 会检查章节入口、学习依赖标题、toctree 目标、关键主题、源码路径、
+Mermaid 数量、占位符以及 Draw.io/SVG 配对。
 `make clean` 清理已生成的 HTML。

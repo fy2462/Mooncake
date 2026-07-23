@@ -1,5 +1,13 @@
 # 三阶段学习路线
 
+## 前置章节
+
+无；这是整个站点的学习入口。
+
+## 本章目标
+
+选择一条依赖清晰的阅读路线，并为每个阶段定义可观察的完成标准。
+
 ## 先记住一条主线
 
 Mooncake Store 的一次对象操作同时经过两条路径：
@@ -75,3 +83,12 @@ rg -n 'register_local_memory|open_segment|submit_transfer|get_transfer_status' \
 rg -n 'RdmaContext|RdmaEndpoint|poll_cq|post_send' \
   mooncake-transfer-engine
 ```
+
+## 自检问题
+
+1. 为什么应先建立控制面/数据面模型，再逐行阅读 FFI？
+2. Master/HA 快速路线仍然需要哪些基础概念？
+
+## 下一步
+
+进入“环境与构建”，确认本地路径、依赖与权限边界。
