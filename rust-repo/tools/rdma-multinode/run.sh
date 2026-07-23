@@ -81,12 +81,7 @@ store_resilience() {
         return 1
     fi
 
-    if [[ -z ${RDMA_STORE_RESILIENCE_COMMAND:-} ]]; then
-        printf 'status=NOT_IMPLEMENTED\nreason=task-5\n' >"$result"
-        return 1
-    fi
-
-    if run_stage_command store-resilience false; then
+    if run_stage_command store-resilience env STORE_GATE_MODE=resilience "$suite_dir/run-store-gate.sh"; then
         :
     else
         rc=$?
@@ -95,7 +90,7 @@ store_resilience() {
        grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"|^status=PASS$' "$result" 2>/dev/null; then
         return 0
     fi
-    if [[ $rc -ne 0 ]] || [[ ! -f $result ]]; then
+    if [[ ! -f $result ]]; then
         printf 'status=FAIL\nreason=runner-exit\n' >"$result"
     fi
     [[ $rc -ne 0 ]] && return "$rc"
@@ -132,8 +127,9 @@ record_failure() {
 try_stage() {
     if "$@"; then
         return 0
+    else
+        local rc=$?
     fi
-    local rc=$?
     record_failure "$rc"
     return "$rc"
 }

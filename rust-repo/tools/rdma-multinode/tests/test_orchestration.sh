@@ -18,7 +18,12 @@ case "$stage" in
         printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store.result"
         ;;
     store-resilience)
-        printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
+        if [[ ${RESILIENCE_DETAIL_FAIL:-0} == 1 ]]; then
+            printf '{"status":"FAIL","first_failure":"rdma_reconnect","scenarios":{"rdma_reconnect":{"status":"FAIL"}}}\n' \
+                >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
+        else
+            printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
+        fi
         ;;
 esac
 
@@ -62,11 +67,11 @@ mkdir -p "$direct_contract_root"
 stage_environment "$direct_contract_root"
 unset RDMA_STORE_RESILIENCE_COMMAND
 if bash "$suite_dir/run.sh" store-resilience; then
-    printf 'accepted a missing resilience implementation\n' >&2
+    printf 'accepted a resilience run without its standard prerequisite\n' >&2
     exit 1
 fi
-grep -Fx 'status=NOT_IMPLEMENTED' "$direct_contract_root/store-resilience.result"
-grep -Fx 'reason=task-5' "$direct_contract_root/store-resilience.result"
+grep -Fx 'status=BLOCKED' "$direct_contract_root/store-resilience.result"
+grep -Fx 'reason=store-standard-gate' "$direct_contract_root/store-resilience.result"
 
 success_root="$tmp_dir/success"
 mkdir -p "$success_root"
@@ -79,16 +84,33 @@ assert_order "$success_root/order.log" \
 grep -Fx '{"status":"PASS"}' "$success_root/store-standard.result"
 grep -Fx '{"status":"PASS"}' "$success_root/store-resilience.result"
 
+detailed_failure_root="$tmp_dir/detailed-failure"
+mkdir -p "$detailed_failure_root"
+stage_environment "$detailed_failure_root"
+printf '{"status":"PASS"}\n' >"$detailed_failure_root/store-standard.result"
+export RDMA_STORE_RESILIENCE_COMMAND="$fake_stage store-resilience"
+export RESILIENCE_DETAIL_FAIL=1 FAIL_STAGE=store-resilience FAIL_CODE=33
+if bash "$suite_dir/run.sh" store-resilience; then
+    printf 'accepted a detailed resilience failure\n' >&2
+    exit 1
+else
+    test $? -eq 33
+fi
+unset RESILIENCE_DETAIL_FAIL FAIL_STAGE FAIL_CODE
+grep -Fq '"first_failure":"rdma_reconnect"' "$detailed_failure_root/store-resilience.result"
+! grep -Fq 'runner-exit' "$detailed_failure_root/store-resilience.result"
+unset RDMA_STORE_RESILIENCE_COMMAND
+
 not_implemented_root="$tmp_dir/not-implemented"
 mkdir -p "$not_implemented_root"
 stage_environment "$not_implemented_root"
 unset RDMA_STORE_RESILIENCE_COMMAND
 if bash "$suite_dir/run.sh" all; then
-    printf 'accepted full validation without a resilience implementation\n' >&2
+    printf 'accepted full validation after the default resilience runner failed\n' >&2
     exit 1
 fi
-grep -Fx 'status=NOT_IMPLEMENTED' "$not_implemented_root/store-resilience.result"
-grep -Fx 'reason=task-5' "$not_implemented_root/store-resilience.result"
+grep -Fx '{"status":"BLOCKED","reason":"te-gate"}' \
+    "$not_implemented_root/store-resilience.result"
 grep -Fx 'open-rdma' "$not_implemented_root/order.log"
 grep -Fx 'report' "$not_implemented_root/order.log"
 grep -Fx 'compose-down' "$not_implemented_root/order.log"
@@ -150,9 +172,23 @@ for signal_name in INT TERM; do
     stage_environment "$signal_root"
     export RDMA_STORE_RESILIENCE_COMMAND="$fake_stage store-resilience"
     export PAUSE_STAGE=verbs
-    setsid bash "$suite_dir/run.sh" all &
+    setsid python3 -c '
+import os
+import signal
+import sys
+
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.execv(sys.argv[1], sys.argv[1:])
+' "$suite_dir/run.sh" all &
     run_pid=$!
     while ! grep -Fxq verbs "$signal_root/order.log" 2>/dev/null; do sleep 0.05; done
+    signal_ignored=$(awk '/^SigIgn:/ {print $2}' "/proc/$run_pid/status")
+    if (( 16#$signal_ignored & 2 )); then
+        printf 'runner inherited SIGINT as ignored\n' >&2
+        kill -s TERM -- "-$run_pid"
+        wait "$run_pid" 2>/dev/null || true
+        exit 1
+    fi
     kill -s "$signal_name" -- "-$run_pid"
     if wait "$run_pid"; then
         printf 'accepted %s without a signal status\n' "$signal_name" >&2

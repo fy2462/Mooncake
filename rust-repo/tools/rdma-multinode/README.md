@@ -34,13 +34,12 @@ Open-RDMA/report stages and cleanup.
 
 Result files are `verbs.result`, `te.result`, `store.result` (legacy Store
 gate output), `store-standard.result`, `store-resilience.result`, and
-`open-rdma.result`. Until Task 5 supplies resilience scenarios,
-`store-resilience` writes `status=NOT_IMPLEMENTED` and `reason=task-5`; that
-nonzero result means `run.sh all` is not a full acceptance PASS. When the
-standard Store gate fails, resilience is recorded as `status=BLOCKED` with
-`reason=store-standard-gate`. Supply the Task 5 runner through
-`RDMA_STORE_RESILIENCE_COMMAND`; it must publish a PASS
-`store-resilience.result`.
+`open-rdma.result`. The resilience gate covers Store-node restart,
+Master/etcd restart, RDMA reconnection, one-owner degraded reads, memory and
+SSD watermark eviction, mixed-size stress, and a second full standard run.
+It publishes a group status plus per-scenario JSON and logs, preserving the
+first failure. When the standard Store gate fails, resilience is recorded as
+`status=BLOCKED` with `reason=store-standard-gate`.
 
 The Markdown report separates product evidence (verbs, Transfer Engine, and
 standard Rust Store), resilience evidence, and Open-RDMA mock-only evidence.

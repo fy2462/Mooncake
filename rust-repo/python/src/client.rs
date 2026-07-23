@@ -2091,6 +2091,25 @@ impl PythonMooncakeClient {
         })
     }
 
+    /// Evict local SSD objects until usage drops below the low watermark.
+    fn run_disk_watermark_eviction<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        high_watermark_ratio: f64,
+        low_watermark_ratio: f64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner)?;
+            let result = client
+                .run_disk_watermark_eviction(high_watermark_ratio, low_watermark_ratio)
+                .await;
+            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
     /// C++ ClientRequester-compatible P2P offload request.
     #[staticmethod]
     fn batch_get_offload_object<'py>(
