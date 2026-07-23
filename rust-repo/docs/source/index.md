@@ -21,6 +21,7 @@ store/index
 transfer-engine/index
 walkthroughs/index
 code-map/index
+testing/index
 labs/index
 ```
 

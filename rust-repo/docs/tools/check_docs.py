@@ -20,6 +20,7 @@ REQUIRED_INDEXES = (
     "transfer-engine/index.md",
     "walkthroughs/index.md",
     "code-map/index.md",
+    "testing/index.md",
     "labs/index.md",
 )
 PLACEHOLDER = re.compile(r"\b(?:TBD|TODO|FIXME)\b")

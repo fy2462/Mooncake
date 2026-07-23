@@ -68,6 +68,11 @@ rust-repo/docs/
 │   │   ├── index.md
 │   │   ├── crates-and-entrypoints.md
 │   │   └── recommended-reading-order.md
+│   ├── testing/
+│   │   ├── index.md
+│   │   ├── single-node.md
+│   │   ├── multi-node.md
+│   │   └── reading-test-evidence.md
 │   ├── labs/
 │   │   ├── index.md
 │   │   ├── tracing-a-request.md
@@ -83,6 +88,22 @@ rust-repo/docs/
 ```
 
 每个一级主题用 `index.md` 汇总章节目的、前置知识和推荐顺序。首页提供顺序阅读入口，也允许熟悉系统的读者直接跳转到源码地图或具体请求链路。
+
+## 章节依赖与循序学习
+
+首页必须展示章节依赖图，而不仅是导航列表。每个内容页开头统一给出“前置章节、本章目标”，结尾给出“自检问题、下一步”。依赖主干固定为：
+
+```text
+开始学习
+  → 整体架构
+  → RDMA / Replica / 多级缓存概念
+  → Store / Master 与 TE / FFI 子系统
+  → Put / Get / Remove 端到端链路
+  → 单节点与多节点测试方法
+  → 分步实验和故障调试
+```
+
+专题捷径允许跳转，但必须显式列出缺失的前置知识。页面不能在首次使用一个核心术语之前假设读者已经理解它。
 
 ## 页面模板
 
@@ -186,6 +207,16 @@ cd rust-repo/docs
 
 每阶段给出预计阅读顺序、需要运行的命令和完成标志。学习实验只使用已有安全测试入口；涉及 RXE、Docker 或 sudo 的实验明确标记权限和清理行为。
 
+## 测试方法章节
+
+独立测试章节解释如何从小到大验证系统，而不把“测试”只留在实验附录：
+
+- 单节点：crate 单元测试、mock/dummy transport、Client/Master contract、Python binding 和本地功能测试。
+- 多节点：三 RXE、三 TE、三 Store 的 Compose 拓扑，verbs、六方向 TE、3/2/1 Replica、多级缓存和 A/B/C 韧性场景。
+- 证据阅读：测试边界、PASS 的充分条件、BLOCKED/FAIL 区分、结果 JSON、日志、资源清理和 Open-RDMA mock 的独立分类。
+
+测试章节必须说明每类测试能证明什么、不能证明什么，以及推荐的执行顺序。
+
 ## 验证与验收
 
 完成条件如下：
@@ -199,6 +230,7 @@ cd rust-repo/docs
 7. 文档明确覆盖 Store/Master/TE 顶层设计、Put/Get/Delete、3/2/1 Replica、多级缓存、HA、A/B/C 故障恢复和推荐源码阅读顺序。
 8. `git diff --check` 和针对文档文件的可用 pre-commit hooks 通过，不包含 HTML 构建产物或无关改动。
 9. 主学习路线关键 Rust 文件包含与教程一致的行内注释，`cargo fmt --check`、受影响 crate 测试和 clippy/check 均通过，且代码 diff 不含行为修改。
+10. 首页与各章节明确前置依赖和下一步，独立测试章节完整覆盖单节点、多节点与测试证据判读。
 
 ## 非目标
 

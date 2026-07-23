@@ -14,6 +14,7 @@
 - 所有架构和功能结论必须由当前 `rust_repo_main` 的类型、函数、测试或运行脚本支撑。
 - Rust Store 不得被描述为依赖或调用 C++ Store；native 边界是 `transfer-engine-ffi` 到 C++ Transfer Engine/TENT。
 - 核心图必须同时保存 `.drawio` 可编辑源文件和 SVG；局部图使用 Mermaid。
+- 首页和每个学习章节必须标出前置依赖、本章目标、自检问题与下一步，维持从架构到测试的递进路径。
 - 使用 `/home/fy2462/Mooncake/.venv` 安装文档依赖，不在共享目录创建 Python 虚拟环境。
 - HTML 输出到 `rust-repo/docs/build/html`，构建产物不提交 Git。
 - 修改范围仅限 `rust-repo/docs` 及必要的 `.gitignore` 文档构建条目，不修改产品实现。
@@ -317,6 +318,10 @@ git commit -m '[Doc] trace Store operations end to end'
 - Create: `rust-repo/docs/source/labs/tracing-a-request.md`
 - Create: `rust-repo/docs/source/labs/running-three-node-e2e.md`
 - Create: `rust-repo/docs/source/labs/debugging-rdma.md`
+- Create: `rust-repo/docs/source/testing/index.md`
+- Create: `rust-repo/docs/source/testing/single-node.md`
+- Create: `rust-repo/docs/source/testing/multi-node.md`
+- Create: `rust-repo/docs/source/testing/reading-test-evidence.md`
 - Modify: `rust-repo/docs/README.md`
 - Modify: `rust-repo/docs/tools/check_docs.py`
 
@@ -324,23 +329,31 @@ git commit -m '[Doc] trace Store operations end to end'
 - Consumes: existing Cargo tests, tracing/log settings, and `tools/rdma-multinode/run.sh` stages/results.
 - Produces: reproducible learning exercises and final acceptance evidence.
 
-- [ ] **Step 1: Write a non-privileged request-tracing lab**
+- [ ] **Step 1: Write the test-method chapters**
+
+Explain the progressive test pyramid: Rust unit/contract tests and dummy transport on one node, Python binding/local integration, then privileged three-node RXE/Compose. For every layer list exact command, prerequisites, proven properties, blind spots, expected outputs and cleanup.
+
+- [ ] **Step 2: Write the test-evidence guide**
+
+Teach how to read `verbs.result`, six-direction `te.result`, Store standard/resilience JSON, logs and final inventory. Distinguish PASS, FAIL and BLOCKED, and explain why Open-RDMA mock is not multi-node data-plane evidence.
+
+- [ ] **Step 3: Write a non-privileged request-tracing lab**
 
 Give exact `rg`, `cargo test`, `RUST_LOG`, source breakpoint and expected-observation steps. The learner must trace one Put or Get without requiring RDMA hardware.
 
-- [ ] **Step 2: Write the three-node RXE lab**
+- [ ] **Step 4: Write the three-node RXE lab**
 
 Explain prerequisites, `CARGO_BUILD_JOBS=5`, artifact placement, interactive sudo, individual gate commands, full `run.sh all`, result interpretation and manifest-owned cleanup. Never embed a password.
 
-- [ ] **Step 3: Write the RDMA debugging lab**
+- [ ] **Step 5: Write the RDMA debugging lab**
 
 Use `rdma link`, `ibv_devinfo`, GID/device mapping, TE result/logs, Store ready/stats and common failure signatures. Provide a decision flow from preflight through QP/data integrity.
 
-- [ ] **Step 4: Strengthen automated coverage checks**
+- [ ] **Step 6: Strengthen automated coverage and learning-dependency checks**
 
-Require all named topics, at least two `.drawio`/SVG pairs, multiple Mermaid blocks, all source links, and all toctree targets. Print actionable failures with file paths.
+Require all named topics, at least two `.drawio`/SVG pairs, multiple Mermaid blocks, all source links, all toctree targets and the page metadata headings “前置章节、本章目标、自检问题、下一步”. Print actionable failures with file paths.
 
-- [ ] **Step 5: Run final strict build and inspect representative HTML**
+- [ ] **Step 7: Run final strict build and inspect representative HTML**
 
 ```bash
 cd rust-repo/docs
@@ -353,6 +366,8 @@ test -f build/html/concepts/rdma-for-rust-developers.html
 test -f build/html/store/master.html
 test -f build/html/transfer-engine/ffi-boundary.html
 test -f build/html/walkthroughs/put-object.html
+test -f build/html/testing/single-node.html
+test -f build/html/testing/multi-node.html
 test -f build/html/labs/running-three-node-e2e.html
 ```
 
@@ -364,7 +379,7 @@ Open the site locally with:
 
 Inspect the homepage, navigation, two SVG diagrams, Mermaid output, Chinese search assets and representative pages in a browser.
 
-- [ ] **Step 6: Run hygiene checks and commit**
+- [ ] **Step 8: Run hygiene checks and commit**
 
 ```bash
 git diff --check
