@@ -15,8 +15,12 @@ The standard test covers:
 3. cross-container verbs transfer;
 4. Transfer Engine RDMA Write, Read, and byte comparison;
 5. Rust Master with two Rust Store segment owners and one test client;
-6. the separately classified Open-RDMA mock run;
-7. report generation and idempotent cleanup.
+6. DRAM/SSD multi-level cache offload, fallback, promotion, and consistency;
+7. concurrent and mixed-size Store workloads;
+8. service restart, link interruption, degraded-read, and recovery scenarios;
+9. repeated-run and bounded stress validation;
+10. the separately classified Open-RDMA mock run;
+11. report generation and idempotent cleanup.
 
 It does not claim two physical hosts. Store nodes are distinct container
 processes with distinct logical endpoints and memory segments, sharing one
@@ -68,7 +72,8 @@ build
 compose-up
 verbs
 transfer-engine
-rust-store
+rust-store-standard
+rust-store-resilience
 open-rdma-mock
 report
 compose-down
@@ -80,10 +85,22 @@ gate requires explicit `protocol: rdma`, Write, Read, and `RDMA compare: OK`
 markers. The Rust Store gate cannot start unless the Transfer Engine result is
 PASS.
 
-The Rust Store gate requires two complete RDMA replicas on different logical
-Store segments, deterministic 4 KiB and 12 MiB content hashes, three repeated
-reads, successful forced removal, and no dependency on
-`libmooncake_store.so`.
+The Rust Store acceptance is split into two mandatory result groups. The
+`standard` group requires two complete RDMA replicas on different logical
+Store segments, deterministic small/large/cross-slice hashes, repeated reads,
+concurrent put/get, overwrite and delete behavior, successful forced removal,
+and no dependency on `libmooncake_store.so`. It also enables the Rust Store
+SSD backend and proves the multi-level cache loop: a value is written through
+the memory tier, offloaded or evicted to SSD, read back with the same hash,
+then promoted or restored to memory without losing replica correctness.
+
+The `resilience` group exercises Store-node restart, Rust Master and etcd
+restart/recovery, bounded RDMA link interruption and reconnection, degraded
+read with one replica owner unavailable, memory/SSD watermark eviction,
+concurrent mixed-size load, and a second complete suite execution. Every
+scenario has a timeout and machine-readable PASS/FAIL/SKIP result. SKIP is
+permitted only for a capability that preflight proves unavailable; a skipped
+scenario never satisfies the overall full acceptance target.
 
 Open-RDMA mock remains independent. Its result is recorded as mock-only and
 does not change the Soft-RoCE, Transfer Engine, or Rust Store gate results.
@@ -95,7 +112,9 @@ for diagnosis, but they consume the same Compose service names and shared RXE
 manifest as the full run.
 
 Any failure preserves logs and machine-readable result files. Verbs failure
-blocks Transfer Engine and Store. Transfer Engine failure blocks Store.
+blocks Transfer Engine and Store. Transfer Engine failure blocks both Store
+groups. A standard Store failure blocks resilience scenarios that depend on a
+healthy baseline.
 Open-RDMA still runs after a product-gate failure when safe, and report plus
 cleanup always run. Cleanup never removes an RXE or network link not recorded
 as owned by the current suite run.
@@ -110,6 +129,9 @@ Contract tests use fake `sudo`, `ip`, `rdma`, and Docker commands to verify:
 - all gates consume `mc-rdma-rxe` and Compose-owned containers;
 - fixed orchestration order and failure short-circuiting;
 - Store never starts without a passing RDMA Transfer Engine result;
+- multi-level DRAM/SSD transitions preserve hashes and replica metadata;
+- restart, link interruption, degraded-read, watermark, concurrency, stress,
+  and repeated-run scenarios are bounded and reported independently;
 - cleanup runs on failures and signals.
 
 The final acceptance run starts from an empty suite inventory, executes

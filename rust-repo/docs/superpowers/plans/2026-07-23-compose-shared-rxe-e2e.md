@@ -16,6 +16,8 @@
 - Delete only manifest-recorded suite-owned `mc-rdma-*` resources.
 - TE must PASS with `protocol=rdma`, Write, Read, and compare evidence before Store starts.
 - Rust Store must not load or run C++ `libmooncake_store.so`.
+- Both Store result groups, `standard` and `resilience`, are mandatory for full E2E acceptance.
+- Multi-level cache evidence must prove DRAM/SSD transition and byte-identical fallback/promotion, not merely that an SSD file exists.
 - Open-RDMA mock is independent and never counts as cross-node data-plane evidence.
 
 ---
@@ -127,11 +129,11 @@ Commit as `[Test] run all RDMA gates through Compose`.
 
 **Interfaces:**
 - Consumes: Tasks 1-3 scripts and gate result files.
-- Produces ordered stages `preflight host-rdma-setup build compose-up verbs te store open-rdma report compose-down host-rdma-cleanup`.
+- Produces ordered stages `preflight host-rdma-setup build compose-up verbs te store-standard store-resilience open-rdma report compose-down host-rdma-cleanup`.
 
 - [ ] **Step 1: Write failing orchestration tests**
 
-Inject fake stage commands and assert exact success order. Assert verbs failure skips TE/Store; TE failure skips Store; Open-RDMA/report still run when safe; cleanup runs once for success, failure, `INT`, and `TERM`.
+Inject fake stage commands and assert exact success order. Assert verbs failure skips TE/Store; TE failure skips both Store groups; standard Store failure blocks dependent resilience scenarios; Open-RDMA/report still run when safe; cleanup runs once for success, failure, `INT`, and `TERM`.
 
 - [ ] **Step 2: Run RED**
 
@@ -143,13 +145,47 @@ Add explicit `host-rdma-setup`, `compose-up`, `compose-down`, and `host-rdma-cle
 
 - [ ] **Step 4: Update documentation and report validation**
 
-Document the interactive sudo prompt, standard Compose service roles, physical-host limitation, result files, diagnostic subcommands, and exact acceptance command. Require reports to name `compose-shared-rdma-device`.
+Document the interactive sudo prompt, standard Compose service roles, physical-host limitation, standard/resilience result files, diagnostic subcommands, and exact acceptance command. Require reports to name `compose-shared-rdma-device` and to distinguish product, resilience, and mock evidence.
 
 - [ ] **Step 5: Run GREEN and commit**
 
 Run orchestration/report tests. Commit as `[Test] automate standard Compose RDMA acceptance`.
 
-### Task 5: Execute clean E2E acceptance and repository verification
+### Task 5: Add multi-level cache and resilience scenarios
+
+**Files:**
+- Modify: `rust-repo/tools/rdma-multinode/store-e2e.py`
+- Create: `rust-repo/tools/rdma-multinode/store-resilience-e2e.py`
+- Create: `rust-repo/tools/rdma-multinode/tests/test_store_multilevel_contract.py`
+- Create: `rust-repo/tools/rdma-multinode/tests/test_store_resilience_contract.py`
+- Modify: `rust-repo/tools/rdma-multinode/run-store-gate.sh`
+- Modify: `rust-repo/tools/rdma-multinode/render-report.sh`
+
+**Interfaces:**
+- Consumes: healthy standard Compose topology, Rust Store SSD backend, two RDMA replicas, bounded scenario timeouts.
+- Produces: `store-standard.result`, `store-resilience.result`, per-scenario JSON and logs.
+
+- [ ] **Step 1: Write failing standard multi-level cache contracts**
+
+Require deterministic small, large, and cross-slice objects; concurrent put/get; overwrite/delete; DRAM-to-SSD offload or eviction; byte-identical SSD fallback; memory promotion/restore; and two-replica metadata consistency. Assert the Rust process never loads C++ `libmooncake_store.so`.
+
+- [ ] **Step 2: Write failing resilience contracts**
+
+Require bounded Store-node restart, Master/etcd restart and recovery, RDMA link interruption/reconnection, one-owner degraded read, memory/SSD watermark eviction, concurrent mixed-size stress, and a second complete standard execution. Each scenario must emit machine-readable status and preserve diagnostic logs.
+
+- [ ] **Step 3: Implement the scenario runner and Store gate integration**
+
+Use only Compose-owned services. Restore every intentionally disrupted service/link before the next scenario, preserve the first failure, and make cleanup safe after partial execution. A capability-based SKIP is reported but does not satisfy full acceptance.
+
+- [ ] **Step 4: Run focused contracts and negative cases**
+
+Prove corrupted fallback data, missing promotion evidence, failed reconnection, unavailable replica without valid degraded read, and timeout all fail their scenario and the relevant Store result group.
+
+- [ ] **Step 5: Commit**
+
+Commit as `[Test] cover multi-level and resilient Store E2E`.
+
+### Task 6: Execute clean E2E acceptance and repository verification
 
 **Files:**
 - Modify: `rust-repo/change_logs/2026-07-23-001.md`
@@ -167,7 +203,7 @@ Require no `mc-rdma-*` container/network/RDMA/veth resource.
 
 Run `CARGO_BUILD_JOBS=5 RDMA_ARTIFACT_ROOT=/home/fy2462/workspace/tmp/mooncake/rdma-multinode bash rust-repo/tools/rdma-multinode/run.sh all` and enter the sudo password only at the terminal prompt.
 
-Expected product gates: verbs PASS, TE RDMA Write/Read/compare PASS, Rust Store dual-replica PASS. Record Open-RDMA independently.
+Expected product gates: verbs PASS, TE RDMA Write/Read/compare PASS, Rust Store standard PASS, and Rust Store resilience PASS. Standard evidence includes dual replicas, concurrent/mixed-size correctness, and a complete DRAM/SSD offload-fallback-promotion loop. Resilience evidence includes restart/recovery, RDMA interruption/reconnection, degraded read, watermark eviction, stress, and repeated execution. Record Open-RDMA independently.
 
 - [ ] **Step 3: Verify cleanup inventory**
 
