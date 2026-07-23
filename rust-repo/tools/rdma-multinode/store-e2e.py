@@ -66,7 +66,12 @@ async def wait_for_replica_state(
 
 
 async def verify_fallback_and_promotion(
-    client, key, expected, timeout=30.0, poll_interval=0.1
+    client,
+    key,
+    expected,
+    timeout=30.0,
+    poll_interval=0.1,
+    expected_segments=None,
 ):
     disk_only = await wait_for_replica_state(
         client,
@@ -85,8 +90,15 @@ async def verify_fallback_and_promotion(
     promoted = await wait_for_replica_state(
         client,
         key,
-        lambda replicas: bool(_complete(replicas, "Memory")),
-        "promotion to Memory",
+        lambda replicas: len(
+            {
+                replica.get("segment_name")
+                for replica in _complete(replicas, "Memory")
+                if replica.get("protocol") == "rdma"
+            }
+        )
+        >= 2,
+        "promotion to two complete RDMA replicas in Memory",
         timeout,
         poll_interval,
     )
@@ -94,7 +106,14 @@ async def verify_fallback_and_promotion(
     if restored != expected:
         raise ScenarioFailure("promoted memory bytes differ from the original object")
     disk = _complete(disk_only, "LocalDisk")
-    memory = _complete(promoted, "Memory")
+    promoted_segments = _two_rdma_replicas(promoted)
+    if expected_segments is not None and set(promoted_segments) != set(
+        expected_segments
+    ):
+        raise ScenarioFailure(
+            "promoted memory topology differs from the initial RDMA topology: "
+            f"initial={sorted(expected_segments)!r} promoted={promoted_segments!r}"
+        )
     return {
         "expected_sha256": digest(expected),
         "fallback": {
@@ -103,7 +122,8 @@ async def verify_fallback_and_promotion(
             "sha256": digest(actual),
         },
         "promotion": {
-            "memory_replicas": len(memory),
+            "memory_replicas": len(promoted_segments),
+            "remote_segments": promoted_segments,
             "sha256": digest(restored),
         },
     }
@@ -227,6 +247,7 @@ async def run_standard_scenario(
                 tier_key,
                 tier_value,
                 timeout=tier_timeout,
+                expected_segments=initial_segments,
             )
             evidence["multilevel"]["initial_memory_segments"] = initial_segments
             evidence["multilevel"]["pressure_objects"] = len(pressure)

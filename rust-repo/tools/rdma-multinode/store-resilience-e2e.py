@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import time
 
@@ -117,7 +118,37 @@ async def run_bounded_scenarios(scenarios, artifact_root, timeout, restore=None)
     artifact_root.mkdir(parents=True, exist_ok=True)
     results = {}
     first_failure = None
+    restoration_healthy = True
+
+    def restore_failure(error):
+        return {
+            "status": "FAIL",
+            "error": str(error) or error.__class__.__name__,
+        }
+
+    def publish(name, record):
+        _atomic_json(artifact_root / f"{name}.json", record)
+        with (artifact_root / f"{name}.log").open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+
     for name, scenario in scenarios:
+        if restore is not None and not restoration_healthy:
+            try:
+                await asyncio.wait_for(restore(name), timeout=timeout)
+                restoration_healthy = True
+            except Exception as error:
+                record = {
+                    "status": "BLOCKED",
+                    "scenario": name,
+                    "reason": "restore-gate",
+                    "restore": restore_failure(error),
+                }
+                if first_failure is None:
+                    first_failure = name
+                results[name] = record
+                publish(name, record)
+                continue
+
         started = time.monotonic()
         record = None
         try:
@@ -137,21 +168,17 @@ async def run_bounded_scenarios(scenarios, artifact_root, timeout, restore=None)
         finally:
             if restore is not None:
                 try:
-                    await restore(name)
+                    await asyncio.wait_for(restore(name), timeout=timeout)
                 except Exception as error:
-                    if record is None or record.get("status") == "PASS":
-                        record = {
-                            "status": "FAIL",
-                            "scenario": name,
-                            "reason": "restore-failure",
-                            "error": str(error),
-                        }
+                    restoration_healthy = False
+                    record["restore"] = restore_failure(error)
+                    if record.get("status") == "PASS":
+                        record["status"] = "FAIL"
+                        record["reason"] = "restore-failure"
         if record["status"] != "PASS" and first_failure is None:
             first_failure = name
         results[name] = record
-        _atomic_json(artifact_root / f"{name}.json", record)
-        with (artifact_root / f"{name}.log").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(record, sort_keys=True) + "\n")
+        publish(name, record)
     return {
         "status": "PASS" if first_failure is None else "FAIL",
         "first_failure": first_failure,
@@ -170,20 +197,25 @@ class DockerOrchestrator:
         self.seed_counter = 0
 
     async def command(self, command, timeout=30, check=True):
-        def execute():
-            return subprocess.run(
-                command,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=timeout,
-                check=False,
-            )
-
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        communicate = asyncio.create_task(process.communicate())
         try:
-            result = await asyncio.to_thread(execute)
-        except subprocess.TimeoutExpired as error:
+            stdout, _ = await asyncio.wait_for(
+                asyncio.shield(communicate), timeout=timeout
+            )
+        except asyncio.TimeoutError as error:
+            await self._terminate_process_group(process, communicate)
             raise ScenarioFailure(f"command timed out: {command!r}") from error
+        except asyncio.CancelledError:
+            await self._terminate_process_group(process, communicate)
+            raise
+        output = stdout.decode(errors="replace")
+        result = subprocess.CompletedProcess(command, process.returncode, output)
         if self.current_log is not None:
             with self.current_log.open("a", encoding="utf-8") as stream:
                 stream.write(f"$ {command!r}\n{result.stdout}")
@@ -192,6 +224,23 @@ class DockerOrchestrator:
                 f"command failed rc={result.returncode}: {command!r}: {result.stdout[-1000:]}"
             )
         return result
+
+    async def _terminate_process_group(self, process, communicate):
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(asyncio.shield(communicate), timeout=2)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await asyncio.wait_for(asyncio.shield(communicate), timeout=2)
+        else:
+            await communicate
 
     async def wait_until(self, predicate, description, timeout=30, interval=0.2):
         deadline = time.monotonic() + timeout
@@ -291,16 +340,13 @@ class DockerOrchestrator:
 
     async def restart_node(self, container):
         command = self.node_commands[container]
-        ready_name = command[command.index("--ready") + 1].removeprefix("/artifacts/")
-        ready_path = self.artifacts / ready_name
+        ready_path = self._node_artifact_path(container, "--ready")
+        stats_path = self._node_artifact_path(container, "--stats")
         await self.stop_process(container, "/tmp/store-node.py")
         ready_path.unlink(missing_ok=True)
+        stats_path.unlink(missing_ok=True)
         await self.start_detached(container, command)
-        await self.wait_until(
-            lambda: asyncio.to_thread(ready_path.exists),
-            f"{container} readiness after restart",
-            timeout=30,
-        )
+        await self.wait_node_healthy(container)
         return await self.process_running(container, "/tmp/store-node.py")
 
     async def restart_master(self):
@@ -326,6 +372,67 @@ class DockerOrchestrator:
             return result.returncode == 0
 
         await self.wait_until(ready, "Master TCP service", timeout=45)
+
+    async def wait_etcd(self):
+        async def ready():
+            result = await self.command(
+                [
+                    "docker",
+                    "exec",
+                    self.args.etcd,
+                    "etcdctl",
+                    "endpoint",
+                    "health",
+                    "--endpoints=http://127.0.0.1:2379",
+                ],
+                timeout=15,
+                check=False,
+            )
+            return result.returncode == 0
+
+        await self.wait_until(ready, "etcd endpoint health", timeout=30)
+
+    def _node_artifact_path(self, container, option):
+        command = self.node_commands[container]
+        value = command[command.index(option) + 1]
+        prefix = "/artifacts/"
+        _require(value.startswith(prefix), f"{container} {option} is outside artifacts")
+        return self.artifacts / value.removeprefix(prefix)
+
+    async def wait_node_healthy(self, container):
+        ready_path = self._node_artifact_path(container, "--ready")
+        stats_path = self._node_artifact_path(container, "--stats")
+        initial_cycles = -1
+        if stats_path.exists():
+            try:
+                initial_cycles = int(
+                    json.loads(stats_path.read_text()).get("cycles", -1)
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+
+        async def healthy():
+            if not await self.process_running(container, "/tmp/store-node.py"):
+                return False
+            try:
+                ready = json.loads(ready_path.read_text())
+                stats = json.loads(stats_path.read_text())
+            except (FileNotFoundError, ValueError, json.JSONDecodeError):
+                return False
+            return (
+                ready.get("storage_backend") == "RustFilePerKey"
+                and ready.get("cpp_store_loaded") is False
+                and int(ready.get("pid", 0)) > 0
+                and stats.get("last_error", "") == ""
+                and int(stats.get("cycles", -1)) > initial_cycles
+            )
+
+        await self.wait_until(
+            healthy,
+            f"{container} ready storage cycle",
+            timeout=30,
+            interval=0.1,
+        )
 
     def owned_link(self):
         manifest = json.loads(Path(self.args.host_rdma_manifest).read_text())
@@ -409,24 +516,7 @@ class DockerOrchestrator:
     async def scenario_master_etcd_restart(self):
         key, expected, _ = await self.seed("master-etcd")
         await self.command(["docker", "restart", self.args.etcd], timeout=30)
-
-        async def etcd_ready():
-            result = await self.command(
-                [
-                    "docker",
-                    "exec",
-                    self.args.etcd,
-                    "etcdctl",
-                    "endpoint",
-                    "health",
-                    "--endpoints=http://127.0.0.1:2379",
-                ],
-                timeout=15,
-                check=False,
-            )
-            return result.returncode == 0
-
-        await self.wait_until(etcd_ready, "etcd health after restart", timeout=30)
+        await self.wait_etcd()
         etcd_recovered = True
         master_recovered = await self.restart_master()
         return {
@@ -555,14 +645,17 @@ class DockerOrchestrator:
         )
         if inspect.returncode != 0 or inspect.stdout.strip() != "true":
             await self.command(["docker", "start", self.args.etcd])
+        await self.wait_etcd()
         if not await self.process_running(
             self.args.master_container, "mooncake-master"
         ):
             await self.start_detached(self.args.master_container, self.master_command)
-            await self.wait_master()
+        await self.wait_master()
         for node in (self.args.node_a, self.args.node_b):
             if not await self.process_running(node, "/tmp/store-node.py"):
                 await self.restart_node(node)
+            else:
+                await self.wait_node_healthy(node)
 
 
 async def main():

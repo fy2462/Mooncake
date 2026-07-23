@@ -15,17 +15,38 @@ printf '%s\n' "$stage" >>"$ORCHESTRATION_LOG"
 
 case "$stage" in
     store-standard)
-        printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store.result"
+        if [[ ${STANDARD_DETAIL_FAIL:-0} == 1 ]]; then
+            printf '{"status":"FAIL","error":"fallback hash mismatch"}\n' \
+                >"$RDMA_ARTIFACT_ROOT/store.result"
+        else
+            printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store.result"
+        fi
         ;;
     store-resilience)
-        if [[ ${RESILIENCE_DETAIL_FAIL:-0} == 1 ]]; then
+        if [[ ${RESILIENCE_TOP_LEVEL_ONLY:-0} == 1 ]]; then
+            printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
+        elif [[ ${RESILIENCE_DETAIL_FAIL:-0} == 1 ]]; then
             printf '{"status":"FAIL","first_failure":"rdma_reconnect","scenarios":{"rdma_reconnect":{"status":"FAIL"}}}\n' \
                 >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
         else
-            printf '{"status":"PASS"}\n' >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
+            printf '%s\n' '{"status":"PASS","first_failure":null,"scenarios":{"store_node_restart":{"status":"PASS","scenario":"store_node_restart","evidence":{"duration_seconds":0.1,"restart":true,"post_restart_read":true}},"master_etcd_restart":{"status":"PASS","scenario":"master_etcd_restart","evidence":{"duration_seconds":0.1,"master_recovered":true,"etcd_recovered":true,"post_restart_read":true}},"rdma_reconnect":{"status":"PASS","scenario":"rdma_reconnect","evidence":{"duration_seconds":0.1,"link_down_observed":true,"link_restored":true,"post_reconnect_read":true}},"degraded_read":{"status":"PASS","scenario":"degraded_read","evidence":{"duration_seconds":0.1,"initial_owners":2,"unavailable_owner":"node-a","remaining_owners":1,"read_valid":true}},"watermark_eviction":{"status":"PASS","scenario":"watermark_eviction","evidence":{"duration_seconds":0.1,"memory_offloaded":1,"ssd_evicted":1,"high_ratio":0.6,"low_ratio":0.3}},"mixed_stress":{"status":"PASS","scenario":"mixed_stress","evidence":{"duration_seconds":0.1,"operations":12,"sizes":[4096,1048576,8388608],"byte_identical":true}},"second_standard":{"status":"PASS","scenario":"second_standard","evidence":{"duration_seconds":0.1,"standard_status":"PASS","complete":true}}}}' \
+                >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
         fi
         ;;
 esac
+
+if [[ $stage == store-resilience && ${RESILIENCE_INVALID_EVIDENCE:-0} == 1 ]]; then
+    python3 - "$RDMA_ARTIFACT_ROOT/store-resilience.result" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    result = json.load(stream)
+result["scenarios"]["rdma_reconnect"]["evidence"]["link_restored"] = False
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump(result, stream)
+PY
+fi
 
 if [[ ${PAUSE_STAGE:-} == "$stage" ]]; then
     while :; do sleep 1; done
@@ -82,7 +103,31 @@ assert_order "$success_root/order.log" \
     preflight host-rdma-setup build compose-up verbs te store-standard \
     store-resilience open-rdma report compose-down host-rdma-cleanup
 grep -Fx '{"status":"PASS"}' "$success_root/store-standard.result"
-grep -Fx '{"status":"PASS"}' "$success_root/store-resilience.result"
+grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"' \
+    "$success_root/store-resilience.result"
+
+top_level_root="$tmp_dir/top-level-only"
+mkdir -p "$top_level_root"
+stage_environment "$top_level_root"
+printf '{"status":"PASS"}\n' >"$top_level_root/store-standard.result"
+export RDMA_STORE_RESILIENCE_COMMAND="$fake_stage store-resilience"
+export RESILIENCE_TOP_LEVEL_ONLY=1
+if bash "$suite_dir/run.sh" store-resilience; then
+    printf 'accepted top-level-only resilience PASS\n' >&2
+    exit 1
+fi
+unset RESILIENCE_TOP_LEVEL_ONLY
+
+invalid_evidence_root="$tmp_dir/invalid-evidence"
+mkdir -p "$invalid_evidence_root"
+stage_environment "$invalid_evidence_root"
+printf '{"status":"PASS"}\n' >"$invalid_evidence_root/store-standard.result"
+export RESILIENCE_INVALID_EVIDENCE=1
+if bash "$suite_dir/run.sh" store-resilience; then
+    printf 'accepted resilience PASS with failed reconnect evidence\n' >&2
+    exit 1
+fi
+unset RESILIENCE_INVALID_EVIDENCE
 
 detailed_failure_root="$tmp_dir/detailed-failure"
 mkdir -p "$detailed_failure_root"
@@ -100,6 +145,20 @@ unset RESILIENCE_DETAIL_FAIL FAIL_STAGE FAIL_CODE
 grep -Fq '"first_failure":"rdma_reconnect"' "$detailed_failure_root/store-resilience.result"
 ! grep -Fq 'runner-exit' "$detailed_failure_root/store-resilience.result"
 unset RDMA_STORE_RESILIENCE_COMMAND
+
+standard_detail_root="$tmp_dir/standard-detail"
+mkdir -p "$standard_detail_root"
+stage_environment "$standard_detail_root"
+export STANDARD_DETAIL_FAIL=1 FAIL_STAGE=store-standard FAIL_CODE=37
+if bash "$suite_dir/run.sh" store-standard; then
+    printf 'accepted a detailed standard Store failure\n' >&2
+    exit 1
+else
+    test $? -eq 37
+fi
+unset STANDARD_DETAIL_FAIL FAIL_STAGE FAIL_CODE
+grep -Fq 'fallback hash mismatch' "$standard_detail_root/store-standard.result"
+! grep -Fq 'runner-exit' "$standard_detail_root/store-standard.result"
 
 not_implemented_root="$tmp_dir/not-implemented"
 mkdir -p "$not_implemented_root"

@@ -48,6 +48,98 @@ te() {
     run_stage_command te "$suite_dir/run-te-gate.sh"
 }
 
+json_status_is() {
+    local path=$1 expected=$2
+    python3 - "$path" "$expected" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(value, dict) and value.get("status") == sys.argv[2] else 1)
+PY
+}
+
+validate_resilience_result() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+required = {
+    "store_node_restart": ("restart", "post_restart_read"),
+    "master_etcd_restart": ("master_recovered", "etcd_recovered", "post_restart_read"),
+    "rdma_reconnect": ("link_down_observed", "link_restored", "post_reconnect_read"),
+    "degraded_read": ("initial_owners", "unavailable_owner", "remaining_owners", "read_valid"),
+    "watermark_eviction": ("memory_offloaded", "ssd_evicted", "high_ratio", "low_ratio"),
+    "mixed_stress": ("operations", "sizes", "byte_identical"),
+    "second_standard": ("standard_status", "complete"),
+}
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        result = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit(1)
+if result.get("status") != "PASS" or result.get("first_failure") is not None:
+    raise SystemExit(1)
+scenarios = result.get("scenarios")
+if not isinstance(scenarios, dict) or set(scenarios) != set(required):
+    raise SystemExit(1)
+for name, evidence_fields in required.items():
+    record = scenarios[name]
+    evidence = record.get("evidence") if isinstance(record, dict) else None
+    if (
+        record.get("status") != "PASS"
+        or record.get("scenario") != name
+        or not isinstance(evidence, dict)
+        or not isinstance(evidence.get("duration_seconds"), (int, float))
+        or evidence["duration_seconds"] < 0
+        or any(field not in evidence for field in evidence_fields)
+    ):
+        raise SystemExit(1)
+    if name == "store_node_restart" and not (
+        evidence["restart"] is True and evidence["post_restart_read"] is True
+    ):
+        raise SystemExit(1)
+    if name == "master_etcd_restart" and not all(
+        evidence[field] is True
+        for field in ("master_recovered", "etcd_recovered", "post_restart_read")
+    ):
+        raise SystemExit(1)
+    if name == "rdma_reconnect" and not all(
+        evidence[field] is True
+        for field in ("link_down_observed", "link_restored", "post_reconnect_read")
+    ):
+        raise SystemExit(1)
+    if name == "degraded_read" and not (
+        evidence["initial_owners"] >= 2
+        and bool(evidence["unavailable_owner"])
+        and evidence["remaining_owners"] >= 1
+        and evidence["read_valid"] is True
+    ):
+        raise SystemExit(1)
+    if name == "watermark_eviction" and not (
+        evidence["memory_offloaded"] > 0
+        and evidence["ssd_evicted"] > 0
+        and 0 < evidence["low_ratio"] < evidence["high_ratio"] <= 1
+    ):
+        raise SystemExit(1)
+    if name == "mixed_stress" and not (
+        evidence["operations"] > 0
+        and isinstance(evidence["sizes"], list)
+        and len(set(evidence["sizes"])) >= 3
+        and evidence["byte_identical"] is True
+    ):
+        raise SystemExit(1)
+    if name == "second_standard" and not (
+        evidence["standard_status"] == "PASS" and evidence["complete"] is True
+    ):
+        raise SystemExit(1)
+PY
+}
+
 store_standard() {
     local result="$artifact_root/store-standard.result"
     local rc=0
@@ -58,15 +150,17 @@ store_standard() {
     fi
 
     if [[ $rc -eq 0 && -f $artifact_root/store.result ]] &&
-       grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"' "$artifact_root/store.result"; then
+       json_status_is "$artifact_root/store.result" PASS; then
         cp -- "$artifact_root/store.result" "$result"
         return 0
     fi
 
-    if [[ -f $artifact_root/store.result ]]; then
+    if [[ -f $artifact_root/store.result ]] &&
+       json_status_is "$artifact_root/store.result" FAIL; then
         cp -- "$artifact_root/store.result" "$result"
+    else
+        printf '{"status":"FAIL","reason":"runner-exit"}\n' >"$result"
     fi
-    printf '{"status":"FAIL","reason":"runner-exit"}\n' >"$result"
     [[ $rc -ne 0 ]] && return "$rc"
     return 1
 }
@@ -86,8 +180,7 @@ store_resilience() {
     else
         rc=$?
     fi
-    if [[ $rc -eq 0 ]] &&
-       grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"|^status=PASS$' "$result" 2>/dev/null; then
+    if [[ $rc -eq 0 && -f $result ]] && validate_resilience_result "$result"; then
         return 0
     fi
     if [[ ! -f $result ]]; then

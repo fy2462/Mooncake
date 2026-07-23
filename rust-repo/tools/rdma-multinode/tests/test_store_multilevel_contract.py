@@ -18,13 +18,20 @@ STORE = load_script("store_e2e_multilevel", "store-e2e.py")
 
 
 class TieredClient:
-    def __init__(self, *, corrupt_fallback=False, promote=True):
+    def __init__(
+        self,
+        *,
+        corrupt_fallback=False,
+        promote=True,
+        promoted_segments=("node-a", "node-b"),
+    ):
         self.values = {}
         self.parts = {}
         self.states = {}
         self.closed = False
         self.corrupt_fallback = corrupt_fallback
         self.promote = promote
+        self.promoted_segments = promoted_segments
 
     async def put(self, key, value, config=None):
         self.values[key] = value
@@ -58,21 +65,18 @@ class TieredClient:
                     "handle_valid": True,
                 }
             ]
+        segments = (
+            self.promoted_segments if state == "promoted" else ("node-a", "node-b")
+        )
         return [
             {
-                "segment_name": "node-a",
+                "segment_name": segment,
                 "replica_type": "Memory",
                 "protocol": "rdma",
                 "status": "Complete",
                 "handle_valid": True,
-            },
-            {
-                "segment_name": "node-b",
-                "replica_type": "Memory",
-                "protocol": "rdma",
-                "status": "Complete",
-                "handle_valid": True,
-            },
+            }
+            for segment in segments
         ]
 
     async def exists(self, key):
@@ -146,6 +150,35 @@ async def test_missing_promotion_evidence_is_rejected():
     with pytest.raises(STORE.ScenarioFailure, match="promotion"):
         await STORE.verify_fallback_and_promotion(
             client, "tiered", b"expected-fallback", timeout=0.01, poll_interval=0
+        )
+
+
+@pytest.mark.asyncio
+async def test_promotion_requires_two_distinct_rdma_replicas():
+    client = TieredClient(promoted_segments=("node-a",))
+    client.values["tiered"] = b"expected-fallback"
+    client.states["tiered"] = "disk"
+
+    with pytest.raises(STORE.ScenarioFailure, match="two complete RDMA replicas"):
+        await STORE.verify_fallback_and_promotion(
+            client, "tiered", b"expected-fallback", timeout=0.05, poll_interval=0
+        )
+
+
+@pytest.mark.asyncio
+async def test_promotion_requires_consistent_memory_topology():
+    client = TieredClient(promoted_segments=("node-a", "node-c"))
+    client.values["tiered"] = b"expected-fallback"
+    client.states["tiered"] = "disk"
+
+    with pytest.raises(STORE.ScenarioFailure, match="topology"):
+        await STORE.verify_fallback_and_promotion(
+            client,
+            "tiered",
+            b"expected-fallback",
+            timeout=0.05,
+            poll_interval=0,
+            expected_segments=("node-a", "node-b"),
         )
 
 

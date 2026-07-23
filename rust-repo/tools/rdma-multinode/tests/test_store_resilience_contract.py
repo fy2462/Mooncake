@@ -2,6 +2,8 @@ import asyncio
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -137,6 +139,208 @@ async def test_timeout_fails_scenario_and_group(tmp_path):
     scenario = json.loads((tmp_path / "store_node_restart.json").read_text())
     assert scenario["status"] == "FAIL"
     assert scenario["reason"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_command_kills_process_group_before_returning(tmp_path):
+    module = load_script()
+    master_commands = tmp_path / "master.json"
+    node_commands = tmp_path / "nodes.json"
+    master_commands.write_text("[]\n")
+    node_commands.write_text("{}\n")
+    args = SimpleNamespace(
+        artifact_root=str(tmp_path),
+        master_command_file=str(master_commands),
+        node_command_file=str(node_commands),
+    )
+    orchestrator = module.DockerOrchestrator(args)
+    delayed_marker = tmp_path / "delayed-mutation"
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import pathlib,subprocess,time,sys;"
+            "subprocess.Popen([sys.executable,'-c',"
+            f'"import time,pathlib;time.sleep(0.15);pathlib.Path({str(delayed_marker)!r}).touch()"]);'
+            "time.sleep(10)"
+        ),
+    ]
+
+    task = asyncio.create_task(orchestrator.command(command, timeout=5))
+    await asyncio.sleep(0.03)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.25)
+
+    assert (
+        not delayed_marker.exists()
+    ), "cancelled child mutated state after restoration began"
+
+
+@pytest.mark.asyncio
+async def test_command_timeout_kills_process_group_before_returning(tmp_path):
+    module = load_script()
+    master_commands = tmp_path / "master.json"
+    node_commands = tmp_path / "nodes.json"
+    master_commands.write_text("[]\n")
+    node_commands.write_text("{}\n")
+    orchestrator = module.DockerOrchestrator(
+        SimpleNamespace(
+            artifact_root=str(tmp_path),
+            master_command_file=str(master_commands),
+            node_command_file=str(node_commands),
+        )
+    )
+    delayed_marker = tmp_path / "timeout-mutation"
+    command = [
+        sys.executable,
+        "-c",
+        (
+            "import subprocess,time,sys;"
+            "subprocess.Popen([sys.executable,'-c',"
+            f'"import time,pathlib;time.sleep(0.15);pathlib.Path({str(delayed_marker)!r}).touch()"]);'
+            "time.sleep(10)"
+        ),
+    ]
+
+    with pytest.raises(module.ScenarioFailure, match="timed out"):
+        await orchestrator.command(command, timeout=0.03)
+    await asyncio.sleep(0.25)
+
+    assert (
+        not delayed_marker.exists()
+    ), "timed-out child mutated state after restoration began"
+
+
+@pytest.mark.asyncio
+async def test_restore_failure_is_recorded_and_gates_later_scenarios(tmp_path):
+    module = load_script()
+    calls = []
+    restore_attempts = 0
+
+    async def first():
+        calls.append("first")
+        raise module.ScenarioFailure("scenario failed")
+
+    async def second():
+        calls.append("second")
+        return valid_evidence(module, "mixed_stress")
+
+    async def third():
+        calls.append("third")
+        return valid_evidence(module, "second_standard")
+
+    async def restore(_name):
+        nonlocal restore_attempts
+        restore_attempts += 1
+        if restore_attempts <= 2:
+            raise module.ScenarioFailure(f"restore attempt {restore_attempts} failed")
+
+    result = await module.run_bounded_scenarios(
+        [
+            ("rdma_reconnect", first),
+            ("mixed_stress", second),
+            ("second_standard", third),
+        ],
+        tmp_path,
+        timeout=0.1,
+        restore=restore,
+    )
+
+    assert calls == ["first", "third"]
+    assert result["status"] == "FAIL"
+    assert result["first_failure"] == "rdma_reconnect"
+    assert result["scenarios"]["rdma_reconnect"]["restore"]["status"] == "FAIL"
+    assert result["scenarios"]["mixed_stress"]["status"] == "BLOCKED"
+    assert result["scenarios"]["second_standard"]["status"] == "PASS"
+    first_log = (tmp_path / "rdma_reconnect.log").read_text()
+    assert "scenario failed" in first_log
+    assert "restore attempt 1 failed" in first_log
+
+
+@pytest.mark.asyncio
+async def test_restore_verifies_all_service_health_even_when_processes_exist():
+    module = load_script()
+    orchestrator = object.__new__(module.DockerOrchestrator)
+    orchestrator.link_down = False
+    orchestrator.args = SimpleNamespace(
+        etcd="etcd",
+        master_container="master",
+        node_a="node-a",
+        node_b="node-b",
+    )
+    calls = []
+
+    async def command(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="true\n")
+
+    async def process_running(container, pattern):
+        calls.append(("running", container, pattern))
+        return True
+
+    async def wait_etcd():
+        calls.append(("healthy", "etcd"))
+
+    async def wait_master():
+        calls.append(("healthy", "master"))
+
+    async def wait_node_healthy(container):
+        calls.append(("healthy", container))
+
+    orchestrator.command = command
+    orchestrator.process_running = process_running
+    orchestrator.wait_etcd = wait_etcd
+    orchestrator.wait_master = wait_master
+    orchestrator.wait_node_healthy = wait_node_healthy
+
+    await orchestrator.restore("probe")
+
+    assert ("healthy", "etcd") in calls
+    assert ("healthy", "master") in calls
+    assert ("healthy", "node-a") in calls
+    assert ("healthy", "node-b") in calls
+
+
+@pytest.mark.asyncio
+async def test_node_health_requires_ready_file_and_a_new_clean_storage_cycle(tmp_path):
+    module = load_script()
+    orchestrator = object.__new__(module.DockerOrchestrator)
+    orchestrator.artifacts = tmp_path
+    orchestrator.node_commands = {
+        "node-a": [
+            "python3",
+            "/tmp/store-node.py",
+            "--ready",
+            "/artifacts/node.ready",
+            "--stats",
+            "/artifacts/node.stats.json",
+        ]
+    }
+    (tmp_path / "node.ready").write_text(
+        json.dumps(
+            {
+                "storage_backend": "RustFilePerKey",
+                "cpp_store_loaded": False,
+                "pid": 42,
+            }
+        )
+    )
+    stats_path = tmp_path / "node.stats.json"
+    stats_path.write_text(json.dumps({"cycles": 4, "last_error": ""}))
+
+    async def process_running(_container, _pattern):
+        return True
+
+    async def wait_until(predicate, _description, **_options):
+        assert await predicate() is False
+        stats_path.write_text(json.dumps({"cycles": 5, "last_error": ""}))
+        assert await predicate() is True
+
+    orchestrator.process_running = process_running
+    orchestrator.wait_until = wait_until
+
+    await orchestrator.wait_node_healthy("node-a")
 
 
 def test_runner_mutates_only_manifest_owned_link_without_password_plumbing():

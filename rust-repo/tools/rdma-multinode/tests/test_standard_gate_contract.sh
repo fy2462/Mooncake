@@ -32,6 +32,7 @@ grep -Fq 'client=${STORE_CLIENT_CONTAINER:-mc-rdma-store-test-client}' "$store_g
 grep -Fq 'docker cp "$suite_dir/store-node.py" "$node_a:/tmp/store-node.py"' "$store_gate"
 grep -Fq 'docker cp "$suite_dir/store-node.py" "$node_b:/tmp/store-node.py"' "$store_gate"
 grep -Fq 'docker cp "$suite_dir/store-e2e.py" "$client:/tmp/store-e2e.py"' "$store_gate"
+grep -Fq 'docker exec "$master" sh -c '\''! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'\''' "$store_gate"
 
 for gate in "${gates[@]}"; do
     ! grep -Eq 'docker[[:space:]]+(run|create)' "$gate"

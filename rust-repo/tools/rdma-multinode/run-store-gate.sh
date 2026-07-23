@@ -117,7 +117,7 @@ master_pid=
 node_a_pid=
 node_b_pid=
 cleanup_store_processes() {
-    local status=$?
+    local status=${1:-$?}
     trap - EXIT INT TERM
     stop_pattern='import os,signal,sys
 needle=sys.argv[1]
@@ -141,7 +141,9 @@ for entry in os.listdir("/proc"):
     fi
     exit "$status"
 }
-trap cleanup_store_processes EXIT INT TERM
+trap cleanup_store_processes EXIT
+trap 'cleanup_store_processes 130' INT
+trap 'cleanup_store_processes 143' TERM
 
 wait_for_ready_file() {
     local file=$1 pattern=$2 deadline=$((SECONDS + 45))
@@ -182,6 +184,7 @@ wait_for_ready_file "$ready_a" '"storage_backend": "RustFilePerKey"'
 wait_for_ready_file "$ready_b" '"storage_backend": "RustFilePerKey"'
 grep -q '"cpp_store_loaded": false' "$ready_a"
 grep -q '"cpp_store_loaded": false' "$ready_b"
+docker exec "$master" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
 docker exec "$node_a" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
 docker exec "$node_b" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
 
