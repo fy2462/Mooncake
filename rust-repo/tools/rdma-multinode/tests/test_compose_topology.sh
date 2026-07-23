@@ -45,10 +45,10 @@ for service in "${data_plane_services[@]}"; do
 done
 
 jq -e '
-    [.services.etcd.volumes[]?] | any(.target == "/artifacts")
+    [.services.etcd.volumes[]?] | all(.target != "/artifacts")
 ' "$rendered" >/dev/null
 jq -e '
-    .services.etcd.command | index("--data-dir=/artifacts/etcd-data") != null
+    .services.etcd.command | index("--data-dir=/tmp/etcd-data") != null
 ' "$rendered" >/dev/null
 jq -e '
     [.. | strings | select(test("10\\.89\\.10\\.|mc-rdma-net"))] | length == 0
