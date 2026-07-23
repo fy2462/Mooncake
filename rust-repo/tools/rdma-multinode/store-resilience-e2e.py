@@ -51,6 +51,60 @@ for entry in os.listdir("/proc"):
             pass"""
 
 
+STOP_DOCKER_EXEC = r"""# MOONCAKE_DOCKER_STOP_V1
+import json,os,signal,sys,time
+token=sys.argv[1]
+marker=f"MOONCAKE_RDMA_EXEC_TOKEN={token}".encode()
+deadline=time.monotonic()+float(sys.argv[2])
+observed=False
+owned=set()
+
+def matches():
+    found=[]
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry)==os.getpid():
+            continue
+        try:
+            values=open(f"/proc/{entry}/environ","rb").read().split(b"\0")
+            if marker in values:
+                found.append(int(entry))
+        except (FileNotFoundError,ProcessLookupError,PermissionError):
+            pass
+    return found
+
+while time.monotonic()<deadline:
+    pids=matches()
+    if pids:
+        observed=True
+        owned.update(pids)
+        break
+    time.sleep(0.02)
+else:
+    pids=[]
+
+for sig,grace in ((signal.SIGTERM,0.5),(signal.SIGKILL,0.5)):
+    owned.update(matches())
+    for pid in owned:
+        try:
+            os.kill(pid,sig)
+        except ProcessLookupError:
+            pass
+    until=time.monotonic()+grace
+    while time.monotonic()<until:
+        owned.update(matches())
+        remaining=[pid for pid in owned if os.path.exists(f"/proc/{pid}")]
+        if not remaining:
+            break
+        time.sleep(0.02)
+    if not remaining:
+        break
+
+owned.update(matches())
+remaining=[pid for pid in owned if os.path.exists(f"/proc/{pid}")]
+print(json.dumps({"observed":observed,"absent":not remaining,"remaining":remaining}))
+raise SystemExit(0 if not remaining else 1)"""
+
+
 def _require(condition, message):
     if not condition:
         raise ScenarioFailure(message)
@@ -69,6 +123,10 @@ def validate_evidence(name, evidence):
         _require(
             evidence.get("link_down_observed") is True, "RDMA interruption not observed"
         )
+        _require(
+            evidence.get("interruption_failed_read") is True,
+            "RDMA interruption did not prove a failed read",
+        )
         _require(evidence.get("link_restored") is True, "RDMA reconnect failed")
         _require(
             evidence.get("post_reconnect_read") is True, "post-reconnect read failed"
@@ -80,8 +138,11 @@ def validate_evidence(name, evidence):
         _require(
             bool(evidence.get("unavailable_owner")), "unavailable owner not recorded"
         )
-        _require(evidence.get("remaining_owners", 0) >= 1, "no remaining replica owner")
-        _require(evidence.get("read_valid") is True, "invalid degraded read")
+        _require(
+            evidence.get("remaining_owners") == 1,
+            "degraded read did not retain exactly one owner",
+        )
+        _require(evidence.get("byte_valid") is True, "invalid degraded read bytes")
     elif name == "watermark_eviction":
         _require(
             evidence.get("memory_offloaded", 0) > 0, "memory watermark did not offload"
@@ -197,6 +258,172 @@ class DockerOrchestrator:
         self.seed_counter = 0
 
     async def command(self, command, timeout=30, check=True):
+        docker_exec = self._docker_exec_details(command)
+        docker_state_container = self._docker_state_container(command)
+        exec_token = None
+        executed_command = list(command)
+        if docker_exec is not None:
+            container, _detached = docker_exec
+            exec_token = f"{os.getpid()}-{time.monotonic_ns()}"
+            executed_command = [
+                command[0],
+                "exec",
+                "-e",
+                f"MOONCAKE_RDMA_EXEC_TOKEN={exec_token}",
+                *command[2:],
+            ]
+        process = await asyncio.create_subprocess_exec(
+            *executed_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        communicate = asyncio.create_task(process.communicate())
+        try:
+            stdout, _ = await asyncio.wait_for(
+                asyncio.shield(communicate), timeout=timeout
+            )
+        except asyncio.TimeoutError as error:
+            await self._reconcile_and_log(
+                command,
+                process,
+                communicate,
+                docker_exec,
+                exec_token,
+                docker_state_container,
+            )
+            raise ScenarioFailure(f"command timed out: {command!r}") from error
+        except asyncio.CancelledError:
+            await self._reconcile_and_log(
+                command,
+                process,
+                communicate,
+                docker_exec,
+                exec_token,
+                docker_state_container,
+            )
+            raise
+        output = stdout.decode(errors="replace")
+        result = subprocess.CompletedProcess(command, process.returncode, output)
+        self._write_command_log(command, output)
+        if check and result.returncode != 0:
+            raise ScenarioFailure(
+                f"command failed rc={result.returncode}: {command!r}: {result.stdout[-1000:]}"
+            )
+        return result
+
+    def _docker_exec_details(self, command):
+        if (
+            len(command) < 4
+            or Path(command[0]).name != "docker"
+            or command[1] != "exec"
+        ):
+            return None
+        index = 2
+        detached = False
+        options_with_values = {"-e", "--env", "-u", "--user", "-w", "--workdir"}
+        while index < len(command) and command[index].startswith("-"):
+            option = command[index]
+            detached = detached or option in {"-d", "--detach"}
+            index += 2 if option in options_with_values else 1
+        _require(index < len(command), f"Docker exec has no container: {command!r}")
+        return command[index], detached
+
+    def _docker_state_container(self, command):
+        if (
+            len(command) >= 3
+            and Path(command[0]).name == "docker"
+            and command[1] in {"restart", "start"}
+        ):
+            return command[-1]
+        return None
+
+    async def _reconcile_and_log(
+        self,
+        command,
+        process,
+        communicate,
+        docker_exec,
+        exec_token,
+        docker_state_container,
+    ):
+        try:
+            output, reconciliation = await self._reconcile_interrupted_docker(
+                command,
+                process,
+                communicate,
+                docker_exec,
+                exec_token,
+                docker_state_container,
+            )
+        except Exception as error:
+            try:
+                output, _forced = await self._settle_local_cli(process, communicate)
+            except Exception as settle_error:
+                output = f"failed to settle local Docker CLI: {settle_error}\n"
+            self._write_command_log(
+                command,
+                output,
+                f"Docker reconciliation failed: {error}\n",
+            )
+            raise
+        self._write_command_log(command, output, reconciliation)
+
+    async def _reconcile_interrupted_docker(
+        self,
+        command,
+        process,
+        communicate,
+        docker_exec,
+        exec_token,
+        docker_state_container,
+    ):
+        reconciliation = []
+        if docker_exec is not None:
+            container, _detached = docker_exec
+            completed_before_stop = communicate.done()
+            stop = await self._raw_command(
+                [
+                    command[0],
+                    "exec",
+                    container,
+                    "python3",
+                    "-c",
+                    STOP_DOCKER_EXEC,
+                    exec_token,
+                    "2.0",
+                ],
+                timeout=4,
+            )
+            reconciliation.append(stop.stdout)
+            state = self._parse_stopper_state(stop.stdout)
+            output, forced_local_stop = await self._settle_local_cli(
+                process, communicate
+            )
+            if stop.returncode != 0 or not state.get("absent"):
+                raise ScenarioFailure(
+                    f"Docker exec token {exec_token} was not absent after interruption: {stop.stdout}"
+                )
+            if (
+                not state.get("observed")
+                and not completed_before_stop
+                and forced_local_stop
+            ):
+                raise ScenarioFailure(
+                    f"Docker exec token {exec_token} never reached a settled daemon state"
+                )
+            return output, "".join(reconciliation)
+        if docker_state_container is not None:
+            state_output = await self._wait_container_settled(
+                command[0], docker_state_container
+            )
+            reconciliation.append(state_output)
+            output, _forced = await self._settle_local_cli(process, communicate)
+            return output, "".join(reconciliation)
+        output = await self._terminate_process_group(process, communicate)
+        return output.decode(errors="replace"), ""
+
+    async def _raw_command(self, command, timeout):
         process = await asyncio.create_subprocess_exec(
             *command,
             stdout=asyncio.subprocess.PIPE,
@@ -209,21 +436,70 @@ class DockerOrchestrator:
                 asyncio.shield(communicate), timeout=timeout
             )
         except asyncio.TimeoutError as error:
-            await self._terminate_process_group(process, communicate)
-            raise ScenarioFailure(f"command timed out: {command!r}") from error
-        except asyncio.CancelledError:
-            await self._terminate_process_group(process, communicate)
-            raise
-        output = stdout.decode(errors="replace")
-        result = subprocess.CompletedProcess(command, process.returncode, output)
+            stdout = await self._terminate_process_group(process, communicate)
+            raise ScenarioFailure(
+                f"Docker reconciliation command timed out: {command!r}: "
+                f"{stdout.decode(errors='replace')}"
+            ) from error
+        return subprocess.CompletedProcess(
+            command, process.returncode, stdout.decode(errors="replace")
+        )
+
+    def _parse_stopper_state(self, output):
+        for line in output.splitlines():
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict) and "absent" in value:
+                return value
+        return {}
+
+    async def _wait_container_settled(self, docker, container):
+        deadline = time.monotonic() + 4
+        evidence = []
+        while time.monotonic() < deadline:
+            inspect = await self._raw_command(
+                [docker, "inspect", "-f", "{{json .State}}", container],
+                timeout=1,
+            )
+            evidence.append(inspect.stdout)
+            if inspect.returncode == 0:
+                try:
+                    state = json.loads(inspect.stdout.strip())
+                except ValueError:
+                    state = {}
+                health = state.get("Health", {}).get("Status")
+                if (
+                    state.get("Running") is True
+                    and state.get("Status") == "running"
+                    and health
+                    in {
+                        None,
+                        "healthy",
+                    }
+                ):
+                    return "".join(evidence)
+            await asyncio.sleep(0.05)
+        raise ScenarioFailure(
+            f"Docker container {container} did not settle running/healthy: {''.join(evidence)}"
+        )
+
+    async def _settle_local_cli(self, process, communicate):
+        try:
+            stdout, _ = await asyncio.wait_for(asyncio.shield(communicate), timeout=0.5)
+            forced = False
+        except asyncio.TimeoutError:
+            stdout = await self._terminate_process_group(process, communicate)
+            forced = True
+        return stdout.decode(errors="replace"), forced
+
+    def _write_command_log(self, command, output, reconciliation=""):
         if self.current_log is not None:
             with self.current_log.open("a", encoding="utf-8") as stream:
-                stream.write(f"$ {command!r}\n{result.stdout}")
-        if check and result.returncode != 0:
-            raise ScenarioFailure(
-                f"command failed rc={result.returncode}: {command!r}: {result.stdout[-1000:]}"
-            )
-        return result
+                stream.write(f"$ {command!r}\n{output}")
+                if reconciliation:
+                    stream.write(f"\n[reconciliation]\n{reconciliation}")
 
     async def _terminate_process_group(self, process, communicate):
         if process.returncode is None:
@@ -232,15 +508,20 @@ class DockerOrchestrator:
             except ProcessLookupError:
                 pass
             try:
-                await asyncio.wait_for(asyncio.shield(communicate), timeout=2)
+                stdout, _ = await asyncio.wait_for(
+                    asyncio.shield(communicate), timeout=2
+                )
             except asyncio.TimeoutError:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                await asyncio.wait_for(asyncio.shield(communicate), timeout=2)
+                stdout, _ = await asyncio.wait_for(
+                    asyncio.shield(communicate), timeout=2
+                )
         else:
-            await communicate
+            stdout, _ = await communicate
+        return stdout
 
     async def wait_until(self, predicate, description, timeout=30, interval=0.2):
         deadline = time.monotonic() + timeout
@@ -594,7 +875,7 @@ class DockerOrchestrator:
             "initial_owners": len(owners),
             "unavailable_owner": unavailable,
             "remaining_owners": len(remaining),
-            "read_valid": valid,
+            "byte_valid": valid,
         }
 
     async def scenario_watermark_eviction(self):

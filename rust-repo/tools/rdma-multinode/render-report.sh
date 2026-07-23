@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+suite_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=lib/common.sh
+source "$suite_dir/lib/common.sh"
 artifact_root=${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}
 report=${RDMA_REPORT:-$artifact_root/report.md}
 standard_store_result=${STORE_STANDARD_RESULT:-$artifact_root/store-standard.result}
@@ -9,7 +12,7 @@ fi
 grep -q '^PASS$' "$artifact_root/verbs.result"
 grep -q '^status=PASS$' "$artifact_root/te.result"
 grep -q '^protocol=rdma$' "$artifact_root/te.result"
-grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"' "$standard_store_result"
+json_status_is "$standard_store_result" PASS
 store_json=$(cat "$standard_store_result")
 resilience_result=$artifact_root/store-resilience.result
 test -f "$resilience_result"

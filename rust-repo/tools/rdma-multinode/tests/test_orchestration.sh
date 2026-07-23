@@ -29,20 +29,24 @@ case "$stage" in
             printf '{"status":"FAIL","first_failure":"rdma_reconnect","scenarios":{"rdma_reconnect":{"status":"FAIL"}}}\n' \
                 >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
         else
-            printf '%s\n' '{"status":"PASS","first_failure":null,"scenarios":{"store_node_restart":{"status":"PASS","scenario":"store_node_restart","evidence":{"duration_seconds":0.1,"restart":true,"post_restart_read":true}},"master_etcd_restart":{"status":"PASS","scenario":"master_etcd_restart","evidence":{"duration_seconds":0.1,"master_recovered":true,"etcd_recovered":true,"post_restart_read":true}},"rdma_reconnect":{"status":"PASS","scenario":"rdma_reconnect","evidence":{"duration_seconds":0.1,"link_down_observed":true,"link_restored":true,"post_reconnect_read":true}},"degraded_read":{"status":"PASS","scenario":"degraded_read","evidence":{"duration_seconds":0.1,"initial_owners":2,"unavailable_owner":"node-a","remaining_owners":1,"read_valid":true}},"watermark_eviction":{"status":"PASS","scenario":"watermark_eviction","evidence":{"duration_seconds":0.1,"memory_offloaded":1,"ssd_evicted":1,"high_ratio":0.6,"low_ratio":0.3}},"mixed_stress":{"status":"PASS","scenario":"mixed_stress","evidence":{"duration_seconds":0.1,"operations":12,"sizes":[4096,1048576,8388608],"byte_identical":true}},"second_standard":{"status":"PASS","scenario":"second_standard","evidence":{"duration_seconds":0.1,"standard_status":"PASS","complete":true}}}}' \
+            printf '%s\n' '{"status":"PASS","first_failure":null,"scenarios":{"store_node_restart":{"status":"PASS","scenario":"store_node_restart","evidence":{"duration_seconds":0.1,"restart":true,"post_restart_read":true}},"master_etcd_restart":{"status":"PASS","scenario":"master_etcd_restart","evidence":{"duration_seconds":0.1,"master_recovered":true,"etcd_recovered":true,"post_restart_read":true}},"rdma_reconnect":{"status":"PASS","scenario":"rdma_reconnect","evidence":{"duration_seconds":0.1,"link_down_observed":true,"interruption_failed_read":true,"link_restored":true,"post_reconnect_read":true}},"degraded_read":{"status":"PASS","scenario":"degraded_read","evidence":{"duration_seconds":0.1,"initial_owners":2,"unavailable_owner":"node-a","remaining_owners":1,"byte_valid":true}},"watermark_eviction":{"status":"PASS","scenario":"watermark_eviction","evidence":{"duration_seconds":0.1,"memory_offloaded":1,"ssd_evicted":1,"high_ratio":0.6,"low_ratio":0.3}},"mixed_stress":{"status":"PASS","scenario":"mixed_stress","evidence":{"duration_seconds":0.1,"operations":12,"sizes":[4096,1048576,8388608],"byte_identical":true}},"second_standard":{"status":"PASS","scenario":"second_standard","evidence":{"duration_seconds":0.1,"standard_status":"PASS","complete":true}}}}' \
                 >"$RDMA_ARTIFACT_ROOT/store-resilience.result"
         fi
         ;;
 esac
 
-if [[ $stage == store-resilience && ${RESILIENCE_INVALID_EVIDENCE:-0} == 1 ]]; then
+if [[ $stage == store-resilience && ${RESILIENCE_INVALID_EVIDENCE:-0} != 0 ]]; then
     python3 - "$RDMA_ARTIFACT_ROOT/store-resilience.result" <<'PY'
 import json
+import os
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as stream:
     result = json.load(stream)
-result["scenarios"]["rdma_reconnect"]["evidence"]["link_restored"] = False
+if os.environ["RESILIENCE_INVALID_EVIDENCE"] == "interruption":
+    result["scenarios"]["rdma_reconnect"]["evidence"]["interruption_failed_read"] = False
+else:
+    result["scenarios"]["degraded_read"]["evidence"]["remaining_owners"] = 2
 with open(sys.argv[1], "w", encoding="utf-8") as stream:
     json.dump(result, stream)
 PY
@@ -118,16 +122,31 @@ if bash "$suite_dir/run.sh" store-resilience; then
 fi
 unset RESILIENCE_TOP_LEVEL_ONLY
 
-invalid_evidence_root="$tmp_dir/invalid-evidence"
-mkdir -p "$invalid_evidence_root"
-stage_environment "$invalid_evidence_root"
-printf '{"status":"PASS"}\n' >"$invalid_evidence_root/store-standard.result"
-export RESILIENCE_INVALID_EVIDENCE=1
+for invalid_evidence in interruption degraded-owner-count; do
+    invalid_evidence_root="$tmp_dir/invalid-evidence-$invalid_evidence"
+    mkdir -p "$invalid_evidence_root"
+    stage_environment "$invalid_evidence_root"
+    printf '{"status":"PASS"}\n' >"$invalid_evidence_root/store-standard.result"
+    export RESILIENCE_INVALID_EVIDENCE=$invalid_evidence
+    if bash "$suite_dir/run.sh" store-resilience; then
+        printf 'accepted resilience PASS with invalid %s evidence\n' \
+            "$invalid_evidence" >&2
+        exit 1
+    fi
+done
+unset RESILIENCE_INVALID_EVIDENCE
+
+nested_pass_root="$tmp_dir/nested-pass-prerequisite"
+mkdir -p "$nested_pass_root"
+stage_environment "$nested_pass_root"
+printf '{"status":"FAIL","nested":{"status":"PASS"}}\n' \
+    >"$nested_pass_root/store-standard.result"
 if bash "$suite_dir/run.sh" store-resilience; then
-    printf 'accepted resilience PASS with failed reconnect evidence\n' >&2
+    printf 'accepted nested PASS as the standard prerequisite\n' >&2
     exit 1
 fi
-unset RESILIENCE_INVALID_EVIDENCE
+grep -Fx 'status=BLOCKED' "$nested_pass_root/store-resilience.result"
+grep -Fx 'reason=store-standard-gate' "$nested_pass_root/store-resilience.result"
 
 detailed_failure_root="$tmp_dir/detailed-failure"
 mkdir -p "$detailed_failure_root"

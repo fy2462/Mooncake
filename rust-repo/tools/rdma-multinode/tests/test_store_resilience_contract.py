@@ -1,9 +1,11 @@
 import asyncio
 import importlib.util
 import json
+import os
 from pathlib import Path
-from types import SimpleNamespace
 import sys
+import textwrap
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +21,135 @@ def load_script():
     return module
 
 
+def install_fake_docker(tmp_path, monkeypatch):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    state_root = tmp_path / "fake-docker-state"
+    state_root.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        textwrap.dedent(
+            r"""#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+root = Path(os.environ["FAKE_DOCKER_STATE"])
+args = sys.argv[1:]
+
+if args[0] == "exec":
+    index = 1
+    token = None
+    while index < len(args) and args[index].startswith("-"):
+        if args[index] == "-e":
+            assignment = args[index + 1]
+            if assignment.startswith("MOONCAKE_RDMA_EXEC_TOKEN="):
+                token = assignment.split("=", 1)[1]
+            index += 2
+        else:
+            index += 1
+    container = args[index]
+    inner = args[index + 1:]
+    if len(inner) >= 4 and inner[:2] == ["python3", "-c"] and "MOONCAKE_DOCKER_STOP_V1" in inner[2]:
+        stop_token = inner[3]
+        pid_file = root / f"exec-{stop_token}.pid"
+        deadline = time.monotonic() + 1.0
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        observed = pid_file.exists()
+        absent = True
+        if observed:
+            pid = int(pid_file.read_text())
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                absent = True
+                pid_file.unlink(missing_ok=True)
+            else:
+                absent = False
+        print(json.dumps({"observed": observed, "absent": absent}))
+        print("stopper-stderr", file=sys.stderr, flush=True)
+        raise SystemExit(0 if absent else 1)
+    if inner and inner[0] == "fake-delayed":
+        marker = inner[1]
+        worker = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,sys,time;time.sleep(0.25);pathlib.Path(sys.argv[1]).write_text('late')",
+                marker,
+            ],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        owned = token or "unowned"
+        (root / f"exec-{owned}.pid").write_text(str(worker.pid))
+        (root / "exec-started").write_text(owned)
+        print("exec-daemon-stdout", flush=True)
+        print("exec-daemon-stderr", file=sys.stderr, flush=True)
+        status = worker.wait()
+        (root / f"exec-{owned}.pid").unlink(missing_ok=True)
+        raise SystemExit(status)
+    raise SystemExit(0)
+
+if args[0] == "restart":
+    state = root / "restart-state"
+    state.write_text("restarting")
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib,sys,time;time.sleep(0.8);pathlib.Path(sys.argv[1]).write_text('running:healthy')",
+            str(state),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    print("restart-daemon-stderr", file=sys.stderr, flush=True)
+    time.sleep(10)
+
+if args[0] == "inspect":
+    state = (root / "restart-state").read_text()
+    healthy = state == "running:healthy"
+    print(json.dumps({
+        "Status": "running" if healthy else "restarting",
+        "Running": healthy,
+        "Health": {"Status": "healthy" if healthy else "starting"},
+    }))
+    raise SystemExit(0)
+
+raise SystemExit(0)
+"""
+        )
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("FAKE_DOCKER_STATE", str(state_root))
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    return state_root
+
+
 def valid_evidence(module, name):
     common = {"duration_seconds": 0.01}
     values = {
@@ -30,6 +161,7 @@ def valid_evidence(module, name):
         },
         "rdma_reconnect": {
             "link_down_observed": True,
+            "interruption_failed_read": True,
             "link_restored": True,
             "post_reconnect_read": True,
         },
@@ -37,7 +169,7 @@ def valid_evidence(module, name):
             "initial_owners": 2,
             "unavailable_owner": "node-a",
             "remaining_owners": 1,
-            "read_valid": True,
+            "byte_valid": True,
         },
         "watermark_eviction": {
             "memory_offloaded": 1,
@@ -74,7 +206,9 @@ def test_required_scenarios_have_strict_evidence_contracts():
     ("name", "change", "message"),
     [
         ("rdma_reconnect", {"link_restored": False}, "reconnect"),
-        ("degraded_read", {"read_valid": False}, "degraded"),
+        ("rdma_reconnect", {"interruption_failed_read": False}, "failed read"),
+        ("degraded_read", {"remaining_owners": 2}, "exactly one"),
+        ("degraded_read", {"byte_valid": False}, "degraded"),
         ("watermark_eviction", {"ssd_evicted": 0}, "SSD"),
         ("second_standard", {"complete": False}, "standard"),
     ],
@@ -211,6 +345,113 @@ async def test_command_timeout_kills_process_group_before_returning(tmp_path):
     assert (
         not delayed_marker.exists()
     ), "timed-out child mutated state after restoration began"
+
+
+@pytest.mark.parametrize("termination", ["cancel", "timeout"])
+@pytest.mark.asyncio
+async def test_docker_exec_is_absent_before_cancel_or_timeout_returns(
+    tmp_path, monkeypatch, termination
+):
+    module = load_script()
+    state_root = install_fake_docker(tmp_path, monkeypatch)
+    master_commands = tmp_path / "master.json"
+    node_commands = tmp_path / "nodes.json"
+    master_commands.write_text("[]\n")
+    node_commands.write_text("{}\n")
+    orchestrator = module.DockerOrchestrator(
+        SimpleNamespace(
+            artifact_root=str(tmp_path),
+            master_command_file=str(master_commands),
+            node_command_file=str(node_commands),
+        )
+    )
+    command_log = tmp_path / f"docker-exec-{termination}.log"
+    orchestrator.current_log = command_log
+    delayed_marker = tmp_path / f"docker-{termination}-late"
+
+    if termination == "cancel":
+        task = asyncio.create_task(
+            orchestrator.command(
+                [
+                    "docker",
+                    "exec",
+                    "fake-container",
+                    "fake-delayed",
+                    str(delayed_marker),
+                ],
+                timeout=5,
+            )
+        )
+        deadline = asyncio.get_running_loop().time() + 1
+        while not (state_root / "exec-started").exists():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(module.ScenarioFailure, match="timed out"):
+            await orchestrator.command(
+                [
+                    "docker",
+                    "exec",
+                    "fake-container",
+                    "fake-delayed",
+                    str(delayed_marker),
+                ],
+                timeout=0.05,
+            )
+
+    await asyncio.sleep(0.3)
+    assert (
+        not delayed_marker.exists()
+    ), "Docker exec mutated state after command returned"
+    assert not list(state_root.glob("exec-*.pid")), "owned Docker exec PID remained"
+    log = command_log.read_text()
+    assert "exec-daemon-stderr" in log
+    assert "stopper-stderr" in log
+
+
+@pytest.mark.parametrize("termination", ["cancel", "timeout"])
+@pytest.mark.asyncio
+async def test_docker_restart_is_settled_before_cancel_or_timeout_returns(
+    tmp_path, monkeypatch, termination
+):
+    module = load_script()
+    state_root = install_fake_docker(tmp_path, monkeypatch)
+    master_commands = tmp_path / "master.json"
+    node_commands = tmp_path / "nodes.json"
+    master_commands.write_text("[]\n")
+    node_commands.write_text("{}\n")
+    orchestrator = module.DockerOrchestrator(
+        SimpleNamespace(
+            artifact_root=str(tmp_path),
+            master_command_file=str(master_commands),
+            node_command_file=str(node_commands),
+        )
+    )
+    command_log = tmp_path / f"docker-restart-{termination}.log"
+    orchestrator.current_log = command_log
+
+    if termination == "cancel":
+        task = asyncio.create_task(
+            orchestrator.command(["docker", "restart", "fake-container"], timeout=5)
+        )
+        deadline = asyncio.get_running_loop().time() + 1
+        while not (state_root / "restart-state").exists():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(module.ScenarioFailure, match="timed out"):
+            await orchestrator.command(
+                ["docker", "restart", "fake-container"], timeout=0.05
+            )
+
+    assert (state_root / "restart-state").read_text() == "running:healthy"
+    assert "restart-daemon-stderr" in command_log.read_text()
 
 
 @pytest.mark.asyncio

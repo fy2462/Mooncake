@@ -19,6 +19,25 @@ require_path() {
     }
 }
 
+json_status_is() {
+    local path=$1 expected=$2
+    python3 - "$path" "$expected" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(
+    0
+    if isinstance(value, dict) and value.get("status") == sys.argv[2]
+    else 1
+)
+PY
+}
+
 owned_name() {
     [[ ${1:-} == mc-rdma-* && ${1:-} != *'/'* && ${1:-} != *'..'* ]]
 }

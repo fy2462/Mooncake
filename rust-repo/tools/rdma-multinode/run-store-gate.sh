@@ -193,7 +193,7 @@ if [[ $mode == standard ]]; then
         --device "$device" --metadata "$metadata" --master "$master_addr" \
         --mode standard --prefix first-standard --tier-timeout 45 \
         --result /artifacts/store.result >"$artifact_root/store-client.log" 2>&1
-    grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"' "$result"
+    json_status_is "$result" PASS
     cp -- "$result" "$artifact_root/store-standard.result"
 else
     python3 "$suite_dir/store-resilience-e2e.py" \
@@ -207,5 +207,5 @@ else
         --client "$client" --etcd "$etcd" \
         --device "$device" --metadata "$metadata" --master "$master_addr" \
         --scenario-timeout "$scenario_timeout"
-    grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"' "$result"
+    json_status_is "$result" PASS
 fi

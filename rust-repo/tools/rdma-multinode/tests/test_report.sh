@@ -21,6 +21,13 @@ grep -q 'mock-only API/driver evidence' "$tmp_dir/report.md"
 grep -q 'shared-rdma-device' "$tmp_dir/report.md"
 grep -q 'Rust Store resilience: PASS' "$tmp_dir/report.md"
 
+printf '{"status":"FAIL","nested":{"status":"PASS"}}\n' >"$tmp_dir/store.result"
+if RDMA_ARTIFACT_ROOT="$tmp_dir" bash "$suite_dir/render-report.sh"; then
+    printf 'report accepted nested Store PASS with top-level FAIL\n' >&2
+    exit 1
+fi
+printf '{"status":"PASS"}\n' >"$tmp_dir/store.result"
+
 python3 - "$tmp_dir/store-resilience.result" <<'PY'
 import json
 import sys
