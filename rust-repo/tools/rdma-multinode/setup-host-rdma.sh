@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=host-rdma-manifest.sh
+source "$script_dir/host-rdma-manifest.sh"
+
 artifact_root=${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}
 env_manifest="$artifact_root/host-rdma.env"
 json_manifest="$artifact_root/host-rdma.json"
@@ -16,14 +20,6 @@ owned_name() {
     esac
 }
 
-manifest_value() {
-    sed -nE "s/.*\\\"$1\\\":\\\"([^\\\"]*)\\\".*/\\1/p" "$json_manifest"
-}
-
-manifest_flag() {
-    sed -nE "s/.*\\\"$1\\\":(true|false).*/\\1/p" "$json_manifest"
-}
-
 owned_name "$device" && owned_name "$veth" && owned_name "$peer_veth" || {
     printf 'refusing unowned host RDMA resource names\n' >&2
     exit 2
@@ -34,10 +30,14 @@ mkdir -p -- "$artifact_root"
 previous_owned_rxe=false
 previous_owned_veth=false
 if [[ -f $json_manifest ]]; then
-    if [[ $(manifest_value device) == "$device" && $(manifest_flag owned_rxe) == true ]]; then
+    host_rdma_load_manifest "$json_manifest" || {
+        printf 'refusing malformed host RDMA ownership manifest\n' >&2
+        exit 1
+    }
+    if [[ $host_rdma_manifest_device == "$device" && $host_rdma_manifest_owned_rxe == true ]]; then
         previous_owned_rxe=true
     fi
-    if [[ $(manifest_value veth) == "$veth" && $(manifest_flag owned_veth) == true ]]; then
+    if [[ $host_rdma_manifest_veth == "$veth" && $host_rdma_manifest_owned_veth == true ]]; then
         previous_owned_veth=true
     fi
 fi

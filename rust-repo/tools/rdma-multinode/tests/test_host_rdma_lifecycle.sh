@@ -172,6 +172,16 @@ fi
 test -e "$state_dir/rxe"
 test -e "$state_dir/veth"
 
+: >"$FAKE_LOG"
+if bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
+    printf 'accepted an extended ownership manifest for existing resources\n' >&2
+    exit 1
+fi
+test ! -s "$FAKE_LOG"
+test -e "$state_dir/rxe"
+test -e "$state_dir/veth"
+grep -Fq '"extra":true' "$artifact_root/host-rdma.json"
+
 rm -rf -- "$artifact_root" "$state_dir"
 mkdir -p "$artifact_root" "$state_dir"
 if FAKE_PORT_STATE=PORT_DOWN bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then

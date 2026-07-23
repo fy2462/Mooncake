@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=host-rdma-manifest.sh
+source "$script_dir/host-rdma-manifest.sh"
+
 artifact_root=${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}
 env_manifest="$artifact_root/host-rdma.env"
 json_manifest="$artifact_root/host-rdma.json"
@@ -12,17 +16,15 @@ if [[ ! -f $json_manifest ]]; then
     exit 0
 fi
 
-mapfile -t manifest_lines <"$json_manifest"
-manifest_pattern='^\{"device":"(mc-rdma-rxe)","veth":"(mc-rdma-net-a)","peer_veth":"(mc-rdma-net-b)","address":"(10\.90\.0\.1/30)","gid":"([[:xdigit:].:]+)","owned_rxe":(true|false),"owned_veth":(true|false)\}$'
-if (( ${#manifest_lines[@]} != 1 )) || ! [[ ${manifest_lines[0]} =~ $manifest_pattern ]]; then
+if ! host_rdma_load_manifest "$json_manifest"; then
     printf 'refusing malformed host RDMA ownership manifest\n' >&2
     exit 1
 fi
 
-manifest_device=${BASH_REMATCH[1]}
-manifest_veth=${BASH_REMATCH[2]}
-owned_rxe=${BASH_REMATCH[6]}
-owned_veth=${BASH_REMATCH[7]}
+manifest_device=$host_rdma_manifest_device
+manifest_veth=$host_rdma_manifest_veth
+owned_rxe=$host_rdma_manifest_owned_rxe
+owned_veth=$host_rdma_manifest_owned_veth
 
 if [[ $owned_rxe == true && $manifest_device == "$device" ]]; then
     if sudo rdma link show "$device/1" >/dev/null 2>&1; then
