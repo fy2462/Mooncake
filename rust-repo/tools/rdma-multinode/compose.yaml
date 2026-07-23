@@ -10,58 +10,44 @@ x-rdma-node: &rdma-node
     - ${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}:/artifacts
     - /dev/infiniband:/dev/infiniband
   command: [sleep, infinity]
-  networks: [rdma]
+  network_mode: host
 
 services:
   etcd:
     image: quay.io/coreos/etcd:v3.5.17
     container_name: mc-rdma-etcd
+    network_mode: host
     command:
       - etcd
       - --data-dir=/tmp/etcd-data
       - --listen-client-urls=http://0.0.0.0:2379
-      - --advertise-client-urls=http://10.89.10.10:2379
-    networks:
-      rdma: {ipv4_address: 10.89.10.10}
+      - --advertise-client-urls=http://127.0.0.1:2379
+    healthcheck:
+      test: [CMD-SHELL, etcdctl endpoint health --endpoints=http://127.0.0.1:2379]
+      interval: 2s
+      timeout: 2s
+      retries: 15
 
-  te-a:
+  te-node-a:
     <<: *rdma-node
-    container_name: mc-rdma-te-a
-    networks:
-      rdma: {ipv4_address: 10.89.10.21}
+    container_name: mc-rdma-te-node-a
 
-  te-b:
+  te-node-b:
     <<: *rdma-node
-    container_name: mc-rdma-te-b
-    networks:
-      rdma: {ipv4_address: 10.89.10.22}
+    container_name: mc-rdma-te-node-b
 
-  master:
+  rust-master:
     <<: *rdma-node
-    container_name: mc-rdma-master
-    networks:
-      rdma: {ipv4_address: 10.89.10.30}
+    container_name: mc-rdma-rust-master
 
-  store-a:
+  store-node-a:
     <<: *rdma-node
-    container_name: mc-rdma-store-a
-    networks:
-      rdma: {ipv4_address: 10.89.10.31}
+    container_name: mc-rdma-store-node-a
 
-  store-b:
+  store-node-b:
     <<: *rdma-node
-    container_name: mc-rdma-store-b
-    networks:
-      rdma: {ipv4_address: 10.89.10.32}
+    container_name: mc-rdma-store-node-b
 
-  client:
+  store-test-client:
     <<: *rdma-node
-    container_name: mc-rdma-client
-    networks:
-      rdma: {ipv4_address: 10.89.10.40}
-
-networks:
-  rdma:
-    name: mc-rdma-net
-    ipam:
-      config: [{subnet: 10.89.10.0/24}]
+    container_name: mc-rdma-store-test-client
