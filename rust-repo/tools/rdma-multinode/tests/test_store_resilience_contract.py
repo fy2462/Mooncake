@@ -1,10 +1,14 @@
 import asyncio
+import builtins
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import textwrap
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -185,6 +189,66 @@ def valid_evidence(module, name):
         "second_standard": {"standard_status": "PASS", "complete": True},
     }
     return common | values[name]
+
+
+def test_docker_stopper_does_not_signal_reused_pid(monkeypatch, capsys):
+    module = load_script()
+    pid = 424242
+    token = "pid-reuse-probe"
+    marker = f"MOONCAKE_RDMA_EXEC_TOKEN={token}".encode()
+    state = {"starttime": "101", "clock": 0.0}
+    signals = []
+    real_open = builtins.open
+    real_listdir = os.listdir
+    real_exists = os.path.exists
+
+    def stat_record():
+        fields = ["S", *("0" for _ in range(49))]
+        fields[19] = state["starttime"]
+        return f"{pid} (worker ) with parens) {' '.join(fields)}\n".encode()
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if path == f"/proc/{pid}/environ":
+            return io.BytesIO(marker + b"\0")
+        if path == f"/proc/{pid}/stat":
+            return io.BytesIO(stat_record())
+        return real_open(path, mode, *args, **kwargs)
+
+    def fake_listdir(path):
+        if path == "/proc":
+            return [str(pid)]
+        return real_listdir(path)
+
+    def fake_exists(path):
+        if path == f"/proc/{pid}":
+            return True
+        return real_exists(path)
+
+    def fake_kill(target, sent_signal):
+        assert target == pid
+        signals.append(sent_signal)
+        if sent_signal == signal.SIGTERM:
+            state["starttime"] = "202"
+
+    def fake_monotonic():
+        state["clock"] += 0.1
+        return state["clock"]
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(os, "listdir", fake_listdir)
+    monkeypatch.setattr(os.path, "exists", fake_exists)
+    monkeypatch.setattr(os, "kill", fake_kill)
+    monkeypatch.setattr(time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(sys, "argv", ["stopper", token, "0.3"])
+
+    with pytest.raises(SystemExit) as exit_info:
+        exec(module.STOP_DOCKER_EXEC, {})
+
+    assert exit_info.value.code == 0
+    assert signals == [signal.SIGTERM]
+    stopper_state = json.loads(capsys.readouterr().out)
+    assert stopper_state == {"observed": True, "absent": True, "remaining": []}
 
 
 def test_required_scenarios_have_strict_evidence_contracts():

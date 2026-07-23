@@ -57,50 +57,95 @@ token=sys.argv[1]
 marker=f"MOONCAKE_RDMA_EXEC_TOKEN={token}".encode()
 deadline=time.monotonic()+float(sys.argv[2])
 observed=False
-owned=set()
+owned={}
+retired=set()
 
-def matches():
+def starttime(pid):
+    try:
+        record=open(f"/proc/{pid}/stat","rb").read()
+    except (FileNotFoundError,ProcessLookupError,PermissionError):
+        return None
+    close=record.rfind(b")")
+    fields=record[close+1:].split() if close>=0 else []
+    return fields[19] if len(fields)>19 else None
+
+def has_token(pid):
+    try:
+        values=open(f"/proc/{pid}/environ","rb").read().split(b"\0")
+        return marker in values
+    except (FileNotFoundError,ProcessLookupError,PermissionError):
+        return False
+
+def snapshot(pid):
+    before=starttime(pid)
+    if before is None or not has_token(pid):
+        return None
+    return before if starttime(pid)==before else None
+
+def matches_identity(pid,original_starttime):
+    before=starttime(pid)
+    return (
+        before==original_starttime
+        and has_token(pid)
+        and starttime(pid)==original_starttime
+    )
+
+def discover():
     found=[]
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry)==os.getpid():
             continue
-        try:
-            values=open(f"/proc/{entry}/environ","rb").read().split(b"\0")
-            if marker in values:
-                found.append(int(entry))
-        except (FileNotFoundError,ProcessLookupError,PermissionError):
-            pass
+        pid=int(entry)
+        identity=snapshot(pid)
+        if identity is not None:
+            found.append((pid,identity))
     return found
 
-while time.monotonic()<deadline:
-    pids=matches()
-    if pids:
+def refresh():
+    global observed
+    for pid,identity in discover():
         observed=True
-        owned.update(pids)
+        if pid not in owned:
+            owned[pid]=identity
+
+def original_is_live(pid,identity):
+    if pid in retired:
+        return False
+    if matches_identity(pid,identity):
+        return True
+    retired.add(pid)
+    return False
+
+def remaining_originals():
+    return [pid for pid,identity in owned.items() if original_is_live(pid,identity)]
+
+while time.monotonic()<deadline:
+    refresh()
+    if owned:
         break
     time.sleep(0.02)
-else:
-    pids=[]
 
 for sig,grace in ((signal.SIGTERM,0.5),(signal.SIGKILL,0.5)):
-    owned.update(matches())
-    for pid in owned:
-        try:
-            os.kill(pid,sig)
-        except ProcessLookupError:
-            pass
+    refresh()
+    for pid,identity in owned.items():
+        if original_is_live(pid,identity):
+            try:
+                os.kill(pid,sig)
+            except ProcessLookupError:
+                pass
     until=time.monotonic()+grace
+    remaining=remaining_originals()
     while time.monotonic()<until:
-        owned.update(matches())
-        remaining=[pid for pid in owned if os.path.exists(f"/proc/{pid}")]
+        refresh()
+        remaining=remaining_originals()
         if not remaining:
             break
         time.sleep(0.02)
     if not remaining:
         break
 
-owned.update(matches())
-remaining=[pid for pid in owned if os.path.exists(f"/proc/{pid}")]
+refresh()
+remaining=remaining_originals()
 print(json.dumps({"observed":observed,"absent":not remaining,"remaining":remaining}))
 raise SystemExit(0 if not remaining else 1)"""
 
