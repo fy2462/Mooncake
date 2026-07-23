@@ -237,11 +237,14 @@ pub(crate) fn client_id_by_segment_name(state: &MasterState, segment_name: &str)
         .map(|entry| entry.client_id)
 }
 
-/// 获取对象的 owner client_id：优先使用 replica 的 holder_client_id，
-/// fallback 到 segment 所属客户端。
-/// Get object's owner client_id: prefer replica's holder_client_id,
-/// fallback to the segment's owning client.
+/// 获取对象的 owner client_id：优先使用对象记录的写入客户端；旧快照中该字段为 nil 时，
+/// fallback 到 replica holder 或 segment 所属客户端。
+/// Get an object's owner client ID from its recorded writer. For legacy snapshots
+/// where that field is nil, fall back to a replica holder or segment owner.
 pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) -> Option<Uuid> {
+    if object.client_id != Uuid::nil() {
+        return Some(object.client_id);
+    }
     object.replicas.iter().find_map(|replica| {
         replica
             .holder_client_id
@@ -818,6 +821,31 @@ pub fn validate_user_key(key: &str) -> Result<(), Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_owner_prefers_explicit_writer_without_replicas() {
+        let state = MasterState::empty();
+        let writer = Uuid::new_v4();
+        let object = ObjectEntry {
+            replicas: Vec::new(),
+            size: 1,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: writer,
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: DEFAULT_TENANT.to_string(),
+            group_id: String::new(),
+            quota_committed: false,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".to_string(),
+        };
+
+        assert_eq!(object_owner_client_id(&state, &object), Some(writer));
+    }
 
     #[test]
     fn normalize_tenant_id_ref_defaults_without_allocating_new_value() {
