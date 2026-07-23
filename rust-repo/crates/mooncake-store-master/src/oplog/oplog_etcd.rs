@@ -11,6 +11,10 @@ pub struct EtcdOpLogStore {
 }
 
 impl EtcdOpLogStore {
+    fn inclusive_range_start(since_seq: u64) -> u64 {
+        since_seq
+    }
+
     /// Create an etcd-backed oplog store, recovering last_seq from the /latest key.
     /// 创建 etcd oplog store，通过读取 `/latest` key 恢复 last_seq。
     pub async fn new(client: etcd_client::Client, key_prefix: &str) -> Result<Self, HaError> {
@@ -112,6 +116,24 @@ impl EtcdOpLogStore {
         metrics::OPLOG_SYNC_BATCH_COMMITS.inc();
         metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EtcdOpLogStore;
+
+    #[test]
+    fn inclusive_read_range_starts_at_requested_sequence() {
+        assert_eq!(EtcdOpLogStore::inclusive_range_start(0), 0);
+        assert_eq!(EtcdOpLogStore::inclusive_range_start(7), 7);
+        assert_eq!(
+            EtcdOpLogStore::format_entry_key(
+                "/oplog/cluster",
+                EtcdOpLogStore::inclusive_range_start(7),
+            ),
+            "/oplog/cluster/00000000000000000007"
+        );
     }
 }
 
@@ -394,9 +416,10 @@ impl EtcdOpLogStore {
         let mut entries = Vec::new();
         let c = self.client.clone();
 
-        // C++ ReadOpLogSinceWithRevision returns entries strictly after start_sequence_id.
+        // OpLogStore::read_since is inclusive, matching the in-memory and
+        // local-file backends.
         let range_end = self.entry_key(u64::MAX);
-        let range_start = self.entry_key(since_seq.saturating_add(1));
+        let range_start = self.entry_key(Self::inclusive_range_start(since_seq));
 
         let revision = match c
             .kv_client()
@@ -429,7 +452,7 @@ impl EtcdOpLogStore {
 
         // Supplement with buffered (not yet flushed) entries
         for entry in &self.buffer {
-            if entry.seq > since_seq
+            if entry.seq >= since_seq
                 && entries.len() < max_count
                 && !entries.iter().any(|e| e.seq == entry.seq)
             {

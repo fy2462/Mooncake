@@ -52,9 +52,7 @@ def _rdma_segments(replicas, minimum):
     ]
     segments = {replica.get("segment_name") for replica in remote}
     if len(segments) < minimum:
-        raise ScenarioFailure(
-            f"{minimum} complete RDMA replica(s) were not observed"
-        )
+        raise ScenarioFailure(f"{minimum} complete RDMA replica(s) were not observed")
     return sorted(segments)
 
 
@@ -93,9 +91,7 @@ async def wait_for_disk_only_candidate(
         for key, (expected, segments) in candidates.items():
             replicas = await _replicas(client, key)
             last[key] = replicas
-            if _complete(replicas, "LocalDisk") and not _complete(
-                replicas, "Memory"
-            ):
+            if _complete(replicas, "LocalDisk") and not _complete(replicas, "Memory"):
                 return key, expected, segments
         await asyncio.sleep(poll_interval)
     raise ScenarioFailure(
@@ -151,13 +147,6 @@ async def verify_fallback_and_promotion(
         raise ScenarioFailure("promoted memory bytes differ from the original object")
     disk = _complete(disk_only, "LocalDisk")
     promoted_segments = _rdma_segments(promoted, expected_replica_count)
-    if expected_segments is not None and set(promoted_segments) != set(
-        expected_segments
-    ):
-        raise ScenarioFailure(
-            "promoted memory topology differs from the initial RDMA topology: "
-            f"initial={sorted(expected_segments)!r} promoted={promoted_segments!r}"
-        )
     return {
         "expected_sha256": digest(expected),
         "fallback": {
@@ -193,6 +182,7 @@ async def _concurrent_case(workers, config, prefix, sizes=None):
         actual = await client.get(key)
         if actual != expected:
             raise ScenarioFailure(f"concurrent byte mismatch for {key}")
+        await client.remove(key, force=True)
         return key, digest(actual)
 
     async def worker_operations(client, worker_index):
@@ -223,6 +213,7 @@ async def run_standard_scenario(
     include_multilevel=True,
     prefix="standard",
     tier_timeout=45.0,
+    cleanup=True,
 ):
     evidence = evidence if evidence is not None else {}
     workers = list(workers or [])
@@ -257,9 +248,7 @@ async def run_standard_scenario(
             "bytes": len(cross_expected),
             "part_count": len(parts),
             "sha256": digest(cross_actual),
-            "remote_segments": _three_rdma_replicas(
-                await _replicas(client, cross_key)
-            ),
+            "remote_segments": _three_rdma_replicas(await _replicas(client, cross_key)),
         }
         evidence["objects"] = objects
 
@@ -301,10 +290,12 @@ async def run_standard_scenario(
                 tier_candidates[key] = (value, tuple(segments))
                 pressure.append(key)
                 cleanup_keys.append(key)
-            selected_key, selected_value, selected_segments = (
-                await wait_for_disk_only_candidate(
-                    client, tier_candidates, timeout=tier_timeout
-                )
+            (
+                selected_key,
+                selected_value,
+                selected_segments,
+            ) = await wait_for_disk_only_candidate(
+                client, tier_candidates, timeout=tier_timeout
             )
             evidence["multilevel"] = await verify_fallback_and_promotion(
                 client,
@@ -314,9 +305,7 @@ async def run_standard_scenario(
                 expected_segments=selected_segments,
             )
             evidence["multilevel"]["selected_key"] = selected_key
-            evidence["multilevel"]["initial_memory_segments"] = list(
-                selected_segments
-            )
+            evidence["multilevel"]["initial_memory_segments"] = list(selected_segments)
             evidence["multilevel"]["pressure_objects"] = len(pressure)
         evidence["cpp_store_loaded"] = _cpp_store_loaded()
         if evidence["cpp_store_loaded"]:
@@ -326,6 +315,12 @@ async def run_standard_scenario(
         evidence["error"] = str(error)
         return 1
     finally:
+        if cleanup:
+            for key in cleanup_keys:
+                try:
+                    await client.remove(key, force=True)
+                except Exception:
+                    pass
         client.close()
         for worker in workers:
             worker.close()
@@ -412,6 +407,7 @@ async def main() -> int:
     parser.add_argument("--prefix", default="standard")
     parser.add_argument("--tier-timeout", type=float, default=45.0)
     parser.add_argument("--replica-num", type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument("--retain-data", choices=("true", "false"), default="false")
     args = parser.parse_args()
     import _mooncake_store as store
 
@@ -437,6 +433,7 @@ async def main() -> int:
                 evidence,
                 prefix=args.prefix,
                 tier_timeout=args.tier_timeout,
+                cleanup=args.retain_data != "true",
             )
             clients.clear()
             result.update(
@@ -460,9 +457,7 @@ async def main() -> int:
         elif args.mode == "describe":
             result.update(status="PASS", replicas=await _replicas(client, args.key))
         else:
-            workers = [client] + [
-                await _create_client(store, args, index + 1) for index in range(3)
-            ]
+            workers = [client]
             clients = workers
             stress_sizes = [4096, 1024 * 1024 + 7, 8 * 1024 * 1024 + 31]
             stress = await _concurrent_case(

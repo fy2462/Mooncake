@@ -9,8 +9,9 @@ failure recovery without loading the C++ Store implementation.
 
 ## Topology
 
-The host setup creates three isolated veth-backed RXE devices and records all
-suite-owned resources in the host manifest. Compose starts three TE containers
+The host setup creates three veth-backed RXE devices connected through one
+manifest-owned software-RoCE bridge and records all suite-owned resources in
+the host manifest. Compose starts three TE containers
 and three Rust Store node containers, named A, B, and C. Each Store node owns a
 distinct RDMA endpoint and its own ephemeral test storage under container
 `/tmp`. Build outputs and retained evidence remain under
@@ -33,7 +34,8 @@ The Store acceptance suite uses three explicit replica profiles:
 - One replica for multi-level cache behavior. Memory pressure must exceed the
   aggregate high-watermark capacity of all three Store nodes, produce a
   disk-only `LocalDisk` replica, return byte-identical fallback data, and
-  promote the object back to its original RDMA endpoint.
+  promote the object back to one healthy RDMA endpoint. Placement may relocate
+  after eviction; byte identity and replica completeness remain invariant.
 
 Replica expectations are scenario-specific and must not be weakened to
 "at least one reachable copy" in the baseline gate.
@@ -73,7 +75,8 @@ startup. Completion requires:
 
 1. All `rust-repo/tools/rdma-multinode/tests` shell and Python tests pass.
 2. Relevant Rust workspace tests, formatting, and dependency checks pass with
-   build output in the shared artifact root.
+   normal Cargo output in `rust-repo/target`; retained E2E runtime artifacts
+   remain in the shared artifact root.
 3. A privileged `run.sh all` run records PASS for verbs, all six direct TE
    directions, standard Store, and every resilience scenario.
 4. The standard result proves three-replica RDMA placement, the degraded result

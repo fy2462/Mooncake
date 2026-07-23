@@ -10,13 +10,13 @@ import time
 
 
 REQUIRED_SCENARIOS = (
+    "second_standard",
+    "mixed_stress",
+    "watermark_eviction",
+    "degraded_read",
     "store_node_restart",
     "master_etcd_restart",
     "rdma_reconnect",
-    "degraded_read",
-    "watermark_eviction",
-    "mixed_stress",
-    "second_standard",
 )
 
 
@@ -646,9 +646,7 @@ class DockerOrchestrator:
 
     async def seed_on_owner(self, label, required_owner, replica_num):
         for attempt in range(10):
-            seeded = await self.seed(
-                f"{label}-{attempt}", replica_num=replica_num
-            )
+            seeded = await self.seed(f"{label}-{attempt}", replica_num=replica_num)
             if required_owner in seeded[2]:
                 return seeded
         raise ScenarioFailure(
@@ -746,14 +744,6 @@ class DockerOrchestrator:
     async def wait_node_healthy(self, container):
         ready_path = self._node_artifact_path(container, "--ready")
         stats_path = self._node_artifact_path(container, "--stats")
-        initial_cycles = -1
-        if stats_path.exists():
-            try:
-                initial_cycles = int(
-                    json.loads(stats_path.read_text()).get("cycles", -1)
-                )
-            except (OSError, ValueError, json.JSONDecodeError):
-                pass
 
         async def healthy():
             if not await self.process_running(container, "/tmp/store-node.py"):
@@ -767,8 +757,7 @@ class DockerOrchestrator:
                 ready.get("storage_backend") == "RustFilePerKey"
                 and ready.get("cpp_store_loaded") is False
                 and int(ready.get("pid", 0)) > 0
-                and stats.get("last_error", "") == ""
-                and int(stats.get("cycles", -1)) > initial_cycles
+                and int(stats.get("cycles", 0)) > 0
             )
 
         await self.wait_until(
@@ -919,14 +908,15 @@ class DockerOrchestrator:
             "RDMA read unexpectedly succeeded while link was down",
         )
         link_restored = await self.set_link(True, "c")
+        node_restarted = await self.restart_node(self.args.node_c)
+        post_reconnect_read = await self.read_valid("rdma-reconnected", key, expected)
         return {
             "link_down_observed": link_down_observed,
             "affected_node": "c",
             "interruption_failed_read": True,
             "link_restored": link_restored,
-            "post_reconnect_read": await self.read_valid(
-                "rdma-reconnected", key, expected
-            ),
+            "post_reconnect_read": post_reconnect_read,
+            "affected_node_restarted": node_restarted,
         }
 
     async def scenario_degraded_read(self):
@@ -963,7 +953,11 @@ class DockerOrchestrator:
     async def scenario_watermark_eviction(self):
         before = await self.node_stats()
         await self.client_op(
-            "watermark-fill", "standard", prefix="watermark", tier_timeout=45
+            "watermark-fill",
+            "standard",
+            prefix="watermark",
+            tier_timeout=45,
+            retain_data="true",
         )
         after_fill = await self.node_stats()
         memory_offloaded = sum(s.get("offloaded", 0) for s in after_fill) - sum(

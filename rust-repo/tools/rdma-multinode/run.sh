@@ -253,7 +253,10 @@ all() {
         fi
     fi
 
-    try_stage open_rdma || true
+    # Open-RDMA is an independent mock-only compatibility probe. Its result is
+    # retained and reported, but it must not override real product data-plane
+    # gates (verbs, TE, and Rust Store).
+    open_rdma || true
     try_stage report || true
     return "$first_failure"
 }

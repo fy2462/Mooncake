@@ -133,9 +133,7 @@ def test_standard_profile_requires_three_distinct_rdma_replicas():
 
 
 def test_store_client_ports_do_not_collide_with_three_store_nodes():
-    worker_ports = {
-        STORE.DEFAULT_CLIENT_PORT + offset for offset in range(3)
-    }
+    worker_ports = {STORE.DEFAULT_CLIENT_PORT + offset for offset in range(3)}
     assert worker_ports.isdisjoint(STORE.STORE_NODE_PORTS)
 
     async def get(self, key):
@@ -168,6 +166,8 @@ async def test_standard_contract_exercises_sizes_parts_concurrency_and_mutation(
     assert evidence["objects"]["cross_slice"]["part_count"] >= 3
     assert evidence["concurrent"]["operations"] >= 4
     assert evidence["overwrite_delete"] == {"overwrite": True, "delete": True}
+    assert primary.values == {}
+    assert all(worker.values == {} for worker in workers)
     assert primary.closed and all(worker.closed for worker in workers)
 
 
@@ -276,20 +276,21 @@ async def test_single_replica_tier_round_trip_restores_original_topology():
 
 
 @pytest.mark.asyncio
-async def test_promotion_requires_consistent_memory_topology():
+async def test_promotion_may_relocate_to_another_healthy_rdma_segment():
     client = TieredClient(promoted_segments=("node-a", "node-c"))
     client.values["tiered"] = b"expected-fallback"
     client.states["tiered"] = "disk"
 
-    with pytest.raises(STORE.ScenarioFailure, match="topology"):
-        await STORE.verify_fallback_and_promotion(
-            client,
-            "tiered",
-            b"expected-fallback",
-            timeout=0.05,
-            poll_interval=0,
-            expected_segments=("node-a", "node-b"),
-        )
+    evidence = await STORE.verify_fallback_and_promotion(
+        client,
+        "tiered",
+        b"expected-fallback",
+        timeout=0.05,
+        poll_interval=0,
+        expected_segments=("node-a", "node-b"),
+    )
+
+    assert evidence["promotion"]["remote_segments"] == ["node-a", "node-c"]
 
 
 def test_store_node_uses_public_rust_ssd_and_watermark_interfaces():

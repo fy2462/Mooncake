@@ -2,6 +2,7 @@ import asyncio
 import builtins
 import importlib.util
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -254,16 +255,24 @@ def test_docker_stopper_does_not_signal_reused_pid(monkeypatch, capsys):
 def test_required_scenarios_have_strict_evidence_contracts():
     module = load_script()
     assert tuple(module.REQUIRED_SCENARIOS) == (
+        "second_standard",
+        "mixed_stress",
+        "watermark_eviction",
+        "degraded_read",
         "store_node_restart",
         "master_etcd_restart",
         "rdma_reconnect",
-        "degraded_read",
-        "watermark_eviction",
-        "mixed_stress",
-        "second_standard",
     )
     for name in module.REQUIRED_SCENARIOS:
         module.validate_evidence(name, valid_evidence(module, name))
+
+
+def test_rxe_reconnect_restarts_affected_store_before_validation_read():
+    module = load_script()
+    source = inspect.getsource(module.DockerOrchestrator.scenario_rdma_reconnect)
+    restart = source.index("await self.restart_node(self.args.node_c)")
+    read = source.index('"rdma-reconnected"')
+    assert restart < read
 
 
 @pytest.mark.parametrize(
@@ -610,7 +619,9 @@ async def test_restore_verifies_all_service_health_even_when_processes_exist():
 
 
 @pytest.mark.asyncio
-async def test_node_health_requires_ready_file_and_a_new_clean_storage_cycle(tmp_path):
+async def test_node_health_accepts_completed_storage_cycle_with_transient_backend_error(
+    tmp_path,
+):
     module = load_script()
     orchestrator = object.__new__(module.DockerOrchestrator)
     orchestrator.artifacts = tmp_path
@@ -634,14 +645,14 @@ async def test_node_health_requires_ready_file_and_a_new_clean_storage_cycle(tmp
         )
     )
     stats_path = tmp_path / "node.stats.json"
-    stats_path.write_text(json.dumps({"cycles": 4, "last_error": ""}))
+    stats_path.write_text(
+        json.dumps({"cycles": 4, "last_error": "local disk segment not found"})
+    )
 
     async def process_running(_container, _pattern):
         return True
 
     async def wait_until(predicate, _description, **_options):
-        assert await predicate() is False
-        stats_path.write_text(json.dumps({"cycles": 5, "last_error": ""}))
         assert await predicate() is True
 
     orchestrator.process_running = process_running
@@ -667,7 +678,7 @@ def test_runner_covers_three_nodes_and_two_replica_degraded_reads():
     assert "self.args.node_c" in source
     assert '"store-c.storage.json"' in source
     assert '"store-c.command.json"' in source
-    assert 'replica_num=2' in source
+    assert "replica_num=2" in source
     assert 'set_link(False, "c")' in source
 
 

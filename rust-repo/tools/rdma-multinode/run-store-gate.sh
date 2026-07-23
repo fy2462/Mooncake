@@ -232,7 +232,7 @@ if [[ $mode == standard ]]; then
     json_status_is "$result" PASS
     cp -- "$result" "$artifact_root/store-standard.result"
 else
-    python3 "$suite_dir/store-resilience-e2e.py" \
+    sudo python3 "$suite_dir/store-resilience-e2e.py" \
         --artifact-root "$artifact_root" \
         --result "$result" \
         --master-command-file "$master_command_file" \

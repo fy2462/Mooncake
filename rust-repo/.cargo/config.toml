@@ -1,5 +1,5 @@
 [build]
-target-dir = "/home/fy2462/workspace/tmp/mooncake/cargo-target"
+target-dir = "target"
 jobs = 5
 
 [env]

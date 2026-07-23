@@ -110,6 +110,16 @@ grep -Fx '{"status":"PASS"}' "$success_root/store-standard.result"
 grep -Eq '"status"[[:space:]]*:[[:space:]]*"PASS"' \
     "$success_root/store-resilience.result"
 
+mock_failure_root="$tmp_dir/mock-failure"
+mkdir -p "$mock_failure_root"
+stage_environment "$mock_failure_root"
+export RDMA_STORE_RESILIENCE_COMMAND="$fake_stage store-resilience"
+export FAIL_STAGE=open-rdma FAIL_CODE=101
+bash "$suite_dir/run.sh" all
+unset FAIL_STAGE FAIL_CODE
+grep -Fx open-rdma "$mock_failure_root/order.log"
+grep -Fx report "$mock_failure_root/order.log"
+
 top_level_root="$tmp_dir/top-level-only"
 mkdir -p "$top_level_root"
 stage_environment "$top_level_root"
