@@ -17,6 +17,7 @@
 - 使用 `/home/fy2462/Mooncake/.venv` 安装文档依赖，不在共享目录创建 Python 虚拟环境。
 - HTML 输出到 `rust-repo/docs/build/html`，构建产物不提交 Git。
 - 修改范围仅限 `rust-repo/docs` 及必要的 `.gitignore` 文档构建条目，不修改产品实现。
+- 允许在主学习路线的关键 Rust 文件中添加学习型注释；不得改变表达式、控制流、类型、公开 API 或运行行为。
 
 ---
 
@@ -371,4 +372,56 @@ git diff --check
 git status --short
 git add rust-repo/docs
 git commit -m '[Doc] complete Rust Store learning guide'
+```
+
+### Task 9: 为主学习路线关键 Rust 代码添加注释
+
+**Files:**
+- Modify: `rust-repo/crates/mooncake-store-client/src/client/lifecycle.rs`
+- Modify: `rust-repo/crates/mooncake-store-client/src/client/write.rs`
+- Modify: `rust-repo/crates/mooncake-store-client/src/client/read.rs`
+- Modify: `rust-repo/crates/mooncake-store-client/src/client/remove.rs`
+- Modify: `rust-repo/crates/mooncake-store-client/src/client/replica_selection.rs`
+- Modify: `rust-repo/crates/mooncake-store-master/src/service/grpc_objects_put.rs`
+- Modify: `rust-repo/crates/mooncake-store-master/src/service/grpc_objects_query.rs`
+- Modify: `rust-repo/crates/mooncake-store-master/src/oplog/oplog_manager.rs`
+- Modify: `rust-repo/crates/mooncake-store-master/src/hot_standby.rs`
+- Modify: `rust-repo/crates/transfer-engine-ffi/src/lib.rs`
+- Modify: `rust-repo/crates/transfer-engine-ffi/src/transfer.rs`
+
+**Interfaces:**
+- Consumes: the final tutorial's recommended reading order and source checkpoints.
+- Produces: behavior-neutral Chinese learning comments adjacent to the key control/data-plane transitions and safety boundaries.
+
+- [ ] **Step 1: Generate a comment target inventory from the tutorial**
+
+List each highlighted function and the non-obvious invariant it needs to explain. Drop files from the list when existing rustdoc/inline comments already provide the required explanation; add a file only when a documented main-path transition otherwise remains opaque.
+
+- [ ] **Step 2: Add Client-path comments**
+
+Annotate only the transition points: creation order and rollback ownership, Put allocation before data transfer and finalize after completion, Get replica selection before data read, Remove metadata versus physical cleanup, and why local/remote replica scoring affects transport choice.
+
+- [ ] **Step 3: Add Master/HA comments**
+
+Annotate allocation/commit state transitions, query visibility rules, oplog sequence/replay invariants, notifier startup, snapshot bootstrap, standby catch-up and promotion fences. Comments must describe current behavior verified by code and tests.
+
+- [ ] **Step 4: Add FFI lifecycle and unsafe comments**
+
+Place comments immediately above the critical calls for memory registration/unregistration, segment open/close, batch allocate/submit/poll/free and raw pointer conversion. Explain caller obligations and cleanup ordering without duplicating existing public rustdoc.
+
+- [ ] **Step 5: Prove the diff is comment-only**
+
+Use `git diff --word-diff=porcelain` and a small lexical check that removes Rust comments before comparing the affected files with `HEAD`. Any non-comment token change fails this step and must be reverted.
+
+- [ ] **Step 6: Run Rust verification and commit**
+
+```bash
+cd rust-repo
+CARGO_BUILD_JOBS=5 cargo fmt --all -- --check
+CARGO_BUILD_JOBS=5 cargo test -p mooncake-store-client --lib
+CARGO_BUILD_JOBS=5 cargo test -p mooncake-store-master --lib
+CARGO_BUILD_JOBS=5 cargo test -p transfer-engine-ffi --lib
+git diff --check
+git add crates/mooncake-store-client crates/mooncake-store-master crates/transfer-engine-ffi
+git commit -m '[Doc] annotate Rust Store learning paths'
 ```

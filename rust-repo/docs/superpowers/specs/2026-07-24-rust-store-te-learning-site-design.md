@@ -145,6 +145,18 @@ Sphinx 使用支持 Mermaid 的扩展在构建时渲染，不依赖浏览器访�
 
 每个重要结论至少由实际类型/函数、测试或运行脚本之一支撑。对于仍在迁移或尚未实现的能力，文档必须明确标为当前限制，不能把规划写成现状。
 
+## 主学习路线代码注释
+
+教程引用的关键 Rust 路径需要补充紧贴代码的学习型注释，但不对整个仓库逐行注释。范围限定为：
+
+- Client 初始化、Put/Get/Remove、Replica 选择和传输提交。
+- Master 分配、Put 提交、查询、删除及关键后台任务。
+- Replica/Segment 状态转换、多级缓存淘汰与提升。
+- oplog、snapshot、leader/standby 恢复的关键状态边界。
+- `transfer-engine-ffi` 的 unsafe 内存注册、Segment 和 batch 生命周期。
+
+注释优先解释代码本身无法直接表达的“为什么”：状态不变量、所有权/生命周期约束、控制面到数据面的切换、unsafe 调用的前置条件、失败时为何按特定顺序清理。已有清晰注释不重复添加；不把每行语句翻译成自然语言，不改变任何产品行为。注释以中文为主，公共 API 的既有英文 rustdoc 保持兼容。
+
 ## Sphinx 构建方案
 
 参考 RLinf 的最小 Sphinx 结构，但只引入本地学习站点必需部分：
@@ -186,10 +198,11 @@ cd rust-repo/docs
 6. 抽查首页、整体架构、RDMA 基础、Put、Master、TE/FFI 和实验页面的生成 HTML，确认导航与中文显示正常。
 7. 文档明确覆盖 Store/Master/TE 顶层设计、Put/Get/Delete、3/2/1 Replica、多级缓存、HA、A/B/C 故障恢复和推荐源码阅读顺序。
 8. `git diff --check` 和针对文档文件的可用 pre-commit hooks 通过，不包含 HTML 构建产物或无关改动。
+9. 主学习路线关键 Rust 文件包含与教程一致的行内注释，`cargo fmt --check`、受影响 crate 测试和 clippy/check 均通过，且代码 diff 不含行为修改。
 
 ## 非目标
 
-- 不在本任务中重构 Store、Master 或 TE 产品代码。
+- 不在本任务中重构 Store、Master 或 TE 产品行为；只允许补充主学习路线所需的注释。
 - 不自动生成完整 Rust API reference；教程以概念、链路和源码导航为主。
 - 不复制 RLinf 的在线搜索服务、版本切换器、AI 问答组件或部署配置。
 - 不提交 `build/html`、Python 虚拟环境或大型构建缓存。
