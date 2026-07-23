@@ -13,6 +13,7 @@ x-rdma-node: &rdma-node
   environment:
     PYTHONPATH: /opt/mooncake-rdma/store
     LD_LIBRARY_PATH: /opt/mooncake-rdma/te
+    MC_GID_INDEX: ${RDMA_GID_INDEX:-0}
   command: [sleep, infinity]
   network_mode: host
 

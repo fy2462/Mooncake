@@ -57,6 +57,9 @@ for service in "${data_plane_services[@]}"; do
     jq -e --arg service "$service" \
         '.services[$service].environment.LD_LIBRARY_PATH == "/opt/mooncake-rdma/te"' \
         "$rendered" >/dev/null
+    jq -e --arg service "$service" \
+        '.services[$service].environment.MC_GID_INDEX == "0"' \
+        "$rendered" >/dev/null
 done
 
 jq -e '
