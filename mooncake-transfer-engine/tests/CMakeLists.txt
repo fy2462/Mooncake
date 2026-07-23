@@ -110,6 +110,12 @@ target_link_libraries(connect_pause_tracker_test PUBLIC gtest gtest_main
                                                         pthread)
 add_test(NAME connect_pause_tracker_test COMMAND connect_pause_tracker_test)
 
+# Hardware-free regression test for matching a filtered transport context to
+# its topology device by name instead of by the full topology-list index.
+add_executable(context_lookup_test ${WORKSPACE}/context_lookup_test.cpp)
+target_link_libraries(context_lookup_test PUBLIC gtest gtest_main)
+add_test(NAME context_lookup_test COMMAND context_lookup_test)
+
 # Hardware-free unit tests for DmabufExport struct and
 # RdmaContext::{exportDmabuf, closeDmabufExport}. Runs on every CI runner —
 # no RDMA device or GPU required (host-memory paths only).

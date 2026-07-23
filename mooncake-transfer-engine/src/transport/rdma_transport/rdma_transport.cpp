@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "transport/rdma_transport/rdma_transport.h"
+#include "transport/rdma_transport/context_lookup.h"
 
 #include <glog/logging.h>
 #include <sys/mman.h>
@@ -759,15 +760,7 @@ int RdmaTransport::onSetupRdmaConnections(const HandShakeDesc &peer_desc,
         return ERR_INVALID_ARGUMENT;
     }
 
-    std::shared_ptr<RdmaContext> context;
-    int index = 0;
-    for (auto &entry : local_topology_->getHcaList()) {
-        if (entry == local_nic_name) {
-            context = context_list_[index];
-            break;
-        }
-        index++;
-    }
+    auto context = findContextByDeviceName(context_list_, local_nic_name);
     if (!context) {
         local_desc.reply_msg =
             "Local RDMA context not found for handshake NIC: " + local_nic_name;
