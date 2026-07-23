@@ -25,12 +25,17 @@ cat >"$fake_bin/ip" <<'EOF'
 set -Eeuo pipefail
 printf 'ip %s\n' "$*" >>"$FAKE_LOG"
 case "$*" in
+    'link show dev mc-rdma-br') test -f "$FAKE_STATE/bridge" ;;
+    'link add mc-rdma-br type bridge') : >"$FAKE_STATE/bridge" ;;
+    'link set dev mc-rdma-br up') test -f "$FAKE_STATE/bridge" ;;
     'link show dev mc-rdma-net-'?) test -f "$FAKE_STATE/veth-${4##*-}" ;;
     'link add mc-rdma-net-'?' type veth peer name mc-rdma-peer-'?) : >"$FAKE_STATE/veth-${3##*-}" ;;
-    'addr replace 10.90.'?'.1/30 dev mc-rdma-net-'?) test -f "$FAKE_STATE/veth-${5##*-}" ;;
+    'addr replace 10.90.0.'?'/24 dev mc-rdma-net-'?) test -f "$FAKE_STATE/veth-${5##*-}" ;;
     'link set dev mc-rdma-net-'?' up') test -f "$FAKE_STATE/veth-${4##*-}" ;;
     'link set dev mc-rdma-peer-'?' up') test -f "$FAKE_STATE/veth-${4##*-}" ;;
+    'link set dev mc-rdma-peer-'?' master mc-rdma-br') test -f "$FAKE_STATE/bridge" ;;
     'link delete dev mc-rdma-net-'?) rm -f -- "$FAKE_STATE/veth-${4##*-}" ;;
+    'link delete dev mc-rdma-br') rm -f -- "$FAKE_STATE/bridge" ;;
     *) printf 'unexpected ip invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
@@ -72,10 +77,12 @@ export PATH="$fake_bin:$PATH" FAKE_LOG="$tmp_dir/commands.log" FAKE_STATE="$stat
 export RDMA_ARTIFACT_ROOT="$artifact_root"
 
 bash "$suite_dir/setup-host-rdma.sh"
+grep -Fx 'sudo ip link add mc-rdma-br type bridge' "$FAKE_LOG"
 for name in a b c; do
     grep -Fx "sudo ip link add mc-rdma-net-$name type veth peer name mc-rdma-peer-$name" "$FAKE_LOG"
     grep -Fx "sudo rdma link add mc-rdma-rxe-$name type rxe netdev mc-rdma-net-$name" "$FAKE_LOG"
     grep -Fx "sudo ibv_devinfo -v -d mc-rdma-rxe-$name" "$FAKE_LOG"
+    grep -Fx "sudo ip link set dev mc-rdma-peer-$name master mc-rdma-br" "$FAKE_LOG"
     grep -Fx "device_$name=mc-rdma-rxe-$name" "$artifact_root/host-rdma.env"
 done
 python3 - "$artifact_root/host-rdma.json" <<'PY'
@@ -83,6 +90,7 @@ import json, sys
 data=json.load(open(sys.argv[1], encoding="utf-8"))
 assert [node["name"] for node in data["nodes"]] == ["a", "b", "c"]
 assert all(node["owned_rxe"] and node["owned_veth"] for node in data["nodes"])
+assert data["bridge"] == "mc-rdma-br" and data["owned_bridge"] is True
 PY
 
 : >"$FAKE_LOG"; bash "$suite_dir/setup-host-rdma.sh"; ! grep -Fq ' link add ' "$FAKE_LOG"
@@ -91,6 +99,7 @@ for name in c b a; do
     grep -Fx "sudo rdma link delete mc-rdma-rxe-$name" "$FAKE_LOG"
     grep -Fx "sudo ip link delete dev mc-rdma-net-$name" "$FAKE_LOG"
 done
+grep -Fx 'sudo ip link delete dev mc-rdma-br' "$FAKE_LOG"
 test ! -e "$artifact_root/host-rdma.json"; test ! -e "$artifact_root/host-rdma.env"
 : >"$FAKE_LOG"; bash "$suite_dir/cleanup-host-rdma.sh"; test ! -s "$FAKE_LOG"
 
@@ -107,15 +116,15 @@ import json, sys
 nodes=[]
 for index, name in enumerate("abc", 1):
     nodes.append({"name":name,"device":f"mc-rdma-rxe-{name}","veth":f"mc-rdma-net-{name}",
-      "peer_veth":f"mc-rdma-peer-{name}","address":f"10.90.{index}.1/30","gid":f"fe80::{name}",
+      "peer_veth":f"mc-rdma-peer-{name}","address":f"10.90.0.{index}/24","gid":f"fe80::{name}",
       "owned_rxe":False,"owned_veth":False})
-json.dump({"nodes":nodes}, open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
+json.dump({"bridge":"mc-rdma-br","owned_bridge":False,"nodes":nodes}, open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
 PY
 for name in a b c; do : >"$state_dir/rxe-$name"; : >"$state_dir/veth-$name"; done
 : >"$FAKE_LOG"; bash "$suite_dir/cleanup-host-rdma.sh"
 ! grep -Fq ' link delete ' "$FAKE_LOG"; test "$(find "$state_dir" -type f | wc -l)" -eq 6
 
-printf '{"nodes":[],"extra":true}\n' >"$artifact_root/host-rdma.json"
+printf '{"bridge":"mc-rdma-br","owned_bridge":true,"nodes":[],"extra":true}\n' >"$artifact_root/host-rdma.json"
 : >"$FAKE_LOG"
 if bash "$suite_dir/cleanup-host-rdma.sh" >/dev/null 2>&1; then exit 1; fi
 ! grep -Fq ' link delete ' "$FAKE_LOG"

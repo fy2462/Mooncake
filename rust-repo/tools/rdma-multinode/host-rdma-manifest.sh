@@ -8,14 +8,18 @@ import json
 import sys
 
 expected = {
-    "a": ("mc-rdma-rxe-a", "mc-rdma-net-a", "mc-rdma-peer-a", "10.90.1.1/30"),
-    "b": ("mc-rdma-rxe-b", "mc-rdma-net-b", "mc-rdma-peer-b", "10.90.2.1/30"),
-    "c": ("mc-rdma-rxe-c", "mc-rdma-net-c", "mc-rdma-peer-c", "10.90.3.1/30"),
+    "a": ("mc-rdma-rxe-a", "mc-rdma-net-a", "mc-rdma-peer-a", "10.90.0.1/24"),
+    "b": ("mc-rdma-rxe-b", "mc-rdma-net-b", "mc-rdma-peer-b", "10.90.0.2/24"),
+    "c": ("mc-rdma-rxe-c", "mc-rdma-net-c", "mc-rdma-peer-c", "10.90.0.3/24"),
 }
 try:
     with open(sys.argv[1], encoding="utf-8") as stream:
         value = json.load(stream)
-    if set(value) != {"nodes"} or not isinstance(value["nodes"], list):
+    if set(value) != {"bridge", "owned_bridge", "nodes"}:
+        raise ValueError
+    if value["bridge"] != "mc-rdma-br" or not isinstance(value["owned_bridge"], bool):
+        raise ValueError
+    if not isinstance(value["nodes"], list):
         raise ValueError
     nodes = value["nodes"]
     if len(nodes) != 3:
@@ -45,6 +49,12 @@ try:
         )))
 except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
     raise SystemExit(1)
+PY
+    ) || return 1
+    host_rdma_manifest_bridge=mc-rdma-br
+    host_rdma_manifest_owned_bridge=$(python3 - "$manifest_path" <<'PY'
+import json, sys
+print(str(json.load(open(sys.argv[1], encoding="utf-8"))["owned_bridge"]).lower())
 PY
     ) || return 1
     mapfile -t host_rdma_manifest_rows <<<"$output"

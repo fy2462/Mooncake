@@ -793,7 +793,7 @@ class DockerOrchestrator:
             "device": f"mc-rdma-rxe-{node_name}",
             "veth": f"mc-rdma-net-{node_name}",
             "peer_veth": f"mc-rdma-peer-{node_name}",
-            "address": f"10.90.{ord(node_name) - ord('a') + 1}.1/30",
+            "address": f"10.90.0.{ord(node_name) - ord('a') + 1}/24",
             "gid": node.get("gid"),
             "owned_rxe": True,
             "owned_veth": True,

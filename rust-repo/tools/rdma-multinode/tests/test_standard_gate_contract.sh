@@ -10,8 +10,11 @@ gates=("$verbs_gate" "$te_gate" "$store_gate")
 grep -Fq 'server=${VERBS_SERVER_CONTAINER:-mc-rdma-te-node-a}' "$verbs_gate"
 grep -Fq 'client=${VERBS_CLIENT_CONTAINER:-mc-rdma-te-node-b}' "$verbs_gate"
 grep -Fq 'server_ip=${VERBS_SERVER_IP:-127.0.0.1}' "$verbs_gate"
+grep -Fq 'gid_index=${VERBS_GID_INDEX:-0}' "$verbs_gate"
 grep -Fq 'server_dev=${VERBS_SERVER_DEVICE:-mc-rdma-rxe-a}' "$verbs_gate"
 grep -Fq 'client_dev=${VERBS_CLIENT_DEVICE:-mc-rdma-rxe-b}' "$verbs_gate"
+grep -Fq '"timeout 45 ib_write_bw -x '\''$gid_index'\'' -d '\''$server_dev'\'' --report_gbits"' "$verbs_gate"
+grep -Fq '"timeout 30 ib_write_bw -x '\''$gid_index'\'' -d '\''$client_dev'\'' '\''$server_ip'\'' --report_gbits -n 10"' "$verbs_gate"
 
 grep -Fq 'directions=(a:b b:a b:c c:b c:a a:c)' "$te_gate"
 grep -Fq '[c]=mc-rdma-te-node-c' "$te_gate"

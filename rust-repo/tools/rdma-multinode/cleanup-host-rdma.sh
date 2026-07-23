@@ -27,4 +27,8 @@ for ((index=${#host_rdma_manifest_rows[@]}-1; index>=0; index--)); do
         sudo ip link delete dev "$veth"
     fi
 done
+if [[ $host_rdma_manifest_owned_bridge == true ]] && \
+   sudo ip link show dev "$host_rdma_manifest_bridge" >/dev/null 2>&1; then
+    sudo ip link delete dev "$host_rdma_manifest_bridge"
+fi
 rm -f -- "$env_manifest" "$json_manifest"

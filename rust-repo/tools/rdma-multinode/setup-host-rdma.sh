@@ -12,15 +12,18 @@ names=(a b c)
 devices=(mc-rdma-rxe-a mc-rdma-rxe-b mc-rdma-rxe-c)
 veths=(mc-rdma-net-a mc-rdma-net-b mc-rdma-net-c)
 peers=(mc-rdma-peer-a mc-rdma-peer-b mc-rdma-peer-c)
-addresses=(10.90.1.1/30 10.90.2.1/30 10.90.3.1/30)
+addresses=(10.90.0.1/24 10.90.0.2/24 10.90.0.3/24)
+bridge=mc-rdma-br
 
 mkdir -p -- "$artifact_root"
 declare -A previous_rxe=() previous_veth=()
+previous_bridge=false
 if [[ -f $json_manifest ]]; then
     host_rdma_load_manifest "$json_manifest" || {
         printf 'refusing malformed host RDMA ownership manifest\n' >&2
         exit 1
     }
+    previous_bridge=$host_rdma_manifest_owned_bridge
     for row in "${host_rdma_manifest_rows[@]}"; do
         IFS=$'\t' read -r name _ _ _ _ _ owned_rxe owned_veth <<<"$row"
         previous_rxe[$name]=$owned_rxe
@@ -29,6 +32,7 @@ if [[ -f $json_manifest ]]; then
 fi
 
 created_rxe=() created_veth=()
+created_bridge=false
 completed=false
 env_tmp= json_tmp=
 cleanup_incomplete_setup() {
@@ -44,12 +48,26 @@ cleanup_incomplete_setup() {
         for ((index=${#created_veth[@]}-1; index>=0; index--)); do
             sudo ip link delete dev "${created_veth[index]}" >/dev/null 2>&1 || true
         done
+        if "$created_bridge"; then
+            sudo ip link delete dev "$bridge" >/dev/null 2>&1 || true
+        fi
     fi
     exit "$status"
 }
 trap cleanup_incomplete_setup EXIT
 
 sudo modprobe rdma_rxe
+if sudo ip link show dev "$bridge" >/dev/null 2>&1; then
+    "$previous_bridge" || {
+        printf 'refusing existing unowned bridge: %s\n' "$bridge" >&2
+        exit 2
+    }
+else
+    sudo ip link add "$bridge" type bridge
+    created_bridge=true
+fi
+owned_bridge=true
+sudo ip link set dev "$bridge" up
 owned_rxes=() owned_veths=() gids=()
 for index in "${!names[@]}"; do
     name=${names[index]} device=${devices[index]} veth=${veths[index]}
@@ -67,6 +85,7 @@ for index in "${!names[@]}"; do
     sudo ip addr replace "$address" dev "$veth"
     sudo ip link set dev "$veth" up
     sudo ip link set dev "$peer" up
+    sudo ip link set dev "$peer" master "$bridge"
 
     if sudo rdma link show "$device/1" >/dev/null 2>&1; then
         [[ ${previous_rxe[$name]:-false} == true ]] || {
@@ -99,6 +118,7 @@ done
 
 env_tmp=$(mktemp "$artifact_root/.host-rdma.env.XXXXXX")
 json_tmp=$(mktemp "$artifact_root/.host-rdma.json.XXXXXX")
+printf 'bridge=%s\nowned_bridge=%s\n' "$bridge" "$owned_bridge" >"$env_tmp"
 for index in "${!names[@]}"; do
     printf 'device_%s=%s\nveth_%s=%s\npeer_veth_%s=%s\naddress_%s=%s\ngid_%s=%s\nowned_rxe_%s=%s\nowned_veth_%s=%s\n' \
         "${names[index]}" "${devices[index]}" "${names[index]}" "${veths[index]}" \
@@ -116,13 +136,13 @@ for index, name in enumerate(("a", "b", "c")):
         "device": f"mc-rdma-rxe-{name}",
         "veth": f"mc-rdma-net-{name}",
         "peer_veth": f"mc-rdma-peer-{name}",
-        "address": f"10.90.{index + 1}.1/30",
+        "address": f"10.90.0.{index + 1}/24",
         "gid": sys.argv[index + 2],
         "owned_rxe": True,
         "owned_veth": True,
     })
 with open(sys.argv[1], "w", encoding="utf-8") as stream:
-    json.dump({"nodes": nodes}, stream, separators=(",", ":"))
+    json.dump({"bridge":"mc-rdma-br","owned_bridge":True,"nodes":nodes}, stream, separators=(",", ":"))
     stream.write("\n")
 PY
 mv -f -- "$env_tmp" "$env_manifest"
