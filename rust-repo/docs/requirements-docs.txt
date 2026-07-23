@@ -1,0 +1,5 @@
+Sphinx>=8.2,<9
+myst-parser>=4,<5
+pydata-sphinx-theme>=0.16,<1
+sphinx-copybutton>=0.5,<1
+sphinxcontrib-mermaid>=1.0,<2

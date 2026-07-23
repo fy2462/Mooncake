@@ -1,0 +1,20 @@
+:root {
+  --pst-color-primary: #155e75;
+  --pst-color-secondary: #c2410c;
+}
+
+.bd-main .bd-content .bd-article-container {
+  max-width: 980px;
+}
+
+.architecture-figure {
+  background: #fff;
+  border: 1px solid #d6dee3;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+table.docutils td,
+table.docutils th {
+  vertical-align: top;
+}
