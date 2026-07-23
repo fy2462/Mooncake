@@ -8,7 +8,11 @@ x-rdma-node: &rdma-node
     memlock: {soft: -1, hard: -1}
   volumes:
     - ${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}:/artifacts
+    - ${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}/runtime:/opt/mooncake-rdma:ro
     - /dev/infiniband:/dev/infiniband
+  environment:
+    PYTHONPATH: /opt/mooncake-rdma/store
+    LD_LIBRARY_PATH: /opt/mooncake-rdma/te
   command: [sleep, infinity]
   network_mode: host
 
@@ -36,6 +40,10 @@ services:
     <<: *rdma-node
     container_name: mc-rdma-te-node-b
 
+  te-node-c:
+    <<: *rdma-node
+    container_name: mc-rdma-te-node-c
+
   rust-master:
     <<: *rdma-node
     container_name: mc-rdma-rust-master
@@ -47,6 +55,10 @@ services:
   store-node-b:
     <<: *rdma-node
     container_name: mc-rdma-store-node-b
+
+  store-node-c:
+    <<: *rdma-node
+    container_name: mc-rdma-store-node-c
 
   store-test-client:
     <<: *rdma-node

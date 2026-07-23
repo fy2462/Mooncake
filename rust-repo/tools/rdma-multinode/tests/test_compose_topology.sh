@@ -11,17 +11,21 @@ expected_services=(
     etcd
     te-node-a
     te-node-b
+    te-node-c
     rust-master
     store-node-a
     store-node-b
+    store-node-c
     store-test-client
 )
 data_plane_services=(
     te-node-a
     te-node-b
+    te-node-c
     rust-master
     store-node-a
     store-node-b
+    store-node-c
     store-test-client
 )
 
@@ -41,6 +45,17 @@ for service in "${data_plane_services[@]}"; do
         "$rendered" >/dev/null
     jq -e --arg service "$service" \
         '[.services[$service].volumes[]?] | any(.target == "/artifacts")' \
+        "$rendered" >/dev/null
+    jq -e --arg service "$service" \
+        '[.services[$service].volumes[]?] | any(
+            .target == "/opt/mooncake-rdma" and .read_only == true
+        )' \
+        "$rendered" >/dev/null
+    jq -e --arg service "$service" \
+        '.services[$service].environment.PYTHONPATH == "/opt/mooncake-rdma/store"' \
+        "$rendered" >/dev/null
+    jq -e --arg service "$service" \
+        '.services[$service].environment.LD_LIBRARY_PATH == "/opt/mooncake-rdma/te"' \
         "$rendered" >/dev/null
 done
 
