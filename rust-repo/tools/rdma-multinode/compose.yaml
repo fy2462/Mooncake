@@ -19,9 +19,11 @@ services:
     network_mode: host
     command:
       - etcd
-      - --data-dir=/tmp/etcd-data
+      - --data-dir=/artifacts/etcd-data
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://127.0.0.1:2379
+    volumes:
+      - ${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}:/artifacts
     healthcheck:
       test: [CMD, etcdctl, endpoint, health, --endpoints=http://127.0.0.1:2379]
       interval: 2s

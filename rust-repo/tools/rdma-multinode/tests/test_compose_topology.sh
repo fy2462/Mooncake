@@ -44,8 +44,15 @@ for service in "${data_plane_services[@]}"; do
         "$rendered" >/dev/null
 done
 
-! grep -Fq '10.89.10.' "$suite_dir/compose.yaml"
-! grep -Fq 'mc-rdma-net' "$suite_dir/compose.yaml"
+jq -e '
+    [.services.etcd.volumes[]?] | any(.target == "/artifacts")
+' "$rendered" >/dev/null
+jq -e '
+    .services.etcd.command | index("--data-dir=/artifacts/etcd-data") != null
+' "$rendered" >/dev/null
+jq -e '
+    [.. | strings | select(test("10\\.89\\.10\\.|mc-rdma-net"))] | length == 0
+' "$rendered" >/dev/null
 
 jq -e '
     .services.etcd.command | index("--advertise-client-urls=http://127.0.0.1:2379") != null
