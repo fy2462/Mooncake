@@ -6,11 +6,11 @@ suite_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 source "$suite_dir/lib/common.sh"
 
 artifact_root=${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}
-server=${VERBS_SERVER_CONTAINER:-mc-rdma-te-a}
-client=${VERBS_CLIENT_CONTAINER:-mc-rdma-te-b}
-server_ip=${VERBS_SERVER_IP:-10.89.10.21}
-server_dev=${VERBS_SERVER_DEVICE:-rxe-a}
-client_dev=${VERBS_CLIENT_DEVICE:-rxe-b}
+server=${VERBS_SERVER_CONTAINER:-mc-rdma-te-node-a}
+client=${VERBS_CLIENT_CONTAINER:-mc-rdma-te-node-b}
+server_ip=${VERBS_SERVER_IP:-127.0.0.1}
+server_dev=${VERBS_SERVER_DEVICE:-mc-rdma-rxe}
+client_dev=${VERBS_CLIENT_DEVICE:-mc-rdma-rxe}
 server_log="$artifact_root/verbs-server.log"
 client_log="$artifact_root/verbs-client.log"
 result="$artifact_root/verbs.result"

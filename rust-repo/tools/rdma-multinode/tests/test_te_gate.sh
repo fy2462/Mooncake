@@ -23,6 +23,11 @@ if RDMA_ARTIFACT_ROOT="$tmp_dir" TE_CLASSIFY_ONLY=1 \
     exit 1
 fi
 grep -q '^status=FAIL$' "$tmp_dir/te.result"
+if RDMA_ARTIFACT_ROOT="$tmp_dir" bash "$suite_dir/run-store-gate.sh"; then
+    printf 'ran Store after a failed TE compare\n' >&2
+    exit 1
+fi
+grep -q '"status":"BLOCKED"' "$tmp_dir/store.result"
 
 printf 'FAIL\n' >"$tmp_dir/verbs.result"
 if RDMA_ARTIFACT_ROOT="$tmp_dir" TE_CLASSIFY_ONLY=1 \

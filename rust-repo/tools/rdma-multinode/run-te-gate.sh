@@ -23,7 +23,7 @@ classify() {
         status=PASS
     fi
     printf 'status=%s\nprotocol=rdma\ntarget_device=%s\ninitiator_device=%s\ncompare=%s\n' \
-        "$status" "${TE_TARGET_DEVICE:-rxe-a}" "${TE_INITIATOR_DEVICE:-rxe-b}" \
+        "$status" "${TE_TARGET_DEVICE:-mc-rdma-rxe}" "${TE_INITIATOR_DEVICE:-mc-rdma-rxe}" \
         "$([[ $status == PASS ]] && printf OK || printf MISSING)" >"$result"
     [[ $status == PASS ]]
 }
@@ -37,13 +37,13 @@ if [[ ${TE_CLASSIFY_ONLY:-0} == 1 ]]; then
     exit
 fi
 
-target=${TE_TARGET_CONTAINER:-mc-rdma-te-a}
-initiator=${TE_INITIATOR_CONTAINER:-mc-rdma-te-b}
-target_ip=${TE_TARGET_IP:-10.89.10.21}
-initiator_ip=${TE_INITIATOR_IP:-10.89.10.22}
-target_device=${TE_TARGET_DEVICE:-rxe-a}
-initiator_device=${TE_INITIATOR_DEVICE:-rxe-b}
-metadata=${TE_METADATA_SERVER:-10.89.10.10:2379}
+target=${TE_TARGET_CONTAINER:-mc-rdma-te-node-a}
+initiator=${TE_INITIATOR_CONTAINER:-mc-rdma-te-node-b}
+target_ip=${TE_TARGET_IP:-127.0.0.1}
+initiator_ip=${TE_INITIATOR_IP:-127.0.0.1}
+target_device=${TE_TARGET_DEVICE:-mc-rdma-rxe}
+initiator_device=${TE_INITIATOR_DEVICE:-mc-rdma-rxe}
+metadata=${TE_METADATA_SERVER:-127.0.0.1:2379}
 
 docker exec "$target" sh -lc "timeout 60 /opt/mooncake-rdma/te/rdma_transport_test \
  --mode=target --protocol=rdma --mem_backend=cpu --metadata_server='$metadata' \
