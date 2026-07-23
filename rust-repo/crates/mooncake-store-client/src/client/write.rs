@@ -177,6 +177,8 @@ impl MooncakeClient {
             )));
         }
 
+        // 从这里开始同时持有远端 Segment 和 native batch 资源；后续每个错误分支都要
+        // 按 batch → Segment 的逆序清理，但 source buffer 必须继续活到任务终态。
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
         let batch_id = match self.engine.allocate_batch_id(buffers.len()) {
             Ok(id) => id,
@@ -205,6 +207,8 @@ impl MooncakeClient {
             return Err(e.into());
         }
 
+        // wait_for_transfer_batch 是 payload 生命周期的栅栏：只有越过它，调用者才可
+        // 认为 RNIC/transport 不再访问 requests 中的裸指针。
         if let Err(e) = self
             .wait_for_transfer_batch(
                 batch_id,

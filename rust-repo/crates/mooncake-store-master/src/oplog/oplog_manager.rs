@@ -63,6 +63,8 @@ impl OpLogManager {
             payload,
         };
         validate_record_size(&record)?;
+        // append 只取得全序 sequence；需要 durable 语义的控制面变更必须在向调用者
+        // 报告成功前 flush，否则进程崩溃可能留下“已应答但 standby 无法重放”的空洞。
         let seq = store.append(&record)?;
         store.flush_durable()?;
         Ok(seq)

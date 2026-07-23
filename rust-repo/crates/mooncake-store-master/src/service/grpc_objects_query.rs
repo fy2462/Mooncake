@@ -245,6 +245,8 @@ impl MasterServiceImpl {
         let Some((_, object)) = self.state.objects.remove(&scoped_key) else {
             return Err(Status::not_found("key not found"));
         };
+        // 先从目录摘除可以阻止新的读者获得该对象；若 allocator/后台索引清理失败，
+        // 必须把原 ObjectEntry 放回，避免“RPC 失败但对象永久消失”的半提交状态。
         if let Err(status) = self.cleanup_removed_object(&scoped_key, &object) {
             self.state.objects.insert(scoped_key, object);
             return Err(status);

@@ -115,6 +115,8 @@ pub(super) fn select_best_replica<'a>(
                 continue;
             }
             let score = policy.score(replica);
+            // 只在严格更优时替换，分数相同会保留 Master 返回的第一个候选；这使
+            // transport 优化保持稳定，不会因一次 Get 随机改变副本选择。
             if score < best_score {
                 best_score = score;
                 best = Some(replica);
@@ -132,6 +134,8 @@ pub(super) fn select_best_replica<'a>(
         return first_nof;
     }
 
+    // 磁盘只在没有可读 Memory/NoF 时兜底；LocalDisk 的后续读取还会触发 promotion，
+    // 因而不能把它提前到远端 Memory 之前仅为了追求节点本地性。
     let mut best = None;
     for replica in replicas {
         if replica.status != ReplicaStatus::Complete {

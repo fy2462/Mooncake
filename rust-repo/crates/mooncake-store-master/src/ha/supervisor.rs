@@ -95,6 +95,8 @@ impl MasterServiceSupervisor {
     ///
     /// 提升为 LeaderWarmup：standby 已被选为 leader 但仍在为服务准备最终状态。
     pub fn promote_to_leader_warmup(&mut self) -> Result<(), HaError> {
+        // controller 的 promote 是追平栅栏（含 lag_entries 检查）；只有它成功后才能
+        // 发布 LeaderWarmup，避免外层状态先行而旧 catalog 随后才发现不可提升。
         self.standby_controller.promote_standby()?;
         *self
             .runtime_state

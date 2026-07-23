@@ -602,6 +602,8 @@ impl TransferEngine {
             req_count = requests.len(),
             "submit_transfer: calling C API"
         );
+        // 该 Vec 让 C layout 描述在 submitTransfer 调用期间地址稳定；它不拥有 source
+        // payload，异步完成前保持 payload 有效仍是上层调用者的责任。
         let mut ffi_requests: Vec<ffi::transfer_request_t> = requests
             .iter()
             .enumerate()
