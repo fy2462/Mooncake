@@ -33,12 +33,28 @@ use crate::ha::oplog_applier::OpLogApplier;
 use crate::ha::{
     HaError, SnapshotProvider, StandbyEvent, StandbyState, StandbyStateMachine, StandbySyncStatus,
 };
-use crate::oplog::OpLogStore;
+use crate::oplog::{OpLogChangeNotifier, OpLogStore};
 use crate::service::state::MasterState;
 use crate::service::sync_cache_total_accounting;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
+
+fn wait_for_notifier_startup(
+    notifier: &mut dyn OpLogChangeNotifier,
+    timeout: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if notifier.is_healthy() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
 
 /// Configuration for the hot standby service.
 /// 热备服务的配置。
@@ -75,7 +91,31 @@ impl Default for HotStandbyConfig {
 mod tests {
     use super::*;
     use crate::ha::SnapshotProvider;
-    use crate::oplog::InMemoryOpLog;
+    use crate::oplog::{
+        InMemoryOpLog, OpLogChangeNotifier, OpLogEntryCallback, OpLogErrorCallback,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DelayedHealthyNotifier {
+        healthy: Arc<AtomicBool>,
+    }
+
+    impl OpLogChangeNotifier for DelayedHealthyNotifier {
+        fn start(
+            &mut self,
+            _start_seq_id: u64,
+            _on_entry: OpLogEntryCallback,
+            _on_error: OpLogErrorCallback,
+        ) -> Result<(), HaError> {
+            Ok(())
+        }
+
+        fn stop(&mut self) {}
+
+        fn is_healthy(&self) -> bool {
+            self.healthy.load(Ordering::Acquire)
+        }
+    }
 
     struct FailingSnapshotProvider;
 
@@ -86,6 +126,22 @@ mod tests {
         ) -> Result<Option<crate::ha::LoadedSnapshot>, HaError> {
             Err(HaError::Snapshot("snapshot unavailable".into()))
         }
+    }
+
+    #[test]
+    fn test_notifier_startup_allows_health_initialization_grace_period() {
+        let healthy = Arc::new(AtomicBool::new(false));
+        let delayed = healthy.clone();
+        let mut notifier = DelayedHealthyNotifier { healthy };
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            delayed.store(true, Ordering::Release);
+        });
+
+        assert!(wait_for_notifier_startup(
+            &mut notifier,
+            std::time::Duration::from_millis(100),
+        ));
     }
 
     #[tokio::test]
@@ -427,26 +483,34 @@ impl HotStandbyService {
                             }),
                         );
                         if start_result.is_ok() {
-                            loop {
-                                if shutdown_rx.has_changed().unwrap_or(true) {
-                                    notifier.stop();
-                                    return;
+                            if wait_for_notifier_startup(
+                                notifier.as_mut(),
+                                std::time::Duration::from_secs(1),
+                            ) {
+                                loop {
+                                    if shutdown_rx.has_changed().unwrap_or(true) {
+                                        notifier.stop();
+                                        return;
+                                    }
+                                    if !notifier.is_healthy() {
+                                        state_machine.process_event(StandbyEvent::WatchBroken);
+                                        notifier.stop();
+                                        break;
+                                    }
+                                    let expected = applier_clone.get_expected_sequence_id();
+                                    let applied = expected.saturating_sub(1);
+                                    let primary = store.latest_sequence();
+                                    if let Some(status) = sync_status_ref.upgrade() {
+                                        let mut st = status.write();
+                                        st.applied_seq_id = applied;
+                                        st.primary_seq_id = primary;
+                                        st.lag_entries = primary.saturating_sub(applied);
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
-                                if !notifier.is_healthy() {
-                                    state_machine.process_event(StandbyEvent::WatchBroken);
-                                    notifier.stop();
-                                    break;
-                                }
-                                let expected = applier_clone.get_expected_sequence_id();
-                                let applied = expected.saturating_sub(1);
-                                let primary = store.latest_sequence();
-                                if let Some(status) = sync_status_ref.upgrade() {
-                                    let mut st = status.write();
-                                    st.applied_seq_id = applied;
-                                    st.primary_seq_id = primary;
-                                    st.lag_entries = primary.saturating_sub(applied);
-                                }
-                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            } else {
+                                state_machine.process_event(StandbyEvent::WatchBroken);
+                                notifier.stop();
                             }
                         }
                     }
