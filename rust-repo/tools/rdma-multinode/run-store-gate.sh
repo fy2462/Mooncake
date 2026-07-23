@@ -6,12 +6,16 @@ suite_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 source "$suite_dir/lib/common.sh"
 artifact_root=${RDMA_ARTIFACT_ROOT:-/home/fy2462/workspace/tmp/mooncake/rdma-multinode}
 te_result=${TE_RESULT:-$artifact_root/te.result}
-device=${STORE_DEVICE:-mc-rdma-rxe}
+device_a=${STORE_DEVICE_A:-mc-rdma-rxe-a}
+device_b=${STORE_DEVICE_B:-mc-rdma-rxe-b}
+device_c=${STORE_DEVICE_C:-mc-rdma-rxe-c}
+device=$device_a
 metadata=${STORE_METADATA_SERVER:-127.0.0.1:2379}
 master_addr=${STORE_MASTER_ADDR:-127.0.0.1:50051}
 master=${STORE_MASTER_CONTAINER:-mc-rdma-rust-master}
 node_a=${STORE_NODE_A_CONTAINER:-mc-rdma-store-node-a}
 node_b=${STORE_NODE_B_CONTAINER:-mc-rdma-store-node-b}
+node_c=${STORE_NODE_C_CONTAINER:-mc-rdma-store-node-c}
 client=${STORE_CLIENT_CONTAINER:-mc-rdma-store-test-client}
 etcd=${STORE_ETCD_CONTAINER:-mc-rdma-etcd}
 mode=${STORE_GATE_MODE:-standard}
@@ -36,11 +40,15 @@ node_command_file=$artifact_root/store-node-command.json
 host_manifest=$artifact_root/host-rdma.json
 ready_a=$artifact_root/store-a.ready
 ready_b=$artifact_root/store-b.ready
+ready_c=$artifact_root/store-c.ready
 stats_a=$artifact_root/store-a.storage.json
 stats_b=$artifact_root/store-b.storage.json
+stats_c=$artifact_root/store-c.storage.json
 command_a=$artifact_root/store-a.command.json
 command_b=$artifact_root/store-b.command.json
-rm -f -- "$ready_a" "$ready_b" "$stats_a" "$stats_b" "$command_a" "$command_b" "$result"
+command_c=$artifact_root/store-c.command.json
+rm -f -- "$ready_a" "$ready_b" "$ready_c" "$stats_a" "$stats_b" "$stats_c" \
+    "$command_a" "$command_b" "$command_c" "$result"
 
 master_command=(
     /opt/mooncake-rdma/store/mooncake-master
@@ -69,7 +77,7 @@ fi
 node_a_command=(
     python3 /tmp/store-node.py
     --node 127.0.0.1:12401
-    --device "$device"
+    --device "$device_a"
     --metadata "$metadata"
     --master "$master_addr"
     --ready /artifacts/store-a.ready
@@ -84,13 +92,28 @@ node_a_command=(
 node_b_command=(
     python3 /tmp/store-node.py
     --node 127.0.0.1:12402
-    --device "$device"
+    --device "$device_b"
     --metadata "$metadata"
     --master "$master_addr"
     --ready /artifacts/store-b.ready
     --stats /artifacts/store-b.storage.json
     --command /artifacts/store-b.command.json
     --storage-root "/tmp/mc-rdma-store-b-$run_id"
+    --storage-quota 268435456
+    --storage-interval 0.1
+    --disk-high-watermark 0.99
+    --disk-low-watermark 0.95
+)
+node_c_command=(
+    python3 /tmp/store-node.py
+    --node 127.0.0.1:12403
+    --device "$device_c"
+    --metadata "$metadata"
+    --master "$master_addr"
+    --ready /artifacts/store-c.ready
+    --stats /artifacts/store-c.storage.json
+    --command /artifacts/store-c.command.json
+    --storage-root "/tmp/mc-rdma-store-c-$run_id"
     --storage-quota 268435456
     --storage-interval 0.1
     --disk-high-watermark 0.99
@@ -104,18 +127,24 @@ with open(sys.argv[1], "w", encoding="utf-8") as stream:
     json.dump(sys.argv[2:], stream)
     stream.write("\n")
 PY
-python3 - "$node_command_file" "$node_a" "$node_b" "${node_a_command[*]}" "${node_b_command[*]}" <<'PY'
+python3 - "$node_command_file" "$node_a" "$node_b" "$node_c" \
+    "${node_a_command[*]}" "${node_b_command[*]}" "${node_c_command[*]}" <<'PY'
 import json
 import shlex
 import sys
 with open(sys.argv[1], "w", encoding="utf-8") as stream:
-    json.dump({sys.argv[2]: shlex.split(sys.argv[4]), sys.argv[3]: shlex.split(sys.argv[5])}, stream)
+    json.dump({
+        sys.argv[2]: shlex.split(sys.argv[5]),
+        sys.argv[3]: shlex.split(sys.argv[6]),
+        sys.argv[4]: shlex.split(sys.argv[7]),
+    }, stream)
     stream.write("\n")
 PY
 
 master_pid=
 node_a_pid=
 node_b_pid=
+node_c_pid=
 cleanup_store_processes() {
     local status=${1:-$?}
     trap - EXIT INT TERM
@@ -131,8 +160,9 @@ for entry in os.listdir("/proc"):
             pass'
     docker exec "$node_a" python3 -c "$stop_pattern" /tmp/store-node.py >/dev/null 2>&1 || true
     docker exec "$node_b" python3 -c "$stop_pattern" /tmp/store-node.py >/dev/null 2>&1 || true
+    docker exec "$node_c" python3 -c "$stop_pattern" /tmp/store-node.py >/dev/null 2>&1 || true
     docker exec "$master" python3 -c "$stop_pattern" mooncake-master >/dev/null 2>&1 || true
-    for process_id in "$node_a_pid" "$node_b_pid" "$master_pid"; do
+    for process_id in "$node_a_pid" "$node_b_pid" "$node_c_pid" "$master_pid"; do
         [[ -z $process_id ]] || kill "$process_id" 2>/dev/null || true
         [[ -z $process_id ]] || wait "$process_id" 2>/dev/null || true
     done
@@ -171,6 +201,7 @@ wait_for_master() {
 
 docker cp "$suite_dir/store-node.py" "$node_a:/tmp/store-node.py"
 docker cp "$suite_dir/store-node.py" "$node_b:/tmp/store-node.py"
+docker cp "$suite_dir/store-node.py" "$node_c:/tmp/store-node.py"
 docker cp "$suite_dir/store-e2e.py" "$client:/tmp/store-e2e.py"
 
 docker exec "$master" "${master_command[@]}" >"$artifact_root/master-$mode.log" 2>&1 &
@@ -180,13 +211,18 @@ docker exec "$node_a" "${node_a_command[@]}" >"$artifact_root/store-a-$mode.log"
 node_a_pid=$!
 docker exec "$node_b" "${node_b_command[@]}" >"$artifact_root/store-b-$mode.log" 2>&1 &
 node_b_pid=$!
+docker exec "$node_c" "${node_c_command[@]}" >"$artifact_root/store-c-$mode.log" 2>&1 &
+node_c_pid=$!
 wait_for_ready_file "$ready_a" '"storage_backend": "RustFilePerKey"'
 wait_for_ready_file "$ready_b" '"storage_backend": "RustFilePerKey"'
+wait_for_ready_file "$ready_c" '"storage_backend": "RustFilePerKey"'
 grep -q '"cpp_store_loaded": false' "$ready_a"
 grep -q '"cpp_store_loaded": false' "$ready_b"
+grep -q '"cpp_store_loaded": false' "$ready_c"
 docker exec "$master" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
 docker exec "$node_a" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
 docker exec "$node_b" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
+docker exec "$node_c" sh -c '! grep -h libmooncake_store.so /proc/[0-9]*/maps 2>/dev/null'
 
 if [[ $mode == standard ]]; then
     docker exec "$client" timeout "$scenario_timeout" python3 /tmp/store-e2e.py \
@@ -203,7 +239,7 @@ else
         --node-command-file "$node_command_file" \
         --host-rdma-manifest "$host_manifest" \
         --master-container "$master" \
-        --node-a "$node_a" --node-b "$node_b" \
+        --node-a "$node_a" --node-b "$node_b" --node-c "$node_c" \
         --client "$client" --etcd "$etcd" \
         --device "$device" --metadata "$metadata" --master "$master_addr" \
         --scenario-timeout "$scenario_timeout"

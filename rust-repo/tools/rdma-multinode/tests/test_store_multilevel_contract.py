@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -66,7 +67,9 @@ class TieredClient:
                 }
             ]
         segments = (
-            self.promoted_segments if state == "promoted" else ("node-a", "node-b")
+            self.promoted_segments
+            if state == "promoted"
+            else ("node-a", "node-b", "node-c")
         )
         return [
             {
@@ -88,6 +91,62 @@ class TieredClient:
 
     def close(self):
         self.closed = True
+
+
+class NonReentrantClient(TieredClient):
+    def __init__(self):
+        super().__init__()
+        self.active = False
+
+    async def put(self, key, value, config=None):
+        if self.active:
+            raise RuntimeError("client operation overlapped")
+        self.active = True
+        try:
+            await asyncio.sleep(0)
+            await super().put(key, value, config)
+        finally:
+            self.active = False
+
+
+def test_multilevel_pressure_exceeds_the_cluster_high_watermark():
+    pressure_bytes = STORE.PRESSURE_OBJECT_COUNT * STORE.PRESSURE_OBJECT_BYTES
+    cluster_high_watermark = (
+        STORE.STORE_NODE_COUNT
+        * STORE.STORE_NODE_SEGMENT_BYTES
+        * STORE.STORE_EVICTION_HIGH_WATERMARK
+    )
+
+    assert pressure_bytes > cluster_high_watermark
+
+
+def test_standard_profile_requires_three_distinct_rdma_replicas():
+    replicas = TieredClient().get_replica_desc("key")
+    assert STORE._three_rdma_replicas(replicas) == [
+        "node-a",
+        "node-b",
+        "node-c",
+    ]
+
+    with pytest.raises(STORE.ScenarioFailure, match="3 complete RDMA"):
+        STORE._three_rdma_replicas(replicas[:2])
+
+
+def test_store_client_ports_do_not_collide_with_three_store_nodes():
+    worker_ports = {
+        STORE.DEFAULT_CLIENT_PORT + offset for offset in range(3)
+    }
+    assert worker_ports.isdisjoint(STORE.STORE_NODE_PORTS)
+
+    async def get(self, key):
+        if self.active:
+            raise RuntimeError("client operation overlapped")
+        self.active = True
+        try:
+            await asyncio.sleep(0)
+            return await super().get(key)
+        finally:
+            self.active = False
 
 
 @pytest.mark.asyncio
@@ -113,6 +172,17 @@ async def test_standard_contract_exercises_sizes_parts_concurrency_and_mutation(
 
 
 @pytest.mark.asyncio
+async def test_concurrency_is_across_clients_without_reentrant_client_use():
+    workers = [NonReentrantClient(), NonReentrantClient()]
+
+    evidence = await STORE._concurrent_case(
+        workers, object(), "non-reentrant", sizes=(4096, 8192)
+    )
+
+    assert evidence["operations"] == 4
+
+
+@pytest.mark.asyncio
 async def test_fallback_is_byte_identical_and_promotion_restores_memory():
     client = TieredClient()
     key = "tiered"
@@ -127,6 +197,27 @@ async def test_fallback_is_byte_identical_and_promotion_restores_memory():
     assert evidence["fallback"]["replica_type"] == "LocalDisk"
     assert evidence["fallback"]["sha256"] == evidence["expected_sha256"]
     assert evidence["promotion"]["memory_replicas"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_disk_only_candidate_is_selected_from_actual_eviction_victims():
+    client = TieredClient()
+    client.values.update({"partial": b"partial", "disk": b"disk"})
+    client.states.update({"partial": "memory", "disk": "disk"})
+    candidates = {
+        "partial": (b"partial", ("node-a", "node-b")),
+        "disk": (b"disk", ("node-a", "node-b")),
+    }
+
+    key, expected, segments = await STORE.wait_for_disk_only_candidate(
+        client, candidates, timeout=0.05, poll_interval=0
+    )
+
+    assert (key, expected, segments) == (
+        "disk",
+        b"disk",
+        ("node-a", "node-b"),
+    )
 
 
 @pytest.mark.asyncio
@@ -163,6 +254,25 @@ async def test_promotion_requires_two_distinct_rdma_replicas():
         await STORE.verify_fallback_and_promotion(
             client, "tiered", b"expected-fallback", timeout=0.05, poll_interval=0
         )
+
+
+@pytest.mark.asyncio
+async def test_single_replica_tier_round_trip_restores_original_topology():
+    client = TieredClient(promoted_segments=("node-a",))
+    client.values["tiered"] = b"expected-fallback"
+    client.states["tiered"] = "disk"
+
+    evidence = await STORE.verify_fallback_and_promotion(
+        client,
+        "tiered",
+        b"expected-fallback",
+        timeout=0.05,
+        poll_interval=0,
+        expected_segments=("node-a",),
+    )
+
+    assert evidence["promotion"]["memory_replicas"] == 1
+    assert evidence["promotion"]["remote_segments"] == ["node-a"]
 
 
 @pytest.mark.asyncio
