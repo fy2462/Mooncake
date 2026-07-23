@@ -9,6 +9,17 @@
 能把任意日志或函数归类为控制面、数据面或两者的衔接点，并理解每个边界的
 超时、重试和清理责任。
 
+```{image} ../_static/diagrams/store-master-te.svg
+:alt: Rust Store、Master、FFI 与 C++ Transfer Engine 的代码和 ABI 边界
+:width: 100%
+:class: architecture-figure
+```
+
+{download}`下载可编辑的 Draw.io 源文件 <../../diagrams/store-master-te.drawio>`。
+
+图中的红色虚线框明确标出 C++ Store 不编译、不链接、不调用；橙色区域是允许的
+native Transfer Engine/TENT 边界。
+
 ## 控制面：决定“在哪里、何时可见”
 
 控制面以 gRPC 与 Master 状态为中心：
