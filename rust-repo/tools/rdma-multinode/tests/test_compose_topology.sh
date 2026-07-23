@@ -35,10 +35,12 @@ for service in "${data_plane_services[@]}"; do
     jq -e --arg service "$service" \
         '.services[$service].network_mode == "host"' "$rendered" >/dev/null
     jq -e --arg service "$service" \
-        '[.services[$service].volumes[]? | tostring] | any(contains("/dev/infiniband:/dev/infiniband"))' \
+        '[.services[$service].volumes[]?] | any(
+            .source == "/dev/infiniband" and .target == "/dev/infiniband"
+        )' \
         "$rendered" >/dev/null
     jq -e --arg service "$service" \
-        '[.services[$service].volumes[]? | tostring] | any(contains(":/artifacts"))' \
+        '[.services[$service].volumes[]?] | any(.target == "/artifacts")' \
         "$rendered" >/dev/null
 done
 
@@ -47,4 +49,13 @@ done
 
 jq -e '
     .services.etcd.command | index("--advertise-client-urls=http://127.0.0.1:2379") != null
+' "$rendered" >/dev/null
+jq -e '
+    .services.etcd.healthcheck.test == [
+        "CMD",
+        "etcdctl",
+        "endpoint",
+        "health",
+        "--endpoints=http://127.0.0.1:2379"
+    ]
 ' "$rendered" >/dev/null

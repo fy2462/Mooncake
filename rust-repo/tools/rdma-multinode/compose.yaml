@@ -23,7 +23,7 @@ services:
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://127.0.0.1:2379
     healthcheck:
-      test: [CMD-SHELL, etcdctl endpoint health --endpoints=http://127.0.0.1:2379]
+      test: [CMD, etcdctl, endpoint, health, --endpoints=http://127.0.0.1:2379]
       interval: 2s
       timeout: 2s
       retries: 15
