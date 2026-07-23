@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Put all generated files, build output, Cargo targets, logs, and caches under `/home/fy2462/workspace/tmp/mooncake/rdma-multinode`.
+- Put compilation-related dependency caches, build output, Cargo targets, and generated binaries/libraries under `/home/fy2462/workspace/tmp/mooncake/rdma-multinode`. Test-runtime state and working directories may use system/container `/tmp`. Retain acceptance logs and machine-readable results under the artifact root.
 - Use `CARGO_BUILD_JOBS=5`.
 - Use interactive `sudo`; never store, accept, or log a password.
 - Delete only manifest-recorded suite-owned `mc-rdma-*` resources.
@@ -68,7 +68,7 @@ Commit as `[Test] manage standard shared RXE lifecycle`.
 
 - [ ] **Step 1: Write the failing Compose contract test**
 
-Render `docker compose config --format json` and assert all seven service names exist, every data-plane service uses host networking, no `10.89.10.*` fixed address or `mc-rdma-net` exists, `/dev/infiniband` and artifacts are mounted, and no fallback container name appears in scripts.
+Render `docker compose config --format json` and assert all seven service names exist, every data-plane service uses host networking, no `10.89.10.*` fixed address or `mc-rdma-net` exists in the rendered Compose model, and `/dev/infiniband` plus artifacts are mounted. Gate-script fallback names are asserted and removed in Task 3, whose file scope owns those scripts.
 
 - [ ] **Step 2: Run RED**
 

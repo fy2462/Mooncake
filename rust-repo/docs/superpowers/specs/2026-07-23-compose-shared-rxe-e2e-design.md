@@ -42,6 +42,11 @@ idempotent and runs for normal completion, command failure, `INT`, and `TERM`.
 Passwords are never accepted as arguments, environment variables, Compose
 values, or log content.
 
+Compilation-related dependency caches, build output, Cargo targets, and
+generated binaries/libraries live under the shared artifact root. Test-runtime
+state and working directories may use system or container `/tmp`. Acceptance
+logs and machine-readable results are retained under the artifact root.
+
 ### Compose services
 
 All data-plane services use `network_mode: host`, privileged device access,
