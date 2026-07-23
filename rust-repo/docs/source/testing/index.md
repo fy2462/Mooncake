@@ -5,3 +5,20 @@
 
 在进入本节前，应先理解整体架构、Replica/Segment 和 TE 数据通路；否则
 容易把 mock 的 PASS 误认为真实 RDMA 已通过。
+
+```{toctree}
+:maxdepth: 1
+
+single-node
+multi-node
+reading-test-evidence
+```
+
+## 学习顺序
+
+1. **单节点测试**：先用 Rust 单元测试和脚本契约测试得到快速、可重复的反馈。
+2. **多节点测试**：再验证真实 verbs、六个方向的 TE RDMA 传输和三 Store 节点。
+3. **测试证据判读**：最后根据产物区分产品通过、失败、前置条件阻塞和 mock 通过。
+
+三层证据不能互相替代。单元测试通过不代表跨节点 RDMA 可用；Open-RDMA 的
+mock 测试通过也不代表真实 verbs 数据面通过。
