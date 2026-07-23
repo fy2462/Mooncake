@@ -17,8 +17,11 @@ grep -Fq '"timeout 45 ib_write_bw -x '\''$gid_index'\'' -d '\''$server_dev'\'' -
 grep -Fq '"timeout 30 ib_write_bw -x '\''$gid_index'\'' -d '\''$client_dev'\'' '\''$server_ip'\'' --report_gbits -n 10"' "$verbs_gate"
 
 grep -Fq 'directions=(a:b b:a b:c c:b c:a a:c)' "$te_gate"
+grep -Fq 'gid_index=${TE_GID_INDEX:-0}' "$te_gate"
 grep -Fq '[c]=mc-rdma-te-node-c' "$te_gate"
 grep -Fq '[c]=mc-rdma-rxe-c' "$te_gate"
+grep -Fq 'MC_GID_INDEX='"'"'$gid_index'"'"'' "$te_gate"
+grep -Fq 'pkill -TERM -f --' "$te_gate"
 grep -Fq 'direction_%s_%s=%s' "$te_gate"
 
 grep -Fq 'device_a=${STORE_DEVICE_A:-mc-rdma-rxe-a}' "$store_gate"
