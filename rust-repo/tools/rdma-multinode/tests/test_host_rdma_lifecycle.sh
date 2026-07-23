@@ -16,191 +16,109 @@ cat >"$fake_bin/sudo" <<'EOF'
 printf 'sudo %s\n' "$*" >>"$FAKE_LOG"
 exec "$@"
 EOF
-
 cat >"$fake_bin/modprobe" <<'EOF'
 #!/usr/bin/env bash
 printf 'modprobe %s\n' "$*" >>"$FAKE_LOG"
 EOF
-
 cat >"$fake_bin/ip" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'ip %s\n' "$*" >>"$FAKE_LOG"
-
 case "$*" in
-    'link show dev mc-rdma-net-a')
-        test -f "$FAKE_STATE/veth"
-        ;;
-    'link add mc-rdma-net-a type veth peer name mc-rdma-net-b')
-        : >"$FAKE_STATE/veth"
-        ;;
-    'addr replace 10.90.0.1/30 dev mc-rdma-net-a')
-        test -f "$FAKE_STATE/veth"
-        ;;
-    'link set dev mc-rdma-net-a up'|'link set dev mc-rdma-net-b up')
-        test -f "$FAKE_STATE/veth"
-        ;;
-    'link delete dev mc-rdma-net-a')
-        rm -f -- "$FAKE_STATE/veth"
-        ;;
-    *)
-        printf 'unexpected ip invocation: %s\n' "$*" >&2
-        exit 1
-        ;;
+    'link show dev mc-rdma-net-'?) test -f "$FAKE_STATE/veth-${4##*-}" ;;
+    'link add mc-rdma-net-'?' type veth peer name mc-rdma-peer-'?) : >"$FAKE_STATE/veth-${3##*-}" ;;
+    'addr replace 10.90.'?'.1/30 dev mc-rdma-net-'?) test -f "$FAKE_STATE/veth-${5##*-}" ;;
+    'link set dev mc-rdma-net-'?' up') test -f "$FAKE_STATE/veth-${4##*-}" ;;
+    'link set dev mc-rdma-peer-'?' up') test -f "$FAKE_STATE/veth-${4##*-}" ;;
+    'link delete dev mc-rdma-net-'?) rm -f -- "$FAKE_STATE/veth-${4##*-}" ;;
+    *) printf 'unexpected ip invocation: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
-
 cat >"$fake_bin/rdma" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'rdma %s\n' "$*" >>"$FAKE_LOG"
-
-case "$*" in
-    'link show mc-rdma-rxe/1')
-        test -f "$FAKE_STATE/rxe"
-        printf 'link mc-rdma-rxe/1 state ACTIVE physical_state LINK_UP netdev mc-rdma-net-a\n'
+case "$1 $2" in
+    'link show')
+        device=${3%/1}; test -f "$FAKE_STATE/rxe-${device##*-}"
+        printf 'link %s/1 state ACTIVE physical_state LINK_UP\n' "$device"
         ;;
-    'link add mc-rdma-rxe type rxe netdev mc-rdma-net-a')
-        test -f "$FAKE_STATE/veth"
-        : >"$FAKE_STATE/rxe"
-        ;;
-    'link delete mc-rdma-rxe/1')
-        rm -f -- "$FAKE_STATE/rxe"
-        ;;
-    *)
-        printf 'unexpected rdma invocation: %s\n' "$*" >&2
-        exit 1
-        ;;
+    'link add') device=$3; : >"$FAKE_STATE/rxe-${device##*-}" ;;
+    'link delete') rm -f -- "$FAKE_STATE/rxe-${3##*-}" ;;
+    *) exit 1 ;;
 esac
 EOF
-
 cat >"$fake_bin/ibv_devinfo" <<'EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'ibv_devinfo %s\n' "$*" >>"$FAKE_LOG"
-test "$*" = '-d mc-rdma-rxe'
+test "$1 $2" = '-v -d'
+device=$3
 cat <<OUT
-hca_id: mc-rdma-rxe
-    transport: InfiniBand (0)
+hca_id: $device
     port: 1
         state: ${FAKE_PORT_STATE:-PORT_ACTIVE (4)}
-        active_mtu: 1024 (3)
-        GID[  0]: ${FAKE_GID-fe80::90}
+        GID[  0]: ${FAKE_GID-fe80::${device##*-}}
 OUT
 EOF
-
 cat >"$fake_bin/mv" <<'EOF'
 #!/usr/bin/env bash
 destination=${!#}
-if [[ ${FAKE_MV_FAIL_JSON:-0} == 1 && $destination == "$RDMA_ARTIFACT_ROOT/host-rdma.json" ]]; then
-    exit 1
-fi
+if [[ ${FAKE_MV_FAIL_JSON:-0} == 1 && $destination == "$RDMA_ARTIFACT_ROOT/host-rdma.json" ]]; then exit 1; fi
 exec /bin/mv "$@"
 EOF
-
 chmod +x "$fake_bin"/*
 export PATH="$fake_bin:$PATH" FAKE_LOG="$tmp_dir/commands.log" FAKE_STATE="$state_dir"
 export RDMA_ARTIFACT_ROOT="$artifact_root"
 
 bash "$suite_dir/setup-host-rdma.sh"
+for name in a b c; do
+    grep -Fx "sudo ip link add mc-rdma-net-$name type veth peer name mc-rdma-peer-$name" "$FAKE_LOG"
+    grep -Fx "sudo rdma link add mc-rdma-rxe-$name type rxe netdev mc-rdma-net-$name" "$FAKE_LOG"
+    grep -Fx "sudo ibv_devinfo -v -d mc-rdma-rxe-$name" "$FAKE_LOG"
+    grep -Fx "device_$name=mc-rdma-rxe-$name" "$artifact_root/host-rdma.env"
+done
+python3 - "$artifact_root/host-rdma.json" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1], encoding="utf-8"))
+assert [node["name"] for node in data["nodes"]] == ["a", "b", "c"]
+assert all(node["owned_rxe"] and node["owned_veth"] for node in data["nodes"])
+PY
 
-grep -Fx 'sudo modprobe rdma_rxe' "$FAKE_LOG"
-grep -Fx 'sudo ip link add mc-rdma-net-a type veth peer name mc-rdma-net-b' "$FAKE_LOG"
-grep -Fx 'sudo ip addr replace 10.90.0.1/30 dev mc-rdma-net-a' "$FAKE_LOG"
-grep -Fx 'sudo ip link set dev mc-rdma-net-a up' "$FAKE_LOG"
-grep -Fx 'sudo ip link set dev mc-rdma-net-b up' "$FAKE_LOG"
-grep -Fx 'sudo rdma link add mc-rdma-rxe type rxe netdev mc-rdma-net-a' "$FAKE_LOG"
-grep -Fx 'sudo rdma link show mc-rdma-rxe/1' "$FAKE_LOG"
-grep -Fx 'sudo ibv_devinfo -d mc-rdma-rxe' "$FAKE_LOG"
-grep -Fx 'owned_rxe=true' "$artifact_root/host-rdma.env"
-grep -Fx 'owned_veth=true' "$artifact_root/host-rdma.env"
-grep -Fx 'device=mc-rdma-rxe' "$artifact_root/host-rdma.env"
-grep -Fx 'veth=mc-rdma-net-a' "$artifact_root/host-rdma.env"
-grep -Fx 'address=10.90.0.1/30' "$artifact_root/host-rdma.env"
-grep -F '"owned_rxe":true' "$artifact_root/host-rdma.json"
-grep -F '"owned_veth":true' "$artifact_root/host-rdma.json"
-grep -F '"gid":"fe80::90"' "$artifact_root/host-rdma.json"
+: >"$FAKE_LOG"; bash "$suite_dir/setup-host-rdma.sh"; ! grep -Fq ' link add ' "$FAKE_LOG"
+: >"$FAKE_LOG"; bash "$suite_dir/cleanup-host-rdma.sh"
+for name in c b a; do
+    grep -Fx "sudo rdma link delete mc-rdma-rxe-$name" "$FAKE_LOG"
+    grep -Fx "sudo ip link delete dev mc-rdma-net-$name" "$FAKE_LOG"
+done
+test ! -e "$artifact_root/host-rdma.json"; test ! -e "$artifact_root/host-rdma.env"
+: >"$FAKE_LOG"; bash "$suite_dir/cleanup-host-rdma.sh"; test ! -s "$FAKE_LOG"
 
+rm -rf -- "$artifact_root" "$state_dir"; mkdir -p "$artifact_root" "$state_dir"
+if FAKE_MV_FAIL_JSON=1 bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then exit 1; fi
+test ! -e "$artifact_root/host-rdma.json"; test -z "$(find "$state_dir" -type f -print -quit)"
+if FAKE_PORT_STATE=PORT_DOWN bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then exit 1; fi
+test -z "$(find "$state_dir" -type f -print -quit)"
+if FAKE_GID= bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then exit 1; fi
+test -z "$(find "$state_dir" -type f -print -quit)"
+
+python3 - "$artifact_root/host-rdma.json" <<'PY'
+import json, sys
+nodes=[]
+for index, name in enumerate("abc", 1):
+    nodes.append({"name":name,"device":f"mc-rdma-rxe-{name}","veth":f"mc-rdma-net-{name}",
+      "peer_veth":f"mc-rdma-peer-{name}","address":f"10.90.{index}.1/30","gid":f"fe80::{name}",
+      "owned_rxe":False,"owned_veth":False})
+json.dump({"nodes":nodes}, open(sys.argv[1], "w", encoding="utf-8"), separators=(",", ":"))
+PY
+for name in a b c; do : >"$state_dir/rxe-$name"; : >"$state_dir/veth-$name"; done
+: >"$FAKE_LOG"; bash "$suite_dir/cleanup-host-rdma.sh"
+! grep -Fq ' link delete ' "$FAKE_LOG"; test "$(find "$state_dir" -type f | wc -l)" -eq 6
+
+printf '{"nodes":[],"extra":true}\n' >"$artifact_root/host-rdma.json"
 : >"$FAKE_LOG"
-bash "$suite_dir/setup-host-rdma.sh"
-! grep -Fq 'link add mc-rdma-rxe' "$FAKE_LOG"
-! grep -Fq 'link add mc-rdma-net-a' "$FAKE_LOG"
-
-: >"$FAKE_LOG"
-bash "$suite_dir/cleanup-host-rdma.sh"
-grep -Fx 'sudo rdma link delete mc-rdma-rxe/1' "$FAKE_LOG"
-grep -Fx 'sudo ip link delete dev mc-rdma-net-a' "$FAKE_LOG"
-! grep -Fq 'mc-rdma-net-b' "$FAKE_LOG"
-test ! -e "$artifact_root/host-rdma.env"
-test ! -e "$artifact_root/host-rdma.json"
-
-: >"$FAKE_LOG"
-bash "$suite_dir/cleanup-host-rdma.sh"
-test ! -s "$FAKE_LOG"
-
-rm -rf -- "$artifact_root" "$state_dir"
-mkdir -p "$artifact_root" "$state_dir"
-if FAKE_MV_FAIL_JSON=1 bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
-    printf 'accepted a host-rdma.json publication failure\n' >&2
-    exit 1
-fi
-test ! -e "$artifact_root/host-rdma.env"
-test ! -e "$artifact_root/host-rdma.json"
-test ! -e "$state_dir/rxe"
-test ! -e "$state_dir/veth"
-
-printf 'device=mc-rdma-rxe\nveth=mc-rdma-net-a\npeer_veth=mc-rdma-net-b\naddress=10.90.0.1/30\ngid=fe80::90\nowned_rxe=false\nowned_veth=false\n' \
-    >"$artifact_root/host-rdma.env"
-printf '{"device":"mc-rdma-rxe","veth":"mc-rdma-net-a","peer_veth":"mc-rdma-net-b","address":"10.90.0.1/30","gid":"fe80::90","owned_rxe":false,"owned_veth":false}\n' \
-    >"$artifact_root/host-rdma.json"
-: >"$state_dir/rxe"
-: >"$state_dir/veth"
-: >"$FAKE_LOG"
-bash "$suite_dir/cleanup-host-rdma.sh"
+if bash "$suite_dir/cleanup-host-rdma.sh" >/dev/null 2>&1; then exit 1; fi
 ! grep -Fq ' link delete ' "$FAKE_LOG"
-test -e "$state_dir/rxe"
-test -e "$state_dir/veth"
-
-printf '{"device":"mc-rdma-rxe","veth":"mc-rdma-net-a","peer_veth":"mc-rdma-net-b","address":"10.90.0.1/30","gid":"fe80::90","owned_rxe":true,"owned_veth":true,"extra":true}\n' \
-    >"$artifact_root/host-rdma.json"
-: >"$FAKE_LOG"
-if bash "$suite_dir/cleanup-host-rdma.sh" >/dev/null 2>&1; then
-    printf 'accepted a malformed ownership manifest\n' >&2
-    exit 1
-fi
-! grep -Fq ' link delete ' "$FAKE_LOG"
-test -e "$state_dir/rxe"
-test -e "$state_dir/veth"
-
-: >"$FAKE_LOG"
-if bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
-    printf 'accepted an extended ownership manifest for existing resources\n' >&2
-    exit 1
-fi
-test ! -s "$FAKE_LOG"
-test -e "$state_dir/rxe"
-test -e "$state_dir/veth"
-grep -Fq '"extra":true' "$artifact_root/host-rdma.json"
-
-rm -rf -- "$artifact_root" "$state_dir"
-mkdir -p "$artifact_root" "$state_dir"
-if FAKE_PORT_STATE=PORT_DOWN bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
-    printf 'accepted an inactive RXE port\n' >&2
-    exit 1
-fi
-test ! -e "$artifact_root/host-rdma.env"
-test ! -e "$artifact_root/host-rdma.json"
-test ! -e "$state_dir/rxe"
-test ! -e "$state_dir/veth"
-
-if FAKE_GID= bash "$suite_dir/setup-host-rdma.sh" >/dev/null 2>&1; then
-    printf 'accepted an empty RXE GID\n' >&2
-    exit 1
-fi
-test ! -e "$artifact_root/host-rdma.env"
-test ! -e "$artifact_root/host-rdma.json"
-test ! -e "$state_dir/rxe"
-test ! -e "$state_dir/veth"
 
 if rg -n -- 'sudo([[:space:]]+[^[:space:]]+)*[[:space:]]+(-S|--stdin)([[:space:]]|$)|SUDO_ASKPASS' \
     "$suite_dir/setup-host-rdma.sh" "$suite_dir/cleanup-host-rdma.sh"; then
