@@ -411,6 +411,7 @@ async def main() -> int:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--prefix", default="standard")
     parser.add_argument("--tier-timeout", type=float, default=45.0)
+    parser.add_argument("--replica-num", type=int, choices=(1, 2, 3), default=3)
     args = parser.parse_args()
     import _mooncake_store as store
 
@@ -420,7 +421,7 @@ async def main() -> int:
     try:
         client = await _create_client(store, args, 0)
         clients.append(client)
-        config = store.ReplicateConfig(replica_num=3)
+        config = store.ReplicateConfig(replica_num=args.replica_num)
         tier_config = store.ReplicateConfig(replica_num=1)
         if args.mode == "standard":
             workers = [

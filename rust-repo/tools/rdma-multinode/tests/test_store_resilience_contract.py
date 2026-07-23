@@ -574,6 +574,7 @@ async def test_restore_verifies_all_service_health_even_when_processes_exist():
         master_container="master",
         node_a="node-a",
         node_b="node-b",
+        node_c="node-c",
     )
     calls = []
 
@@ -605,6 +606,7 @@ async def test_restore_verifies_all_service_health_even_when_processes_exist():
     assert ("healthy", "master") in calls
     assert ("healthy", "node-a") in calls
     assert ("healthy", "node-b") in calls
+    assert ("healthy", "node-c") in calls
 
 
 @pytest.mark.asyncio
@@ -651,11 +653,22 @@ async def test_node_health_requires_ready_file_and_a_new_clean_storage_cycle(tmp
 def test_runner_mutates_only_manifest_owned_link_without_password_plumbing():
     source = SCRIPT.read_text()
     assert "host-rdma.json" in source
-    assert "mc-rdma-net-a" in source and "mc-rdma-net-b" in source
+    assert 'f"mc-rdma-net-{node_name}"' in source
+    assert 'f"mc-rdma-peer-{node_name}"' in source
     assert "owned_veth" in source
     assert "sudo" in source
     assert "-S" not in source
     assert "SUDO_ASKPASS" not in source
+
+
+def test_runner_covers_three_nodes_and_two_replica_degraded_reads():
+    source = SCRIPT.read_text()
+    assert 'parser.add_argument("--node-c"' in source
+    assert "self.args.node_c" in source
+    assert '"store-c.storage.json"' in source
+    assert '"store-c.command.json"' in source
+    assert 'replica_num=2' in source
+    assert 'set_link(False, "c")' in source
 
 
 def test_run_sh_defaults_to_real_resilience_gate():

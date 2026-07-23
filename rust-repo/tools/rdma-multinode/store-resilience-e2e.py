@@ -616,9 +616,16 @@ class DockerOrchestrator:
             raise ScenarioFailure(f"client operation {label} failed: {result}")
         return result
 
-    async def seed(self, label, size=2 * 1024 * 1024, seed=71):
+    async def seed(self, label, size=2 * 1024 * 1024, seed=71, replica_num=3):
         key = f"resilience-{label}-{self.seed_counter}"
-        result = await self.client_op(label, "seed", key=key, size=size, seed=seed)
+        result = await self.client_op(
+            label,
+            "seed",
+            key=key,
+            size=size,
+            seed=seed,
+            replica_num=replica_num,
+        )
         owners = [
             replica.get("segment_name")
             for replica in result["replicas"]
@@ -636,6 +643,17 @@ class DockerOrchestrator:
             "read hash differs from seeded object",
         )
         return True
+
+    async def seed_on_owner(self, label, required_owner, replica_num):
+        for attempt in range(10):
+            seeded = await self.seed(
+                f"{label}-{attempt}", replica_num=replica_num
+            )
+            if required_owner in seeded[2]:
+                return seeded
+        raise ScenarioFailure(
+            f"could not place {replica_num}-replica object on {required_owner}"
+        )
 
     async def describe(self, label, key):
         return (await self.client_op(label, "describe", key=key))["replicas"]
@@ -760,26 +778,32 @@ class DockerOrchestrator:
             interval=0.1,
         )
 
-    def owned_link(self):
+    def owned_link(self, node_name):
         manifest = json.loads(Path(self.args.host_rdma_manifest).read_text())
+        nodes = manifest.get("nodes") if isinstance(manifest, dict) else None
         _require(
-            manifest
-            == {
-                "device": "mc-rdma-rxe",
-                "veth": "mc-rdma-net-a",
-                "peer_veth": "mc-rdma-net-b",
-                "address": "10.90.0.1/30",
-                "gid": manifest.get("gid"),
-                "owned_rxe": True,
-                "owned_veth": True,
-            },
-            "RDMA link interruption requires the exact owned manifest",
+            isinstance(nodes, list) and len(nodes) == 3,
+            "RDMA link interruption requires a three-node owned manifest",
         )
-        _require(bool(manifest.get("gid")), "owned RDMA manifest has no GID")
-        return manifest["veth"], manifest["peer_veth"]
+        matches = [node for node in nodes if node.get("name") == node_name]
+        _require(len(matches) == 1, f"owned RDMA node {node_name} is missing")
+        node = matches[0]
+        expected = {
+            "name": node_name,
+            "device": f"mc-rdma-rxe-{node_name}",
+            "veth": f"mc-rdma-net-{node_name}",
+            "peer_veth": f"mc-rdma-peer-{node_name}",
+            "address": f"10.90.{ord(node_name) - ord('a') + 1}.1/30",
+            "gid": node.get("gid"),
+            "owned_rxe": True,
+            "owned_veth": True,
+        }
+        _require(node == expected, "RDMA link interruption requires exact ownership")
+        _require(bool(node.get("gid")), "owned RDMA manifest has no GID")
+        return node["veth"], node["peer_veth"]
 
-    async def set_link(self, up):
-        veth, peer = self.owned_link()
+    async def set_link(self, up, node_name="c"):
+        veth, peer = self.owned_link(node_name)
         state = "up" if up else "down"
         await self.command(["sudo", "ip", "link", "set", "dev", veth, state])
         if up:
@@ -791,14 +815,22 @@ class DockerOrchestrator:
 
     async def node_stats(self):
         values = []
-        for name in ("store-a.storage.json", "store-b.storage.json"):
+        for name in (
+            "store-a.storage.json",
+            "store-b.storage.json",
+            "store-c.storage.json",
+        ):
             path = self.artifacts / name
             values.append(json.loads(path.read_text()) if path.exists() else {})
         return values
 
     async def request_watermark(self, high, low):
         request_id = f"watermark-{time.monotonic_ns()}"
-        for name in ("store-a.command.json", "store-b.command.json"):
+        for name in (
+            "store-a.command.json",
+            "store-b.command.json",
+            "store-c.command.json",
+        ):
             _atomic_json(
                 self.artifacts / name,
                 {"id": request_id, "action": "watermark", "high": high, "low": low},
@@ -833,6 +865,7 @@ class DockerOrchestrator:
         restarted = await self.restart_node(self.args.node_a)
         return {
             "restart": restarted,
+            "affected_node": "a",
             "initial_owners": len(owners),
             "post_restart_read": await self.read_valid(
                 "node-restart-read", key, expected
@@ -855,7 +888,7 @@ class DockerOrchestrator:
 
     async def scenario_rdma_reconnect(self):
         key, expected, _ = await self.seed("rdma-reconnect")
-        link_down_observed = await self.set_link(False)
+        link_down_observed = await self.set_link(False, "c")
         interrupted = await self.command(
             [
                 "docker",
@@ -885,9 +918,10 @@ class DockerOrchestrator:
             interrupted.returncode != 0,
             "RDMA read unexpectedly succeeded while link was down",
         )
-        link_restored = await self.set_link(True)
+        link_restored = await self.set_link(True, "c")
         return {
             "link_down_observed": link_down_observed,
+            "affected_node": "c",
             "interruption_failed_read": True,
             "link_restored": link_restored,
             "post_reconnect_read": await self.read_valid(
@@ -896,9 +930,11 @@ class DockerOrchestrator:
         }
 
     async def scenario_degraded_read(self):
-        key, expected, owners = await self.seed("degraded")
-        unavailable = "127.0.0.1:12401"
-        await self.stop_process(self.args.node_a, "/tmp/store-node.py")
+        key, expected, owners = await self.seed_on_owner(
+            "degraded", "127.0.0.1:12402", replica_num=2
+        )
+        unavailable = "127.0.0.1:12402"
+        await self.stop_process(self.args.node_b, "/tmp/store-node.py")
 
         async def one_owner():
             replicas = await self.describe("degraded-describe", key)
@@ -915,9 +951,10 @@ class DockerOrchestrator:
             one_owner, "one-owner degraded metadata", timeout=20
         )
         valid = await self.read_valid("degraded-read", key, expected)
-        await self.restart_node(self.args.node_a)
+        await self.restart_node(self.args.node_b)
         return {
             "initial_owners": len(owners),
+            "affected_node": "b",
             "unavailable_owner": unavailable,
             "remaining_owners": len(remaining),
             "byte_valid": valid,
@@ -977,7 +1014,7 @@ class DockerOrchestrator:
         ):
             await self.start_detached(self.args.master_container, self.master_command)
         await self.wait_master()
-        for node in (self.args.node_a, self.args.node_b):
+        for node in (self.args.node_a, self.args.node_b, self.args.node_c):
             if not await self.process_running(node, "/tmp/store-node.py"):
                 await self.restart_node(node)
             else:
@@ -997,9 +1034,10 @@ async def main():
     parser.add_argument("--master-container", default="mc-rdma-rust-master")
     parser.add_argument("--node-a", default="mc-rdma-store-node-a")
     parser.add_argument("--node-b", default="mc-rdma-store-node-b")
+    parser.add_argument("--node-c", default="mc-rdma-store-node-c")
     parser.add_argument("--client", default="mc-rdma-store-test-client")
     parser.add_argument("--etcd", default="mc-rdma-etcd")
-    parser.add_argument("--device", default="mc-rdma-rxe")
+    parser.add_argument("--device", default="mc-rdma-rxe-c")
     parser.add_argument("--metadata", default="127.0.0.1:2379")
     parser.add_argument("--master", default="127.0.0.1:50051")
     parser.add_argument("--scenario-timeout", type=float, default=120)
