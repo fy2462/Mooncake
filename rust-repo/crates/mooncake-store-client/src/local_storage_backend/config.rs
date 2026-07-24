@@ -6,6 +6,13 @@ pub enum OffsetEvictionPolicy {
     Fifo,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetPersistMode {
+    Disabled,
+    Relaxed,
+    Strict,
+}
+
 #[derive(Debug, Clone)]
 pub struct OffsetAllocatorConfig {
     pub root_dir: PathBuf,
@@ -19,6 +26,9 @@ pub struct OffsetAllocatorConfig {
     pub keys_low_ratio: f64,
     pub max_evict_per_offload: usize,
     pub fallback_evict_batch: usize,
+    pub persist_mode: OffsetPersistMode,
+    pub persist_interval_seconds: i64,
+    pub enable_record_crc: bool,
 }
 
 impl Default for OffsetAllocatorConfig {
@@ -35,6 +45,9 @@ impl Default for OffsetAllocatorConfig {
             keys_low_ratio: 0.80,
             max_evict_per_offload: 4096,
             fallback_evict_batch: 16,
+            persist_mode: OffsetPersistMode::Disabled,
+            persist_interval_seconds: 60,
+            enable_record_crc: true,
         }
     }
 }
@@ -77,10 +90,35 @@ impl OffsetAllocatorConfig {
             config.max_evict_per_offload = value;
         }
 
+        if let Some(value) = lookup("MOONCAKE_OFFSET_PERSIST_MODE") {
+            config.persist_mode = match value.as_str() {
+                "disabled" | "DISABLED" => OffsetPersistMode::Disabled,
+                "relaxed" | "RELAXED" => OffsetPersistMode::Relaxed,
+                "strict" | "STRICT" => OffsetPersistMode::Strict,
+                _ => config.persist_mode,
+            };
+        }
+        if let Some(value) =
+            parse_env::<i64>(&mut lookup, "MOONCAKE_OFFSET_PERSIST_INTERVAL_SECONDS")
+        {
+            config.persist_interval_seconds = value;
+        }
+        if lookup("MOONCAKE_OFFSET_RECORD_CRC").is_some_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "off")
+        }) {
+            config.enable_record_crc = false;
+        }
+
         config
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.persist_mode == OffsetPersistMode::Relaxed && self.persist_interval_seconds < 5 {
+            return Err(
+                "offset allocator persist_interval_seconds must be at least 5 in relaxed mode"
+                    .to_string(),
+            );
+        }
         if self.fsdir.is_empty() {
             return Err("offset allocator fsdir must not be empty".to_string());
         }
@@ -128,7 +166,7 @@ fn parse_positive_u64(lookup: &mut impl FnMut(&str) -> Option<String>, name: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{OffsetAllocatorConfig, OffsetEvictionPolicy};
+    use super::{OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode};
     use std::collections::HashMap;
 
     #[test]
@@ -170,6 +208,86 @@ mod tests {
         assert_eq!(config.high_ratio, 0.90);
         assert_eq!(config.max_evict_per_offload, 4096);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn offset_persistence_defaults_match_cpp() {
+        let config = OffsetAllocatorConfig::default();
+
+        assert_eq!(config.persist_mode, OffsetPersistMode::Disabled);
+        assert_eq!(config.persist_interval_seconds, 60);
+        assert!(config.enable_record_crc);
+    }
+
+    #[test]
+    fn offset_config_reads_cpp_persistence_environment_values() {
+        let environment = HashMap::from([
+            ("MOONCAKE_OFFSET_PERSIST_MODE", "RELAXED"),
+            ("MOONCAKE_OFFSET_PERSIST_INTERVAL_SECONDS", "7"),
+            ("MOONCAKE_OFFSET_RECORD_CRC", "OFF"),
+        ]);
+
+        let config = OffsetAllocatorConfig::from_lookup(|name| {
+            environment.get(name).map(|value| value.to_string())
+        });
+
+        assert_eq!(config.persist_mode, OffsetPersistMode::Relaxed);
+        assert_eq!(config.persist_interval_seconds, 7);
+        assert!(!config.enable_record_crc);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn offset_config_ignores_unknown_or_malformed_persistence_environment_values() {
+        let environment = HashMap::from([
+            ("MOONCAKE_OFFSET_PERSIST_MODE", "ReLaXeD"),
+            ("MOONCAKE_OFFSET_PERSIST_INTERVAL_SECONDS", "soon"),
+            ("MOONCAKE_OFFSET_RECORD_CRC", "sometimes"),
+        ]);
+
+        let config = OffsetAllocatorConfig::from_lookup(|name| {
+            environment.get(name).map(|value| value.to_string())
+        });
+
+        assert_eq!(config.persist_mode, OffsetPersistMode::Disabled);
+        assert_eq!(config.persist_interval_seconds, 60);
+        assert!(config.enable_record_crc);
+    }
+
+    #[test]
+    fn offset_record_crc_accepts_all_cpp_disable_spellings() {
+        for disabled in ["0", "false", "FALSE", "off", "OFF"] {
+            let config = OffsetAllocatorConfig::from_lookup(|name| {
+                (name == "MOONCAKE_OFFSET_RECORD_CRC").then(|| disabled.to_string())
+            });
+            assert!(!config.enable_record_crc, "value={disabled}");
+        }
+    }
+
+    #[test]
+    fn relaxed_persistence_rejects_intervals_below_five_seconds() {
+        let config = OffsetAllocatorConfig {
+            persist_mode: OffsetPersistMode::Relaxed,
+            persist_interval_seconds: 4,
+            ..OffsetAllocatorConfig::default()
+        };
+
+        assert_eq!(
+            config.validate().unwrap_err(),
+            "offset allocator persist_interval_seconds must be at least 5 in relaxed mode"
+        );
+    }
+
+    #[test]
+    fn strict_and_disabled_modes_do_not_restrict_the_interval() {
+        for persist_mode in [OffsetPersistMode::Strict, OffsetPersistMode::Disabled] {
+            let config = OffsetAllocatorConfig {
+                persist_mode,
+                persist_interval_seconds: 0,
+                ..OffsetAllocatorConfig::default()
+            };
+            config.validate().unwrap();
+        }
     }
 }
 

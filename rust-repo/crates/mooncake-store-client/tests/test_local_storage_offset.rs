@@ -1,5 +1,5 @@
 use mooncake_store_client::{
-    OffsetAllocatorConfig, OffsetAllocatorStorageBackend, OffsetEvictionPolicy,
+    OffsetAllocatorConfig, OffsetAllocatorStorageBackend, OffsetEvictionPolicy, OffsetPersistMode,
 };
 
 fn offset_config(root_dir: std::path::PathBuf) -> OffsetAllocatorConfig {
@@ -15,6 +15,8 @@ fn offset_config(root_dir: std::path::PathBuf) -> OffsetAllocatorConfig {
         keys_low_ratio: 0.80,
         max_evict_per_offload: 16,
         fallback_evict_batch: 2,
+        persist_mode: OffsetPersistMode::Disabled,
+        ..OffsetAllocatorConfig::default()
     }
 }
 

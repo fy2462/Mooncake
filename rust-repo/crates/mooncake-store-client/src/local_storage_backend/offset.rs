@@ -8,6 +8,163 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// Task 1 establishes these primitives before Tasks 2-3 wire them into I/O.
+#[allow(dead_code)]
+const RECORD_HEADER_SIZE: usize = 24;
+#[allow(dead_code)]
+const RECORD_HEADER_PREFIX_SIZE: usize = 20;
+#[allow(dead_code)]
+const RECORD_FLAG_HAS_CRC: u32 = 1;
+#[allow(dead_code)]
+const RECORD_KNOWN_FLAGS: u32 = RECORD_FLAG_HAS_CRC;
+#[allow(dead_code)]
+const RECORD_VALUE_ALIGNMENT: u64 = 4096;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordHeader {
+    key_len: u32,
+    value_len: u32,
+    write_seq: u64,
+    flags: u32,
+    crc32: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordFormatError(&'static str);
+
+#[allow(dead_code)]
+impl RecordHeader {
+    fn encode_prefix(&self) -> [u8; RECORD_HEADER_PREFIX_SIZE] {
+        let mut encoded = [0; RECORD_HEADER_PREFIX_SIZE];
+        encoded[0..4].copy_from_slice(&self.key_len.to_le_bytes());
+        encoded[4..8].copy_from_slice(&self.value_len.to_le_bytes());
+        encoded[8..16].copy_from_slice(&self.write_seq.to_le_bytes());
+        encoded[16..20].copy_from_slice(&self.flags.to_le_bytes());
+        encoded
+    }
+
+    fn encode(&self) -> [u8; RECORD_HEADER_SIZE] {
+        let mut encoded = [0; RECORD_HEADER_SIZE];
+        encoded[..RECORD_HEADER_PREFIX_SIZE].copy_from_slice(&self.encode_prefix());
+        encoded[RECORD_HEADER_PREFIX_SIZE..].copy_from_slice(&self.crc32.to_le_bytes());
+        encoded
+    }
+
+    fn decode(encoded: &[u8]) -> Result<Self, RecordFormatError> {
+        if encoded.len() < RECORD_HEADER_SIZE {
+            return Err(RecordFormatError("truncated record header"));
+        }
+        let header = Self {
+            key_len: u32::from_le_bytes(encoded[0..4].try_into().unwrap()),
+            value_len: u32::from_le_bytes(encoded[4..8].try_into().unwrap()),
+            write_seq: u64::from_le_bytes(encoded[8..16].try_into().unwrap()),
+            flags: u32::from_le_bytes(encoded[16..20].try_into().unwrap()),
+            crc32: u32::from_le_bytes(encoded[20..24].try_into().unwrap()),
+        };
+        if header.flags & !RECORD_KNOWN_FLAGS != 0 {
+            return Err(RecordFormatError("record header has unknown flags"));
+        }
+        header.checked_record_size()?;
+        Ok(header)
+    }
+
+    fn value_padding(key_len: u64) -> Result<u64, RecordFormatError> {
+        if key_len > u32::MAX.into() {
+            return Err(RecordFormatError("record key length exceeds u32"));
+        }
+        let head = (RECORD_HEADER_SIZE as u64)
+            .checked_add(key_len)
+            .ok_or(RecordFormatError("record size overflow"))?;
+        Ok((RECORD_VALUE_ALIGNMENT - head % RECORD_VALUE_ALIGNMENT) % RECORD_VALUE_ALIGNMENT)
+    }
+
+    fn value_offset(key_len: u64) -> Result<u64, RecordFormatError> {
+        let padding = Self::value_padding(key_len)?;
+        (RECORD_HEADER_SIZE as u64)
+            .checked_add(key_len)
+            .and_then(|head| head.checked_add(padding))
+            .ok_or(RecordFormatError("record size overflow"))
+    }
+
+    fn record_size(key_len: u64, value_len: u64) -> Result<u64, RecordFormatError> {
+        if value_len > u32::MAX.into() {
+            return Err(RecordFormatError("record value length exceeds u32"));
+        }
+        Self::value_offset(key_len)?
+            .checked_add(value_len)
+            .ok_or(RecordFormatError("record size overflow"))
+    }
+
+    fn checked_record_size(&self) -> Result<u64, RecordFormatError> {
+        Self::record_size(self.key_len.into(), self.value_len.into())
+    }
+
+    fn validate_extent(&self, record_offset: u64, arena_len: u64) -> Result<(), RecordFormatError> {
+        let record_end = record_offset
+            .checked_add(self.checked_record_size()?)
+            .ok_or(RecordFormatError("record extent overflow"))?;
+        if record_end > arena_len {
+            return Err(RecordFormatError("record extent is out of bounds"));
+        }
+        Ok(())
+    }
+
+    fn verify_crc(&self, key: &[u8], value: &[u8]) -> Result<(), RecordFormatError> {
+        if key.len() != self.key_len as usize || value.len() != self.value_len as usize {
+            return Err(RecordFormatError("record lengths do not match header"));
+        }
+        if self.flags & RECORD_FLAG_HAS_CRC != 0
+            && crc32c([self.encode_prefix().as_slice(), key, value]) != self.crc32
+        {
+            return Err(RecordFormatError("record CRC-32C mismatch"));
+        }
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct Crc32c(u32);
+
+#[allow(dead_code)]
+impl Crc32c {
+    fn new() -> Self {
+        Self(u32::MAX)
+    }
+
+    fn extend(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u32::from(*byte);
+            for _ in 0..8 {
+                self.0 = if self.0 & 1 != 0 {
+                    0x82f6_3b78 ^ (self.0 >> 1)
+                } else {
+                    self.0 >> 1
+                };
+            }
+        }
+    }
+
+    fn finish(self) -> u32 {
+        self.0 ^ u32::MAX
+    }
+}
+
+#[allow(dead_code)]
+fn crc32c<I, B>(chunks: I) -> u32
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+{
+    let mut crc = Crc32c::new();
+    for chunk in chunks {
+        crc.extend(chunk.as_ref());
+    }
+    crc.finish()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct OffsetEntry {
     offset: u64,
@@ -502,4 +659,94 @@ fn insert_free_extent(extents: &mut BTreeMap<u64, u64>, offset: u64, len: u64) {
         }
     }
     extents.insert(start, length);
+}
+
+#[cfg(test)]
+mod record_primitive_tests {
+    use super::{
+        RECORD_FLAG_HAS_CRC, RECORD_HEADER_PREFIX_SIZE, RECORD_HEADER_SIZE, RecordHeader, crc32c,
+    };
+
+    #[test]
+    fn crc32c_matches_castagnoli_check_vector_and_streaming() {
+        assert_eq!(crc32c([b"123", b"456", b"789"]), 0xe306_9283);
+        assert_eq!(crc32c([b"".as_slice()]), 0);
+    }
+
+    #[test]
+    fn record_header_uses_explicit_little_endian_v3_layout() {
+        let header = RecordHeader {
+            key_len: 0x0102_0304,
+            value_len: 0x1112_1314,
+            write_seq: 0x2122_2324_2526_2728,
+            flags: RECORD_FLAG_HAS_CRC,
+            crc32: 0x3132_3334,
+        };
+
+        let encoded = header.encode();
+        assert_eq!(RECORD_HEADER_SIZE, 24);
+        assert_eq!(RECORD_HEADER_PREFIX_SIZE, 20);
+        assert_eq!(
+            encoded,
+            [
+                0x04, 0x03, 0x02, 0x01, 0x14, 0x13, 0x12, 0x11, 0x28, 0x27, 0x26, 0x25, 0x24, 0x23,
+                0x22, 0x21, 0x01, 0x00, 0x00, 0x00, 0x34, 0x33, 0x32, 0x31,
+            ]
+        );
+        assert_eq!(RecordHeader::decode(&encoded).unwrap(), header);
+    }
+
+    #[test]
+    fn record_layout_aligns_values_to_four_kibibytes() {
+        assert_eq!(RecordHeader::value_padding(4072).unwrap(), 0);
+        assert_eq!(RecordHeader::value_padding(4073).unwrap(), 4095);
+        assert_eq!(RecordHeader::value_offset(0).unwrap(), 4096);
+        assert_eq!(RecordHeader::record_size(5, 1000).unwrap(), 5096);
+        assert_eq!(RecordHeader::value_offset(5).unwrap() % 4096, 0);
+    }
+
+    #[test]
+    fn record_header_rejects_truncation_unknown_flags_and_size_overflow() {
+        assert!(RecordHeader::decode(&[0; RECORD_HEADER_SIZE - 1]).is_err());
+
+        let mut unknown_flags = [0u8; RECORD_HEADER_SIZE];
+        unknown_flags[16..20].copy_from_slice(&2u32.to_le_bytes());
+        assert!(RecordHeader::decode(&unknown_flags).is_err());
+
+        assert!(RecordHeader::value_offset(u64::MAX).is_err());
+        assert!(RecordHeader::record_size(0, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn record_header_checks_extent_bounds_without_truncating_lengths() {
+        let header = RecordHeader {
+            key_len: 5,
+            value_len: 1000,
+            write_seq: 7,
+            flags: 0,
+            crc32: 0,
+        };
+
+        assert_eq!(header.checked_record_size().unwrap(), 5096);
+        assert!(header.validate_extent(100, 5196).is_ok());
+        assert!(header.validate_extent(100, 5195).is_err());
+        assert!(header.validate_extent(u64::MAX - 10, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn record_crc_covers_prefix_key_and_value_but_not_crc_field_or_padding() {
+        let mut header = RecordHeader {
+            key_len: 3,
+            value_len: 5,
+            write_seq: 9,
+            flags: RECORD_FLAG_HAS_CRC,
+            crc32: 0,
+        };
+        let prefix = header.encode_prefix();
+        let expected = crc32c([prefix.as_slice(), b"key", b"value"]);
+
+        header.crc32 = expected;
+        assert!(header.verify_crc(b"key", b"value").is_ok());
+        assert!(header.verify_crc(b"key", b"Value").is_err());
+    }
 }

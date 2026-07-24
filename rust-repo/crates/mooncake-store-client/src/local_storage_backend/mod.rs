@@ -13,7 +13,9 @@ use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use parking_lot::RwLock;
 
-pub use config::{LocalStorageConfig, OffsetAllocatorConfig, OffsetEvictionPolicy};
+pub use config::{
+    LocalStorageConfig, OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode,
+};
 pub use offset::OffsetAllocatorStorageBackend;
 
 const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
