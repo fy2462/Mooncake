@@ -24,7 +24,8 @@ fn offset_config(root_dir: std::path::PathBuf) -> OffsetAllocatorConfig {
 #[test]
 fn offset_allocator_fifo_eviction_reuses_released_extent() {
     let temp = tempfile::tempdir().unwrap();
-    let config = offset_config(temp.path().to_path_buf());
+    let mut config = offset_config(temp.path().to_path_buf());
+    config.persist_mode = OffsetPersistMode::Strict;
     let backend = OffsetAllocatorStorageBackend::new(config.clone());
     backend.init().unwrap();
 
@@ -88,6 +89,7 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
 
     let mut config = offset_config(temp.path().to_path_buf());
     config.quota_bytes = 16 * 1024;
+    config.persist_mode = OffsetPersistMode::Strict;
     let backend = OffsetAllocatorStorageBackend::new(config);
     backend.init().unwrap();
     backend.write_object("c", b"cccc").unwrap();

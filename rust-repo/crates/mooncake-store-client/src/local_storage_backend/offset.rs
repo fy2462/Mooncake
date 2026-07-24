@@ -1,4 +1,4 @@
-use super::{OffsetAllocatorConfig, OffsetEvictionPolicy};
+use super::{OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode};
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use parking_lot::Mutex;
@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 const RECORD_HEADER_SIZE: usize = 24;
 const RECORD_HEADER_PREFIX_SIZE: usize = 20;
@@ -276,6 +278,8 @@ struct OffsetState {
     quota_bytes: u64,
     next_write_seq: u64,
     tombstones: Vec<String>,
+    dirty: bool,
+    last_checkpoint_at: Option<Duration>,
     pinned_extents: HashMap<ExtentIdentity, usize>,
     deferred_free_extents: HashMap<ExtentIdentity, OffsetEntry>,
 }
@@ -289,6 +293,8 @@ impl Default for OffsetState {
             quota_bytes: 0,
             next_write_seq: 1,
             tombstones: Vec::new(),
+            dirty: false,
+            last_checkpoint_at: None,
             pinned_extents: HashMap::new(),
             deferred_free_extents: HashMap::new(),
         }
@@ -403,14 +409,17 @@ pub struct OffsetAllocatorStorageBackend {
     config: OffsetAllocatorConfig,
     state: Mutex<OffsetState>,
     initialized: AtomicBool,
+    clock: Arc<dyn Fn() -> Duration + Send + Sync>,
 }
 
 impl OffsetAllocatorStorageBackend {
     pub fn new(config: OffsetAllocatorConfig) -> Self {
+        let started = Instant::now();
         Self {
             config,
             state: Mutex::new(OffsetState::default()),
             initialized: AtomicBool::new(false),
+            clock: Arc::new(move || started.elapsed()),
         }
     }
 
@@ -432,6 +441,23 @@ impl OffsetAllocatorStorageBackend {
         }
         self.config.validate().map_err(StoreError::InvalidParams)?;
         std::fs::create_dir_all(self.data_dir())?;
+
+        if self.config.persist_mode == OffsetPersistMode::Disabled {
+            remove_stale_checkpoint_tmp(&self.index_path())?;
+            remove_file_if_present(&self.index_path())?;
+            remove_file_if_present(&self.data_path())?;
+            let quota_bytes = if self.config.quota_bytes > 0 {
+                self.config.quota_bytes
+            } else {
+                (fs2::available_space(self.data_dir())? as f64 * 0.90) as u64
+            };
+            *self.state.lock() = OffsetState {
+                quota_bytes,
+                ..OffsetState::default()
+            };
+            self.initialized.store(true, Ordering::Release);
+            return Ok(());
+        }
 
         remove_stale_checkpoint_tmp(&self.index_path())?;
         let loaded = load_checkpoint(&self.index_path())?;
@@ -461,12 +487,15 @@ impl OffsetAllocatorStorageBackend {
             quota_bytes,
             next_write_seq: recovered.next_write_seq.max(1),
             tombstones: recovered.tombstones,
+            dirty: false,
+            last_checkpoint_at: None,
             pinned_extents: HashMap::new(),
             deferred_free_extents: HashMap::new(),
         };
         if upgraded {
-            let state = self.state.lock();
-            self.persist_state(&state)?;
+            let mut state = self.state.lock();
+            state.dirty = true;
+            self.checkpoint_dirty_state(&mut state, true)?;
         }
         self.initialized.store(true, Ordering::Release);
         Ok(())
@@ -578,7 +607,7 @@ impl OffsetAllocatorStorageBackend {
         let committed_victims = apply_pending_eviction(&mut state, pending);
 
         let mut candidate_free = state.free_extents.clone();
-        for entry in &committed_victims {
+        for (_, entry) in &committed_victims {
             if !state
                 .pinned_extents
                 .contains_key(&ExtentIdentity::from(entry))
@@ -651,8 +680,9 @@ impl OffsetAllocatorStorageBackend {
             },
         );
         state.used_bytes = state.used_bytes.saturating_add(required);
+        state.tombstones.retain(|tombstone| tombstone != key);
         boundary_hook(DurableWriteBoundary::CheckpointPublish)?;
-        self.persist_state(&state)?;
+        self.after_mutation(&mut state)?;
         Ok(())
     }
 
@@ -788,7 +818,13 @@ impl OffsetAllocatorStorageBackend {
         if let Some(entry) = state.index.entries.remove(key) {
             state.used_bytes = state.used_bytes.saturating_sub(entry.len);
             retire_extent(&mut state, entry);
-            self.persist_state(&state)?;
+            record_tombstone(&mut state, key);
+            self.after_mutation(&mut state)?;
+        } else if state.dirty && self.config.persist_mode == OffsetPersistMode::Strict {
+            // A prior strict delete may have committed its in-memory removal
+            // before its checkpoint failed. Retrying the same public call must
+            // retry that durability barrier even though the key is now absent.
+            self.checkpoint_dirty_state(&mut state, true)?;
         }
         Ok(())
     }
@@ -797,20 +833,28 @@ impl OffsetAllocatorStorageBackend {
         self.ensure_init()?;
         let mut state = self.state.lock();
         let count = state.index.entries.len();
+        let removed_keys: Vec<_> = state.index.entries.keys().cloned().collect();
+        let arena_len = match std::fs::metadata(self.data_path()) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
         state.index = PersistedIndex::default();
         state.free_extents.clear();
         state.deferred_free_extents.clear();
         state.used_bytes = 0;
-        match std::fs::remove_file(self.data_path()) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+        for key in removed_keys {
+            record_tombstone(&mut state, &key);
         }
-        match std::fs::remove_file(self.index_path()) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+        if self.config.persist_mode == OffsetPersistMode::Relaxed {
+            // Until the next relaxed checkpoint, the previous checkpoint is
+            // authoritative. Preserve its arena bytes and append beyond them
+            // so an abrupt restart can still recover that generation.
+            state.index.next_offset = arena_len;
+        } else {
+            remove_file_if_present(&self.data_path())?;
         }
+        self.after_mutation(&mut state)?;
         Ok(count)
     }
 
@@ -823,15 +867,95 @@ impl OffsetAllocatorStorageBackend {
         )
     }
 
+    fn after_mutation(&self, state: &mut OffsetState) -> StoreResult<()> {
+        match self.config.persist_mode {
+            OffsetPersistMode::Disabled => {
+                state.dirty = false;
+                state.tombstones.clear();
+                Ok(())
+            }
+            OffsetPersistMode::Strict => {
+                state.dirty = true;
+                self.checkpoint_dirty_state(state, true)
+            }
+            OffsetPersistMode::Relaxed => {
+                state.dirty = true;
+                let now = (self.clock)();
+                let interval = Duration::from_secs(self.config.persist_interval_seconds as u64);
+                let due = state
+                    .last_checkpoint_at
+                    .is_none_or(|last| now.saturating_sub(last) >= interval);
+                if due {
+                    // Relaxed mode preserves the dirty state and availability
+                    // when a periodic durability barrier fails.
+                    let _ = self.checkpoint_dirty_state(state, true);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn checkpoint_dirty_state(&self, state: &mut OffsetState, sync_arena: bool) -> StoreResult<()> {
+        if !state.dirty || self.config.persist_mode == OffsetPersistMode::Disabled {
+            return Ok(());
+        }
+        if sync_arena {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(self.data_path())
+            {
+                Ok(file) => file.sync_data()?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.persist_state(state)?;
+        state.dirty = false;
+        state.tombstones.clear();
+        state.last_checkpoint_at = Some((self.clock)());
+        if state.pinned_extents.is_empty() && state.deferred_free_extents.is_empty() {
+            let arena_len = std::fs::metadata(self.data_path())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            state.free_extents = rebuild_free_extents(&state.index, arena_len);
+        }
+        Ok(())
+    }
+
     fn finalize_evicted_entries(
         &self,
         state: &mut OffsetState,
-        entries: Vec<OffsetEntry>,
+        entries: Vec<(String, OffsetEntry)>,
     ) -> StoreResult<()> {
-        for entry in entries {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        for (key, entry) in entries {
+            record_tombstone(state, &key);
             retire_extent(state, entry);
         }
-        self.persist_state(state)
+        self.after_mutation(state)
+    }
+}
+
+impl Drop for OffsetAllocatorStorageBackend {
+    fn drop(&mut self) {
+        if !self.initialized.load(Ordering::Acquire)
+            || self.config.persist_mode == OffsetPersistMode::Disabled
+        {
+            return;
+        }
+        let mut state = self.state.lock();
+        let _ = self.checkpoint_dirty_state(&mut state, true);
+    }
+}
+
+fn remove_file_if_present(path: &Path) -> StoreResult<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1071,6 +1195,9 @@ fn recover_checkpoint(
             survivors.insert(key, entry);
         }
     }
+    for tombstone in &loaded.tombstones {
+        survivors.remove(tombstone);
+    }
     loaded.index.entries = survivors;
     Ok(loaded)
 }
@@ -1261,7 +1388,7 @@ fn allocate_extent(
 fn apply_pending_eviction(
     state: &mut OffsetState,
     pending: PendingOffsetEviction,
-) -> Vec<OffsetEntry> {
+) -> Vec<(String, OffsetEntry)> {
     let mut removed = Vec::with_capacity(pending.victims.len());
     for (key, expected) in pending.victims {
         if state.index.entries.get(&key) != Some(&expected) {
@@ -1269,17 +1396,23 @@ fn apply_pending_eviction(
         }
         let entry = state.index.entries.remove(&key).unwrap();
         state.used_bytes = state.used_bytes.saturating_sub(entry.len);
-        removed.push(entry);
+        removed.push((key, entry));
     }
     removed
 }
 
-fn defer_pinned_extents(state: &mut OffsetState, entries: &[OffsetEntry]) {
-    for entry in entries {
+fn defer_pinned_extents(state: &mut OffsetState, entries: &[(String, OffsetEntry)]) {
+    for (_, entry) in entries {
         let identity = ExtentIdentity::from(entry);
         if state.pinned_extents.contains_key(&identity) {
             state.deferred_free_extents.insert(identity, entry.clone());
         }
+    }
+}
+
+fn record_tombstone(state: &mut OffsetState, key: &str) {
+    if !state.tombstones.iter().any(|existing| existing == key) {
+        state.tombstones.push(key.to_string());
     }
 }
 
@@ -2044,11 +2177,7 @@ mod durable_recovery_tests {
 
         assert!(result.is_err());
         assert!(!backend.exists("unsynced"));
-        assert!(
-            checkpoint_json(temp.path())["payload"]["index"]["entries"]
-                .get("unsynced")
-                .is_none()
-        );
+        assert!(!checkpoint(temp.path()).exists());
         drop(backend);
         let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
         assert!(!restarted.exists("unsynced"));
@@ -2356,5 +2485,459 @@ mod durable_recovery_tests {
         let header = RecordHeader::decode(&bytes[start..start + RECORD_HEADER_SIZE]).unwrap();
         assert_eq!(header.key_len, 3);
         assert_eq!(header.value_len, 5);
+    }
+}
+
+#[cfg(test)]
+mod persistence_mode_tests {
+    use super::super::OffsetPersistMode;
+    use super::{
+        DurableWriteBoundary, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
+        OffsetEvictionPolicy, canonical_json_bytes, checkpoint_tmp_path, crc32c, load_checkpoint,
+    };
+    use mooncake_store_core::StoreError;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    fn config(root: &Path, mode: OffsetPersistMode) -> OffsetAllocatorConfig {
+        OffsetAllocatorConfig {
+            root_dir: root.to_path_buf(),
+            fsdir: "offset".to_string(),
+            eviction_policy: OffsetEvictionPolicy::Fifo,
+            quota_bytes: 12_300,
+            total_keys_limit: 16,
+            high_ratio: 0.90,
+            low_ratio: 0.80,
+            keys_high_ratio: 0.90,
+            keys_low_ratio: 0.80,
+            max_evict_per_offload: 16,
+            fallback_evict_batch: 2,
+            persist_mode: mode,
+            persist_interval_seconds: 60,
+            enable_record_crc: true,
+        }
+    }
+
+    fn backend(root: &Path, mode: OffsetPersistMode) -> OffsetAllocatorStorageBackend {
+        let backend = OffsetAllocatorStorageBackend::new(config(root, mode));
+        backend.init().unwrap();
+        backend
+    }
+
+    fn checkpoint(root: &Path) -> PathBuf {
+        root.join("offset/offset_allocator.index.json")
+    }
+
+    fn arena(root: &Path) -> PathBuf {
+        root.join("offset/offset_allocator.data")
+    }
+
+    fn add_tombstone_to_checkpoint(root: &Path, key: &str) {
+        let path = checkpoint(root);
+        let mut envelope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        envelope["payload"]["tombstones"] = serde_json::json!([key]);
+        envelope["payload_crc32c"] = serde_json::json!(crc32c([canonical_json_bytes(
+            &envelope["payload"]
+        )
+        .unwrap()]));
+        std::fs::write(path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    }
+
+    fn backend_with_clock(
+        root: &Path,
+        mode: OffsetPersistMode,
+        now_seconds: Arc<AtomicU64>,
+    ) -> OffsetAllocatorStorageBackend {
+        let mut roomy = config(root, mode);
+        roomy.quota_bytes = 64 * 1024;
+        let mut backend = OffsetAllocatorStorageBackend::new(roomy);
+        backend.clock = Arc::new(move || Duration::from_secs(now_seconds.load(Ordering::SeqCst)));
+        backend.init().unwrap();
+        backend
+    }
+
+    #[test]
+    fn disabled_init_discards_stale_checkpoint_and_arena_then_never_persists() {
+        let temp = tempfile::tempdir().unwrap();
+        {
+            let strict = backend(temp.path(), OffsetPersistMode::Strict);
+            strict.write_object("stale", b"old").unwrap();
+        }
+        std::fs::write(checkpoint_tmp_path(&checkpoint(temp.path())), b"partial").unwrap();
+
+        let disabled = backend(temp.path(), OffsetPersistMode::Disabled);
+
+        assert!(!disabled.exists("stale"));
+        assert!(!checkpoint(temp.path()).exists());
+        assert!(!checkpoint_tmp_path(&checkpoint(temp.path())).exists());
+        assert!(!arena(temp.path()).exists());
+        disabled.write_object("session-only", b"value").unwrap();
+        assert!(!checkpoint(temp.path()).exists());
+    }
+
+    #[test]
+    fn disabled_mutations_do_not_accumulate_persistence_bookkeeping() {
+        let temp = tempfile::tempdir().unwrap();
+        let disabled = backend(temp.path(), OffsetPersistMode::Disabled);
+        disabled.write_object("delete-me", b"value").unwrap();
+        disabled.delete_object("delete-me").unwrap();
+
+        let state = disabled.state.lock();
+        assert!(!state.dirty);
+        assert!(state.tombstones.is_empty());
+    }
+
+    #[test]
+    fn strict_checkpoint_failure_returns_error_and_next_mutation_retries_dirty_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let strict = backend(temp.path(), OffsetPersistMode::Strict);
+        let pending = strict.prepare_write("first", 5).unwrap();
+
+        let result = strict.commit_write_with_hook("first", b"value", pending, |boundary| {
+            if boundary == DurableWriteBoundary::CheckpointPublish {
+                Err(StoreError::Internal(
+                    "injected checkpoint failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_err());
+        assert!(strict.exists("first"));
+        strict.write_object("retry", b"value").unwrap();
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(durable.index.entries.contains_key("first"));
+        assert!(durable.index.entries.contains_key("retry"));
+    }
+
+    #[test]
+    fn strict_real_checkpoint_failure_keeps_dirty_state_for_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let strict = backend(temp.path(), OffsetPersistMode::Strict);
+        std::fs::create_dir_all(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+
+        assert!(strict.write_object("first", b"value").is_err());
+        assert!(strict.exists("first"));
+        assert!(strict.state.lock().dirty);
+
+        std::fs::remove_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+        strict.write_object("retry", b"value").unwrap();
+        assert!(!strict.state.lock().dirty);
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(durable.index.entries.contains_key("first"));
+        assert!(durable.index.entries.contains_key("retry"));
+    }
+
+    #[test]
+    fn strict_delete_retry_of_already_removed_key_flushes_dirty_tombstone() {
+        let temp = tempfile::tempdir().unwrap();
+        let strict = backend(temp.path(), OffsetPersistMode::Strict);
+        strict.write_object("delete-me", b"value").unwrap();
+        std::fs::create_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+
+        assert!(strict.delete_object("delete-me").is_err());
+        assert!(!strict.exists("delete-me"));
+        assert!(strict.state.lock().dirty);
+
+        std::fs::remove_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+        strict.delete_object("delete-me").unwrap();
+        assert!(!strict.state.lock().dirty);
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(!durable.index.entries.contains_key("delete-me"));
+        assert!(durable.tombstones.contains(&"delete-me".to_string()));
+    }
+
+    #[test]
+    fn relaxed_first_mutation_checkpoints_but_second_waits_for_interval() {
+        let temp = tempfile::tempdir().unwrap();
+        let relaxed = backend(temp.path(), OffsetPersistMode::Relaxed);
+
+        relaxed.write_object("first", b"one").unwrap();
+        let first_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+        relaxed.write_object("second", b"two").unwrap();
+
+        assert_eq!(
+            std::fs::read(checkpoint(temp.path())).unwrap(),
+            first_checkpoint
+        );
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(durable.index.entries.contains_key("first"));
+        assert!(!durable.index.entries.contains_key("second"));
+        std::mem::forget(relaxed);
+    }
+
+    #[test]
+    fn failed_relaxed_write_without_eviction_does_not_mark_metadata_dirty() {
+        let temp = tempfile::tempdir().unwrap();
+        let relaxed = backend(temp.path(), OffsetPersistMode::Relaxed);
+        std::fs::create_dir(arena(temp.path())).unwrap();
+
+        assert!(relaxed.write_object("never-published", b"value").is_err());
+        assert!(!relaxed.exists("never-published"));
+        assert!(!relaxed.state.lock().dirty);
+        assert!(!checkpoint(temp.path()).exists());
+    }
+
+    #[test]
+    fn relaxed_interval_uses_injected_monotonic_clock_without_sleeping() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        relaxed.write_object("first", b"one").unwrap();
+        relaxed.write_object("second", b"two").unwrap();
+
+        now.store(159, Ordering::SeqCst);
+        relaxed.write_object("third", b"three").unwrap();
+        let before_due = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(!before_due.index.entries.contains_key("second"));
+        assert!(!before_due.index.entries.contains_key("third"));
+
+        now.store(160, Ordering::SeqCst);
+        relaxed.write_object("fourth", b"four").unwrap();
+        let due = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(due.index.entries.contains_key("second"));
+        assert!(due.index.entries.contains_key("third"));
+        assert!(due.index.entries.contains_key("fourth"));
+        std::mem::forget(relaxed);
+    }
+
+    #[test]
+    fn relaxed_periodic_failure_is_best_effort_and_retries_when_due_again() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        relaxed.write_object("first", b"one").unwrap();
+        std::fs::create_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+        now.store(160, Ordering::SeqCst);
+
+        relaxed.write_object("during-failure", b"two").unwrap();
+        assert!(relaxed.exists("during-failure"));
+        assert!(relaxed.state.lock().dirty);
+
+        std::fs::remove_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+        relaxed.write_object("retry", b"three").unwrap();
+        assert!(!relaxed.state.lock().dirty);
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(durable.index.entries.contains_key("during-failure"));
+        assert!(durable.index.entries.contains_key("retry"));
+        std::mem::forget(relaxed);
+    }
+
+    #[test]
+    fn relaxed_drop_best_effort_checkpoints_dirty_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let relaxed = backend(temp.path(), OffsetPersistMode::Relaxed);
+        relaxed.write_object("first", b"one").unwrap();
+        relaxed.write_object("drop-me", b"two").unwrap();
+        assert!(
+            !load_checkpoint(&checkpoint(temp.path()))
+                .unwrap()
+                .index
+                .entries
+                .contains_key("drop-me")
+        );
+
+        drop(relaxed);
+
+        assert!(
+            load_checkpoint(&checkpoint(temp.path()))
+                .unwrap()
+                .index
+                .entries
+                .contains_key("drop-me")
+        );
+    }
+
+    #[test]
+    fn relaxed_drop_waits_for_last_arc_without_deadlocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let relaxed = Arc::new(backend(temp.path(), OffsetPersistMode::Relaxed));
+        relaxed.write_object("first", b"one").unwrap();
+        let first_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+        relaxed.write_object("last-arc", b"two").unwrap();
+        let survivor = Arc::clone(&relaxed);
+
+        drop(relaxed);
+        assert_eq!(
+            std::fs::read(checkpoint(temp.path())).unwrap(),
+            first_checkpoint
+        );
+        assert!(survivor.exists("last-arc"));
+
+        drop(survivor);
+        assert!(
+            load_checkpoint(&checkpoint(temp.path()))
+                .unwrap()
+                .index
+                .entries
+                .contains_key("last-arc")
+        );
+    }
+
+    #[test]
+    fn rollback_does_not_create_tombstone_but_finalized_eviction_does() {
+        let temp = tempfile::tempdir().unwrap();
+        let strict = backend(temp.path(), OffsetPersistMode::Strict);
+        strict.write_object("a", b"aaaa").unwrap();
+        strict.write_object("b", b"bbbb").unwrap();
+
+        let rolled_back = strict.prepare_write("c", 4).unwrap();
+        assert_eq!(rolled_back.keys(), ["a"]);
+        strict.rollback_eviction(rolled_back);
+        assert!(strict.state.lock().tombstones.is_empty());
+
+        let finalized = strict.prepare_watermark_eviction(0.60, 0.20).unwrap();
+        assert!(!finalized.keys().is_empty());
+        let victims = finalized.keys();
+        strict.commit_eviction(finalized).unwrap();
+
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        for victim in victims {
+            assert!(durable.tombstones.contains(&victim));
+            assert!(!durable.index.entries.contains_key(&victim));
+        }
+    }
+
+    #[test]
+    fn recovery_applies_finalized_tombstone_after_record_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        {
+            let strict = backend(temp.path(), OffsetPersistMode::Strict);
+            strict.write_object("resurrected", b"old-value").unwrap();
+        }
+        add_tombstone_to_checkpoint(temp.path(), "resurrected");
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Strict);
+
+        assert!(!restarted.exists("resurrected"));
+    }
+
+    #[test]
+    fn abrupt_relaxed_eviction_has_documented_resurrection_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        relaxed.write_object("checkpointed", b"old-value").unwrap();
+        let pending = relaxed.prepare_watermark_eviction(0.01, 0.001).unwrap();
+        assert_eq!(pending.keys(), ["checkpointed"]);
+        relaxed.commit_eviction(pending).unwrap();
+        assert!(!relaxed.exists("checkpointed"));
+        std::mem::forget(relaxed);
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert_eq!(restarted.read_object("checkpointed").unwrap(), b"old-value");
+    }
+
+    #[test]
+    fn rewrite_clears_pending_tombstone_before_next_relaxed_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        relaxed.write_object("a", b"aaaa").unwrap();
+        relaxed.write_object("b", b"bbbb").unwrap();
+        let pending = relaxed.prepare_watermark_eviction(0.10, 0.05).unwrap();
+        assert!(pending.keys().contains(&"a".to_string()));
+        relaxed.commit_eviction(pending).unwrap();
+        assert!(relaxed.state.lock().tombstones.contains(&"a".to_string()));
+
+        relaxed.write_object("a", b"rewritten").unwrap();
+        assert!(!relaxed.state.lock().tombstones.contains(&"a".to_string()));
+        now.store(160, Ordering::SeqCst);
+        relaxed.write_object("trigger", b"checkpoint").unwrap();
+
+        let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
+        assert!(durable.index.entries.contains_key("a"));
+        assert!(!durable.tombstones.contains(&"a".to_string()));
+        std::mem::forget(relaxed);
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert_eq!(restarted.read_object("a").unwrap(), b"rewritten");
+    }
+
+    #[test]
+    fn strict_remove_all_publishes_empty_checkpoint_and_restarts_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let strict = backend(temp.path(), OffsetPersistMode::Strict);
+        strict.write_object("a", b"value").unwrap();
+
+        assert_eq!(strict.remove_all().unwrap(), 1);
+        assert!(
+            load_checkpoint(&checkpoint(temp.path()))
+                .unwrap()
+                .index
+                .entries
+                .is_empty()
+        );
+        drop(strict);
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Strict);
+        assert!(!restarted.exists("a"));
+    }
+
+    #[test]
+    fn strict_remove_all_checkpoint_failure_is_retryable() {
+        let temp = tempfile::tempdir().unwrap();
+        let strict = backend(temp.path(), OffsetPersistMode::Strict);
+        strict.write_object("a", b"value").unwrap();
+        std::fs::create_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+
+        assert!(strict.remove_all().is_err());
+        assert!(!strict.exists("a"));
+        assert!(strict.state.lock().dirty);
+
+        std::fs::remove_dir(checkpoint_tmp_path(&checkpoint(temp.path()))).unwrap();
+        assert_eq!(strict.remove_all().unwrap(), 0);
+        assert!(!strict.state.lock().dirty);
+        assert!(
+            load_checkpoint(&checkpoint(temp.path()))
+                .unwrap()
+                .index
+                .entries
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn abrupt_relaxed_remove_all_recovers_last_checkpoint_until_interval() {
+        let temp = tempfile::tempdir().unwrap();
+        let relaxed = backend(temp.path(), OffsetPersistMode::Relaxed);
+        relaxed.write_object("checkpointed", b"old-value").unwrap();
+        let prior_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+
+        assert_eq!(relaxed.remove_all().unwrap(), 1);
+        assert!(!relaxed.exists("checkpointed"));
+        assert_eq!(
+            std::fs::read(checkpoint(temp.path())).unwrap(),
+            prior_checkpoint
+        );
+        assert!(arena(temp.path()).exists());
+        std::mem::forget(relaxed);
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert_eq!(restarted.read_object("checkpointed").unwrap(), b"old-value");
+    }
+
+    #[test]
+    fn relaxed_remove_all_appends_until_due_checkpoint_replaces_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        relaxed.write_object("old", b"old-value").unwrap();
+        let old_arena_len = std::fs::metadata(arena(temp.path())).unwrap().len();
+        relaxed.remove_all().unwrap();
+        relaxed.write_object("new", b"new-value").unwrap();
+        assert!(relaxed.state.lock().index.entries["new"].offset >= old_arena_len);
+
+        now.store(160, Ordering::SeqCst);
+        relaxed.write_object("trigger", b"checkpoint").unwrap();
+        std::mem::forget(relaxed);
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert!(!restarted.exists("old"));
+        assert_eq!(restarted.read_object("new").unwrap(), b"new-value");
+        assert_eq!(restarted.read_object("trigger").unwrap(), b"checkpoint");
     }
 }
