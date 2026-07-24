@@ -74,7 +74,7 @@ pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
 pub use local_storage_backend::{
     LocalStorageBackend, LocalStorageConfig, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
-    OffsetEvictionPolicy, OffsetPersistMode,
+    OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
 };
 pub use remote_source::{
     RemoteSource,

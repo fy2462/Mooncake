@@ -26,6 +26,10 @@ pub struct OffsetAllocatorConfig {
     pub keys_low_ratio: f64,
     pub max_evict_per_offload: usize,
     pub fallback_evict_batch: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct OffsetPersistenceConfig {
     pub persist_mode: OffsetPersistMode,
     pub persist_interval_seconds: i64,
     pub enable_record_crc: bool,
@@ -45,6 +49,13 @@ impl Default for OffsetAllocatorConfig {
             keys_low_ratio: 0.80,
             max_evict_per_offload: 4096,
             fallback_evict_batch: 16,
+        }
+    }
+}
+
+impl Default for OffsetPersistenceConfig {
+    fn default() -> Self {
+        Self {
             persist_mode: OffsetPersistMode::Disabled,
             persist_interval_seconds: 60,
             enable_record_crc: true,
@@ -90,6 +101,45 @@ impl OffsetAllocatorConfig {
             config.max_evict_per_offload = value;
         }
 
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.fsdir.is_empty() {
+            return Err("offset allocator fsdir must not be empty".to_string());
+        }
+        if !(0.0 < self.high_ratio && self.high_ratio <= 1.0) {
+            return Err("offset allocator high_ratio must be in (0, 1]".to_string());
+        }
+        if !(0.0 < self.low_ratio && self.low_ratio < self.high_ratio) {
+            return Err("offset allocator low_ratio must be in (0, high_ratio)".to_string());
+        }
+        if !(0.0 < self.keys_high_ratio && self.keys_high_ratio <= 1.0) {
+            return Err("offset allocator keys_high_ratio must be in (0, 1]".to_string());
+        }
+        if !(0.0 < self.keys_low_ratio && self.keys_low_ratio < self.keys_high_ratio) {
+            return Err(
+                "offset allocator keys_low_ratio must be in (0, keys_high_ratio)".to_string(),
+            );
+        }
+        if self.max_evict_per_offload == 0 || self.fallback_evict_batch == 0 {
+            return Err("offset allocator eviction caps must be positive".to_string());
+        }
+        if self.total_keys_limit == 0 {
+            return Err("offset allocator total_keys_limit must be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl OffsetPersistenceConfig {
+    pub fn from_environment() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let mut config = Self::default();
+
         if let Some(value) = lookup("MOONCAKE_OFFSET_PERSIST_MODE") {
             config.persist_mode = match value.as_str() {
                 "disabled" | "DISABLED" => OffsetPersistMode::Disabled,
@@ -119,29 +169,6 @@ impl OffsetAllocatorConfig {
                     .to_string(),
             );
         }
-        if self.fsdir.is_empty() {
-            return Err("offset allocator fsdir must not be empty".to_string());
-        }
-        if !(0.0 < self.high_ratio && self.high_ratio <= 1.0) {
-            return Err("offset allocator high_ratio must be in (0, 1]".to_string());
-        }
-        if !(0.0 < self.low_ratio && self.low_ratio < self.high_ratio) {
-            return Err("offset allocator low_ratio must be in (0, high_ratio)".to_string());
-        }
-        if !(0.0 < self.keys_high_ratio && self.keys_high_ratio <= 1.0) {
-            return Err("offset allocator keys_high_ratio must be in (0, 1]".to_string());
-        }
-        if !(0.0 < self.keys_low_ratio && self.keys_low_ratio < self.keys_high_ratio) {
-            return Err(
-                "offset allocator keys_low_ratio must be in (0, keys_high_ratio)".to_string(),
-            );
-        }
-        if self.max_evict_per_offload == 0 || self.fallback_evict_batch == 0 {
-            return Err("offset allocator eviction caps must be positive".to_string());
-        }
-        if self.total_keys_limit == 0 {
-            return Err("offset allocator total_keys_limit must be positive".to_string());
-        }
         Ok(())
     }
 }
@@ -166,7 +193,9 @@ fn parse_positive_u64(lookup: &mut impl FnMut(&str) -> Option<String>, name: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode};
+    use super::{
+        OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -212,7 +241,7 @@ mod tests {
 
     #[test]
     fn offset_persistence_defaults_match_cpp() {
-        let config = OffsetAllocatorConfig::default();
+        let config = OffsetPersistenceConfig::default();
 
         assert_eq!(config.persist_mode, OffsetPersistMode::Disabled);
         assert_eq!(config.persist_interval_seconds, 60);
@@ -227,7 +256,7 @@ mod tests {
             ("MOONCAKE_OFFSET_RECORD_CRC", "OFF"),
         ]);
 
-        let config = OffsetAllocatorConfig::from_lookup(|name| {
+        let config = OffsetPersistenceConfig::from_lookup(|name| {
             environment.get(name).map(|value| value.to_string())
         });
 
@@ -245,7 +274,7 @@ mod tests {
             ("MOONCAKE_OFFSET_RECORD_CRC", "sometimes"),
         ]);
 
-        let config = OffsetAllocatorConfig::from_lookup(|name| {
+        let config = OffsetPersistenceConfig::from_lookup(|name| {
             environment.get(name).map(|value| value.to_string())
         });
 
@@ -257,7 +286,7 @@ mod tests {
     #[test]
     fn offset_record_crc_accepts_all_cpp_disable_spellings() {
         for disabled in ["0", "false", "FALSE", "off", "OFF"] {
-            let config = OffsetAllocatorConfig::from_lookup(|name| {
+            let config = OffsetPersistenceConfig::from_lookup(|name| {
                 (name == "MOONCAKE_OFFSET_RECORD_CRC").then(|| disabled.to_string())
             });
             assert!(!config.enable_record_crc, "value={disabled}");
@@ -266,10 +295,10 @@ mod tests {
 
     #[test]
     fn relaxed_persistence_rejects_intervals_below_five_seconds() {
-        let config = OffsetAllocatorConfig {
+        let config = OffsetPersistenceConfig {
             persist_mode: OffsetPersistMode::Relaxed,
             persist_interval_seconds: 4,
-            ..OffsetAllocatorConfig::default()
+            ..OffsetPersistenceConfig::default()
         };
 
         assert_eq!(
@@ -281,10 +310,10 @@ mod tests {
     #[test]
     fn strict_and_disabled_modes_do_not_restrict_the_interval() {
         for persist_mode in [OffsetPersistMode::Strict, OffsetPersistMode::Disabled] {
-            let config = OffsetAllocatorConfig {
+            let config = OffsetPersistenceConfig {
                 persist_mode,
                 persist_interval_seconds: 0,
-                ..OffsetAllocatorConfig::default()
+                ..OffsetPersistenceConfig::default()
             };
             config.validate().unwrap();
         }

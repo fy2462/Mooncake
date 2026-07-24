@@ -1,6 +1,14 @@
 use mooncake_store_client::{
     OffsetAllocatorConfig, OffsetAllocatorStorageBackend, OffsetEvictionPolicy, OffsetPersistMode,
+    OffsetPersistenceConfig,
 };
+
+fn persistence(mode: OffsetPersistMode) -> OffsetPersistenceConfig {
+    OffsetPersistenceConfig {
+        persist_mode: mode,
+        ..OffsetPersistenceConfig::default()
+    }
+}
 
 fn offset_config(root_dir: std::path::PathBuf) -> OffsetAllocatorConfig {
     OffsetAllocatorConfig {
@@ -16,17 +24,17 @@ fn offset_config(root_dir: std::path::PathBuf) -> OffsetAllocatorConfig {
         keys_low_ratio: 0.80,
         max_evict_per_offload: 16,
         fallback_evict_batch: 2,
-        persist_mode: OffsetPersistMode::Disabled,
-        ..OffsetAllocatorConfig::default()
     }
 }
 
 #[test]
 fn offset_allocator_fifo_eviction_reuses_released_extent() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = offset_config(temp.path().to_path_buf());
-    config.persist_mode = OffsetPersistMode::Strict;
-    let backend = OffsetAllocatorStorageBackend::new(config.clone());
+    let config = offset_config(temp.path().to_path_buf());
+    let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+        config.clone(),
+        persistence(OffsetPersistMode::Strict),
+    );
     backend.init().unwrap();
 
     assert!(backend.write_object("a", b"aaaa").unwrap().is_empty());
@@ -43,9 +51,20 @@ fn offset_allocator_fifo_eviction_reuses_released_extent() {
             .len(),
         8_200
     );
+    let checkpoint: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("offset/offset_allocator.index.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        checkpoint["payload"]["tombstones"],
+        serde_json::json!(["a"])
+    );
     drop(backend);
 
-    let restarted = OffsetAllocatorStorageBackend::new(config);
+    let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+        config,
+        persistence(OffsetPersistMode::Strict),
+    );
     restarted.init().unwrap();
     assert!(!restarted.exists("a"));
     assert_eq!(restarted.read_object("b").unwrap(), b"bbbb");
@@ -56,7 +75,10 @@ fn offset_allocator_fifo_eviction_reuses_released_extent() {
 #[test]
 fn offset_allocator_restores_prepared_fifo_victims_on_notification_failure() {
     let temp = tempfile::tempdir().unwrap();
-    let backend = OffsetAllocatorStorageBackend::new(offset_config(temp.path().to_path_buf()));
+    let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+        offset_config(temp.path().to_path_buf()),
+        OffsetPersistenceConfig::default(),
+    );
     backend.init().unwrap();
     backend.write_object("a", b"aaaa").unwrap();
     backend.write_object("b", b"bbbb").unwrap();
@@ -90,8 +112,10 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
 
     let mut config = offset_config(temp.path().to_path_buf());
     config.quota_bytes = 16 * 1024;
-    config.persist_mode = OffsetPersistMode::Strict;
-    let backend = OffsetAllocatorStorageBackend::new(config);
+    let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+        config,
+        persistence(OffsetPersistMode::Strict),
+    );
     backend.init().unwrap();
     backend.write_object("c", b"cccc").unwrap();
 
@@ -108,9 +132,11 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
 #[test]
 fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = offset_config(temp.path().to_path_buf());
-    config.persist_mode = OffsetPersistMode::Strict;
-    let backend = OffsetAllocatorStorageBackend::new(config);
+    let config = offset_config(temp.path().to_path_buf());
+    let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+        config,
+        persistence(OffsetPersistMode::Strict),
+    );
     backend.init().unwrap();
     backend.write_object("a", b"aaaa").unwrap();
 
@@ -119,7 +145,7 @@ fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
     )
     .unwrap();
     assert_eq!(checkpoint["format"], "mooncake-offset-allocator-checkpoint");
-    assert_eq!(checkpoint["version"], 1);
+    assert_eq!(checkpoint["version"], 2);
     assert!(checkpoint["payload_crc32c"].is_u64());
     assert!(checkpoint["payload"].is_object());
 }
@@ -133,7 +159,10 @@ fn offset_allocator_uses_fallback_batch_after_key_high_watermark_is_exceeded() {
     config.keys_high_ratio = 0.90;
     config.keys_low_ratio = 0.80;
     config.fallback_evict_batch = 2;
-    let backend = OffsetAllocatorStorageBackend::new(config);
+    let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+        config,
+        OffsetPersistenceConfig::default(),
+    );
     backend.init().unwrap();
 
     assert!(backend.write_object("a", b"a").unwrap().is_empty());
@@ -150,7 +179,10 @@ fn offset_allocator_uses_fallback_batch_after_key_high_watermark_is_exceeded() {
 #[test]
 fn offset_allocator_keeps_notified_victims_evicted_when_new_write_fails() {
     let temp = tempfile::tempdir().unwrap();
-    let backend = OffsetAllocatorStorageBackend::new(offset_config(temp.path().to_path_buf()));
+    let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+        offset_config(temp.path().to_path_buf()),
+        OffsetPersistenceConfig::default(),
+    );
     backend.init().unwrap();
     backend.write_object("a", b"aaaa").unwrap();
     backend.write_object("b", b"bbbb").unwrap();

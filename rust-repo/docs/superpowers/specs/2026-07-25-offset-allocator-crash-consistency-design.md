@@ -50,8 +50,9 @@ Alternatives rejected:
 
 ## Configuration
 
-Add `OffsetPersistMode::{Disabled, Relaxed, Strict}` to
-`OffsetAllocatorConfig`.
+Add `OffsetPersistMode::{Disabled, Relaxed, Strict}` through the separate
+`OffsetPersistenceConfig`, preserving the existing `OffsetAllocatorConfig`
+field layout.
 
 - `Disabled` is the C++-compatible default. No checkpoint is recovered or
   written.
@@ -106,8 +107,10 @@ The checkpoint is a versioned Rust index containing:
 - allocator high-water offset needed to rebuild free extents;
 - finalized eviction tombstones accumulated since the last checkpoint.
 
-The checkpoint file is written as an envelope with a CRC-32C over its serialized
-payload. The exact file is Rust-owned; protobuf and C++ formats do not change.
+The checkpoint file is written as a version-2 envelope with a CRC-32C over its
+serialized payload. Each entry records the expected record flags so recovery
+cannot downgrade a checksummed record by trusting a corrupted arena flag. The
+exact file is Rust-owned; protobuf and C++ formats do not change.
 
 Checkpoint ordering is:
 
@@ -119,7 +122,10 @@ Checkpoint ordering is:
 6. fsync the parent directory;
 7. only then clear dirty/tombstone state and advance the checkpoint timestamp.
 
-A failure before step 6 leaves the previous checkpoint authoritative. Dirty
+A failure before the rename in step 5 leaves the previous checkpoint
+authoritative. After rename but before the parent-directory sync succeeds, the
+new checkpoint is visible to the running process, while crash recovery may see
+the old or new name depending on filesystem durability. In either case, dirty
 state remains set so a later operation can retry. Stale temporary files are
 removed during recovery.
 
@@ -180,4 +186,8 @@ TDD coverage must include:
 
 Keep public read/write/eviction APIs source compatible. Changing the default
 persistence mode to `Disabled` is intentional C++ parity; restart tests that
-require recovery must opt into `Strict` or `Relaxed` explicitly.
+require recovery must opt into `Strict` or `Relaxed` explicitly. Preserve the
+existing exhaustive-literal shape of `OffsetAllocatorConfig`; persistence
+controls live in the separate `OffsetPersistenceConfig`, with `new(config)`
+reading the C++ environment controls and `new_with_persistence` providing an
+explicit, deterministic path.

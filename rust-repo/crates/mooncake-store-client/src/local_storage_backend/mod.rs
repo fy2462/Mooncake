@@ -15,6 +15,7 @@ use parking_lot::RwLock;
 
 pub use config::{
     LocalStorageConfig, OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode,
+    OffsetPersistenceConfig,
 };
 pub use offset::OffsetAllocatorStorageBackend;
 

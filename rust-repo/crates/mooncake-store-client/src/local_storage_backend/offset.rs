@@ -1,4 +1,6 @@
-use super::{OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode};
+use super::{
+    OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
+};
 use fs2::FileExt;
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
@@ -197,6 +199,9 @@ struct OffsetEntry {
     /// Expected on-disk record sequence. Zero is reserved for legacy entries.
     #[serde(default)]
     write_seq: u64,
+    /// Expected on-disk record flags, authenticated by the checkpoint envelope.
+    #[serde(default)]
+    record_flags: u32,
 }
 
 impl OffsetEntry {
@@ -210,6 +215,7 @@ impl OffsetEntry {
             value_offset: 0,
             value_len: 0,
             write_seq: 0,
+            record_flags: 0,
         }
     }
 
@@ -237,7 +243,7 @@ struct PersistedIndex {
 }
 
 const CHECKPOINT_FORMAT: &str = "mooncake-offset-allocator-checkpoint";
-const CHECKPOINT_VERSION: u32 = 1;
+const CHECKPOINT_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CheckpointPayload {
@@ -343,6 +349,7 @@ struct LoadedCheckpoint {
     index: PersistedIndex,
     next_write_seq: u64,
     tombstones: Vec<String>,
+    recovered_checkpoint: bool,
 }
 
 #[derive(Debug, Default)]
@@ -411,6 +418,7 @@ fn write_zero_padding(writer: &mut impl Write, mut len: u64) -> StoreResult<()> 
 /// writes, keeping the data file bounded by the configured quota.
 pub struct OffsetAllocatorStorageBackend {
     config: OffsetAllocatorConfig,
+    persistence: OffsetPersistenceConfig,
     state: Mutex<OffsetState>,
     init_lock: Mutex<()>,
     owner_lock: Mutex<Option<std::fs::File>>,
@@ -420,9 +428,17 @@ pub struct OffsetAllocatorStorageBackend {
 
 impl OffsetAllocatorStorageBackend {
     pub fn new(config: OffsetAllocatorConfig) -> Self {
+        Self::new_with_persistence(config, OffsetPersistenceConfig::from_environment())
+    }
+
+    pub fn new_with_persistence(
+        config: OffsetAllocatorConfig,
+        persistence: OffsetPersistenceConfig,
+    ) -> Self {
         let started = Instant::now();
         Self {
             config,
+            persistence,
             state: Mutex::new(OffsetState::default()),
             init_lock: Mutex::new(()),
             owner_lock: Mutex::new(None),
@@ -453,6 +469,9 @@ impl OffsetAllocatorStorageBackend {
             return Ok(());
         }
         self.config.validate().map_err(StoreError::InvalidParams)?;
+        self.persistence
+            .validate()
+            .map_err(StoreError::InvalidParams)?;
         std::fs::create_dir_all(self.data_dir())?;
 
         // Take ownership before inspecting or mutating any persistent file.
@@ -482,7 +501,7 @@ impl OffsetAllocatorStorageBackend {
     }
 
     fn init_owned_directory(&self) -> StoreResult<()> {
-        if self.config.persist_mode == OffsetPersistMode::Disabled {
+        if self.persistence.persist_mode == OffsetPersistMode::Disabled {
             // Never leave an old arena available after publishing/removing its
             // checkpoint in non-persistent mode.
             remove_file_if_present(&self.data_path())?;
@@ -522,6 +541,7 @@ impl OffsetAllocatorStorageBackend {
             .map(|entry| entry.len)
             .sum();
         let free_extents = rebuild_free_extents(&recovered.index, file_len);
+        let last_checkpoint_at = recovered.recovered_checkpoint.then(|| (self.clock)());
         *self.state.lock() = OffsetState {
             index: recovered.index,
             free_extents,
@@ -530,7 +550,7 @@ impl OffsetAllocatorStorageBackend {
             next_write_seq: recovered.next_write_seq.max(1),
             tombstones: recovered.tombstones,
             dirty: false,
-            last_checkpoint_at: None,
+            last_checkpoint_at,
             pinned_extents: HashMap::new(),
             deferred_free_extents: HashMap::new(),
             pending_rebuild_arena_len: None,
@@ -646,6 +666,10 @@ impl OffsetAllocatorStorageBackend {
         let required = RecordHeader::record_size(key.len() as u64, data.len() as u64)
             .map_err(record_format_store_error)?;
         let mut state = self.state.lock();
+        let write_seq = state.next_write_seq;
+        let next_write_seq = write_seq.checked_add(1).ok_or_else(|| {
+            StoreError::Internal("offset allocator write sequence exhausted".to_string())
+        })?;
         let replaced = state.index.entries.get(key).cloned();
         let committed_victims = apply_pending_eviction(&mut state, pending);
 
@@ -679,11 +703,8 @@ impl OffsetAllocatorStorageBackend {
             return Err(StoreError::NoAvailableHandle);
         };
 
-        let write_seq = state.next_write_seq;
-        let next_write_seq = write_seq.checked_add(1).ok_or_else(|| {
-            StoreError::Internal("offset allocator write sequence exhausted".to_string())
-        })?;
-        let (header, padding) = record_header(key, data, write_seq, self.config.enable_record_crc)?;
+        let (header, padding) =
+            record_header(key, data, write_seq, self.persistence.enable_record_crc)?;
         debug_assert_eq!(header.checked_record_size().ok(), Some(required));
         let write_result = (|| -> StoreResult<()> {
             let mut data_file = std::fs::OpenOptions::new()
@@ -715,6 +736,9 @@ impl OffsetAllocatorStorageBackend {
             // byte written before the final lease is released.
             *arena_len = (*arena_len).max(candidate_next_offset);
         }
+        for (victim, _) in &committed_victims {
+            record_tombstone(&mut state, victim);
+        }
         defer_pinned_extents(&mut state, &committed_victims);
         state.index.next_offset = candidate_next_offset;
         state.next_write_seq = next_write_seq;
@@ -737,6 +761,7 @@ impl OffsetAllocatorStorageBackend {
                     .map_err(record_format_store_error)?,
                 value_len: data.len() as u64,
                 write_seq,
+                record_flags: header.flags,
             },
         );
         state.used_bytes = state.used_bytes.saturating_add(required);
@@ -889,7 +914,7 @@ impl OffsetAllocatorStorageBackend {
             retire_extent(&mut state, entry);
             record_tombstone(&mut state, key);
             self.after_mutation(&mut state)?;
-        } else if state.dirty && self.config.persist_mode == OffsetPersistMode::Strict {
+        } else if state.dirty && self.persistence.persist_mode == OffsetPersistMode::Strict {
             // A prior strict delete may have committed its in-memory removal
             // before its checkpoint failed. Retrying the same public call must
             // retry that durability barrier even though the key is now absent.
@@ -918,7 +943,7 @@ impl OffsetAllocatorStorageBackend {
         for key in removed_keys {
             record_tombstone(&mut state, &key);
         }
-        match self.config.persist_mode {
+        match self.persistence.persist_mode {
             OffsetPersistMode::Relaxed => {
                 // Until the next relaxed checkpoint, the previous checkpoint
                 // is authoritative. Preserve its arena bytes and append beyond
@@ -964,7 +989,7 @@ impl OffsetAllocatorStorageBackend {
         state: &mut OffsetState,
         boundary_hook: &mut impl FnMut(DurableWriteBoundary) -> StoreResult<()>,
     ) -> StoreResult<()> {
-        match self.config.persist_mode {
+        match self.persistence.persist_mode {
             OffsetPersistMode::Disabled => {
                 state.dirty = false;
                 state.tombstones.clear();
@@ -977,7 +1002,8 @@ impl OffsetAllocatorStorageBackend {
             OffsetPersistMode::Relaxed => {
                 state.dirty = true;
                 let now = (self.clock)();
-                let interval = Duration::from_secs(self.config.persist_interval_seconds as u64);
+                let interval =
+                    Duration::from_secs(self.persistence.persist_interval_seconds as u64);
                 let due = state
                     .last_checkpoint_at
                     .is_none_or(|last| now.saturating_sub(last) >= interval);
@@ -1001,7 +1027,7 @@ impl OffsetAllocatorStorageBackend {
         sync_arena: bool,
         boundary_hook: &mut impl FnMut(DurableWriteBoundary) -> StoreResult<()>,
     ) -> StoreResult<()> {
-        if !state.dirty || self.config.persist_mode == OffsetPersistMode::Disabled {
+        if !state.dirty || self.persistence.persist_mode == OffsetPersistMode::Disabled {
             return Ok(());
         }
         if sync_arena {
@@ -1040,11 +1066,11 @@ impl OffsetAllocatorStorageBackend {
     }
 
     fn relaxed_checkpoint_before_allocation(&self, state: &mut OffsetState) {
-        if self.config.persist_mode != OffsetPersistMode::Relaxed || !state.dirty {
+        if self.persistence.persist_mode != OffsetPersistMode::Relaxed || !state.dirty {
             return;
         }
         let now = (self.clock)();
-        let interval = Duration::from_secs(self.config.persist_interval_seconds as u64);
+        let interval = Duration::from_secs(self.persistence.persist_interval_seconds as u64);
         let due = state
             .last_checkpoint_at
             .is_none_or(|last| now.saturating_sub(last) >= interval);
@@ -1076,7 +1102,7 @@ impl OffsetAllocatorStorageBackend {
         entries: Vec<(String, OffsetEntry)>,
     ) -> StoreResult<()> {
         if entries.is_empty() {
-            if state.dirty && self.config.persist_mode == OffsetPersistMode::Strict {
+            if state.dirty && self.persistence.persist_mode == OffsetPersistMode::Strict {
                 self.checkpoint_dirty_state(state, true)?;
             }
             return Ok(());
@@ -1092,7 +1118,7 @@ impl OffsetAllocatorStorageBackend {
 impl Drop for OffsetAllocatorStorageBackend {
     fn drop(&mut self) {
         if self.initialized.load(Ordering::Acquire)
-            && self.config.persist_mode != OffsetPersistMode::Disabled
+            && self.persistence.persist_mode != OffsetPersistMode::Disabled
         {
             let mut state = self.state.lock();
             let _ = self.checkpoint_dirty_state(&mut state, true);
@@ -1175,6 +1201,7 @@ fn empty_loaded_checkpoint() -> LoadedCheckpoint {
         index: PersistedIndex::default(),
         next_write_seq: 1,
         tombstones: Vec::new(),
+        recovered_checkpoint: false,
     }
 }
 
@@ -1192,10 +1219,14 @@ fn load_checkpoint(path: &Path) -> StoreResult<LoadedCheckpoint> {
         return Ok(empty_loaded_checkpoint());
     };
     if value.get("format").and_then(serde_json::Value::as_str) != Some(CHECKPOINT_FORMAT) {
-        return Ok(LoadedCheckpoint {
-            index: serde_json::from_value(value).unwrap_or_default(),
-            next_write_seq: 1,
-            tombstones: Vec::new(),
+        return Ok(match serde_json::from_value(value) {
+            Ok(index) => LoadedCheckpoint {
+                index,
+                next_write_seq: 1,
+                tombstones: Vec::new(),
+                recovered_checkpoint: true,
+            },
+            Err(_) => empty_loaded_checkpoint(),
         });
     }
 
@@ -1218,6 +1249,7 @@ fn load_checkpoint(path: &Path) -> StoreResult<LoadedCheckpoint> {
         index: payload.index,
         next_write_seq: payload.next_write_seq.max(1),
         tombstones: payload.tombstones,
+        recovered_checkpoint: true,
     })
 }
 
@@ -1288,9 +1320,18 @@ fn write_checkpoint_state_with_hook(
 }
 
 fn recover_checkpoint(
+    loaded: LoadedCheckpoint,
+    arena_path: &Path,
+    arena_len: u64,
+) -> StoreResult<LoadedCheckpoint> {
+    recover_checkpoint_with_overlap_probe(loaded, arena_path, arena_len, || {})
+}
+
+fn recover_checkpoint_with_overlap_probe(
     mut loaded: LoadedCheckpoint,
     arena_path: &Path,
     arena_len: u64,
+    mut overlap_probe: impl FnMut(),
 ) -> StoreResult<LoadedCheckpoint> {
     if loaded.index.entries.is_empty() {
         loaded.index.next_offset = 0;
@@ -1312,7 +1353,7 @@ fn recover_checkpoint(
     });
 
     let mut survivors = HashMap::new();
-    let mut occupied: Vec<(u64, u64)> = Vec::new();
+    let mut last_occupied: Option<(u64, u64)> = None;
     for (key, entry) in candidates {
         let Some(end) = entry.offset.checked_add(entry.len) else {
             continue;
@@ -1320,11 +1361,11 @@ fn recover_checkpoint(
         if end > arena_len {
             continue;
         }
-        if occupied
-            .iter()
-            .any(|(start, occupied_end)| entry.offset < *occupied_end && *start < end)
-        {
-            continue;
+        if let Some((start, occupied_end)) = last_occupied {
+            overlap_probe();
+            if entry.offset < occupied_end && start < end {
+                continue;
+            }
         }
 
         let valid = match entry.format {
@@ -1343,7 +1384,9 @@ fn recover_checkpoint(
             OffsetEntryFormat::Unknown => false,
         };
         if valid {
-            occupied.push((entry.offset, end));
+            if entry.offset < end {
+                last_occupied = Some((entry.offset, end));
+            }
             survivors.insert(key, entry);
         }
     }
@@ -1377,6 +1420,7 @@ fn validate_v3_record(
     if entry.write_seq == 0
         || entry.write_seq >= next_write_seq
         || entry.value_len > u32::MAX.into()
+        || entry.record_flags & !RECORD_KNOWN_FLAGS != 0
     {
         return Ok(false);
     }
@@ -1394,6 +1438,7 @@ fn validate_v3_record(
         return Ok(false);
     };
     if header.write_seq != entry.write_seq
+        || header.flags != entry.record_flags
         || header.key_len as usize != checkpoint_key.len()
         || u64::from(header.value_len) != entry.value_len
         || record_size != entry.len
@@ -1929,15 +1974,16 @@ mod record_primitive_tests {
 mod durable_recovery_tests {
     use super::super::OffsetPersistMode;
     use super::{
-        DurableWriteBoundary, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
-        OffsetEvictionPolicy, RECORD_FLAG_HAS_CRC, RECORD_HEADER_SIZE, RecordHeader,
-        canonical_json_bytes, crc32c,
+        DurableWriteBoundary, OffsetAllocatorConfig, OffsetAllocatorStorageBackend, OffsetEntry,
+        OffsetEntryFormat, OffsetEvictionPolicy, OffsetPersistenceConfig, PersistedIndex,
+        RECORD_FLAG_HAS_CRC, RECORD_HEADER_SIZE, RecordHeader, canonical_json_bytes, crc32c,
+        recover_checkpoint_with_overlap_probe,
     };
     use mooncake_store_core::StoreError;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
 
-    fn config(root_dir: PathBuf, mode: OffsetPersistMode, crc: bool) -> OffsetAllocatorConfig {
+    fn config(root_dir: PathBuf, _mode: OffsetPersistMode, _crc: bool) -> OffsetAllocatorConfig {
         OffsetAllocatorConfig {
             root_dir,
             fsdir: "offset".to_string(),
@@ -1950,6 +1996,11 @@ mod durable_recovery_tests {
             keys_low_ratio: 0.80,
             max_evict_per_offload: 64,
             fallback_evict_batch: 2,
+        }
+    }
+
+    fn persistence(mode: OffsetPersistMode, crc: bool) -> OffsetPersistenceConfig {
+        OffsetPersistenceConfig {
             persist_mode: mode,
             persist_interval_seconds: 60,
             enable_record_crc: crc,
@@ -2000,7 +2051,10 @@ mod durable_recovery_tests {
     }
 
     fn restart(root: &Path, mode: OffsetPersistMode, crc: bool) -> OffsetAllocatorStorageBackend {
-        let backend = OffsetAllocatorStorageBackend::new(config(root.to_path_buf(), mode, crc));
+        let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            config(root.to_path_buf(), mode, crc),
+            persistence(mode, crc),
+        );
         backend.init().unwrap();
         backend
     }
@@ -2023,11 +2077,59 @@ mod durable_recovery_tests {
     }
 
     #[test]
+    fn recovery_overlap_validation_is_linear_in_checkpoint_entries() {
+        const ENTRY_COUNT: u64 = 10_000;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("offset")).unwrap();
+        std::fs::write(arena(temp.path()), vec![0; ENTRY_COUNT as usize]).unwrap();
+        let entries = (0..ENTRY_COUNT)
+            .map(|offset| {
+                (
+                    format!("key-{offset}"),
+                    OffsetEntry {
+                        offset,
+                        len: 1,
+                        format: OffsetEntryFormat::LegacyRaw,
+                        value_offset: 0,
+                        value_len: 0,
+                        write_seq: 0,
+                        record_flags: 0,
+                        fifo_seq: offset,
+                    },
+                )
+            })
+            .collect();
+        let loaded = super::LoadedCheckpoint {
+            index: PersistedIndex {
+                entries,
+                next_offset: ENTRY_COUNT,
+                next_fifo_seq: ENTRY_COUNT,
+            },
+            next_write_seq: 1,
+            tombstones: Vec::new(),
+            recovered_checkpoint: true,
+        };
+        let mut overlap_comparisons = 0;
+
+        let recovered =
+            recover_checkpoint_with_overlap_probe(loaded, &arena(temp.path()), ENTRY_COUNT, || {
+                overlap_comparisons += 1
+            })
+            .unwrap();
+
+        assert_eq!(recovered.index.entries.len(), ENTRY_COUNT as usize);
+        assert_eq!(overlap_comparisons, ENTRY_COUNT as usize - 1);
+    }
+
+    #[test]
     fn active_reader_keeps_deleted_extent_until_value_copy_finishes() {
         let temp = tempfile::tempdir().unwrap();
         let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
         constrained.quota_bytes = 4_100;
-        let backend = Arc::new(OffsetAllocatorStorageBackend::new(constrained));
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new_with_persistence(
+            constrained,
+            persistence(OffsetPersistMode::Strict, true),
+        ));
         backend.init().unwrap();
         backend.write_object("a", b"aaaa").unwrap();
         let original_offset = record_offset(temp.path(), "a");
@@ -2081,7 +2183,10 @@ mod durable_recovery_tests {
         let temp = tempfile::tempdir().unwrap();
         let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
         constrained.quota_bytes = 4_100;
-        let backend = Arc::new(OffsetAllocatorStorageBackend::new(constrained));
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new_with_persistence(
+            constrained,
+            persistence(OffsetPersistMode::Strict, true),
+        ));
         backend.init().unwrap();
         backend.write_object("a", b"aaaa").unwrap();
         let original_offset = record_offset(temp.path(), "a");
@@ -2114,11 +2219,10 @@ mod durable_recovery_tests {
     #[test]
     fn active_reader_keeps_open_file_alive_across_remove_all() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(OffsetAllocatorStorageBackend::new(config(
-            temp.path().to_path_buf(),
-            OffsetPersistMode::Strict,
-            true,
-        )));
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new_with_persistence(
+            config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true),
+            persistence(OffsetPersistMode::Strict, true),
+        ));
         backend.init().unwrap();
         backend.write_object("a", b"old-value").unwrap();
 
@@ -2149,11 +2253,10 @@ mod durable_recovery_tests {
     #[test]
     fn remove_all_detaches_deferred_extents_from_the_new_arena() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = OffsetAllocatorStorageBackend::new(config(
-            temp.path().to_path_buf(),
-            OffsetPersistMode::Strict,
-            true,
-        ));
+        let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true),
+            persistence(OffsetPersistMode::Strict, true),
+        );
         backend.init().unwrap();
         backend.write_object("a", b"old-a").unwrap();
         backend.write_object("b", b"old-b").unwrap();
@@ -2206,11 +2309,10 @@ mod durable_recovery_tests {
     #[test]
     fn active_reader_observes_old_value_during_replacement() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(OffsetAllocatorStorageBackend::new(config(
-            temp.path().to_path_buf(),
-            OffsetPersistMode::Strict,
-            true,
-        )));
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new_with_persistence(
+            config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true),
+            persistence(OffsetPersistMode::Strict, true),
+        ));
         backend.init().unwrap();
         backend.write_object("a", b"old-value").unwrap();
 
@@ -2241,7 +2343,10 @@ mod durable_recovery_tests {
         let temp = tempfile::tempdir().unwrap();
         let mut roomy = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
         roomy.quota_bytes = 4 * 1024 * 1024;
-        let backend = OffsetAllocatorStorageBackend::new(roomy);
+        let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            roomy,
+            persistence(OffsetPersistMode::Strict, true),
+        );
         backend.init().unwrap();
         let maximum = "m".repeat(ONE_MIB);
         backend.write_object(&maximum, b"value").unwrap();
@@ -2506,6 +2611,24 @@ mod durable_recovery_tests {
     }
 
     #[test]
+    fn clearing_crc_flag_cannot_downgrade_a_checksummed_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        let bad_record = record_offset(temp.path(), "bad");
+        let bad_value = value_offset(temp.path(), "bad");
+        drop(backend);
+
+        write_at(&arena(temp.path()), bad_value, b"B");
+        write_at(&arena(temp.path()), bad_record + 16, &0u32.to_le_bytes());
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
     fn recovery_preserves_fifo_order_among_surviving_records() {
         let temp = tempfile::tempdir().unwrap();
         let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
@@ -2518,7 +2641,10 @@ mod durable_recovery_tests {
 
         let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
         constrained.quota_bytes = 8_200;
-        let restarted = OffsetAllocatorStorageBackend::new(constrained);
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            constrained,
+            persistence(OffsetPersistMode::Strict, true),
+        );
         restarted.init().unwrap();
         assert!(!restarted.exists("a"));
         assert_eq!(restarted.prepare_write("d", 4).unwrap().keys(), ["b", "c"]);
@@ -2661,8 +2787,8 @@ mod persistence_mode_tests {
     use super::super::OffsetPersistMode;
     use super::{
         DurableWriteBoundary, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
-        OffsetEvictionPolicy, PendingOffsetEviction, RecordHeader, canonical_json_bytes,
-        checkpoint_tmp_path, crc32c, load_checkpoint,
+        OffsetEvictionPolicy, OffsetPersistenceConfig, PendingOffsetEviction, RecordHeader,
+        canonical_json_bytes, checkpoint_tmp_path, crc32c, load_checkpoint,
     };
     use mooncake_store_core::StoreError;
     use std::path::{Path, PathBuf};
@@ -2670,7 +2796,7 @@ mod persistence_mode_tests {
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
-    fn config(root: &Path, mode: OffsetPersistMode) -> OffsetAllocatorConfig {
+    fn config(root: &Path, _mode: OffsetPersistMode) -> OffsetAllocatorConfig {
         OffsetAllocatorConfig {
             root_dir: root.to_path_buf(),
             fsdir: "offset".to_string(),
@@ -2683,6 +2809,11 @@ mod persistence_mode_tests {
             keys_low_ratio: 0.80,
             max_evict_per_offload: 16,
             fallback_evict_batch: 2,
+        }
+    }
+
+    fn persistence(mode: OffsetPersistMode) -> OffsetPersistenceConfig {
+        OffsetPersistenceConfig {
             persist_mode: mode,
             persist_interval_seconds: 60,
             enable_record_crc: true,
@@ -2690,7 +2821,10 @@ mod persistence_mode_tests {
     }
 
     fn backend(root: &Path, mode: OffsetPersistMode) -> OffsetAllocatorStorageBackend {
-        let backend = OffsetAllocatorStorageBackend::new(config(root, mode));
+        let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            config(root, mode),
+            persistence(mode),
+        );
         backend.init().unwrap();
         backend
     }
@@ -2722,7 +2856,8 @@ mod persistence_mode_tests {
     ) -> OffsetAllocatorStorageBackend {
         let mut roomy = config(root, mode);
         roomy.quota_bytes = 64 * 1024;
-        let mut backend = OffsetAllocatorStorageBackend::new(roomy);
+        let mut backend =
+            OffsetAllocatorStorageBackend::new_with_persistence(roomy, persistence(mode));
         backend.clock = Arc::new(move || Duration::from_secs(now_seconds.load(Ordering::SeqCst)));
         backend.init().unwrap();
         backend
@@ -2816,7 +2951,10 @@ mod persistence_mode_tests {
         let mut exact = config(temp.path(), OffsetPersistMode::Relaxed);
         exact.eviction_policy = OffsetEvictionPolicy::None;
         exact.quota_bytes = record_len * 2;
-        let mut relaxed = OffsetAllocatorStorageBackend::new(exact);
+        let mut relaxed = OffsetAllocatorStorageBackend::new_with_persistence(
+            exact,
+            persistence(OffsetPersistMode::Relaxed),
+        );
         let test_now = Arc::clone(&now);
         relaxed.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
         relaxed.init().unwrap();
@@ -2849,7 +2987,10 @@ mod persistence_mode_tests {
         let mut exact = config(temp.path(), OffsetPersistMode::Relaxed);
         exact.eviction_policy = OffsetEvictionPolicy::None;
         exact.quota_bytes = record_len;
-        let mut relaxed = OffsetAllocatorStorageBackend::new(exact);
+        let mut relaxed = OffsetAllocatorStorageBackend::new_with_persistence(
+            exact,
+            persistence(OffsetPersistMode::Relaxed),
+        );
         let test_now = Arc::clone(&now);
         relaxed.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
         relaxed.init().unwrap();
@@ -2880,7 +3021,10 @@ mod persistence_mode_tests {
         let mut exact = config(temp.path(), OffsetPersistMode::Relaxed);
         exact.eviction_policy = OffsetEvictionPolicy::None;
         exact.quota_bytes = record_len * 3;
-        let mut relaxed = OffsetAllocatorStorageBackend::new(exact);
+        let mut relaxed = OffsetAllocatorStorageBackend::new_with_persistence(
+            exact,
+            persistence(OffsetPersistMode::Relaxed),
+        );
         let test_now = Arc::clone(&now);
         relaxed.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
         relaxed.init().unwrap();
@@ -2920,10 +3064,10 @@ mod persistence_mode_tests {
     #[test]
     fn init_is_serialized_for_one_backend_instance() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = Arc::new(OffsetAllocatorStorageBackend::new(config(
-            temp.path(),
-            OffsetPersistMode::Strict,
-        )));
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new_with_persistence(
+            config(temp.path(), OffsetPersistMode::Strict),
+            persistence(OffsetPersistMode::Strict),
+        ));
         let start = Arc::new(Barrier::new(8));
         let threads: Vec<_> = (0..8)
             .map(|_| {
@@ -2948,8 +3092,10 @@ mod persistence_mode_tests {
         let temp = tempfile::tempdir().unwrap();
         let first = backend(temp.path(), OffsetPersistMode::Strict);
         first.write_object("preserved", b"value").unwrap();
-        let second =
-            OffsetAllocatorStorageBackend::new(config(temp.path(), OffsetPersistMode::Strict));
+        let second = OffsetAllocatorStorageBackend::new_with_persistence(
+            config(temp.path(), OffsetPersistMode::Strict),
+            persistence(OffsetPersistMode::Strict),
+        );
 
         assert!(second.init().is_err());
         assert_eq!(first.read_object("preserved").unwrap(), b"value");
@@ -3013,6 +3159,28 @@ mod persistence_mode_tests {
         assert!(durable.index.entries.contains_key("first"));
         assert!(!durable.index.entries.contains_key("second"));
         relaxed.simulate_abrupt_exit();
+    }
+
+    #[test]
+    fn relaxed_recovery_waits_interval_before_next_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        relaxed.write_object("durable", b"one").unwrap();
+        let recovered_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+        relaxed.simulate_abrupt_exit();
+
+        now.store(200, Ordering::SeqCst);
+        let restarted =
+            backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        restarted.write_object("inside-interval", b"two").unwrap();
+
+        assert_eq!(
+            std::fs::read(checkpoint(temp.path())).unwrap(),
+            recovered_checkpoint
+        );
+        assert!(restarted.state.lock().dirty);
+        restarted.simulate_abrupt_exit();
     }
 
     #[test]
