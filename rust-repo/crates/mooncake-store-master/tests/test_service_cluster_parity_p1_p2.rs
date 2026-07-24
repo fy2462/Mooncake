@@ -149,7 +149,7 @@ async fn put_complete_with_config(
 }
 
 #[tokio::test]
-async fn test_get_all_keys_empty_tenant_matches_default_only() {
+async fn test_get_all_keys_ignores_tenant_when_quota_is_disabled() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();
     mount_memory_segment(&service, client_id, "keys-default:1", 4096).await;
@@ -164,7 +164,7 @@ async fn test_get_all_keys_empty_tenant_matches_default_only() {
     )
     .await;
 
-    let keys = MasterService::get_all_keys(
+    let mut keys = MasterService::get_all_keys(
         &service,
         Request::new(proto::GetAllKeysRequest {
             tenant_id: String::new(),
@@ -174,7 +174,8 @@ async fn test_get_all_keys_empty_tenant_matches_default_only() {
     .unwrap()
     .into_inner()
     .keys;
-    assert_eq!(keys, vec!["default-key".to_string()]);
+    keys.sort();
+    assert_eq!(keys, vec!["default-key", "tenant-key"]);
 }
 
 #[tokio::test]

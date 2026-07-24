@@ -103,7 +103,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     assert_eq!(
         offload.tasks,
         vec![proto::OffloadTaskItem {
-            tenant_id: tenant_id.into(),
+            tenant_id: "default".into(),
             key: "evict-offload".into(),
             size: 256,
         }]

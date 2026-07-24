@@ -239,17 +239,17 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
         }
         let task_id = Uuid::new_v4();
         #[derive(Serialize)]
-        struct ReplicaMovePayload {
-            tenant_id: String,
-            key: String,
-            source: String,
-            target: String,
+        struct ReplicaMovePayload<'a> {
+            tenant_id: &'a TenantId,
+            key: &'a str,
+            source: &'a str,
+            target: &'a str,
         }
         let payload = serde_json::to_string(&ReplicaMovePayload {
-            tenant_id: tenant_id.as_str().to_owned(),
-            key: user_key,
-            source: source_seg.clone(),
-            target: target_seg.clone(),
+            tenant_id: &tenant_id,
+            key: &user_key,
+            source: &source_seg,
+            target: &target_seg,
         })
         .unwrap_or_default();
         let assigned_client = client_id_by_segment_name(state, &source_seg);

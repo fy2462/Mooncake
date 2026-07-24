@@ -304,7 +304,7 @@ impl MasterServiceImpl {
 
             // Create a move task for this drain unit.
             let payload = serde_json::to_string(&ReplicaMovePayload {
-                tenant_id: tenant_id.as_str(),
+                tenant_id: &tenant_id,
                 key: &user_key,
                 source: &task.source_segment,
                 target: &task.target_segment,

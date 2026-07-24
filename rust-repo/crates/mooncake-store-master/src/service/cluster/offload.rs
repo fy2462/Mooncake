@@ -42,8 +42,9 @@ impl MasterServiceImpl {
         let mut tasks = Vec::with_capacity(objects.len());
         let mut unscoped = HashMap::with_capacity(objects.len());
         for (scoped_key, size) in objects {
-            let (tenant_id, key) = split_scoped_key(&scoped_key);
-            let tenant_id = resolve_request_tenant(&tenant_id, true)?;
+            let (tenant_id, key) = TenantId::parse_scoped_key(&scoped_key).map_err(|error| {
+                Status::internal(format!("invalid internal scoped key: {error}"))
+            })?;
             tasks.push(proto::OffloadTaskItem {
                 tenant_id: tenant_id.as_str().to_owned(),
                 key: key.clone(),

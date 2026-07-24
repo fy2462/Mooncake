@@ -32,6 +32,24 @@ fn client_proto(id: Uuid) -> proto::Uuid {
     }
 }
 
+fn strict_service(tenants: &[&str], lease_ttl: Duration) -> MasterServiceImpl {
+    let policy = tempfile::NamedTempFile::new().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        tenant_quota_connector_uri: policy.path().to_string_lossy().into_owned(),
+        tenant_quota_pool_capacity_bytes: 64 * 1024,
+        default_tenant_quota_bytes: 16 * 1024,
+        lease_ttl,
+        ..Default::default()
+    });
+    for tenant_id in tenants {
+        service
+            .upsert_tenant_quota_policy(tenant_id, 16 * 1024)
+            .unwrap();
+    }
+    service
+}
+
 fn mount_seg(service: &MasterServiceImpl, name: &str, cid: Uuid, size: u64) {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         MasterService::mount_segment(
@@ -130,10 +148,7 @@ fn test_object_state_retains_typed_default_tenant() {
 
 #[test]
 fn test_same_key_different_tenants_isolated() {
-    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
+    let service = strict_service(&["tenant-A", "tenant-B"], Duration::ZERO);
     let cid_a = Uuid::new_v4();
     let cid_b = Uuid::new_v4();
 
@@ -253,10 +268,7 @@ fn test_same_key_different_tenants_isolated() {
 
 #[test]
 fn test_remove_by_regex_tenant_scoped() {
-    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
+    let service = strict_service(&["tenant-X", "tenant-Y"], Duration::ZERO);
     let cid = Uuid::new_v4();
     mount_seg(&service, "regex-seg:1", cid, 4096);
 
@@ -312,10 +324,7 @@ fn test_remove_by_regex_tenant_scoped() {
 
 #[test]
 fn test_get_all_keys_filters_by_tenant() {
-    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
+    let service = strict_service(&["tenant-Z", "default"], Duration::ZERO);
     let cid = Uuid::new_v4();
     mount_seg(&service, "allkeys-seg:1", cid, 4096);
 
@@ -359,10 +368,7 @@ fn test_get_all_keys_filters_by_tenant() {
 
 #[test]
 fn test_eviction_tenant_scoped() {
-    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::from_millis(1),
-        ..Default::default()
-    });
+    let service = strict_service(&["tenant-E1", "tenant-E2"], Duration::from_millis(1));
     let cid = Uuid::new_v4();
 
     mount_seg(&service, "evict-tenant-seg:1", cid, 4096);
@@ -465,10 +471,7 @@ fn test_backward_compat_empty_tenant_defaults() {
 
 #[test]
 fn test_copy_task_tenant_isolated() {
-    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
+    let service = strict_service(&["tenant-C1", "tenant-C2"], Duration::ZERO);
     let cid_a = Uuid::new_v4();
     let cid_b = Uuid::new_v4();
 

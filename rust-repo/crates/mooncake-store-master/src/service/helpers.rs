@@ -19,7 +19,7 @@
 use crate::allocator::{AllocationStrategy, SsdUsageMetrics};
 use crate::http_metadata::MetadataState;
 use crate::metrics;
-use crate::tenant_id::{DEFAULT_TENANT, TenantId};
+use crate::tenant_id::TenantId;
 use chrono::Utc;
 use mooncake_store_core::{
     ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskStatus,
@@ -754,49 +754,6 @@ pub fn resolve_write_tenant(raw: &str, strict: bool) -> Result<TenantId, Status>
     TenantId::new(raw.to_owned()).map_err(|_| Status::resource_exhausted("tenant not registered"))
 }
 
-/// Normalize an incoming tenant_id: empty string → "default".
-/// 规范化传入的 tenant_id：空字符串 → "default"。
-/// C++ equivalent: types.h:225-227 NormalizeTenantId()
-pub fn normalize_tenant_id(tenant_id: &str) -> String {
-    normalize_tenant_id_ref(tenant_id).to_string()
-}
-
-/// Borrowing variant for hot paths that only need to read or compose with the tenant id.
-/// 用于热路径的借用版本，避免仅仅读取或拼接 tenant id 时产生临时 String。
-/// C++ equivalent: types.h NormalizeTenantIdRef()
-pub fn normalize_tenant_id_ref(tenant_id: &str) -> &str {
-    if tenant_id.is_empty() {
-        DEFAULT_TENANT
-    } else {
-        tenant_id
-    }
-}
-
-/// Build a tenant-scoped internal key: `"{tenant_id}\0{user_key}"`.
-/// 构造租户作用域的内部 key："{tenant_id}\0{user_key}"。
-/// C++ equivalent: master_service.h MakeTenantScopedKey()
-pub fn make_tenant_scoped_key(tenant_id: &str, user_key: &str) -> String {
-    let tenant = normalize_tenant_id_ref(tenant_id);
-    let mut buf = String::with_capacity(tenant.len() + 1 + user_key.len());
-    buf.push_str(&tenant);
-    buf.push(TENANT_SCOPE_DELIMITER);
-    buf.push_str(user_key);
-    buf
-}
-
-/// Reverse: extract (tenant_id, user_key) from a scoped key.
-/// If no delimiter is found, the whole key is the user_key with tenant="default"
-/// (handles legacy/upgrade keys).
-///
-/// 反向提取：从作用域 key 中提取 (tenant_id, user_key)。
-/// 如果找不到分隔符，整个 key 即为 user_key，tenant 为 "default"（处理旧格式/升级数据）。
-pub fn split_scoped_key(scoped: &str) -> (String, String) {
-    scoped
-        .find(TENANT_SCOPE_DELIMITER)
-        .map(|pos| (scoped[..pos].to_string(), scoped[pos + 1..].to_string()))
-        .unwrap_or_else(|| (DEFAULT_TENANT.to_string(), scoped.to_string()))
-}
-
 pub(crate) fn task_count_with_status(state: &MasterState, status: TaskStatus) -> usize {
     state
         .tasks
@@ -858,24 +815,6 @@ mod tests {
         };
 
         assert_eq!(object_owner_client_id(&state, &object), Some(writer));
-    }
-
-    #[test]
-    fn normalize_tenant_id_ref_defaults_without_allocating_new_value() {
-        assert_eq!(normalize_tenant_id_ref(""), DEFAULT_TENANT);
-        assert_eq!(normalize_tenant_id(""), DEFAULT_TENANT);
-    }
-
-    #[test]
-    fn make_tenant_scoped_key_uses_borrowing_tenant_normalization() {
-        assert_eq!(
-            make_tenant_scoped_key("", "key"),
-            format!("{DEFAULT_TENANT}{TENANT_SCOPE_DELIMITER}key")
-        );
-        assert_eq!(
-            make_tenant_scoped_key("tenant-a", "key"),
-            format!("tenant-a{TENANT_SCOPE_DELIMITER}key")
-        );
     }
 
     #[test]

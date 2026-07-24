@@ -77,17 +77,27 @@ async fn put_object(service: &MasterServiceImpl, key: &str, tenant: &str, cid: U
     .unwrap();
 }
 
+fn strict_master(tenant_id: &str) -> MasterServiceImpl {
+    let policy = tempfile::NamedTempFile::new().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        tenant_quota_connector_uri: policy.path().to_string_lossy().into_owned(),
+        tenant_quota_pool_capacity_bytes: 16 * 1024,
+        default_tenant_quota_bytes: 16 * 1024,
+        lease_ttl: Duration::ZERO,
+        ..Default::default()
+    });
+    service
+        .upsert_tenant_quota_policy(tenant_id, 16 * 1024)
+        .unwrap();
+    service
+}
+
 #[tokio::test]
 async fn test_two_masters_independent_tenant_state() {
     // Two independent master instances
-    let master_a = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
-    let master_b = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
+    let master_a = strict_master("tenant-X");
+    let master_b = strict_master("tenant-Y");
 
     let cid_a = Uuid::new_v4();
     let cid_b = Uuid::new_v4();

@@ -30,11 +30,11 @@ impl MasterServiceImpl {
             else {
                 break;
             };
-            let (_t, uk) = split_scoped_key(&scoped_key);
+            let (tenant_id, key) = TenantId::parse_scoped_key(&scoped_key).map_err(|error| {
+                Status::internal(format!("invalid internal scoped key: {error}"))
+            })?;
             entry.promotion_objects.remove(&scoped_key);
-            objects.insert(uk, size);
-            let (tenant_id, key) = split_scoped_key(&scoped_key);
-            let tenant_id = resolve_request_tenant(&tenant_id, true)?;
+            objects.insert(key.clone(), size);
             tasks.push(proto::PromotionTaskItem {
                 tenant_id: tenant_id.as_str().to_owned(),
                 key,

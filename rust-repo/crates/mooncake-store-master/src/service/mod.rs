@@ -83,12 +83,11 @@ use self::helpers::{
     allocate_nof_replicas, bump_view_version, choose_drain_target_segment, cleanup_stale_handles,
     client_id_by_nof_segment_name, client_id_by_replica_segment_name, client_id_by_segment_name,
     default_drain_target_segments, get_alive_clients_snapshot, has_pending_task_capacity,
-    host_from_segment_name, is_lease_expired, make_tenant_scoped_key, object_owner_client_id,
-    processing_task_capacity, register_metadata_segments, release_object_replicas,
-    release_replicas, release_replicas_scheduled, resolve_request_tenant, resolve_write_tenant,
-    split_scoped_key, storage_fs_dir_for_client, sync_client_segments, sync_nof_segment_usage,
-    sync_segment_usage, unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses,
-    validate_user_key,
+    host_from_segment_name, is_lease_expired, object_owner_client_id, processing_task_capacity,
+    register_metadata_segments, release_object_replicas, release_replicas,
+    release_replicas_scheduled, resolve_request_tenant, resolve_write_tenant,
+    storage_fs_dir_for_client, sync_client_segments, sync_nof_segment_usage, sync_segment_usage,
+    unmount_nof_segment_owned, unmount_segment_owned, upsert_client_addresses, validate_user_key,
 };
 use self::nof_probe::probe_nof_endpoint;
 use self::proto_conv::{
@@ -134,7 +133,7 @@ const PUT_NO_SPACE_HELPER_STR: &str = " due to insufficient space. Consider lowe
 /// Payload for ReplicaCopy tasks — describes a single key copy from source to targets.
 #[derive(Serialize)]
 struct ReplicaCopyPayload<'a> {
-    tenant_id: &'a str,
+    tenant_id: &'a TenantId,
     key: &'a str,
     source: &'a str,
     targets: &'a [String],
@@ -144,7 +143,7 @@ struct ReplicaCopyPayload<'a> {
 /// Payload for ReplicaMove tasks — describes a single key move from source to target.
 #[derive(Serialize)]
 struct ReplicaMovePayload<'a> {
-    tenant_id: &'a str,
+    tenant_id: &'a TenantId,
     key: &'a str,
     source: &'a str,
     target: &'a str,
@@ -879,7 +878,9 @@ impl MasterServiceImpl {
         replica_type: ReplicaType,
         tenant_id: &str,
     ) -> Vec<u32> {
-        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        let scoped_key = TenantId::new(tenant_id.to_owned())
+            .expect("test tenant id must be valid")
+            .make_scoped_key(key);
         self.state
             .objects
             .get(&scoped_key)
@@ -902,7 +903,9 @@ impl MasterServiceImpl {
         tenant_id: &str,
         handle_valid: bool,
     ) -> bool {
-        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        let scoped_key = TenantId::new(tenant_id.to_owned())
+            .expect("test tenant id must be valid")
+            .make_scoped_key(key);
         let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
             return false;
         };
@@ -945,9 +948,11 @@ impl MasterServiceImpl {
 
     #[doc(hidden)]
     pub fn has_promotion_candidate_for_test(&self, key: &str, tenant_id: &str) -> bool {
-        self.state
-            .promotion_candidates
-            .contains_key(&make_tenant_scoped_key(tenant_id, key))
+        self.state.promotion_candidates.contains_key(
+            &TenantId::new(tenant_id.to_owned())
+                .expect("test tenant id must be valid")
+                .make_scoped_key(key),
+        )
     }
 
     #[doc(hidden)]
@@ -979,11 +984,11 @@ impl MasterServiceImpl {
         tenant_id: &str,
         retry_count: u32,
     ) {
-        if let Some(mut candidate) = self
-            .state
-            .promotion_candidates
-            .get_mut(&make_tenant_scoped_key(tenant_id, key))
-        {
+        if let Some(mut candidate) = self.state.promotion_candidates.get_mut(
+            &TenantId::new(tenant_id.to_owned())
+                .expect("test tenant id must be valid")
+                .make_scoped_key(key),
+        ) {
             candidate.retry_count = retry_count;
         }
     }

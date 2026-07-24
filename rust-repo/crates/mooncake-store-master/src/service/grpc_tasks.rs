@@ -91,7 +91,7 @@ impl MasterServiceImpl {
         // 序列化任务负载 —— 发送给 worker 的 JSON 字符串。
         let task_key = scoped_key.clone();
         let task_payload = serde_json::to_string(&ReplicaCopyPayload {
-            tenant_id: tenant_id.as_str(),
+            tenant_id: &tenant_id,
             key: &req.key,
             source: &source_segment,
             targets: &req.targets,
@@ -197,7 +197,7 @@ impl MasterServiceImpl {
         // Serialise the move payload. / 序列化移动负载。
         let task_key = scoped_key.clone();
         let task_payload = serde_json::to_string(&ReplicaMovePayload {
-            tenant_id: tenant_id.as_str(),
+            tenant_id: &tenant_id,
             key: &req.key,
             source: &req.source,
             target: &req.target,

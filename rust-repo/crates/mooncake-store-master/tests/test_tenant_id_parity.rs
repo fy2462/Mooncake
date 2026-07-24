@@ -44,6 +44,19 @@ fn strict_service(enable_offload: bool) -> MasterServiceImpl {
     })
 }
 
+fn strict_remote_pull_service() -> MasterServiceImpl {
+    MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        remote_source_enabled: true,
+        tenant_quota_connector_uri: tempfile::NamedTempFile::new()
+            .unwrap()
+            .path()
+            .to_string_lossy()
+            .into_owned(),
+        ..Default::default()
+    })
+}
+
 fn non_strict_service() -> MasterServiceImpl {
     MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         lease_ttl: std::time::Duration::ZERO,
@@ -533,6 +546,83 @@ async fn batch_upsert_rejects_later_unregistered_tenant_before_any_entry_mutates
         .unwrap()
         .unwrap();
     assert_eq!(quota.reserved_bytes, 0);
+}
+
+#[tokio::test]
+async fn strict_remote_pull_coordination_is_tenant_scoped_and_validated() {
+    let service = strict_remote_pull_service();
+    let client_id = Uuid::new_v4();
+
+    let acquire = |tenant_id: &str| {
+        MasterService::acquire_remote_pull(
+            &service,
+            Request::new(proto::AcquireRemotePullRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "shared-key".into(),
+                tenant_id: tenant_id.into(),
+            }),
+        )
+    };
+
+    assert_eq!(
+        acquire("tenant-a").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Pull as i32
+    );
+    assert_eq!(
+        acquire("tenant-a").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Wait as i32
+    );
+    assert_eq!(
+        acquire("tenant-b").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Pull as i32
+    );
+
+    let error = acquire("_reserved").await.unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    MasterService::complete_remote_pull(
+        &service,
+        Request::new(proto::CompleteRemotePullRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "shared-key".into(),
+            success: true,
+            data_size: 128,
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        acquire("tenant-a").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Pull as i32
+    );
+    assert_eq!(
+        acquire("tenant-b").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Wait as i32
+    );
+}
+
+#[tokio::test]
+async fn ping_ignores_tenant_like_the_cpp_control_plane() {
+    let service = strict_service(false);
+    let client_id = Uuid::new_v4();
+
+    let response = MasterService::ping(
+        &service,
+        Request::new(proto::PingRequest {
+            client_id: Some(proto_uuid(client_id)),
+            mounted_segments: vec![],
+            tenant_id: "_not-a-store-identity".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(
+        response.client_status,
+        proto::ClientStatus::NeedRemount as i32
+    );
 }
 
 #[tokio::test]

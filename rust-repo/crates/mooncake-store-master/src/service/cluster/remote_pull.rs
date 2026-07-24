@@ -23,7 +23,11 @@ impl MasterServiceImpl {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("client_id is required"))?;
         let client_id = uuid_from_proto(proto_id);
-        let key = req.key;
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
 
         if !self.state.runtime_config.remote_source_enabled {
             return Ok(Response::new(proto::AcquireRemotePullResponse {
@@ -70,7 +74,11 @@ impl MasterServiceImpl {
         request: Request<proto::CompleteRemotePullRequest>,
     ) -> Result<Response<proto::CompleteRemotePullResponse>, Status> {
         let req = request.into_inner();
-        let key = req.key;
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
 
         let removed = self.state.pending_remote_pulls.remove(&key);
         tracing::debug!(
@@ -90,7 +98,11 @@ impl MasterServiceImpl {
         request: Request<proto::ReleaseRemotePullRequest>,
     ) -> Result<Response<proto::ReleaseRemotePullResponse>, Status> {
         let req = request.into_inner();
-        let key = req.key;
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
 
         self.state.pending_remote_pulls.remove(&key);
         tracing::debug!(key = %key, "remote pull released");

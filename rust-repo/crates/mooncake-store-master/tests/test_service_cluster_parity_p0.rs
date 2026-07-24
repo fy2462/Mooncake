@@ -120,7 +120,7 @@ async fn test_exist_key_requires_complete_replica_and_grants_lease() {
 }
 
 #[tokio::test]
-async fn test_batch_exist_key_is_tenant_scoped_and_requires_complete() {
+async fn test_batch_exist_key_ignores_tenant_when_quota_is_disabled_and_requires_complete() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();
     mount_memory_segment(&service, client_id, "batch-exist-tenant:1", 4096).await;
@@ -183,7 +183,7 @@ async fn test_batch_exist_key_is_tenant_scoped_and_requires_complete() {
     .await
     .unwrap()
     .into_inner();
-    assert_eq!(tenant_b.results, vec![false]);
+    assert_eq!(tenant_b.results, vec![true]);
 }
 
 #[tokio::test]

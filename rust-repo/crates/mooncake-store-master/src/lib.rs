@@ -49,8 +49,6 @@ pub mod tenant_quota_policy_store;
 
 pub use service::{MasterRuntimeConfig, MasterServiceImpl};
 pub use tenant_id::{DEFAULT_TENANT, TenantId, TenantIdError};
-// Re-export tenant helpers for integration test use
-pub use service::helpers::{make_tenant_scoped_key, normalize_tenant_id};
 
 // Generated protobuf code — compiled by build.rs from
 // proto/mooncake_store_grpc.proto + proto/mooncake_store_types.proto
