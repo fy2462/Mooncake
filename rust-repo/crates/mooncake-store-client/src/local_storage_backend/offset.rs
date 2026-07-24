@@ -92,9 +92,13 @@ impl RecordHeader {
         if value_len > u32::MAX.into() {
             return Err(RecordFormatError("record value length exceeds u32"));
         }
-        Self::value_offset(key_len)?
+        let record_size = Self::value_offset(key_len)?
             .checked_add(value_len)
-            .ok_or(RecordFormatError("record size overflow"))
+            .ok_or(RecordFormatError("record size overflow"))?;
+        if record_size > u32::MAX.into() {
+            return Err(RecordFormatError("record size exceeds u32"));
+        }
+        Ok(record_size)
     }
 
     fn checked_record_size(&self) -> Result<u64, RecordFormatError> {
@@ -731,6 +735,45 @@ mod record_primitive_tests {
         assert!(header.validate_extent(100, 5196).is_ok());
         assert!(header.validate_extent(100, 5195).is_err());
         assert!(header.validate_extent(u64::MAX - 10, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn record_header_caps_total_record_size_at_u32_max() {
+        let max_value_len = u32::MAX - 4096;
+        let max_header = RecordHeader {
+            key_len: 0,
+            value_len: max_value_len,
+            write_seq: 7,
+            flags: 0,
+            crc32: 0,
+        };
+        let oversized_header = RecordHeader {
+            value_len: max_value_len + 1,
+            ..max_header
+        };
+
+        assert_eq!(
+            RecordHeader::record_size(0, u64::from(max_value_len)).unwrap(),
+            u64::from(u32::MAX)
+        );
+        assert_eq!(
+            max_header.checked_record_size().unwrap(),
+            u64::from(u32::MAX)
+        );
+        assert_eq!(
+            RecordHeader::decode(&max_header.encode()).unwrap(),
+            max_header
+        );
+        assert!(max_header.validate_extent(0, u64::from(u32::MAX)).is_ok());
+
+        assert!(RecordHeader::record_size(0, u64::from(max_value_len) + 1).is_err());
+        assert!(oversized_header.checked_record_size().is_err());
+        assert!(RecordHeader::decode(&oversized_header.encode()).is_err());
+        assert!(
+            oversized_header
+                .validate_extent(0, u64::from(u32::MAX) + 1)
+                .is_err()
+        );
     }
 
     #[test]
