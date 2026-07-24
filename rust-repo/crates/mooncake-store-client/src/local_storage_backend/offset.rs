@@ -323,6 +323,11 @@ impl Drop for ReadExtentLease<'_> {
     }
 }
 
+struct OffsetReadPlan<'a> {
+    file: std::fs::File,
+    lease: ReadExtentLease<'a>,
+}
+
 #[derive(Debug)]
 struct LoadedCheckpoint {
     index: PersistedIndex,
@@ -661,22 +666,21 @@ impl OffsetAllocatorStorageBackend {
         after_entry_lookup: impl FnOnce(),
     ) -> StoreResult<Vec<u8>> {
         self.ensure_init()?;
-        let lease = self.pin_extent(key)?;
+        let mut plan = self.prepare_read(key)?;
         after_entry_lookup();
-        let mut file = std::fs::File::open(self.data_path())?;
-        let value_offset = lease.entry.absolute_value_offset().ok_or_else(|| {
+        let value_offset = plan.lease.entry.absolute_value_offset().ok_or_else(|| {
             StoreError::Internal("offset allocator value offset overflow".to_string())
         })?;
-        file.seek(SeekFrom::Start(value_offset))?;
-        let value_len = usize::try_from(lease.entry.value_len()).map_err(|_| {
+        plan.file.seek(SeekFrom::Start(value_offset))?;
+        let value_len = usize::try_from(plan.lease.entry.value_len()).map_err(|_| {
             StoreError::Internal("offset allocator value length exceeds usize".to_string())
         })?;
         let mut value = vec![0; value_len];
-        file.read_exact(&mut value)?;
+        plan.file.read_exact(&mut value)?;
         Ok(value)
     }
 
-    fn pin_extent(&self, key: &str) -> StoreResult<ReadExtentLease<'_>> {
+    fn prepare_read(&self, key: &str) -> StoreResult<OffsetReadPlan<'_>> {
         let mut state = self.state.lock();
         let entry = state
             .index
@@ -684,13 +688,20 @@ impl OffsetAllocatorStorageBackend {
             .get(key)
             .cloned()
             .ok_or_else(|| StoreError::KeyNotFound(key.to_string()))?;
+        // Keep lookup, opening the arena, and acquiring the logical extent
+        // lease atomic with respect to remove_all. If open fails, no pin has
+        // been published and therefore no cleanup can be missed.
+        let file = std::fs::File::open(self.data_path())?;
         *state
             .pinned_extents
             .entry(ExtentIdentity::from(&entry))
             .or_default() += 1;
-        Ok(ReadExtentLease {
-            backend: self,
-            entry,
+        Ok(OffsetReadPlan {
+            file,
+            lease: ReadExtentLease {
+                backend: self,
+                entry,
+            },
         })
     }
 
@@ -1812,6 +1823,84 @@ mod durable_recovery_tests {
         assert_eq!(reader.join().unwrap().unwrap(), b"aaaa");
         backend.write_object("b", b"bbbb").unwrap();
         assert_eq!(record_offset(temp.path(), "b"), original_offset);
+    }
+
+    #[test]
+    fn active_reader_keeps_open_file_alive_across_remove_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new(config(
+            temp.path().to_path_buf(),
+            OffsetPersistMode::Strict,
+            true,
+        )));
+        backend.init().unwrap();
+        backend.write_object("a", b"old-value").unwrap();
+
+        let read_started = Arc::new(Barrier::new(2));
+        let continue_read = Arc::new(Barrier::new(2));
+        let reader = {
+            let backend = Arc::clone(&backend);
+            let read_started = Arc::clone(&read_started);
+            let continue_read = Arc::clone(&continue_read);
+            std::thread::spawn(move || {
+                backend.read_object_with_hook("a", || {
+                    read_started.wait();
+                    continue_read.wait();
+                })
+            })
+        };
+
+        read_started.wait();
+        assert_eq!(backend.remove_all().unwrap(), 1);
+        assert!(matches!(
+            backend.read_object("a"),
+            Err(StoreError::KeyNotFound(key)) if key == "a"
+        ));
+        continue_read.wait();
+        assert_eq!(reader.join().unwrap().unwrap(), b"old-value");
+    }
+
+    #[test]
+    fn failed_read_open_does_not_leak_an_extent_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("a", b"value").unwrap();
+        std::fs::remove_file(arena(temp.path())).unwrap();
+
+        assert!(matches!(backend.read_object("a"), Err(StoreError::Io(_))));
+        assert!(backend.state.lock().pinned_extents.is_empty());
+    }
+
+    #[test]
+    fn active_reader_observes_old_value_during_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new(config(
+            temp.path().to_path_buf(),
+            OffsetPersistMode::Strict,
+            true,
+        )));
+        backend.init().unwrap();
+        backend.write_object("a", b"old-value").unwrap();
+
+        let read_started = Arc::new(Barrier::new(2));
+        let continue_read = Arc::new(Barrier::new(2));
+        let reader = {
+            let backend = Arc::clone(&backend);
+            let read_started = Arc::clone(&read_started);
+            let continue_read = Arc::clone(&continue_read);
+            std::thread::spawn(move || {
+                backend.read_object_with_hook("a", || {
+                    read_started.wait();
+                    continue_read.wait();
+                })
+            })
+        };
+
+        read_started.wait();
+        backend.write_object("a", b"new-value").unwrap();
+        assert_eq!(backend.read_object("a").unwrap(), b"new-value");
+        continue_read.wait();
+        assert_eq!(reader.join().unwrap().unwrap(), b"old-value");
     }
 
     #[test]
