@@ -1,6 +1,6 @@
-use crate::MasterServiceImpl;
 use crate::ha::{MasterRuntimeState, MasterView};
 use crate::proto;
+use crate::{MasterServiceImpl, TenantId};
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -122,7 +122,8 @@ async fn batch_query_keys_handler(
         ));
     }
 
-    let results = service.batch_get_replica_list_for_admin(&keys, "default");
+    let tenant_id = TenantId::default();
+    let results = service.batch_get_replica_list_for_admin_tenant(&keys, &tenant_id);
     Ok(Json(build_batch_query_keys_json(&keys, &results)))
 }
 
@@ -177,20 +178,22 @@ fn service_or_unavailable(
 
 fn tenant_id_from_query(
     query: &HashMap<String, String>,
-) -> Result<String, (StatusCode, Json<Value>)> {
+) -> Result<TenantId, (StatusCode, Json<Value>)> {
     let Some(tenant_id) = query.get("tenant_id") else {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "Missing or invalid tenant_id",
         ));
     };
-    if tenant_id.trim().is_empty()
-        || tenant_id.starts_with('_')
-        || tenant_id.bytes().any(|c| c < 0x20 || c == 0x7f)
-    {
+    parse_admin_tenant_id(tenant_id)
+}
+
+fn parse_admin_tenant_id(tenant_id: &str) -> Result<TenantId, (StatusCode, Json<Value>)> {
+    if tenant_id.is_empty() {
         return Err(json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"));
     }
-    Ok(tenant_id.clone())
+    TenantId::new(tenant_id.to_owned())
+        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"))
 }
 
 fn json_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -227,14 +230,9 @@ async fn get_tenant_quotas_handler(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let service = service_or_unavailable(&state)?;
     if let Some(tenant_id) = query.get("tenant_id") {
-        if tenant_id.trim().is_empty()
-            || tenant_id.starts_with('_')
-            || tenant_id.bytes().any(|c| c < 0x20 || c == 0x7f)
-        {
-            return Err(json_error(StatusCode::BAD_REQUEST, "Invalid tenant_id"));
-        }
+        let tenant_id = parse_admin_tenant_id(tenant_id)?;
         let snapshot = service
-            .get_tenant_quota_snapshot(tenant_id)
+            .get_tenant_quota_snapshot_for_tenant(&tenant_id)
             .map_err(status_error)?
             .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "tenant quota not found"))?;
         Ok(Json(json!({ "success": true, "data": snapshot })))
@@ -260,7 +258,7 @@ async fn upsert_tenant_quota_handler(
         ));
     }
     let snapshot = service
-        .upsert_tenant_quota_policy(&tenant_id, body.requested_quota_bytes)
+        .upsert_tenant_quota_policy_for_tenant(&tenant_id, body.requested_quota_bytes)
         .map_err(status_error)?;
     Ok(Json(json!({ "success": true, "data": snapshot })))
 }
@@ -272,7 +270,7 @@ async fn delete_tenant_quota_handler(
     let service = service_or_unavailable(&state)?;
     let tenant_id = tenant_id_from_query(&query)?;
     let snapshot = service
-        .delete_tenant_quota_policy(&tenant_id)
+        .delete_tenant_quota_policy_for_tenant(&tenant_id)
         .map_err(status_error)?;
     Ok(Json(json!({ "success": true, "data": snapshot })))
 }

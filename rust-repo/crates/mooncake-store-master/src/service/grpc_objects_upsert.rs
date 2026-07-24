@@ -35,7 +35,7 @@ impl MasterServiceImpl {
         &self,
         client_id: Uuid,
         user_key: &str,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         slice_length: u64,
         config: ReplicateConfig,
     ) -> Result<Vec<ReplicaDescriptor>, Status> {
@@ -61,11 +61,6 @@ impl MasterServiceImpl {
         }
         let requested_group_id = Self::group_id_for_key(&config, 1, 0)?;
 
-        let tenant_id = if self.state.runtime_config.enable_tenant_quota {
-            resolve_write_tenant(tenant_id, true)?
-        } else {
-            resolve_request_tenant(tenant_id, true)?
-        };
         let scoped_key = tenant_id.make_scoped_key(user_key);
         if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition("object has replication task"));
@@ -135,7 +130,7 @@ impl MasterServiceImpl {
                 return self.allocate_and_insert_upsert(
                     client_id,
                     user_key,
-                    &tenant_id,
+                    tenant_id,
                     &scoped_key,
                     slice_length,
                     replica_count,
@@ -150,7 +145,7 @@ impl MasterServiceImpl {
         self.allocate_and_insert_upsert(
             client_id,
             user_key,
-            &tenant_id,
+            tenant_id,
             &scoped_key,
             slice_length,
             replica_count,
@@ -256,6 +251,10 @@ impl MasterServiceImpl {
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -266,13 +265,8 @@ impl MasterServiceImpl {
             .as_ref()
             .map(config_from_proto)
             .unwrap_or_default();
-        let replicas = self.upsert_start_for_entry(
-            client_id,
-            &req.key,
-            &req.tenant_id,
-            req.slice_length,
-            config,
-        )?;
+        let replicas =
+            self.upsert_start_for_entry(client_id, &req.key, &tenant_id, req.slice_length, config)?;
         Ok(Response::new(proto::UpsertResponse {
             replicas: replicas.iter().map(replica_to_proto).collect(),
         }))

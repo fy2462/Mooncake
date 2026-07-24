@@ -40,7 +40,11 @@ impl MasterServiceImpl {
         request: Request<proto::CreateCopyTaskRequest>,
     ) -> Result<Response<proto::CreateCopyTaskResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
 
         // Validate key — must exist in the object store.
         // 验证 key —— 必须存在于对象存储中。
@@ -90,6 +94,7 @@ impl MasterServiceImpl {
         // 序列化任务负载 —— 发送给 worker 的 JSON 字符串。
         let task_key = scoped_key.clone();
         let task_payload = serde_json::to_string(&ReplicaCopyPayload {
+            tenant_id: tenant_id.as_str(),
             key: &req.key,
             source: &source_segment,
             targets: &req.targets,
@@ -150,7 +155,11 @@ impl MasterServiceImpl {
         request: Request<proto::CreateMoveTaskRequest>,
     ) -> Result<Response<proto::CreateMoveTaskResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
 
         // All three fields are required. / 三个字段都是必需的。
         if req.key.is_empty() || req.source.is_empty() || req.target.is_empty() {
@@ -194,6 +203,7 @@ impl MasterServiceImpl {
         // Serialise the move payload. / 序列化移动负载。
         let task_key = scoped_key.clone();
         let task_payload = serde_json::to_string(&ReplicaMovePayload {
+            tenant_id: tenant_id.as_str(),
             key: &req.key,
             source: &req.source,
             target: &req.target,

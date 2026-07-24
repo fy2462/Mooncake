@@ -40,18 +40,17 @@ impl MasterServiceImpl {
         // Convert scoped keys back to user_keys for external API.
         // 将作用域 key 转换回 user_key，供外部 API 使用。
         let mut tasks = Vec::with_capacity(objects.len());
-        let unscoped: HashMap<String, i64> = objects
-            .into_iter()
-            .map(|(k, v)| {
-                let (tenant_id, key) = split_scoped_key(&k);
-                tasks.push(proto::OffloadTaskItem {
-                    tenant_id,
-                    key: key.clone(),
-                    size: v,
-                });
-                (key, v)
-            })
-            .collect();
+        let mut unscoped = HashMap::with_capacity(objects.len());
+        for (scoped_key, size) in objects {
+            let (tenant_id, key) = split_scoped_key(&scoped_key);
+            let tenant_id = resolve_request_tenant(&tenant_id, true)?;
+            tasks.push(proto::OffloadTaskItem {
+                tenant_id: tenant_id.as_str().to_owned(),
+                key: key.clone(),
+                size,
+            });
+            unscoped.insert(key, size);
+        }
         Ok(Response::new(proto::OffloadObjectHeartbeatResponse {
             objects: unscoped,
             tasks,
@@ -123,8 +122,18 @@ impl MasterServiceImpl {
         } else {
             req.tasks.clone()
         };
-        for (task, metadata) in tasks.iter().zip(req.metadatas.iter()) {
-            let key = make_tenant_scoped_key(&task.tenant_id, &task.key);
+        let tenant_ids = tasks
+            .iter()
+            .map(|task| {
+                resolve_request_tenant(
+                    &task.tenant_id,
+                    self.state.runtime_config.enable_tenant_quota,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for ((task, tenant_id), metadata) in tasks.iter().zip(&tenant_ids).zip(req.metadatas.iter())
+        {
+            let key = tenant_id.make_scoped_key(&task.key);
             clear_offloading_task(&self.state, &key);
             if metadata.data_size < 0 {
                 continue;
@@ -156,8 +165,6 @@ impl MasterServiceImpl {
                     sync_cache_total_accounting(&mut object);
                 }
                 _ => {
-                    let (t_id, u_key) = split_scoped_key(&key);
-                    let tenant_id = resolve_request_tenant(&t_id, true)?;
                     let mut object = ObjectEntry {
                         replicas: vec![replica],
                         size: metadata.data_size.max(0) as u64,
@@ -168,12 +175,12 @@ impl MasterServiceImpl {
                         put_start_time: None,
                         lease_timeout: None,
                         soft_pin_timeout: None,
-                        tenant_id,
+                        tenant_id: tenant_id.clone(),
                         group_id: String::new(),
                         quota_committed: false,
                         memory_cache_total_accounted: false,
                         disk_cache_total_accounted: false,
-                        user_key: u_key,
+                        user_key: task.key.clone(),
                     };
                     sync_cache_total_accounting(&mut object);
                     self.state.objects.insert(key.clone(), object);

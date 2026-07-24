@@ -211,7 +211,11 @@ impl MasterServiceImpl {
         request: Request<proto::ExistKeyRequest>,
     ) -> Result<Response<proto::ExistKeyResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let exists = self.completed_object_exists_and_grant_lease(&scoped_key);
         metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::ExistKeyResponse { exists }))
@@ -225,7 +229,10 @@ impl MasterServiceImpl {
         request: Request<proto::GetAllKeysRequest>,
     ) -> Result<Response<proto::GetAllKeysResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
+        let tenant_filter = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let keys: Vec<String> = self
             .state
             .objects

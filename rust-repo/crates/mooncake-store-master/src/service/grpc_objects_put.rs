@@ -16,6 +16,10 @@ impl MasterServiceImpl {
         request: Request<proto::PutStartRequest>,
     ) -> Result<Response<proto::PutStartResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
 
         // C++ master_service.cpp:1287-1294 对空 key 和零长度 slice 进行校验
         // Validate non-empty key and non-zero slice length
@@ -29,11 +33,6 @@ impl MasterServiceImpl {
         validate_user_key(&req.key)?;
 
         let user_key = req.key.clone();
-        let tenant_id = if self.state.runtime_config.enable_tenant_quota {
-            resolve_write_tenant(&req.tenant_id, true)?
-        } else {
-            resolve_request_tenant(&req.tenant_id, true)?
-        };
         let scoped_key = tenant_id.make_scoped_key(&user_key);
         let client_id = uuid_from_proto(
             req.client_id
@@ -237,7 +236,11 @@ impl MasterServiceImpl {
         request: Request<proto::PutEndRequest>,
     ) -> Result<Response<proto::PutEndResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -264,8 +267,11 @@ impl MasterServiceImpl {
         request: Request<proto::AddReplicaRequest>,
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
-        let tenant_id = resolve_request_tenant(&req.tenant_id, true)?;
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()

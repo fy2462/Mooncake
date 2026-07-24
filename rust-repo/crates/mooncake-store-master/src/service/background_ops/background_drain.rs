@@ -1,4 +1,5 @@
 use super::*;
+use crate::TenantId;
 
 // ============================================================================
 // Drain Job Processing / Drain 任务处理
@@ -174,12 +175,11 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
     if available == 0 {
         return;
     }
-    let mut units: Vec<(String, String, u64)> = Vec::new();
+    let mut units: Vec<(TenantId, String, String, String, u64)> = Vec::new();
     let mut blocked_unit_keys = HashSet::new();
     for entry in state.objects.iter() {
-        let key = entry.key().clone();
-        if !entry.tenant_id.is_default()
-            || entry.hard_pinned
+        let scoped_key = entry.key().clone();
+        if entry.hard_pinned
             || !is_lease_expired(entry.value())
             || !entry
                 .replicas
@@ -202,24 +202,30 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             if draining_segments.contains(&replica.segment_name)
                 && replica.status == ReplicaStatus::Complete
             {
-                let unit_key = ActiveDrainTask::unit_key_for(&key, &replica.segment_name);
+                let unit_key = ActiveDrainTask::unit_key_for(&scoped_key, &replica.segment_name);
                 if !job.completed_unit_keys.contains(&unit_key)
                     && !job.terminal_failed_unit_keys.contains(&unit_key)
                     && !job.active_tasks.values().any(|t| t.unit_key == unit_key)
                     && seen_source_segments.insert(replica.segment_name.clone())
                 {
-                    units.push((key.clone(), replica.segment_name.clone(), replica.size));
+                    units.push((
+                        entry.tenant_id.clone(),
+                        entry.user_key.clone(),
+                        scoped_key.clone(),
+                        replica.segment_name.clone(),
+                        replica.size,
+                    ));
                 }
             }
         }
     }
     let mut scheduled = 0;
-    for (key, source_seg, bytes) in units {
+    for (tenant_id, user_key, scoped_key, source_seg, bytes) in units {
         if scheduled >= available {
             break;
         }
-        let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
-        let Some(object) = state.objects.get(&key) else {
+        let unit_key = ActiveDrainTask::unit_key_for(&scoped_key, &source_seg);
+        let Some(object) = state.objects.get(&scoped_key) else {
             continue;
         };
         let Some(target_seg) = choose_drain_target_segment(state, &object, &source_seg, &targets)
@@ -234,12 +240,14 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
         let task_id = Uuid::new_v4();
         #[derive(Serialize)]
         struct ReplicaMovePayload {
+            tenant_id: String,
             key: String,
             source: String,
             target: String,
         }
         let payload = serde_json::to_string(&ReplicaMovePayload {
-            key: key.clone(),
+            tenant_id: tenant_id.as_str().to_owned(),
+            key: user_key,
             source: source_seg.clone(),
             target: target_seg.clone(),
         })
@@ -256,9 +264,9 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
                     created_at: now,
                     last_updated_at: now,
                     assigned_client,
-                    message: format!("drain {key} from {source_seg} to {target_seg}"),
+                    message: format!("drain {scoped_key} from {source_seg} to {target_seg}"),
                 },
-                key: key.clone(),
+                key: scoped_key,
                 payload,
                 max_retry_attempts: state.runtime_config.max_task_retry_attempts,
             },

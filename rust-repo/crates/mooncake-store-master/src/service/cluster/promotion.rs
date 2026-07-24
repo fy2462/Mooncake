@@ -34,8 +34,9 @@ impl MasterServiceImpl {
             entry.promotion_objects.remove(&scoped_key);
             objects.insert(uk, size);
             let (tenant_id, key) = split_scoped_key(&scoped_key);
+            let tenant_id = resolve_request_tenant(&tenant_id, true)?;
             tasks.push(proto::PromotionTaskItem {
-                tenant_id,
+                tenant_id: tenant_id.as_str().to_owned(),
                 key,
                 size,
             });
@@ -58,7 +59,11 @@ impl MasterServiceImpl {
         request: Request<proto::PromotionAllocStartRequest>,
     ) -> Result<Response<proto::PromotionAllocStartResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -124,7 +129,11 @@ impl MasterServiceImpl {
         request: Request<proto::NotifyPromotionSuccessRequest>,
     ) -> Result<Response<proto::NotifyPromotionSuccessResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -189,7 +198,11 @@ impl MasterServiceImpl {
         request: Request<proto::NotifyPromotionFailureRequest>,
     ) -> Result<Response<proto::NotifyPromotionFailureResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()

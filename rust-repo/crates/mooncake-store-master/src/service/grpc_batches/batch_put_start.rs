@@ -9,6 +9,10 @@ impl MasterServiceImpl {
         request: Request<proto::BatchPutStartRequest>,
     ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         if req.keys.len() != req.slice_lengths.len() || req.keys.is_empty() {
             return Err(Status::invalid_argument(
                 "keys and slice_lengths mismatch or empty",
@@ -39,11 +43,6 @@ impl MasterServiceImpl {
         }
         let memory_replica_count = config.replica_num as usize;
         let nof_replica_count = config.nof_replica_num as usize;
-        let tenant_id = if self.state.runtime_config.enable_tenant_quota {
-            resolve_write_tenant(&req.tenant_id, true)?
-        } else {
-            resolve_request_tenant(&req.tenant_id, true)?
-        };
         let tenant_id_wire = tenant_id.as_str().to_owned();
         let mut all_replicas = Vec::new();
         let mut results = Vec::with_capacity(req.keys.len());

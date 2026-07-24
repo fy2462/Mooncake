@@ -78,7 +78,11 @@ impl MasterServiceImpl {
         request: Request<proto::BatchGetReplicaListRequest>,
     ) -> Result<Response<proto::BatchGetReplicaListResponse>, Status> {
         let req = request.into_inner();
-        let results = self.batch_replica_lists_for_keys(&req.tenant_id, &req.keys);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let results = self.batch_replica_lists_for_keys(&tenant_id, &req.keys);
         Ok(Response::new(proto::BatchGetReplicaListResponse {
             results,
         }))
@@ -86,7 +90,7 @@ impl MasterServiceImpl {
 
     fn batch_replica_lists_for_keys(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         keys: &[String],
     ) -> Vec<proto::BatchGetReplicaListResult> {
         struct BatchGetHit {
@@ -101,7 +105,7 @@ impl MasterServiceImpl {
         let mut hits = Vec::new();
 
         for key in keys {
-            let scoped_key = make_tenant_scoped_key(tenant_id, key);
+            let scoped_key = tenant_id.make_scoped_key(key);
             let result = match self.state.objects.get(&scoped_key) {
                 Some(entry) => {
                     let complete = entry
@@ -186,20 +190,24 @@ impl MasterServiceImpl {
         request: Request<proto::BatchExistKeyRequest>,
     ) -> Result<Response<proto::BatchExistKeyResponse>, Status> {
         let req = request.into_inner();
-        let results = self.batch_completed_objects_exist_and_grant_lease(&req.tenant_id, &req.keys);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let results = self.batch_completed_objects_exist_and_grant_lease(&tenant_id, &req.keys);
         Ok(Response::new(proto::BatchExistKeyResponse { results }))
     }
 
     fn batch_completed_objects_exist_and_grant_lease(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         keys: &[String],
     ) -> Vec<bool> {
         let mut results = Vec::with_capacity(keys.len());
         let mut lease_keys = Vec::new();
 
         for key in keys {
-            let scoped_key = make_tenant_scoped_key(tenant_id, key);
+            let scoped_key = tenant_id.make_scoped_key(key);
             let exists = self
                 .state
                 .objects
@@ -265,6 +273,10 @@ impl MasterServiceImpl {
         request: Request<proto::BatchReplicaClearRequest>,
     ) -> Result<Response<proto::BatchReplicaClearResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -273,7 +285,7 @@ impl MasterServiceImpl {
         let clear_all_segments = req.segment_name.is_empty();
         let mut cleared = vec![];
         for raw_key in &req.object_keys {
-            let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+            let key = tenant_id.make_scoped_key(raw_key);
             let mut remove_entire_object = false;
             let mut removed_replicas = Vec::new();
             let mut had_match = false;
@@ -343,14 +355,25 @@ impl MasterServiceImpl {
         request: Request<proto::BatchPutEndRequest>,
     ) -> Result<Response<proto::BatchPutEndResponse>, Status> {
         let req = request.into_inner();
-        let statuses: Vec<i32> = req
+        let tenant_ids = req
             .entries
             .iter()
             .map(|entry| {
+                resolve_request_tenant(
+                    &entry.tenant_id,
+                    self.state.runtime_config.enable_tenant_quota,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let statuses: Vec<i32> = req
+            .entries
+            .iter()
+            .zip(&tenant_ids)
+            .map(|(entry, tenant_id)| {
                 let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
                     return BatchStatus::IllegalClient.into();
                 };
-                let scoped_key = make_tenant_scoped_key(&entry.tenant_id, &entry.key);
+                let scoped_key = tenant_id.make_scoped_key(&entry.key);
                 match self.apply_put_end_for_key(
                     &scoped_key,
                     client_id,
@@ -372,13 +395,17 @@ impl MasterServiceImpl {
         request: Request<proto::BatchPutRevokeRequest>,
     ) -> Result<Response<proto::BatchPutRevokeResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let client_id = req.client_id.as_ref().map(uuid_from_proto);
         let target = replica_type_from_i32(req.replica_type);
         let statuses: Vec<i32> = req
             .keys
             .iter()
             .map(|raw_key| {
-                let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+                let key = tenant_id.make_scoped_key(raw_key);
                 if self.state.replication_tasks.contains_key(&key) {
                     return BatchStatus::HasReplicationTask.into();
                 }
@@ -435,11 +462,15 @@ impl MasterServiceImpl {
         request: Request<proto::BatchRemoveRequest>,
     ) -> Result<Response<proto::BatchRemoveResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let statuses: Vec<i32> = req
             .keys
             .iter()
             .map(|raw_key| {
-                let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+                let key = tenant_id.make_scoped_key(raw_key);
                 if self.state.replication_tasks.contains_key(&key) {
                     return BatchStatus::HasReplicationTask.into();
                 }
@@ -480,11 +511,21 @@ impl MasterServiceImpl {
         request: Request<proto::BatchUpsertStartRequest>,
     ) -> Result<Response<proto::BatchUpsertStartResponse>, Status> {
         let req = request.into_inner();
+        let tenant_ids = req
+            .entries
+            .iter()
+            .map(|entry| {
+                resolve_write_tenant(
+                    &entry.tenant_id,
+                    self.state.runtime_config.enable_tenant_quota,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut all_replicas = Vec::new();
         let mut statuses = Vec::with_capacity(req.entries.len());
         let mut results = Vec::with_capacity(req.entries.len());
 
-        for entry in &req.entries {
+        for (entry, tenant_id) in req.entries.iter().zip(&tenant_ids) {
             let config = entry
                 .config
                 .as_ref()
@@ -497,14 +538,14 @@ impl MasterServiceImpl {
                     key: entry.key.clone(),
                     replicas: vec![],
                     status,
-                    tenant_id: normalize_tenant_id(&entry.tenant_id),
+                    tenant_id: tenant_id.as_str().to_owned(),
                 });
                 continue;
             };
             match self.upsert_start_for_entry(
                 client_id,
                 &entry.key,
-                &entry.tenant_id,
+                tenant_id,
                 entry.slice_length,
                 config,
             ) {
@@ -517,7 +558,7 @@ impl MasterServiceImpl {
                         key: entry.key.clone(),
                         replicas: proto_replicas,
                         status,
-                        tenant_id: normalize_tenant_id(&entry.tenant_id),
+                        tenant_id: tenant_id.as_str().to_owned(),
                     });
                 }
                 Err(status) => {
@@ -527,7 +568,7 @@ impl MasterServiceImpl {
                         key: entry.key.clone(),
                         replicas: vec![],
                         status,
-                        tenant_id: normalize_tenant_id(&entry.tenant_id),
+                        tenant_id: tenant_id.as_str().to_owned(),
                     });
                 }
             }
@@ -547,14 +588,25 @@ impl MasterServiceImpl {
         request: Request<proto::BatchUpsertEndRequest>,
     ) -> Result<Response<proto::BatchUpsertEndResponse>, Status> {
         let req = request.into_inner();
-        let statuses = req
+        let tenant_ids = req
             .entries
             .iter()
             .map(|entry| {
+                resolve_request_tenant(
+                    &entry.tenant_id,
+                    self.state.runtime_config.enable_tenant_quota,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let statuses = req
+            .entries
+            .iter()
+            .zip(&tenant_ids)
+            .map(|(entry, tenant_id)| {
                 let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
                     return BatchStatus::IllegalClient.into();
                 };
-                let scoped_key = make_tenant_scoped_key(&entry.tenant_id, &entry.key);
+                let scoped_key = tenant_id.make_scoped_key(&entry.key);
                 match self.apply_put_end_for_key(
                     &scoped_key,
                     client_id,
@@ -575,14 +627,25 @@ impl MasterServiceImpl {
         request: Request<proto::BatchUpsertRevokeRequest>,
     ) -> Result<Response<proto::BatchUpsertRevokeResponse>, Status> {
         let req = request.into_inner();
-        let statuses = req
+        let tenant_ids = req
             .entries
             .iter()
             .map(|entry| {
+                resolve_request_tenant(
+                    &entry.tenant_id,
+                    self.state.runtime_config.enable_tenant_quota,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let statuses = req
+            .entries
+            .iter()
+            .zip(&tenant_ids)
+            .map(|(entry, tenant_id)| {
                 let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
                     return BatchStatus::IllegalClient.into();
                 };
-                let scoped_key = make_tenant_scoped_key(&entry.tenant_id, &entry.key);
+                let scoped_key = tenant_id.make_scoped_key(&entry.key);
                 if self.state.replication_tasks.contains_key(&scoped_key) {
                     return BatchStatus::HasReplicationTask.into();
                 }

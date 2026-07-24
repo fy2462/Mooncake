@@ -117,7 +117,11 @@ impl MasterServiceImpl {
         request: Request<proto::PutRevokeRequest>,
     ) -> Result<Response<proto::PutRevokeResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -202,20 +206,17 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = if req.tenant_id.is_empty() {
-            None
-        } else {
-            Some(resolve_request_tenant(&req.tenant_id, true)?)
-        };
+        let tenant_filter = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let keys = self
             .state
             .objects
             .iter()
             .filter(|entry| {
-                if let Some(tenant_filter) = tenant_filter.as_ref() {
-                    if entry.tenant_id != *tenant_filter {
-                        return false;
-                    }
+                if entry.tenant_id != tenant_filter {
+                    return false;
                 }
                 !self.state.replication_tasks.contains_key(entry.key())
                     && entry
@@ -260,7 +261,11 @@ impl MasterServiceImpl {
         request: Request<proto::CopyStartRequest>,
     ) -> Result<Response<proto::CopyStartResponse>, Status> {
         let req = request.into_inner();
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -363,7 +368,11 @@ impl MasterServiceImpl {
         request: Request<proto::CopyEndRequest>,
     ) -> Result<Response<proto::CopyEndResponse>, Status> {
         let req = request.into_inner();
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -472,7 +481,11 @@ impl MasterServiceImpl {
         request: Request<proto::CopyRevokeRequest>,
     ) -> Result<Response<proto::CopyRevokeResponse>, Status> {
         let req = request.into_inner();
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -531,7 +544,11 @@ impl MasterServiceImpl {
         request: Request<proto::MoveStartRequest>,
     ) -> Result<Response<proto::MoveStartResponse>, Status> {
         let req = request.into_inner();
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_write_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -620,7 +637,11 @@ impl MasterServiceImpl {
         request: Request<proto::MoveEndRequest>,
     ) -> Result<Response<proto::MoveEndResponse>, Status> {
         let req = request.into_inner();
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -762,7 +783,11 @@ impl MasterServiceImpl {
         request: Request<proto::MoveRevokeRequest>,
     ) -> Result<Response<proto::MoveRevokeResponse>, Status> {
         let req = request.into_inner();
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()

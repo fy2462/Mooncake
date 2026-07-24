@@ -227,12 +227,11 @@ impl MasterServiceImpl {
 
         // Find objects with replicas on draining segments
         // 查找在 draining segment 上有副本的对象
-        let mut units: Vec<(String, String, u64)> = Vec::new(); // (key, source_seg, bytes)
+        let mut units: Vec<(TenantId, String, String, String, u64)> = Vec::new();
         let mut blocked_unit_keys = HashSet::new();
         for entry in self.state.objects.iter() {
-            let key = entry.key().clone();
-            if !entry.tenant_id.is_default()
-                || entry.hard_pinned
+            let scoped_key = entry.key().clone();
+            if entry.hard_pinned
                 || !is_lease_expired(entry.value())
                 || !entry
                     .replicas
@@ -256,22 +255,28 @@ impl MasterServiceImpl {
                     && replica.status == ReplicaStatus::Complete
                     && seen_source_segments.insert(replica.segment_name.clone())
                 {
-                    units.push((key.clone(), replica.segment_name.clone(), replica.size));
+                    units.push((
+                        entry.tenant_id.clone(),
+                        entry.user_key.clone(),
+                        scoped_key.clone(),
+                        replica.segment_name.clone(),
+                        replica.size,
+                    ));
                 }
             }
         }
 
-        for (key, source_seg, _bytes) in units {
+        for (tenant_id, user_key, scoped_key, source_seg, bytes) in units {
             if job.active_tasks.len() >= max_concurrency {
                 break;
             }
-            let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
+            let unit_key = ActiveDrainTask::unit_key_for(&scoped_key, &source_seg);
             if job.completed_unit_keys.contains(&unit_key)
                 || job.terminal_failed_unit_keys.contains(&unit_key)
             {
                 continue;
             }
-            let Some(object) = self.state.objects.get(&key) else {
+            let Some(object) = self.state.objects.get(&scoped_key) else {
                 continue;
             };
             let Some(target_seg) =
@@ -284,14 +289,14 @@ impl MasterServiceImpl {
             if !has_pending_task_capacity(&self.state) {
                 break;
             }
-            let unit_key = ActiveDrainTask::unit_key_for(&key, &source_seg);
+            let unit_key = ActiveDrainTask::unit_key_for(&scoped_key, &source_seg);
             let task_id = Uuid::new_v4();
             job.active_tasks.insert(
                 task_id,
                 ActiveDrainTask {
                     source_segment: source_seg.clone(),
                     target_segment: target_seg.clone(),
-                    bytes: _bytes,
+                    bytes,
                     unit_key: unit_key.clone(),
                 },
             );
@@ -299,7 +304,8 @@ impl MasterServiceImpl {
 
             // Create a move task for this drain unit.
             let payload = serde_json::to_string(&ReplicaMovePayload {
-                key: &key,
+                tenant_id: tenant_id.as_str(),
+                key: &user_key,
                 source: &task.source_segment,
                 target: &task.target_segment,
             })
@@ -318,10 +324,10 @@ impl MasterServiceImpl {
                         assigned_client: assigned,
                         message: format!(
                             "drain {} from {} to {}",
-                            key, task.source_segment, task.target_segment,
+                            scoped_key, task.source_segment, task.target_segment,
                         ),
                     },
-                    key: key.clone(),
+                    key: scoped_key.clone(),
                     payload,
                     max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
                 },

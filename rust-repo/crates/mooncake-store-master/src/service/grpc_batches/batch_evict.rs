@@ -8,12 +8,16 @@ impl MasterServiceImpl {
         request: Request<proto::EvictDiskReplicaRequest>,
     ) -> Result<Response<proto::EvictDiskReplicaResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        let key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let key = tenant_id.make_scoped_key(&req.key);
         let target = replica_type_from_i32(req.replica_type);
         if target != ReplicaType::Disk && target != ReplicaType::LocalDisk {
             return Err(Status::invalid_argument(
@@ -54,6 +58,10 @@ impl MasterServiceImpl {
         request: Request<proto::BatchEvictDiskReplicaRequest>,
     ) -> Result<Response<proto::BatchEvictDiskReplicaResponse>, Status> {
         let req = request.into_inner();
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -66,7 +74,7 @@ impl MasterServiceImpl {
             ));
         }
         for raw_key in &req.keys {
-            let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
+            let key = tenant_id.make_scoped_key(raw_key);
             if let Some(mut entry) = self.state.objects.get_mut(&key) {
                 entry.replicas.retain(|r| match target {
                     ReplicaType::Disk => r.replica_type != ReplicaType::Disk,

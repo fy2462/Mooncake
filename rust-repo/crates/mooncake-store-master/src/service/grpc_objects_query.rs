@@ -14,16 +14,20 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListRequest>,
     ) -> Result<Response<proto::GetReplicaListResponse>, Status> {
         let req = request.into_inner();
-        let response = self.replica_list_for_key(&req.tenant_id, &req.key)?;
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let response = self.replica_list_for_key(&tenant_id, &req.key)?;
         Ok(Response::new(response))
     }
 
     pub(super) fn replica_list_for_key(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         key: &str,
     ) -> Result<proto::GetReplicaListResponse, Status> {
-        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        let scoped_key = tenant_id.make_scoped_key(key);
 
         // Phase 1: read-only (uses get() — shared lock, allows concurrent reads).
         // 阶段 1：只读（使用 get() — 共享锁，允许并发读）
@@ -90,10 +94,10 @@ impl MasterServiceImpl {
 
     pub(crate) fn replica_list_for_key_for_admin(
         &self,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         key: &str,
     ) -> Result<proto::GetReplicaListResponse, Status> {
-        let scoped_key = make_tenant_scoped_key(tenant_id, key);
+        let scoped_key = tenant_id.make_scoped_key(key);
         let completed_replicas = match self.state.objects.get(&scoped_key) {
             Some(entry) => {
                 let replicas: Vec<_> = entry
@@ -121,6 +125,24 @@ impl MasterServiceImpl {
         keys: &[String],
         tenant_id: &str,
     ) -> Vec<proto::BatchGetReplicaListResult> {
+        let Ok(tenant_id) = resolve_request_tenant(tenant_id, true) else {
+            return keys
+                .iter()
+                .map(|_| proto::BatchGetReplicaListResult {
+                    status: -6,
+                    response: None,
+                    error_message: "invalid tenant id".to_string(),
+                })
+                .collect();
+        };
+        self.batch_get_replica_list_for_admin_tenant(keys, &tenant_id)
+    }
+
+    pub(crate) fn batch_get_replica_list_for_admin_tenant(
+        &self,
+        keys: &[String],
+        tenant_id: &TenantId,
+    ) -> Vec<proto::BatchGetReplicaListResult> {
         keys.iter()
             .map(
                 |key| match self.replica_list_for_key_for_admin(tenant_id, key) {
@@ -147,7 +169,10 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListByRegexRequest>,
     ) -> Result<Response<proto::GetReplicaListByRegexResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
+        let tenant_filter = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let pattern = regex::Regex::new(&req.key_regex)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
@@ -223,7 +248,11 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
         let req = request.into_inner();
-        let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
+        let tenant_id = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
+        let scoped_key = tenant_id.make_scoped_key(&req.key);
         if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
@@ -264,7 +293,10 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveByRegexRequest>,
     ) -> Result<Response<proto::RemoveByRegexResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
+        let tenant_filter = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let pattern = regex::Regex::new(&req.pattern)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
@@ -318,7 +350,10 @@ impl MasterServiceImpl {
         request: Request<proto::QueryByRegexRequest>,
     ) -> Result<Response<proto::QueryByRegexResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
+        let tenant_filter = resolve_request_tenant(
+            &req.tenant_id,
+            self.state.runtime_config.enable_tenant_quota,
+        )?;
         let pattern = regex::Regex::new(&req.pattern)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
