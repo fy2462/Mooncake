@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Task 1 establishes these primitives before Tasks 2-3 wire them into I/O.
@@ -187,6 +187,34 @@ struct PersistedIndex {
     next_fifo_seq: u64,
 }
 
+const CHECKPOINT_FORMAT: &str = "mooncake-offset-allocator-checkpoint";
+const CHECKPOINT_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckpointPayload {
+    index: PersistedIndex,
+    #[serde(default)]
+    next_write_seq: u64,
+    #[serde(default)]
+    tombstones: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckpointEnvelope {
+    format: String,
+    version: u32,
+    payload_crc32c: u32,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckpointBoundary {
+    Write,
+    FileSync,
+    Rename,
+    DirectorySync,
+}
+
 #[derive(Debug, Default)]
 struct OffsetState {
     index: PersistedIndex,
@@ -245,13 +273,8 @@ impl OffsetAllocatorStorageBackend {
         self.config.validate().map_err(StoreError::InvalidParams)?;
         std::fs::create_dir_all(self.data_dir())?;
 
-        let mut index = if self.index_path().exists() {
-            serde_json::from_reader(std::io::BufReader::new(std::fs::File::open(
-                self.index_path(),
-            )?))?
-        } else {
-            PersistedIndex::default()
-        };
+        remove_stale_checkpoint_tmp(&self.index_path())?;
+        let mut index = load_persisted_index(&self.index_path())?;
         let file_len = std::fs::metadata(self.data_path())
             .map(|metadata| metadata.len())
             .unwrap_or(0);
@@ -533,13 +556,7 @@ impl OffsetAllocatorStorageBackend {
     }
 
     fn persist_index(&self, index: &PersistedIndex) -> StoreResult<()> {
-        let path = self.index_path();
-        let temporary = path.with_extension("json.tmp");
-        let mut writer = std::io::BufWriter::new(std::fs::File::create(&temporary)?);
-        serde_json::to_writer(&mut writer, index)?;
-        writer.flush()?;
-        std::fs::rename(temporary, path)?;
-        Ok(())
+        write_checkpoint(&self.index_path(), index)
     }
 
     fn finalize_evicted_entries(
@@ -552,6 +569,128 @@ impl OffsetAllocatorStorageBackend {
         }
         self.persist_index(&state.index)
     }
+}
+
+fn checkpoint_tmp_path(path: &Path) -> PathBuf {
+    path.with_extension("json.tmp")
+}
+
+fn remove_stale_checkpoint_tmp(path: &Path) -> StoreResult<()> {
+    match std::fs::remove_file(checkpoint_tmp_path(path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn canonical_json_bytes(value: &serde_json::Value) -> StoreResult<Vec<u8>> {
+    fn canonicalize(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(canonicalize).collect())
+            }
+            serde_json::Value::Object(values) => {
+                let sorted = values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), canonicalize(value)))
+                    .collect();
+                serde_json::Value::Object(sorted)
+            }
+            other => other.clone(),
+        }
+    }
+
+    Ok(serde_json::to_vec(&canonicalize(value))?)
+}
+
+fn checkpoint_envelope(index: &PersistedIndex) -> StoreResult<CheckpointEnvelope> {
+    let payload = serde_json::to_value(CheckpointPayload {
+        index: PersistedIndex {
+            entries: index.entries.clone(),
+            next_offset: index.next_offset,
+            next_fifo_seq: index.next_fifo_seq,
+        },
+        next_write_seq: 0,
+        tombstones: Vec::new(),
+    })?;
+    Ok(CheckpointEnvelope {
+        format: CHECKPOINT_FORMAT.to_string(),
+        version: CHECKPOINT_VERSION,
+        payload_crc32c: crc32c([canonical_json_bytes(&payload)?]),
+        payload,
+    })
+}
+
+fn load_persisted_index(path: &Path) -> StoreResult<PersistedIndex> {
+    let mut bytes = Vec::new();
+    match std::fs::File::open(path) {
+        Ok(mut file) => file.read_to_end(&mut bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PersistedIndex::default());
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return Ok(PersistedIndex::default());
+    };
+    if value.get("format").and_then(serde_json::Value::as_str) != Some(CHECKPOINT_FORMAT) {
+        return Ok(serde_json::from_value(value).unwrap_or_default());
+    }
+
+    let Ok(envelope) = serde_json::from_value::<CheckpointEnvelope>(value) else {
+        return Ok(PersistedIndex::default());
+    };
+    if envelope.version != CHECKPOINT_VERSION {
+        return Ok(PersistedIndex::default());
+    }
+    let Ok(payload_bytes) = canonical_json_bytes(&envelope.payload) else {
+        return Ok(PersistedIndex::default());
+    };
+    if crc32c([payload_bytes]) != envelope.payload_crc32c {
+        return Ok(PersistedIndex::default());
+    }
+    Ok(
+        serde_json::from_value::<CheckpointPayload>(envelope.payload)
+            .map(|payload| payload.index)
+            .unwrap_or_default(),
+    )
+}
+
+fn write_checkpoint(path: &Path, index: &PersistedIndex) -> StoreResult<()> {
+    write_checkpoint_with_hook(path, index, |_| Ok(()))
+}
+
+fn write_checkpoint_with_hook(
+    path: &Path,
+    index: &PersistedIndex,
+    mut boundary_hook: impl FnMut(CheckpointBoundary) -> std::io::Result<()>,
+) -> StoreResult<()> {
+    let temporary = checkpoint_tmp_path(path);
+    let bytes = serde_json::to_vec(&checkpoint_envelope(index)?)?;
+    let result = (|| -> StoreResult<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&temporary)?;
+        boundary_hook(CheckpointBoundary::Write)?;
+        file.write_all(&bytes)?;
+        boundary_hook(CheckpointBoundary::FileSync)?;
+        file.sync_all()?;
+        drop(file);
+        boundary_hook(CheckpointBoundary::Rename)?;
+        std::fs::rename(&temporary, path)?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let directory = std::fs::File::open(parent)?;
+        boundary_hook(CheckpointBoundary::DirectorySync)?;
+        directory.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn key_watermarks(config: &OffsetAllocatorConfig) -> (usize, usize) {
@@ -663,6 +802,195 @@ fn insert_free_extent(extents: &mut BTreeMap<u64, u64>, offset: u64, len: u64) {
         }
     }
     extents.insert(start, length);
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::{
+        CHECKPOINT_VERSION, CheckpointBoundary, OffsetEntry, PersistedIndex, checkpoint_envelope,
+        checkpoint_tmp_path, load_persisted_index, remove_stale_checkpoint_tmp, write_checkpoint,
+        write_checkpoint_with_hook,
+    };
+    use std::collections::HashMap;
+    use std::io::Error;
+
+    fn index(key: &str, offset: u64) -> PersistedIndex {
+        PersistedIndex {
+            entries: HashMap::from([(
+                key.to_string(),
+                OffsetEntry {
+                    offset,
+                    len: 4,
+                    fifo_seq: offset,
+                },
+            )]),
+            next_offset: offset + 4,
+            next_fifo_seq: offset + 1,
+        }
+    }
+
+    #[test]
+    fn checkpoint_round_trip_verifies_payload_crc() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let expected = index("a", 8);
+
+        write_checkpoint(&path, &expected).unwrap();
+
+        assert_eq!(
+            load_persisted_index(&path).unwrap().entries,
+            expected.entries
+        );
+    }
+
+    #[test]
+    fn unsupported_corrupt_and_malformed_checkpoints_fall_back_without_rewriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let expected = index("a", 8);
+
+        let mut unsupported =
+            serde_json::to_value(checkpoint_envelope(&expected).unwrap()).unwrap();
+        unsupported["version"] = serde_json::json!(CHECKPOINT_VERSION + 1);
+        let unsupported_bytes = serde_json::to_vec(&unsupported).unwrap();
+        std::fs::write(&path, &unsupported_bytes).unwrap();
+        assert!(load_persisted_index(&path).unwrap().entries.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), unsupported_bytes);
+
+        let mut corrupt = serde_json::to_value(checkpoint_envelope(&expected).unwrap()).unwrap();
+        corrupt["payload"]["index"]["next_offset"] = serde_json::json!(99);
+        let corrupt_bytes = serde_json::to_vec(&corrupt).unwrap();
+        std::fs::write(&path, &corrupt_bytes).unwrap();
+        assert!(load_persisted_index(&path).unwrap().entries.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt_bytes);
+
+        let malformed = b"{not-json".to_vec();
+        std::fs::write(&path, &malformed).unwrap();
+        assert!(load_persisted_index(&path).unwrap().entries.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn legacy_raw_value_index_loads_without_touching_arena_or_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let arena = temp.path().join("offset_allocator.data");
+        let legacy = br#"{"entries":{"a":{"offset":0,"len":4,"fifo_seq":3}},"next_offset":4,"next_fifo_seq":4}"#;
+        std::fs::write(&path, legacy).unwrap();
+        std::fs::write(&arena, b"aaaa").unwrap();
+
+        let loaded = load_persisted_index(&path).unwrap();
+
+        assert_eq!(loaded.entries["a"].offset, 0);
+        assert_eq!(loaded.entries["a"].len, 4);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy);
+        assert_eq!(std::fs::read(&arena).unwrap(), b"aaaa");
+    }
+
+    #[test]
+    fn stale_checkpoint_tmp_is_removed_without_touching_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let expected = index("a", 0);
+        write_checkpoint(&path, &expected).unwrap();
+        std::fs::write(checkpoint_tmp_path(&path), b"partial").unwrap();
+
+        remove_stale_checkpoint_tmp(&path).unwrap();
+
+        assert!(!checkpoint_tmp_path(&path).exists());
+        assert_eq!(
+            load_persisted_index(&path).unwrap().entries,
+            expected.entries
+        );
+    }
+
+    #[test]
+    fn checkpoint_boundaries_are_ordered_and_failures_leave_a_usable_checkpoint() {
+        for failure in [
+            CheckpointBoundary::Write,
+            CheckpointBoundary::FileSync,
+            CheckpointBoundary::Rename,
+            CheckpointBoundary::DirectorySync,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("offset_allocator.index.json");
+            let previous = index("previous", 0);
+            let replacement = index("replacement", 8);
+            write_checkpoint(&path, &previous).unwrap();
+            let mut observed = Vec::new();
+
+            let result = write_checkpoint_with_hook(&path, &replacement, |boundary| {
+                observed.push(boundary);
+                if boundary == failure {
+                    Err(Error::other("injected checkpoint failure"))
+                } else {
+                    Ok(())
+                }
+            });
+
+            assert!(result.is_err(), "{failure:?}");
+            let recovered = load_persisted_index(&path).unwrap();
+            if failure == CheckpointBoundary::DirectorySync {
+                assert_eq!(recovered.entries, replacement.entries);
+            } else {
+                assert_eq!(recovered.entries, previous.entries);
+            }
+            let expected_prefix = [
+                CheckpointBoundary::Write,
+                CheckpointBoundary::FileSync,
+                CheckpointBoundary::Rename,
+                CheckpointBoundary::DirectorySync,
+            ];
+            let failure_index = expected_prefix
+                .iter()
+                .position(|boundary| *boundary == failure)
+                .unwrap();
+            assert_eq!(observed, expected_prefix[..=failure_index]);
+            assert!(!checkpoint_tmp_path(&path).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transient_open_error_is_returned_without_truncating_arena() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let arena = temp.path().join("offset_allocator.data");
+        symlink("offset_allocator.index.json", &path).unwrap();
+        std::fs::write(&arena, b"recoverable-arena").unwrap();
+
+        assert!(load_persisted_index(&path).is_err());
+        assert_eq!(std::fs::read(&arena).unwrap(), b"recoverable-arena");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_permission_error_is_returned_without_rewriting_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let arena = temp.path().join("offset_allocator.data");
+        let checkpoint = b"recoverable-checkpoint";
+        std::fs::write(&path, checkpoint).unwrap();
+        std::fs::write(&arena, b"recoverable-arena").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
+
+        let result = load_persisted_index(&path);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), checkpoint);
+        assert_eq!(std::fs::read(&arena).unwrap(), b"recoverable-arena");
+    }
 }
 
 #[cfg(test)]

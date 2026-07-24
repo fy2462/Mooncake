@@ -101,6 +101,25 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
 }
 
 #[test]
+fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = offset_config(temp.path().to_path_buf());
+    config.persist_mode = OffsetPersistMode::Strict;
+    let backend = OffsetAllocatorStorageBackend::new(config);
+    backend.init().unwrap();
+    backend.write_object("a", b"aaaa").unwrap();
+
+    let checkpoint: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(temp.path().join("offset/offset_allocator.index.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(checkpoint["format"], "mooncake-offset-allocator-checkpoint");
+    assert_eq!(checkpoint["version"], 1);
+    assert!(checkpoint["payload_crc32c"].is_u64());
+    assert!(checkpoint["payload"].is_object());
+}
+
+#[test]
 fn offset_allocator_uses_fallback_batch_after_key_high_watermark_is_exceeded() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = offset_config(temp.path().to_path_buf());
