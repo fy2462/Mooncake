@@ -43,6 +43,7 @@ fn offset_allocator_fifo_eviction_reuses_released_extent() {
             .len(),
         8_200
     );
+    drop(backend);
 
     let restarted = OffsetAllocatorStorageBackend::new(config);
     restarted.init().unwrap();
