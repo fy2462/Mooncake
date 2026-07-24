@@ -608,21 +608,7 @@ fn decode_metadata(
                 [tenant, key, metadata] => {
                     let tenant_id = TenantId::new(value_str(tenant, "tenant id")?.to_string())
                         .map_err(|error| snapshot_error(format!("invalid tenant id: {error}")))?;
-                    let key = value_str(key, "object key")?;
-                    let user_key = if key.contains('\0') {
-                        let (scoped_tenant, user_key) =
-                            TenantId::parse_scoped_key(key).map_err(|error| {
-                                snapshot_error(format!("invalid scoped tenant id: {error}"))
-                            })?;
-                        if scoped_tenant != tenant_id {
-                            return Err(snapshot_error(format!(
-                                "object tenant mismatch: scoped={scoped_tenant}, metadata={tenant_id}"
-                            )));
-                        }
-                        user_key
-                    } else {
-                        key.to_string()
-                    };
+                    let user_key = value_str(key, "object key")?.to_string();
                     (tenant_id, user_key, metadata)
                 }
                 _ => return Err(snapshot_error("metadata item has invalid shape")),

@@ -112,9 +112,18 @@ Legacy compatibility rules are:
 - an invalid explicit tenant fails recovery with contextual snapshot/oplog
   corruption information instead of being normalized or skipped.
 
-Restore must rebuild the same scoped key that was serialized and must reject a
-metadata tenant that conflicts with an explicitly scoped key. This prevents
-two logical identities from being admitted for the same durable object.
+Catalog recovery follows the current C++ field semantics exactly. A
+three-field metadata item is `[tenant_id, user_key, metadata]`; `user_key` is
+always an opaque local key and may contain embedded NUL bytes. It must never be
+reinterpreted as a tenant-scoped key. A two-field legacy item has no explicit
+tenant field and may use the older scoped-key representation, so recovery
+splits only its first NUL and otherwise assigns it to `default`.
+
+Oplog records have a separate durable scoped key. When an oplog also carries
+an explicit tenant, recovery must reject a conflict between the two identities.
+Legacy empty tenant/user fields are treated as unspecified when the durable
+key already supplies the identity. These rules preserve legacy entries without
+allowing two logical identities for one oplog object.
 
 ## Error handling
 
@@ -147,7 +156,9 @@ Focused service tests cover strict mode enabled and disabled for:
 - quota admin APIs.
 
 Recovery tests cover valid and invalid snapshot/oplog tenant values, legacy
-empty values, scoped-key consistency, and unchanged serialized field shapes.
+empty values, two-field legacy scoped keys, three-field user keys containing
+embedded NUL bytes, oplog identity conflicts, and unchanged serialized field
+shapes.
 Existing multi-tenant isolation, quota, promotion, replication, snapshot, and
 oplog suites remain required regression coverage.
 

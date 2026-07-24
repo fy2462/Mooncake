@@ -286,8 +286,11 @@ assert!(!apply_oplog_put_end_with_tenant("bad\nname"));
 assert_eq!(encoded_json["tenant_id"], "tenant-a");
 ```
 
-Add a catalog vector whose scoped tenant and metadata tenant disagree and
-assert contextual recovery failure.
+Add a catalog round-trip vector with a three-field item whose user key is
+`part1\0part2`; assert that the full local key is preserved verbatim. Add a
+two-field legacy vector with `tenant-a\0key-a` and assert that only this legacy
+shape is parsed as a scoped key. Add an oplog vector whose durable scoped key
+and explicit tenant disagree and assert contextual recovery failure.
 
 - [ ] **Step 2: Run recovery tests and verify failure**
 
@@ -307,9 +310,13 @@ catalog and oplog recovery call `TenantId::new`; map failures to contextual
 `HaError`/corrupt-record results. Build scoped keys only through
 `tenant_id.make_scoped_key(user_key)`.
 
-For legacy keys, parse the first NUL with `TenantId::parse_scoped_key`. If both
-the durable key and metadata specify tenants, require equality before inserting
-the object.
+For a two-field legacy catalog item, parse the first NUL with
+`TenantId::parse_scoped_key`; for a three-field catalog item, treat the second
+field as an opaque local user key even when it contains NUL, matching the C++
+`[tenant_id, key, metadata]` reader. For oplog records, compare an explicit
+tenant with the tenant parsed from the durable scoped key and reject conflicts;
+legacy empty tenant/user fields are unspecified when the durable key supplies
+the identity.
 
 - [ ] **Step 4: Run recovery and HA regression suites**
 

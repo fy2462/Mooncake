@@ -273,17 +273,6 @@ fn test_catalog_provider_parses_legacy_scoped_key_identity() {
 }
 
 #[test]
-fn test_catalog_provider_rejects_conflicting_scoped_and_metadata_tenants() {
-    let (_root, provider, _, _, _) =
-        publish_fixture_with_identity(Some("tenant-a"), "tenant-b\0key-a", u64::MAX / 2);
-
-    let error = provider.load_latest_snapshot("cluster-a").unwrap_err();
-
-    assert!(error.to_string().contains("tenant"), "{error}");
-    assert!(error.to_string().contains("mismatch"), "{error}");
-}
-
-#[test]
 fn test_catalog_provider_skips_expired_unpinned_objects() {
     let (_root, provider, _, _, _) = publish_fixture(1);
 
@@ -311,6 +300,64 @@ fn test_catalog_provider_accepts_legacy_snapshot_without_tasks() {
     let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
 
     assert!(snapshot.tasks.is_empty());
+}
+
+#[test]
+fn test_catalog_provider_round_trips_three_field_user_key_with_embedded_nul() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    let tenant_id = TenantId::new("tenant-a".to_string()).unwrap();
+    let user_key = "part1\0part2";
+    let now = SystemTime::now();
+    let snapshot = LoadedSnapshot {
+        snapshot_id: "20260610_120002_003".to_string(),
+        snapshot_sequence_id: 77,
+        segments: Vec::new(),
+        nof_segments: Vec::new(),
+        objects: vec![(
+            tenant_id.make_scoped_key(user_key),
+            ObjectEntry {
+                replicas: vec![ReplicaDescriptor {
+                    segment_id: Uuid::nil(),
+                    segment_name: "disk-a".to_string(),
+                    offset: 0,
+                    size: 128,
+                    status: ReplicaStatus::Complete,
+                    replica_type: ReplicaType::Disk,
+                    holder_client_id: None,
+                    refcnt: 0,
+                    handle_valid: true,
+                    base_addr: 0,
+                    protocol: String::new(),
+                }],
+                size: 128,
+                last_access: now,
+                hard_pinned: true,
+                data_type: ObjectDataType::Kvcache,
+                client_id: Uuid::new_v4(),
+                put_start_time: Some(now),
+                lease_timeout: Some(now + std::time::Duration::from_secs(60)),
+                soft_pin_timeout: None,
+                tenant_id: tenant_id.clone(),
+                group_id: "group-a".to_string(),
+                quota_committed: true,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: user_key.to_string(),
+            },
+        )],
+        tasks: Vec::new(),
+        local_disk_segments: Vec::new(),
+    };
+
+    provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(loaded.objects[0].0, "tenant-a\0part1\0part2");
+    assert_eq!(loaded.objects[0].1.tenant_id, tenant_id);
+    assert_eq!(loaded.objects[0].1.user_key, user_key);
 }
 
 #[test]
