@@ -188,7 +188,11 @@ Implemented on 2026-07-24 in these commits:
 - `e4ec71c2` and `9e57d35b` resolve request tenants before mutation and enforce
   registered-tenant write admission;
 - `650f8071` closes the remote-pull, task-payload, legacy-helper, and stale-test
-  audit gaps.
+  audit gaps;
+- `c345a3eb` directly verifies disabled-mode remote-pull canonicalization;
+- `86dd9f08` closes final-review gaps in AddReplica/offload admission,
+  remove/revoke recovery, non-lossy durable/config decoding, and distributed
+  miss-handler tenant propagation.
 
 The final audit found no unchecked Store-domain tenant identity path. Raw
 tenant strings remain only in protobuf/HTTP entry values, oplog and event wire
@@ -204,8 +208,9 @@ tenant isolation and disabled-mode collapse to `default` are an inference from
 the canonical identity contract applied to its object-key coordination state.
 
 Verification completed with `cargo fmt --all -- --check`, `git diff --check`,
-the 35 focused service/isolation tests, and the complete
-`mooncake-store-master` suite (365 passed, 0 failed; 2 documentation tests
+the TenantId parity target (17 passed), oplog target (24 passed), distributed
+miss-handler/client targets (73 passed), and the complete
+`mooncake-store-master` suite (373 passed, 0 failed; 2 documentation tests
 ignored). Strict all-target Clippy remains blocked by the existing crate-wide
 baseline (102 library and 108 library-test warnings promoted to errors); a
 non-denying all-target run completed and the warning-to-hunk audit found no
