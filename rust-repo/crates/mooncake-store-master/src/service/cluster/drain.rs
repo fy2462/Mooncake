@@ -231,7 +231,7 @@ impl MasterServiceImpl {
         let mut blocked_unit_keys = HashSet::new();
         for entry in self.state.objects.iter() {
             let key = entry.key().clone();
-            if entry.tenant_id != "default"
+            if !entry.tenant_id.is_default()
                 || entry.hard_pinned
                 || !is_lease_expired(entry.value())
                 || !entry

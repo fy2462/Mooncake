@@ -19,6 +19,7 @@
 use crate::allocator::{AllocationStrategy, SsdUsageMetrics};
 use crate::http_metadata::MetadataState;
 use crate::metrics;
+use crate::tenant_id::{DEFAULT_TENANT, TenantId};
 use chrono::Utc;
 use mooncake_store_core::{
     ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskStatus,
@@ -736,10 +737,22 @@ pub(crate) fn clear_invalid_handles(state: &MasterState, alive_clients: &HashSet
 /// NUL 字节分隔符，因为用户提供的 key 不能包含 '\0'。
 pub const TENANT_SCOPE_DELIMITER: char = '\0';
 
-/// Default tenant identifier when none is provided.
-/// 未提供租户标识符时的默认值。
-/// C++ equivalent: NormalizeTenantId("") -> "default"
-pub const DEFAULT_TENANT: &str = "default";
+pub fn resolve_request_tenant(raw: &str, strict: bool) -> Result<TenantId, Status> {
+    if !strict {
+        return Ok(TenantId::default());
+    }
+    TenantId::new(raw.to_owned()).map_err(|error| Status::invalid_argument(error.to_string()))
+}
+
+pub fn resolve_write_tenant(raw: &str, strict: bool) -> Result<TenantId, Status> {
+    if !strict {
+        return Ok(TenantId::default());
+    }
+    if raw.is_empty() {
+        return Err(Status::resource_exhausted("tenant not registered"));
+    }
+    TenantId::new(raw.to_owned()).map_err(|_| Status::resource_exhausted("tenant not registered"))
+}
 
 /// Normalize an incoming tenant_id: empty string → "default".
 /// 规范化传入的 tenant_id：空字符串 → "default"。
@@ -836,7 +849,7 @@ mod tests {
             put_start_time: None,
             lease_timeout: None,
             soft_pin_timeout: None,
-            tenant_id: DEFAULT_TENANT.to_string(),
+            tenant_id: TenantId::default(),
             group_id: String::new(),
             quota_committed: false,
             memory_cache_total_accounted: false,

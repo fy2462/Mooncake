@@ -3,10 +3,11 @@ mod common;
 use common::proto_uuid;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
+use mooncake_store_master::tenant_quota::TenantQuotaTable;
 use mooncake_store_master::tenant_quota_policy_store::{
     TenantQuotaPolicySnapshot, load_tenant_quota_policy, save_tenant_quota_policy,
 };
-use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl, TenantId};
 use std::os::unix::fs::PermissionsExt;
 use tonic::{Code, Request};
 use uuid::Uuid;
@@ -48,6 +49,17 @@ fn temp_policy_uri() -> String {
         .path()
         .to_string_lossy()
         .into_owned()
+}
+
+#[test]
+fn test_tenant_quota_table_uses_typed_ids_for_deterministic_assignment() {
+    let alpha = TenantId::new("alpha".into()).unwrap();
+    let beta = TenantId::new("beta".into()).unwrap();
+    let mut table = TenantQuotaTable::new(0);
+    table.upsert_policy(&alpha, 2, 3).unwrap();
+    table.upsert_policy(&beta, 2, 3).unwrap();
+    assert_eq!(table.get_snapshot(&alpha).unwrap().effective_quota_bytes, 2);
+    assert_eq!(table.get_snapshot(&beta).unwrap().effective_quota_bytes, 1);
 }
 
 #[tokio::test]
@@ -171,7 +183,10 @@ fn test_tenant_quota_admin_policy_lifecycle_methods() {
     });
 
     let snapshot = service.upsert_tenant_quota_policy("tenant-a", 800).unwrap();
-    assert_eq!(snapshot.tenant_id, "tenant-a");
+    assert_eq!(
+        snapshot.tenant_id,
+        TenantId::new("tenant-a".to_string()).unwrap()
+    );
     assert_eq!(snapshot.requested_quota_bytes, 800);
     assert!(snapshot.has_explicit_policy);
 

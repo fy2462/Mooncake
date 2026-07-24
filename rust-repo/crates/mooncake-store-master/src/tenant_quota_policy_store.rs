@@ -1,4 +1,4 @@
-use crate::normalize_tenant_id;
+use crate::TenantId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -365,14 +365,9 @@ fn parse_tenant_quota_bytes(value: &str) -> Result<u64, String> {
 }
 
 fn normalize_policy_tenant_id(tenant_id: &str) -> Result<String, String> {
-    let tenant_id = normalize_tenant_id(tenant_id);
-    if tenant_id.is_empty()
-        || tenant_id.starts_with('_')
-        || tenant_id.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
-    {
-        return Err(format!("invalid tenant name '{tenant_id}'"));
-    }
-    Ok(tenant_id)
+    TenantId::new(tenant_id.to_owned())
+        .map(TenantId::into_string)
+        .map_err(|_| format!("invalid tenant name '{tenant_id}'"))
 }
 
 fn format_tenant_quota_policy_yaml(snapshot: &TenantQuotaPolicySnapshot) -> String {

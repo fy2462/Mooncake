@@ -6,6 +6,7 @@ use super::snapshot::{
     SnapshotProvider,
 };
 use super::types::HaError;
+use crate::TenantId;
 use crate::make_tenant_scoped_key;
 use crate::proto::SegmentStatus;
 use crate::service::{ObjectEntry, SegmentEntry};
@@ -412,11 +413,7 @@ fn encode_compressed_value(value: &Value) -> Result<Vec<u8>, HaError> {
 }
 
 fn tenant_and_user_key<'a>(scoped_key: &'a str, object: &'a ObjectEntry) -> (&'a str, &'a str) {
-    let tenant_id = if object.tenant_id.is_empty() {
-        "default"
-    } else {
-        object.tenant_id.as_str()
-    };
+    let tenant_id = object.tenant_id.as_str();
     if !object.user_key.is_empty() {
         return (tenant_id, object.user_key.as_str());
     }
@@ -679,12 +676,8 @@ fn decode_object(
         put_start_time: Some(time_from_ms(put_start_ms)?),
         lease_timeout: Some(lease_timeout),
         soft_pin_timeout,
-        tenant_id: if tenant_id.is_empty() {
-            "default"
-        } else {
-            tenant_id
-        }
-        .to_string(),
+        tenant_id: TenantId::new(tenant_id.to_owned())
+            .map_err(|error| snapshot_error(format!("invalid tenant id: {error}")))?,
         group_id,
         quota_committed: true,
         memory_cache_total_accounted: false,

@@ -3,6 +3,7 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment
 mod common;
 use common::temp_dir;
 
+use mooncake_store_master::TenantId;
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use mooncake_store_master::service::{
@@ -28,7 +29,7 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         put_start_time: None,
         lease_timeout: None,
         soft_pin_timeout: None,
-        tenant_id: "default".to_string(),
+        tenant_id: TenantId::default(),
         user_key: String::new(),
         group_id: String::new(),
         quota_committed: false,

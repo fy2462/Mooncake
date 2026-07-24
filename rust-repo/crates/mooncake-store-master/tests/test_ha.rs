@@ -3,6 +3,7 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment
 mod common;
 use common::temp_dir;
 
+use mooncake_store_master::TenantId;
 use mooncake_store_master::ha::EmbeddedSnapshotCatalogStore;
 use mooncake_store_master::ha::{
     CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
@@ -191,7 +192,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
     objects.insert(
         "ha-key".into(),
         ObjectEntry {
-            tenant_id: "default".to_string(),
+            tenant_id: TenantId::default(),
             user_key: String::new(),
             replicas: vec![ReplicaDescriptor {
                 base_addr: 0x100000000,
@@ -251,7 +252,7 @@ fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
     cluster_objects.insert(
         "cluster-key".into(),
         ObjectEntry {
-            tenant_id: "default".to_string(),
+            tenant_id: TenantId::default(),
             user_key: "cluster-key".to_string(),
             replicas: vec![],
             size: 0,

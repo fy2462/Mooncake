@@ -29,8 +29,12 @@ impl MasterServiceImpl {
         validate_user_key(&req.key)?;
 
         let user_key = req.key.clone();
-        let tenant_id = normalize_tenant_id(&req.tenant_id);
-        let scoped_key = make_tenant_scoped_key(&tenant_id, &user_key);
+        let tenant_id = if self.state.runtime_config.enable_tenant_quota {
+            resolve_write_tenant(&req.tenant_id, true)?
+        } else {
+            resolve_request_tenant(&req.tenant_id, true)?
+        };
+        let scoped_key = tenant_id.make_scoped_key(&user_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -261,7 +265,7 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
         let req = request.into_inner();
         let scoped_key = make_tenant_scoped_key(&req.tenant_id, &req.key);
-        let tenant_id = normalize_tenant_id(&req.tenant_id);
+        let tenant_id = resolve_request_tenant(&req.tenant_id, true)?;
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()

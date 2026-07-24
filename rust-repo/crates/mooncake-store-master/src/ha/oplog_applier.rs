@@ -13,6 +13,7 @@ use parking_lot::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
 
+use crate::TenantId;
 use crate::ha::types::OpLogRecord;
 use crate::oplog::{OpLogStore, decode_record_payload_value};
 use crate::service::helpers::release_object_replicas;
@@ -174,8 +175,11 @@ impl OpLogApplier {
                                 .as_str()
                                 .and_then(|id| Uuid::parse_str(id).ok())
                                 .unwrap_or_else(Uuid::nil);
-                            let tenant_id =
-                                v["tenant_id"].as_str().unwrap_or("default").to_string();
+                            let Ok(tenant_id) = TenantId::new(
+                                v["tenant_id"].as_str().unwrap_or("default").to_string(),
+                            ) else {
+                                return false;
+                            };
                             let user_key = v["user_key"].as_str().unwrap_or(key).to_string();
                             let mut object = ObjectEntry {
                                 replicas,
@@ -399,7 +403,7 @@ mod tests {
         let object = state.objects.get("tenant-a/k1").unwrap();
         assert_eq!(object.size, 256);
         assert_eq!(object.client_id, client_id);
-        assert_eq!(object.tenant_id, "tenant-a");
+        assert_eq!(object.tenant_id.as_str(), "tenant-a");
         assert_eq!(object.group_id, "group-a");
         assert_eq!(object.user_key, "k1");
         assert_eq!(object.replicas.len(), 1);
@@ -442,7 +446,7 @@ mod tests {
                 put_start_time: None,
                 lease_timeout: None,
                 soft_pin_timeout: None,
-                tenant_id: "default".to_string(),
+                tenant_id: TenantId::default(),
                 group_id: String::new(),
                 quota_committed: false,
                 memory_cache_total_accounted: false,
@@ -508,7 +512,7 @@ mod tests {
                 put_start_time: None,
                 lease_timeout: None,
                 soft_pin_timeout: None,
-                tenant_id: "default".to_string(),
+                tenant_id: TenantId::default(),
                 group_id: String::new(),
                 quota_committed: false,
                 memory_cache_total_accounted: false,

@@ -147,7 +147,7 @@ impl MasterServiceImpl {
         request: Request<proto::GetReplicaListByRegexRequest>,
     ) -> Result<Response<proto::GetReplicaListByRegexResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = normalize_tenant_id(&req.tenant_id);
+        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
         let pattern = regex::Regex::new(&req.key_regex)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
@@ -183,7 +183,7 @@ impl MasterServiceImpl {
             entries.push(proto::get_replica_list_by_regex_response::ObjectEntry {
                 key: entry.key().clone(),
                 replicas: completed_replicas,
-                tenant_id: entry.tenant_id.clone(),
+                tenant_id: entry.tenant_id.as_str().to_owned(),
                 user_key: entry.user_key.clone(),
             });
             lease_keys.push(entry.key().clone());
@@ -264,7 +264,7 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveByRegexRequest>,
     ) -> Result<Response<proto::RemoveByRegexResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = normalize_tenant_id(&req.tenant_id);
+        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
         let pattern = regex::Regex::new(&req.pattern)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
@@ -318,7 +318,7 @@ impl MasterServiceImpl {
         request: Request<proto::QueryByRegexRequest>,
     ) -> Result<Response<proto::QueryByRegexResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = normalize_tenant_id(&req.tenant_id);
+        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
         let pattern = regex::Regex::new(&req.pattern)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
@@ -334,7 +334,7 @@ impl MasterServiceImpl {
             entries.push(proto::query_by_regex_response::Entry {
                 key: entry.key().clone(),
                 replicas: r,
-                tenant_id: entry.tenant_id.clone(),
+                tenant_id: entry.tenant_id.as_str().to_owned(),
                 user_key: entry.user_key.clone(),
             });
         }

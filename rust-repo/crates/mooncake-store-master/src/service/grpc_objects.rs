@@ -55,7 +55,7 @@ impl MasterServiceImpl {
         Ok(config.group_ids[key_index].clone())
     }
 
-    pub(crate) fn grant_group_lease(&self, tenant_id: &str, group_id: &str) {
+    pub(crate) fn grant_group_lease(&self, tenant_id: &TenantId, group_id: &str) {
         if group_id.is_empty() {
             return;
         }
@@ -63,7 +63,7 @@ impl MasterServiceImpl {
             .state
             .objects
             .iter()
-            .filter(|entry| entry.tenant_id == tenant_id && entry.group_id == group_id)
+            .filter(|entry| &entry.tenant_id == tenant_id && entry.group_id == group_id)
             .filter(|entry| {
                 entry
                     .replicas
@@ -187,7 +187,7 @@ impl MasterServiceImpl {
                             scoped_key,
                             size,
                             Some(entry.client_id),
-                            &entry.tenant_id,
+                            entry.tenant_id.as_str(),
                             &entry.group_id,
                             &entry.user_key,
                             &entry.replicas,
@@ -225,7 +225,7 @@ impl MasterServiceImpl {
         request: Request<proto::GetAllKeysRequest>,
     ) -> Result<Response<proto::GetAllKeysResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = normalize_tenant_id(&req.tenant_id);
+        let tenant_filter = resolve_request_tenant(&req.tenant_id, true)?;
         let keys: Vec<String> = self
             .state
             .objects

@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use mooncake_store_core::{
     ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment,
 };
+use mooncake_store_master::TenantId;
 use mooncake_store_master::allocator::{AllocationStrategy, SegmentAllocator};
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use mooncake_store_master::service::{ObjectEntry, SegmentEntry};
@@ -228,7 +229,7 @@ fn test_object_entry_creation() {
         put_start_time: None,
         lease_timeout: None,
         soft_pin_timeout: None,
-        tenant_id: "default".to_string(),
+        tenant_id: TenantId::default(),
         user_key: String::new(),
         group_id: String::new(),
         quota_committed: false,

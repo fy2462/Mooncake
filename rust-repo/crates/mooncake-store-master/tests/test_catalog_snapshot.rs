@@ -3,6 +3,7 @@ use mooncake_store_core::{
     ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment, TaskInfo, TaskStatus,
     TaskType,
 };
+use mooncake_store_master::TenantId;
 use mooncake_store_master::ha::{
     CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, LoadedSnapshot,
     LocalFileSnapshotObjectStore, SnapshotCatalogStore, SnapshotCatalogStoreType,
@@ -297,7 +298,7 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
                 put_start_time: Some(now),
                 lease_timeout: Some(now + std::time::Duration::from_secs(60)),
                 soft_pin_timeout: None,
-                tenant_id: "tenant-a".to_string(),
+                tenant_id: TenantId::new("tenant-a".to_string()).unwrap(),
                 group_id: "group-a".to_string(),
                 quota_committed: true,
                 memory_cache_total_accounted: false,

@@ -39,6 +39,12 @@ impl MasterServiceImpl {
         }
         let memory_replica_count = config.replica_num as usize;
         let nof_replica_count = config.nof_replica_num as usize;
+        let tenant_id = if self.state.runtime_config.enable_tenant_quota {
+            resolve_write_tenant(&req.tenant_id, true)?
+        } else {
+            resolve_request_tenant(&req.tenant_id, true)?
+        };
+        let tenant_id_wire = tenant_id.as_str().to_owned();
         let mut all_replicas = Vec::new();
         let mut results = Vec::with_capacity(req.keys.len());
         let invalid_group_ids =
@@ -50,7 +56,7 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::InvalidState.into(),
-                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                    tenant_id: tenant_id_wire.clone(),
                 });
                 continue;
             }
@@ -59,12 +65,11 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::InvalidState.into(),
-                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                    tenant_id: tenant_id_wire.clone(),
                 });
                 continue;
             }
-            let key = make_tenant_scoped_key(&req.tenant_id, raw_key);
-            let tenant_id = normalize_tenant_id(&req.tenant_id);
+            let key = tenant_id.make_scoped_key(raw_key);
             let group_id = Self::group_id_for_key(&config, req.keys.len(), idx)
                 .map_err(|_| Status::invalid_argument("invalid group_ids"))?;
             if self.state.objects.contains_key(&key) {
@@ -72,7 +77,7 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::ObjectAlreadyExists.into(),
-                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                    tenant_id: tenant_id_wire.clone(),
                 });
                 continue;
             }
@@ -81,7 +86,7 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::InvalidState.into(),
-                    tenant_id,
+                    tenant_id: tenant_id_wire.clone(),
                 });
                 continue;
             }
@@ -100,7 +105,7 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::InvalidState.into(),
-                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                    tenant_id: tenant_id_wire.clone(),
                 });
                 continue;
             }
@@ -120,7 +125,7 @@ impl MasterServiceImpl {
                             key: raw_key.clone(),
                             replicas: vec![],
                             status: BatchStatus::InvalidState.into(),
-                            tenant_id: normalize_tenant_id(&req.tenant_id),
+                            tenant_id: tenant_id_wire.clone(),
                         });
                         continue;
                     }
@@ -143,7 +148,6 @@ impl MasterServiceImpl {
                         .map(|r| r.segment_id),
                 );
                 let now = SystemTime::now();
-                let (t_id, u_key) = split_scoped_key(&key);
                 self.state.objects.insert(
                     key.clone(),
                     ObjectEntry {
@@ -161,12 +165,12 @@ impl MasterServiceImpl {
                         } else {
                             None
                         },
-                        tenant_id: t_id,
+                        tenant_id: tenant_id.clone(),
                         group_id,
                         quota_committed: false,
                         memory_cache_total_accounted: false,
                         disk_cache_total_accounted: false,
-                        user_key: u_key,
+                        user_key: raw_key.clone(),
                     },
                 );
                 self.state.processing_keys.insert(key.clone(), ());
@@ -175,7 +179,7 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: proto_r,
                     status: BatchStatus::Success.into(),
-                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                    tenant_id: tenant_id_wire.clone(),
                 });
             } else {
                 release_replicas(&self.state, &replicas);
@@ -184,7 +188,7 @@ impl MasterServiceImpl {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::InvalidState.into(),
-                    tenant_id: normalize_tenant_id(&req.tenant_id),
+                    tenant_id: tenant_id_wire.clone(),
                 });
             }
         }

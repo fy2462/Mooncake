@@ -1,3 +1,4 @@
+use crate::TenantId;
 use rmpv::Value;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -71,7 +72,7 @@ struct PendingEvent {
     kind: KvEventKind,
     object_key: String,
     medium: String,
-    tenant_id: String,
+    tenant_id: TenantId,
     group_id: String,
 }
 
@@ -148,22 +149,34 @@ impl KvEventPublisher {
         self.shared.runtime_enabled.load(Ordering::Acquire)
     }
 
-    pub fn publish_stored(&self, object_key: &str, medium: &str, tenant_id: &str, group_id: &str) {
+    pub fn publish_stored(
+        &self,
+        object_key: &str,
+        medium: &str,
+        tenant_id: &TenantId,
+        group_id: &str,
+    ) {
         self.enqueue(PendingEvent {
             kind: KvEventKind::Stored,
             object_key: object_key.to_string(),
             medium: medium.to_string(),
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_id.clone(),
             group_id: group_id.to_string(),
         });
     }
 
-    pub fn publish_removed(&self, object_key: &str, medium: &str, tenant_id: &str, group_id: &str) {
+    pub fn publish_removed(
+        &self,
+        object_key: &str,
+        medium: &str,
+        tenant_id: &TenantId,
+        group_id: &str,
+    ) {
         self.enqueue(PendingEvent {
             kind: KvEventKind::Removed,
             object_key: object_key.to_string(),
             medium: medium.to_string(),
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_id.clone(),
             group_id: group_id.to_string(),
         });
     }
@@ -367,11 +380,6 @@ fn build_event_value(
     timestamp_ms: i64,
 ) -> Value {
     let is_stored = pending.kind == KvEventKind::Stored;
-    let tenant_id = if pending.tenant_id.is_empty() {
-        "default"
-    } else {
-        &pending.tenant_id
-    };
     let mut fields = Vec::new();
     push_field(&mut fields, "event_id", Value::from(event_id));
     push_field(&mut fields, "timestamp", Value::from(timestamp_ms));
@@ -395,7 +403,11 @@ fn build_event_value(
     push_field(&mut fields, "block_size", Value::Nil);
     push_field(&mut fields, "additional_salt", Value::Nil);
     push_field(&mut fields, "lora_name", Value::Nil);
-    push_field(&mut fields, "tenant_id", Value::from(tenant_id));
+    push_field(
+        &mut fields,
+        "tenant_id",
+        Value::from(pending.tenant_id.as_str()),
+    );
     push_field(
         &mut fields,
         "backend_id",
@@ -483,7 +495,7 @@ mod tests {
             kind: KvEventKind::Stored,
             object_key: "0x2a".to_string(),
             medium: "cpu".to_string(),
-            tenant_id: "tenant-a".to_string(),
+            tenant_id: TenantId::new("tenant-a".to_string()).unwrap(),
             group_id: "group-a".to_string(),
         };
 
@@ -542,7 +554,12 @@ mod tests {
         subscriber.connect(&endpoint).unwrap();
         std::thread::sleep(Duration::from_millis(100));
 
-        publisher.publish_stored(object_key, "cpu", "tenant-a", group_id);
+        publisher.publish_stored(
+            object_key,
+            "cpu",
+            &TenantId::new("tenant-a".to_string()).unwrap(),
+            group_id,
+        );
         let frames = subscriber.recv_multipart(0).unwrap();
 
         assert_eq!(frames.len(), 3);
@@ -591,9 +608,10 @@ mod tests {
             worker: Mutex::new(None),
         };
 
-        publisher.publish_stored("1", "cpu", "", "");
-        publisher.publish_stored("2", "cpu", "", "");
-        publisher.publish_stored("3", "cpu", "", "");
+        let tenant_id = TenantId::default();
+        publisher.publish_stored("1", "cpu", &tenant_id, "");
+        publisher.publish_stored("2", "cpu", &tenant_id, "");
+        publisher.publish_stored("3", "cpu", &tenant_id, "");
 
         let queue = publisher.shared.queue.lock().unwrap();
         let keys = queue

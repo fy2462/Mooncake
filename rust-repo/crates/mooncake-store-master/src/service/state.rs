@@ -34,6 +34,7 @@
 //! | `runtime_config` | `MasterRuntimeConfig` | 运行时配置：所有可调参数的汇总 |
 //! | `pending_remote_pulls` | `DashMap<String, RemotePullEntry>` | 进行中的远端拉取：S3 等远端源的回源协调 |
 
+use crate::TenantId;
 use crate::allocator::{AllocationStrategy, MemoryAllocatorKind, SegmentAllocator};
 use crate::count_min_sketch::CountMinSketch;
 use crate::kv_event::KvEventPublisher;
@@ -239,8 +240,8 @@ pub struct ObjectEntry {
     /// 租户标识符（规范化后，未设置时默认为 "default"）。
     /// Tenant identifier (normalized; defaults to "default" when not set).
     /// C++ equivalent: ObjectMetadata::tenant_id
-    #[serde(default = "default_tenant_id")]
-    pub tenant_id: String,
+    #[serde(default)]
+    pub tenant_id: TenantId,
     /// Optional group id for grouped lease/routing semantics.
     /// 分组租约/路由语义使用的可选 group id。
     #[serde(default)]
@@ -306,12 +307,6 @@ impl ObjectEntry {
     pub fn is_soft_pinned_at(&self, now: SystemTime) -> bool {
         self.soft_pin_timeout.map_or(false, |t| now < t)
     }
-}
-
-/// Default tenant identifier — matches C++ NormalizeTenantId in types.h.
-/// 默认租户标识符 —— 对应 C++ types.h 中的 NormalizeTenantId。
-fn default_tenant_id() -> String {
-    "default".to_string()
 }
 
 /// Segment 条目：Memory segment 的注册信息。

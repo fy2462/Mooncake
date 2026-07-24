@@ -157,6 +157,7 @@ impl MasterServiceImpl {
                 }
                 _ => {
                     let (t_id, u_key) = split_scoped_key(&key);
+                    let tenant_id = resolve_request_tenant(&t_id, true)?;
                     let mut object = ObjectEntry {
                         replicas: vec![replica],
                         size: metadata.data_size.max(0) as u64,
@@ -167,7 +168,7 @@ impl MasterServiceImpl {
                         put_start_time: None,
                         lease_timeout: None,
                         soft_pin_timeout: None,
-                        tenant_id: t_id,
+                        tenant_id,
                         group_id: String::new(),
                         quota_committed: false,
                         memory_cache_total_accounted: false,

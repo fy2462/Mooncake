@@ -205,7 +205,7 @@ impl MasterServiceImpl {
         let tenant_filter = if req.tenant_id.is_empty() {
             None
         } else {
-            Some(normalize_tenant_id(&req.tenant_id))
+            Some(resolve_request_tenant(&req.tenant_id, true)?)
         };
         let keys = self
             .state

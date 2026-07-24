@@ -16,10 +16,12 @@
 //! - Copy/Move 操作按租户隔离
 //! - Offload / Promotion 心跳 key 内部已作用域化
 
+use dashmap::DashMap;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
-use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
-use std::time::Duration;
+use mooncake_store_master::service::ObjectEntry;
+use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl, TenantId};
+use std::time::{Duration, SystemTime};
 use tonic::Request;
 use uuid::Uuid;
 
@@ -95,6 +97,35 @@ fn put_object(
 
         put.replicas
     })
+}
+
+#[test]
+fn test_object_state_retains_typed_default_tenant() {
+    let objects = DashMap::new();
+    objects.insert(
+        "default\0typed-object".to_string(),
+        ObjectEntry {
+            replicas: vec![],
+            size: 1,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::default(),
+            group_id: String::new(),
+            quota_committed: false,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "typed-object".to_string(),
+        },
+    );
+
+    let entry = objects.get("default\0typed-object").unwrap();
+    let tenant: &TenantId = &entry.tenant_id;
+    assert_eq!(tenant, &TenantId::default());
 }
 
 #[test]

@@ -61,8 +61,12 @@ impl MasterServiceImpl {
         }
         let requested_group_id = Self::group_id_for_key(&config, 1, 0)?;
 
-        let tenant_id = normalize_tenant_id(tenant_id);
-        let scoped_key = make_tenant_scoped_key(&tenant_id, user_key);
+        let tenant_id = if self.state.runtime_config.enable_tenant_quota {
+            resolve_write_tenant(tenant_id, true)?
+        } else {
+            resolve_request_tenant(tenant_id, true)?
+        };
+        let scoped_key = tenant_id.make_scoped_key(user_key);
         if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition("object has replication task"));
         }
@@ -161,7 +165,7 @@ impl MasterServiceImpl {
         &self,
         client_id: Uuid,
         user_key: &str,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         scoped_key: &str,
         slice_length: u64,
         replica_count: usize,
@@ -231,7 +235,7 @@ impl MasterServiceImpl {
                 put_start_time: Some(now),
                 lease_timeout: None,
                 soft_pin_timeout,
-                tenant_id: tenant_id.to_string(),
+                tenant_id: tenant_id.clone(),
                 group_id,
                 quota_committed: false,
                 memory_cache_total_accounted: false,
