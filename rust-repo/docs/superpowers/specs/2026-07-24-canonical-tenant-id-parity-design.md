@@ -177,6 +177,41 @@ The slice is complete only when searches show that tenant identity in the
 master core is no longer represented by an unconstrained `String`, except at
 documented wire, persistence, configuration, logging, or user-data boundaries.
 
+## Implementation status
+
+Implemented on 2026-07-24 in these commits:
+
+- `5b43d744` introduces the canonical `TenantId` domain type;
+- `0f58eba3` carries it through master state, quota, policy, and events;
+- `cedff1c7` and `8b223076` validate recovery while preserving the C++
+  three-field catalog key contract;
+- `e4ec71c2` and `9e57d35b` resolve request tenants before mutation and enforce
+  registered-tenant write admission;
+- `650f8071` closes the remote-pull, task-payload, legacy-helper, and stale-test
+  audit gaps.
+
+The final audit found no unchecked Store-domain tenant identity path. Raw
+tenant strings remain only in protobuf/HTTP entry values, oplog and event wire
+payloads, quota-policy configuration, logging, and test-facing compatibility
+methods; each Store-owned path converts to `TenantId` before state access.
+Legacy `normalize_tenant_id`, `make_tenant_scoped_key`, and `split_scoped_key`
+exports were removed so they cannot bypass validation.
+
+The C++ `Ping` control-plane API accepts no tenant identity, so the Rust proto's
+compatibility `tenant_id` field is intentionally ignored by Ping. Remote-pull
+coordination is a Rust-only API with no same-named C++ oracle. Its strict-mode
+tenant isolation and disabled-mode collapse to `default` are an inference from
+the canonical identity contract applied to its object-key coordination state.
+
+Verification completed with `cargo fmt --all -- --check`, `git diff --check`,
+the 35 focused service/isolation tests, and the complete
+`mooncake-store-master` suite (365 passed, 0 failed; 2 documentation tests
+ignored). Strict all-target Clippy remains blocked by the existing crate-wide
+baseline (102 library and 108 library-test warnings promoted to errors); a
+non-denying all-target run completed and the warning-to-hunk audit found no
+warning on a Task 5 added line. Pre-commit disposition is recorded in the
+matching migration log.
+
 ## Out of scope
 
 - changing protobuf field types or field numbers;
