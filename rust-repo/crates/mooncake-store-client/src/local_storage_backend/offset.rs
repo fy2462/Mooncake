@@ -284,6 +284,7 @@ struct OffsetState {
     last_checkpoint_at: Option<Duration>,
     pinned_extents: HashMap<ExtentIdentity, usize>,
     deferred_free_extents: HashMap<ExtentIdentity, OffsetEntry>,
+    pending_rebuild_arena_len: Option<u64>,
 }
 
 impl Default for OffsetState {
@@ -299,6 +300,7 @@ impl Default for OffsetState {
             last_checkpoint_at: None,
             pinned_extents: HashMap::new(),
             deferred_free_extents: HashMap::new(),
+            pending_rebuild_arena_len: None,
         }
     }
 }
@@ -531,6 +533,7 @@ impl OffsetAllocatorStorageBackend {
             last_checkpoint_at: None,
             pinned_extents: HashMap::new(),
             deferred_free_extents: HashMap::new(),
+            pending_rebuild_arena_len: None,
         };
         if upgraded {
             let mut state = self.state.lock();
@@ -706,6 +709,12 @@ impl OffsetAllocatorStorageBackend {
         }
 
         state.free_extents = candidate_free;
+        if let Some(arena_len) = state.pending_rebuild_arena_len.as_mut() {
+            // A write may append while an older generation is still pinned.
+            // Keep the eventual whole-map rebuild wide enough to cover every
+            // byte written before the final lease is released.
+            *arena_len = (*arena_len).max(candidate_next_offset);
+        }
         defer_pinned_extents(&mut state, &committed_victims);
         state.index.next_offset = candidate_next_offset;
         state.next_write_seq = next_write_seq;
@@ -797,6 +806,15 @@ impl OffsetAllocatorStorageBackend {
             state.pinned_extents.remove(&identity);
             if let Some(entry) = state.deferred_free_extents.remove(&identity) {
                 insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
+            }
+        }
+        if state.pinned_extents.is_empty() && state.deferred_free_extents.is_empty() {
+            if let Some(arena_len) = state.pending_rebuild_arena_len.take() {
+                // Rebuild from the current live index, not from the index that
+                // existed when the checkpoint completed. Mutations between
+                // checkpoint and final unpin therefore cannot resurrect an
+                // extent from the detached generation (ABA).
+                state.free_extents = rebuild_free_extents(&state.index, arena_len);
             }
         }
     }
@@ -892,6 +910,9 @@ impl OffsetAllocatorStorageBackend {
         state.index = PersistedIndex::default();
         state.free_extents.clear();
         state.deferred_free_extents.clear();
+        // remove_all starts a new logical generation. Any earlier deferred
+        // rebuild described the generation being detached and is stale now.
+        state.pending_rebuild_arena_len = None;
         state.used_bytes = 0;
         for key in removed_keys {
             record_tombstone(&mut state, &key);
@@ -912,9 +933,12 @@ impl OffsetAllocatorStorageBackend {
                 state.dirty = true;
                 self.checkpoint_dirty_state(&mut state, false)?;
                 remove_file_if_present(&self.data_path())?;
+                state.pending_rebuild_arena_len = None;
+                state.free_extents.clear();
             }
             OffsetPersistMode::Disabled => {
                 remove_file_if_present(&self.data_path())?;
+                state.pending_rebuild_arena_len = None;
                 self.after_mutation(&mut state)?;
             }
         }
@@ -999,11 +1023,17 @@ impl OffsetAllocatorStorageBackend {
         state.dirty = false;
         state.tombstones.clear();
         state.last_checkpoint_at = Some((self.clock)());
+        let arena_len = std::fs::metadata(self.data_path())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         if state.pinned_extents.is_empty() && state.deferred_free_extents.is_empty() {
-            let arena_len = std::fs::metadata(self.data_path())
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
             state.free_extents = rebuild_free_extents(&state.index, arena_len);
+            state.pending_rebuild_arena_len = None;
+        } else {
+            // A checkpoint is a generation-reclamation barrier, but pinned
+            // readers may still own extents from the prior generation. Delay
+            // the whole-map rebuild until the final old lease is released.
+            state.pending_rebuild_arena_len = Some(arena_len);
         }
         Ok(())
     }
@@ -1021,7 +1051,13 @@ impl OffsetAllocatorStorageBackend {
             // Best effort matches relaxed post-mutation scheduling. A success
             // rebuilds free extents before allocation, allowing a full old
             // generation cleared by remove_all to make forward progress.
-            let _ = self.checkpoint_dirty_state(state, true);
+            // This preallocation barrier must not consume the periodic due
+            // time: the write about to be allocated still needs its own
+            // post-mutation checkpoint before it can be considered durable.
+            let scheduled_checkpoint_at = state.last_checkpoint_at;
+            if self.checkpoint_dirty_state(state, true).is_ok() {
+                state.last_checkpoint_at = scheduled_checkpoint_at;
+            }
         }
     }
 
@@ -2782,6 +2818,87 @@ mod persistence_mode_tests {
         assert_eq!(relaxed.read_object("c").unwrap(), b"3");
         assert!(relaxed.state.lock().index.entries["c"].offset < record_len * 2);
         relaxed.simulate_abrupt_exit();
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert_eq!(restarted.read_object("c").unwrap(), b"3");
+        assert!(!restarted.exists("a"));
+        assert!(!restarted.exists("b"));
+    }
+
+    #[test]
+    fn relaxed_generation_rebuild_waits_for_last_read_pin() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let record_len = RecordHeader::record_size(1, 1).unwrap();
+        let mut exact = config(temp.path(), OffsetPersistMode::Relaxed);
+        exact.eviction_policy = OffsetEvictionPolicy::None;
+        exact.quota_bytes = record_len;
+        let mut relaxed = OffsetAllocatorStorageBackend::new(exact);
+        let test_now = Arc::clone(&now);
+        relaxed.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
+        relaxed.init().unwrap();
+        relaxed.write_object("a", b"1").unwrap();
+        let held_read = relaxed.prepare_read("a").unwrap();
+
+        relaxed.remove_all().unwrap();
+        now.store(160, Ordering::SeqCst);
+        assert!(matches!(
+            relaxed.write_object("b", b"2"),
+            Err(StoreError::NoAvailableHandle)
+        ));
+
+        drop(held_read);
+        relaxed.write_object("b", b"2").unwrap();
+        relaxed.simulate_abrupt_exit();
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert!(!restarted.exists("a"));
+        assert_eq!(restarted.read_object("b").unwrap(), b"2");
+    }
+
+    #[test]
+    fn relaxed_pending_rebuild_tracks_writes_multiple_pins_and_deferred_extents() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let record_len = RecordHeader::record_size(1, 1).unwrap();
+        let mut exact = config(temp.path(), OffsetPersistMode::Relaxed);
+        exact.eviction_policy = OffsetEvictionPolicy::None;
+        exact.quota_bytes = record_len * 3;
+        let mut relaxed = OffsetAllocatorStorageBackend::new(exact);
+        let test_now = Arc::clone(&now);
+        relaxed.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
+        relaxed.init().unwrap();
+        relaxed.write_object("a", b"1").unwrap();
+        relaxed.write_object("b", b"2").unwrap();
+        let held_a = relaxed.prepare_read("a").unwrap();
+        let held_b = relaxed.prepare_read("b").unwrap();
+
+        relaxed.remove_all().unwrap();
+        now.store(160, Ordering::SeqCst);
+        // This mutation lands between the generation checkpoint and the last
+        // old-generation unpin, so the pending rebuild length must expand.
+        relaxed.write_object("c", b"3").unwrap();
+        let held_c = relaxed.prepare_read("c").unwrap();
+        relaxed.delete_object("c").unwrap();
+        assert_eq!(relaxed.state.lock().deferred_free_extents.len(), 1);
+
+        drop(held_a);
+        drop(held_b);
+        assert!(relaxed.state.lock().pending_rebuild_arena_len.is_some());
+        drop(held_c);
+        assert!(relaxed.state.lock().pending_rebuild_arena_len.is_none());
+        assert!(relaxed.state.lock().deferred_free_extents.is_empty());
+
+        now.store(220, Ordering::SeqCst);
+        relaxed.write_object("d", b"4").unwrap();
+        assert_eq!(relaxed.read_object("d").unwrap(), b"4");
+        relaxed.simulate_abrupt_exit();
+
+        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        assert!(!restarted.exists("a"));
+        assert!(!restarted.exists("b"));
+        assert!(!restarted.exists("c"));
+        assert_eq!(restarted.read_object("d").unwrap(), b"4");
     }
 
     #[test]
