@@ -251,10 +251,7 @@ impl MasterServiceImpl {
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
         let req = request.into_inner();
-        let tenant_id = resolve_write_tenant(
-            &req.tenant_id,
-            self.state.runtime_config.enable_tenant_quota,
-        )?;
+        let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()

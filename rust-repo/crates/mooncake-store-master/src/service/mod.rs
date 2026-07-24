@@ -151,6 +151,17 @@ struct ReplicaMovePayload<'a> {
 }
 
 impl MasterServiceImpl {
+    pub(crate) fn resolve_write_tenant(&self, raw: &str) -> Result<TenantId, Status> {
+        if !self.state.runtime_config.enable_tenant_quota {
+            return Ok(TenantId::default());
+        }
+        let tenant_id = resolve_write_tenant(raw, true)?;
+        if !self.state.tenant_quotas.read().is_registered(&tenant_id) {
+            return Err(Status::resource_exhausted("tenant not registered"));
+        }
+        Ok(tenant_id)
+    }
+
     fn tenant_quota_capacity_bytes(&self) -> u64 {
         let configured = self.state.runtime_config.tenant_quota_pool_capacity_bytes;
         if configured > 0 {

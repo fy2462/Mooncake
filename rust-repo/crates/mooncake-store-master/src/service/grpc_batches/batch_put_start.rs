@@ -9,10 +9,7 @@ impl MasterServiceImpl {
         request: Request<proto::BatchPutStartRequest>,
     ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
         let req = request.into_inner();
-        let tenant_id = resolve_write_tenant(
-            &req.tenant_id,
-            self.state.runtime_config.enable_tenant_quota,
-        )?;
+        let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         if req.keys.len() != req.slice_lengths.len() || req.keys.is_empty() {
             return Err(Status::invalid_argument(
                 "keys and slice_lengths mismatch or empty",

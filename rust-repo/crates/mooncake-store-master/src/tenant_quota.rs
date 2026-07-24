@@ -96,6 +96,15 @@ impl TenantQuotaTable {
             .map(|state| self.make_snapshot(tenant_id, state))
     }
 
+    /// Returns whether the tenant has an explicit quota policy and is therefore
+    /// registered for writes. Accounting-only states restored from metadata do
+    /// not constitute registration.
+    pub fn is_registered(&self, tenant_id: &TenantId) -> bool {
+        self.tenants
+            .get(tenant_id)
+            .is_some_and(|state| state.has_explicit_policy)
+    }
+
     pub fn list_snapshots(&self) -> Vec<TenantQuotaSnapshot> {
         self.tenants
             .iter()

@@ -59,10 +59,7 @@ impl MasterServiceImpl {
         request: Request<proto::PromotionAllocStartRequest>,
     ) -> Result<Response<proto::PromotionAllocStartResponse>, Status> {
         let req = request.into_inner();
-        let tenant_id = resolve_write_tenant(
-            &req.tenant_id,
-            self.state.runtime_config.enable_tenant_quota,
-        )?;
+        let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
         let client_id = uuid_from_proto(
             req.client_id

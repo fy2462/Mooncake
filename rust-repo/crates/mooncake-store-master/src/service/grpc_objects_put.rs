@@ -16,10 +16,7 @@ impl MasterServiceImpl {
         request: Request<proto::PutStartRequest>,
     ) -> Result<Response<proto::PutStartResponse>, Status> {
         let req = request.into_inner();
-        let tenant_id = resolve_write_tenant(
-            &req.tenant_id,
-            self.state.runtime_config.enable_tenant_quota,
-        )?;
+        let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
 
         // C++ master_service.cpp:1287-1294 对空 key 和零长度 slice 进行校验
         // Validate non-empty key and non-zero slice length

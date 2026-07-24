@@ -1,10 +1,15 @@
 mod common;
 
 use common::proto_uuid;
+use dashmap::DashMap;
 use mooncake_store_core::ReplicaType;
+use mooncake_store_master::TenantId;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
+use mooncake_store_master::service::ObjectEntry;
+use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::time::SystemTime;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
@@ -44,6 +49,49 @@ fn non_strict_service() -> MasterServiceImpl {
         lease_ttl: std::time::Duration::ZERO,
         ..Default::default()
     })
+}
+
+fn strict_service_with_unregistered_object(tenant_id: &str, key: &str) -> MasterServiceImpl {
+    let snapshot_dir = tempfile::tempdir().unwrap();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, snapshot_dir.path());
+    let objects = DashMap::new();
+    objects.insert(
+        format!("{tenant_id}\0{key}"),
+        ObjectEntry {
+            replicas: vec![],
+            size: 128,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::new(tenant_id.to_owned()).unwrap(),
+            group_id: String::new(),
+            quota_committed: false,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: key.to_owned(),
+        },
+    );
+    backend
+        .save(&DashMap::new(), &DashMap::new(), &objects, &DashMap::new())
+        .unwrap();
+
+    let policy = tempfile::NamedTempFile::new().unwrap();
+    MasterServiceImpl::new_with_runtime_config(
+        Some(StorageBackendType::LocalDisk),
+        Some(snapshot_dir.keep()),
+        MasterRuntimeConfig {
+            enable_tenant_quota: true,
+            tenant_quota_connector_uri: policy.path().to_string_lossy().into_owned(),
+            tenant_quota_pool_capacity_bytes: 16 * 1024,
+            default_tenant_quota_bytes: 16 * 1024,
+            lease_ttl: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    )
 }
 
 async fn mount_memory(service: &MasterServiceImpl, client_id: Uuid, segment: &str) {
@@ -409,4 +457,98 @@ fn admin_quota_mutations_reject_empty_and_invalid_tenants() {
         .upsert_tenant_quota_policy("tenant:with:colon", 128)
         .unwrap();
     assert_eq!(snapshot.tenant_id.as_str(), "tenant:with:colon");
+}
+
+#[tokio::test]
+async fn strict_upsert_rejects_unregistered_tenant_before_removing_existing_object() {
+    let service = strict_service_with_unregistered_object("unregistered", "existing");
+    assert!(
+        service
+            .capture_loaded_snapshot("before")
+            .objects
+            .iter()
+            .any(|(key, _)| key == "unregistered\0existing")
+    );
+
+    let error = MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(Uuid::new_v4())),
+            key: "existing".into(),
+            slice_length: 256,
+            config: Some(replica_config("missing-segment")),
+            tenant_id: "unregistered".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert!(
+        service
+            .capture_loaded_snapshot("after")
+            .objects
+            .iter()
+            .any(|(key, _)| key == "unregistered\0existing")
+    );
+}
+
+#[tokio::test]
+async fn batch_upsert_rejects_later_unregistered_tenant_before_any_entry_mutates() {
+    let service = strict_service(false);
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "strict-registered-batch:1").await;
+    service
+        .upsert_tenant_quota_policy("registered", 4096)
+        .unwrap();
+
+    let error = MasterService::batch_upsert_start(
+        &service,
+        Request::new(proto::BatchUpsertStartRequest {
+            entries: vec![
+                proto::UpsertEntry {
+                    client_id: Some(proto_uuid(client_id)),
+                    key: "would-mutate".into(),
+                    slice_length: 128,
+                    config: Some(replica_config("strict-registered-batch:1")),
+                    tenant_id: "registered".into(),
+                },
+                proto::UpsertEntry {
+                    client_id: Some(proto_uuid(client_id)),
+                    key: "unregistered".into(),
+                    slice_length: 128,
+                    config: Some(replica_config("strict-registered-batch:1")),
+                    tenant_id: "unregistered".into(),
+                },
+            ],
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(object_count(&service).await, 0);
+    let quota = service
+        .get_tenant_quota_snapshot("registered")
+        .unwrap()
+        .unwrap();
+    assert_eq!(quota.reserved_bytes, 0);
+}
+
+#[tokio::test]
+async fn create_copy_task_rejects_unregistered_tenant_before_object_lookup() {
+    let service = strict_service(false);
+
+    let error = MasterService::create_copy_task(
+        &service,
+        Request::new(proto::CreateCopyTaskRequest {
+            key: "missing".into(),
+            targets: vec!["missing-target".into()],
+            tenant_id: "unregistered".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), Code::ResourceExhausted);
 }

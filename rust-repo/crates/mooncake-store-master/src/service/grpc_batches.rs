@@ -514,12 +514,7 @@ impl MasterServiceImpl {
         let tenant_ids = req
             .entries
             .iter()
-            .map(|entry| {
-                resolve_write_tenant(
-                    &entry.tenant_id,
-                    self.state.runtime_config.enable_tenant_quota,
-                )
-            })
+            .map(|entry| self.resolve_write_tenant(&entry.tenant_id))
             .collect::<Result<Vec<_>, _>>()?;
         let mut all_replicas = Vec::new();
         let mut statuses = Vec::with_capacity(req.entries.len());
