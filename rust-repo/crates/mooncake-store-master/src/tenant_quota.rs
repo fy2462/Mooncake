@@ -90,6 +90,16 @@ impl TenantQuotaTable {
             .map(|_| self.snapshot_for_existing(tenant_id)))
     }
 
+    #[doc(hidden)]
+    pub fn remove_registration_for_test(&mut self, tenant_id: &TenantId, capacity: u64) {
+        if let Some(state) = self.tenants.get_mut(tenant_id) {
+            state.requested_quota_bytes = 0;
+            state.effective_quota_bytes = 0;
+            state.has_explicit_policy = false;
+            self.recompute_effective_quotas(capacity);
+        }
+    }
+
     pub fn get_snapshot(&self, tenant_id: &TenantId) -> Option<TenantQuotaSnapshot> {
         self.tenants
             .get(tenant_id)

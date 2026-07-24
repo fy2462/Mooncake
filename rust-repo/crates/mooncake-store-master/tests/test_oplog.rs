@@ -82,6 +82,24 @@ fn test_local_fs_append_and_read() {
 }
 
 #[test]
+fn test_local_fs_rejects_invalid_utf8_payload_with_record_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&1_u32.to_le_bytes());
+    frame.extend_from_slice(&2_u32.to_le_bytes());
+    frame.extend_from_slice(&[0xff, 0xfe]);
+    std::fs::write(dir.path().join("oplog_00000000000000000001.bin"), frame).unwrap();
+
+    let error = match LocalFsOpLogStore::new(dir.path(), 100) {
+        Ok(_) => panic!("invalid UTF-8 oplog payload must fail recovery"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("invalid UTF-8"), "{message}");
+    assert!(message.contains("seq=1"), "{message}");
+}
+
+#[test]
 fn test_local_fs_flush_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LocalFsOpLogStore::new(dir.path(), 2).unwrap();
@@ -496,4 +514,24 @@ fn test_etcd_oplog_value_reads_cpp_remove_and_put_revoke() {
         serde_json::from_str::<serde_json::Value>(&revoke.payload).unwrap(),
         json!({"op": "put_revoke", "key": "k-revoke"})
     );
+}
+
+#[test]
+fn test_etcd_oplog_value_rejects_invalid_remove_like_tenant_identity() {
+    for (sequence_id, op_type) in [(26, TEST_CPP_OP_REMOVE), (27, TEST_CPP_OP_PUT_REVOKE)] {
+        let wire = CppWireTestEntry {
+            sequence_id,
+            timestamp_ms: 1,
+            op_type,
+            object_key: "_reserved\0k1".to_string(),
+            payload: String::new(),
+            checksum: 0,
+            prefix_hash: compute_cpp_prefix_hash_for_test("_reserved\0k1"),
+        };
+
+        let error =
+            deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("tenant"), "{error}");
+    }
 }

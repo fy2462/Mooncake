@@ -100,15 +100,22 @@ fn load_etcd_policy(
         let response = client.get(key.as_bytes(), None).await.map_err(|e| {
             format!("failed to load tenant quota policy from etcd key '{key}': {e}")
         })?;
-        Ok(response
+        response
             .kvs()
             .first()
-            .map(|kv| String::from_utf8_lossy(kv.value()).into_owned()))
+            .map(|kv| decode_etcd_policy_content(&key, kv.value()))
+            .transpose()
     })?;
     match content {
         Some(content) => parse_tenant_quota_policy_yaml(&content),
         None => Ok(TenantQuotaPolicySnapshot::default()),
     }
+}
+
+fn decode_etcd_policy_content(key: &str, value: &[u8]) -> Result<String, String> {
+    String::from_utf8(value.to_vec()).map_err(|error| {
+        format!("tenant quota policy from etcd key '{key}' is not valid UTF-8: {error}")
+    })
 }
 
 fn save_etcd_policy(
@@ -545,5 +552,15 @@ tenant_quotas:
     fn rejects_invalid_etcd_cluster_id_before_connecting() {
         let err = load_tenant_quota_policy("etcd", "127.0.0.1:2379", "bad/cluster").unwrap_err();
         assert!(err.contains("invalid tenant quota etcd cluster_id"));
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_etcd_policy_bytes_with_key_context() {
+        let key = "mooncake-store/cluster-a/tenant_quota_policy";
+        let error = decode_etcd_policy_content(key, &[0xff, 0xfe]).unwrap_err();
+
+        assert!(error.contains(key), "{error}");
+        assert!(error.contains("valid UTF-8"), "{error}");
+        assert!(!error.contains('\u{fffd}'), "{error}");
     }
 }

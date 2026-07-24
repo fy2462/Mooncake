@@ -211,13 +211,18 @@ impl OpLogApplier {
                 true
             }
             "remove" | "put_revoke" => {
-                let Some(key) = v["key"].as_str() else {
+                let Some(durable_key) = v["key"].as_str() else {
                     return false;
                 };
-                if key.len() > MAX_OBJECT_KEY_SIZE {
+                if durable_key.len() > MAX_OBJECT_KEY_SIZE {
                     return false;
                 }
-                Self::apply_remove_like(state, key);
+                let (tenant_id, user_key) = match crate::TenantId::parse_scoped_key(durable_key) {
+                    Ok(identity) => identity,
+                    Err(_) => return false,
+                };
+                let key = tenant_id.make_scoped_key(&user_key);
+                Self::apply_remove_like(state, &key);
                 true
             }
             "mount_segment" => {
@@ -292,6 +297,30 @@ mod tests {
                 crate::kv_event::KvEventPublisher::new(Default::default()),
             ),
         })
+    }
+
+    fn insert_default_tenant_object(state: &MasterState, user_key: &str) {
+        let scoped_key = TenantId::default().make_scoped_key(user_key);
+        state.objects.insert(
+            scoped_key,
+            crate::service::state::ObjectEntry {
+                replicas: vec![],
+                size: 0,
+                last_access: std::time::SystemTime::now(),
+                hard_pinned: false,
+                data_type: mooncake_store_core::ObjectDataType::General,
+                client_id: uuid::Uuid::nil(),
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: TenantId::default(),
+                group_id: String::new(),
+                quota_committed: false,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: user_key.to_string(),
+            },
+        );
     }
 
     #[test]
@@ -512,8 +541,9 @@ mod tests {
     fn test_apply_remove() {
         let state = make_state();
         let client_id = uuid::Uuid::new_v4();
+        let scoped_key = TenantId::default().make_scoped_key("k1");
         state.objects.insert(
-            "k1".to_string(),
+            scoped_key.clone(),
             crate::service::state::ObjectEntry {
                 replicas: vec![],
                 size: 0,
@@ -534,8 +564,8 @@ mod tests {
         );
         state
             .client_objects
-            .insert(client_id, std::iter::once("k1".to_string()).collect());
-        state.processing_keys.insert("k1".to_string(), ());
+            .insert(client_id, std::iter::once(scoped_key.clone()).collect());
+        state.processing_keys.insert(scoped_key.clone(), ());
         let replica = mooncake_store_core::ReplicaDescriptor {
             segment_id: uuid::Uuid::new_v4(),
             segment_name: "seg".to_string(),
@@ -550,7 +580,7 @@ mod tests {
             protocol: String::new(),
         };
         state.replication_tasks.insert(
-            "k1".to_string(),
+            scoped_key.clone(),
             crate::service::state::ReplicationTaskEntry {
                 client_id,
                 start_time: std::time::Instant::now(),
@@ -569,17 +599,24 @@ mod tests {
         }];
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 1);
-        assert!(!state.objects.contains_key("k1"));
-        assert!(!state.processing_keys.contains_key("k1"));
-        assert!(!state.replication_tasks.contains_key("k1"));
-        assert!(!state.client_objects.get(&client_id).unwrap().contains("k1"));
+        assert!(!state.objects.contains_key(&scoped_key));
+        assert!(!state.processing_keys.contains_key(&scoped_key));
+        assert!(!state.replication_tasks.contains_key(&scoped_key));
+        assert!(
+            !state
+                .client_objects
+                .get(&client_id)
+                .unwrap()
+                .contains(&scoped_key)
+        );
     }
 
     #[test]
     fn test_apply_put_revoke_removes_object_and_processing_key() {
         let state = make_state();
+        let scoped_key = TenantId::default().make_scoped_key("k1");
         state.objects.insert(
-            "k1".to_string(),
+            scoped_key.clone(),
             crate::service::state::ObjectEntry {
                 replicas: vec![],
                 size: 0,
@@ -598,7 +635,7 @@ mod tests {
                 user_key: "k1".to_string(),
             },
         );
-        state.processing_keys.insert("k1".to_string(), ());
+        state.processing_keys.insert(scoped_key.clone(), ());
         let applier = OpLogApplier::new(state.clone());
 
         let payload = r#"{"op":"put_revoke","key":"k1"}"#;
@@ -609,8 +646,60 @@ mod tests {
         }];
         let n = applier.apply_op_log_entries(&entries);
         assert_eq!(n, 1);
-        assert!(!state.objects.contains_key("k1"));
-        assert!(!state.processing_keys.contains_key("k1"));
+        assert!(!state.objects.contains_key(&scoped_key));
+        assert!(!state.processing_keys.contains_key(&scoped_key));
+    }
+
+    #[test]
+    fn test_remove_like_rejects_invalid_scoped_tenant_without_advancing_sequence() {
+        for op in ["remove", "put_revoke"] {
+            let state = make_state();
+            insert_default_tenant_object(&state, "k1");
+            let applier = OpLogApplier::new(state.clone());
+            let payload = serde_json::json!({
+                "op": op,
+                "key": "_reserved\0k1",
+            })
+            .to_string();
+
+            let applied = applier.apply_op_log_entries(&[OpLogRecord {
+                seq: 1,
+                producer_view_version: 1,
+                payload,
+            }]);
+
+            assert_eq!(applied, 0, "{op} must reject corrupt tenant identity");
+            assert_eq!(applier.get_expected_sequence_id(), 1);
+            assert!(state.objects.contains_key("default\0k1"));
+        }
+    }
+
+    #[test]
+    fn test_remove_like_canonicalizes_legacy_unscoped_key_to_default_tenant() {
+        for op in ["remove", "put_revoke"] {
+            let state = make_state();
+            insert_default_tenant_object(&state, "legacy-key");
+            state
+                .processing_keys
+                .insert("default\0legacy-key".to_string(), ());
+            let applier = OpLogApplier::new(state.clone());
+            let payload = serde_json::json!({
+                "op": op,
+                "key": "legacy-key",
+            })
+            .to_string();
+
+            let applied = applier.apply_op_log_entries(&[OpLogRecord {
+                seq: 1,
+                producer_view_version: 1,
+                payload,
+            }]);
+
+            assert_eq!(applied, 1);
+            assert_eq!(applier.get_expected_sequence_id(), 2);
+            assert!(!state.objects.contains_key("default\0legacy-key"));
+            assert!(!state.processing_keys.contains_key("default\0legacy-key"));
+        }
     }
 
     #[test]

@@ -82,7 +82,7 @@ impl LocalFsOpLogStore {
             let path = self.segment_path(highest_start);
             let data = fs::read(&path)
                 .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
-            let entries = Self::parse_entries(&data);
+            let entries = Self::parse_entries(&data)?;
             if let Some(last) = entries.last() {
                 self.last_seq = last.seq;
                 self.current_segment_seq = highest_start;
@@ -196,7 +196,7 @@ impl LocalFsOpLogStore {
     /// 遇到不完整帧时停止解析，保证容错性。
     ///
     /// Stops parsing on incomplete frames for fault tolerance.
-    fn parse_entries(data: &[u8]) -> Vec<OpLogRecord> {
+    fn parse_entries(data: &[u8]) -> Result<Vec<OpLogRecord>, HaError> {
         let mut entries = Vec::new();
         let mut offset = 0;
         while offset + 8 <= data.len() {
@@ -216,7 +216,13 @@ impl LocalFsOpLogStore {
             if offset + payload_len > data.len() {
                 break;
             }
-            let payload = String::from_utf8_lossy(&data[offset..offset + payload_len]).into_owned();
+            let payload = String::from_utf8(data[offset..offset + payload_len].to_vec()).map_err(
+                |error| {
+                    HaError::InvalidBackend(format!(
+                        "oplog record payload is invalid UTF-8 at seq={seq}: {error}"
+                    ))
+                },
+            )?;
             entries.push(OpLogRecord {
                 seq,
                 producer_view_version: 0,
@@ -224,7 +230,7 @@ impl LocalFsOpLogStore {
             });
             offset += payload_len;
         }
-        entries
+        Ok(entries)
     }
 }
 
@@ -274,7 +280,7 @@ impl OpLogStore for LocalFsOpLogStore {
             }
             let data = fs::read(self.segment_path(start_seq))
                 .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
-            for entry in Self::parse_entries(&data) {
+            for entry in Self::parse_entries(&data)? {
                 if entry.seq >= since_seq {
                     all_entries.push(entry);
                     if all_entries.len() >= max_count {
@@ -307,7 +313,7 @@ impl OpLogStore for LocalFsOpLogStore {
         for start_seq in self.list_segment_files()? {
             let data = fs::read(self.segment_path(start_seq))
                 .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
-            if let Some(entry) = Self::parse_entries(&data).last() {
+            if let Some(entry) = Self::parse_entries(&data)?.last() {
                 max_seq = max_seq.max(entry.seq);
             }
         }
@@ -354,7 +360,7 @@ impl OpLogStore for LocalFsOpLogStore {
             let path = self.segment_path(start_seq);
             let data = fs::read(&path)
                 .map_err(|e| HaError::InvalidBackend(format!("oplog read segment: {e}")))?;
-            let entries = Self::parse_entries(&data);
+            let entries = Self::parse_entries(&data)?;
             let retained = entries
                 .iter()
                 .filter(|entry| entry.seq >= before_sequence_id)

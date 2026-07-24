@@ -38,15 +38,22 @@ fn validate_recovered_record_identity(entry: &OpLogRecord) -> Result<(), HaError
         }
         Err(_) => return Ok(()),
     };
-    if payload.get("op").and_then(serde_json::Value::as_str) != Some("put_end") {
-        return Ok(());
+    match payload.get("op").and_then(serde_json::Value::as_str) {
+        Some("put_end") => {
+            recover_object_identity_from_payload(&payload)?;
+            Ok(())
+        }
+        Some(op @ ("remove" | "put_revoke")) => {
+            let Some(key) = payload.get("key").and_then(serde_json::Value::as_str) else {
+                return Ok(());
+            };
+            TenantId::parse_scoped_key(key).map_err(|error| {
+                HaError::InvalidBackend(format!("oplog {op} has invalid scoped tenant id: {error}"))
+            })?;
+            Ok(())
+        }
+        _ => Ok(()),
     }
-    let Some(key) = payload.get("key").and_then(serde_json::Value::as_str) else {
-        return Ok(());
-    };
-    let _ = key;
-    recover_object_identity_from_payload(&payload)?;
-    Ok(())
 }
 
 pub(super) fn validate_record_size(entry: &OpLogRecord) -> Result<(), HaError> {

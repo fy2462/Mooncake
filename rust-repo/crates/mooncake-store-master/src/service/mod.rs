@@ -896,6 +896,16 @@ impl MasterServiceImpl {
     }
 
     #[doc(hidden)]
+    pub fn remove_tenant_registration_for_test(&self, tenant_id: &str) {
+        let tenant_id = TenantId::new(tenant_id.to_owned()).expect("test tenant id must be valid");
+        let capacity = self.tenant_quota_capacity_bytes();
+        self.state
+            .tenant_quotas
+            .write()
+            .remove_registration_for_test(&tenant_id, capacity);
+    }
+
+    #[doc(hidden)]
     pub fn set_replica_handle_valid_for_test(
         &self,
         key: &str,

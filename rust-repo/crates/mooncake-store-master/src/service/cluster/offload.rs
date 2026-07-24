@@ -123,19 +123,30 @@ impl MasterServiceImpl {
         } else {
             req.tasks.clone()
         };
-        let tenant_ids = tasks
+        let mut claimed_offloading_tasks = HashSet::new();
+        let preflight = tasks
             .iter()
-            .map(|task| {
-                resolve_request_tenant(
+            .zip(&req.metadatas)
+            .map(|(task, metadata)| {
+                let tenant_id = resolve_request_tenant(
                     &task.tenant_id,
                     self.state.runtime_config.enable_tenant_quota,
-                )
+                )?;
+                let scoped_key = tenant_id.make_scoped_key(&task.key);
+                let completes_admitted_task = metadata.data_size >= 0
+                    && self.state.objects.contains_key(&scoped_key)
+                    && self.state.offloading_tasks.contains_key(&scoped_key)
+                    && claimed_offloading_tasks.insert(scoped_key.clone());
+                if metadata.data_size >= 0 && !completes_admitted_task {
+                    self.resolve_write_tenant(&task.tenant_id)?;
+                }
+                Ok::<_, Status>((tenant_id, scoped_key))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        for ((task, tenant_id), metadata) in tasks.iter().zip(&tenant_ids).zip(req.metadatas.iter())
+        for ((task, (tenant_id, key)), metadata) in
+            tasks.iter().zip(&preflight).zip(req.metadatas.iter())
         {
-            let key = tenant_id.make_scoped_key(&task.key);
-            clear_offloading_task(&self.state, &key);
+            clear_offloading_task(&self.state, key);
             if metadata.data_size < 0 {
                 continue;
             }
@@ -152,7 +163,7 @@ impl MasterServiceImpl {
                 base_addr: 0,
                 protocol: String::new(),
             };
-            match self.state.objects.get_mut(&key) {
+            match self.state.objects.get_mut(key) {
                 Some(mut object) => {
                     if let Some(existing) = object.replicas.iter_mut().find(|existing| {
                         existing.replica_type == ReplicaType::LocalDisk

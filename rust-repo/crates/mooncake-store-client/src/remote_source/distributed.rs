@@ -65,6 +65,7 @@ use crate::proto::{self, master_service_client::MasterServiceClient};
 /// - `inner`: 内部 MissHandler，负责实际的远程获取和缓存
 /// - `master`: Master gRPC 客户端，用于协调多节点的远程获取
 /// - `client_id`: 当前节点的唯一标识符 (UUID)
+/// - `tenant_id`: 远端拉取协调所属的租户；空字符串表示兼容的默认租户
 /// - `max_wait_retries`: WAIT 状态下的最大重试次数（默认 10）
 /// - `wait_backoff`: 重试退避的基础间隔（默认 100ms，指数增长）
 ///
@@ -80,6 +81,8 @@ pub struct DistributedMissHandler<S: RemoteSource> {
     master: MasterServiceClient<Channel>,
     /// 当前节点的 UUID
     client_id: uuid::Uuid,
+    /// Tenant identity carried by every remote-pull coordination request.
+    tenant_id: String,
     /// WAIT 状态下最大重试次数 (max retries when in WAIT state before giving up)
     max_wait_retries: usize,
     /// WAIT 状态下重试的基础退避间隔 (base backoff between retries in WAIT state)
@@ -99,10 +102,25 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
         master: MasterServiceClient<Channel>,
         client_id: uuid::Uuid,
     ) -> Self {
+        Self::new_for_tenant(inner, master, client_id, "")
+    }
+
+    /// Create a distributed miss handler scoped to `tenant_id`.
+    ///
+    /// Use the same tenant identifier as the owning [`crate::MooncakeClient`].
+    /// The identifier remains a wire string here; the master validates and
+    /// canonicalizes it at the request boundary.
+    pub fn new_for_tenant(
+        inner: MissHandler<S>,
+        master: MasterServiceClient<Channel>,
+        client_id: uuid::Uuid,
+        tenant_id: impl Into<String>,
+    ) -> Self {
         Self {
             inner,
             master,
             client_id,
+            tenant_id: tenant_id.into(),
             max_wait_retries: 10,
             wait_backoff: Duration::from_millis(100),
         }
@@ -208,7 +226,7 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                 low: self.client_id.as_u64_pair().1,
             }),
             key: key.to_string(),
-            tenant_id: String::new(),
+            tenant_id: self.tenant_id.clone(),
         };
 
         let response = master
@@ -244,7 +262,7 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                     low: self.client_id.as_u64_pair().1,
                 }),
                 key: key.to_string(),
-                tenant_id: String::new(),
+                tenant_id: self.tenant_id.clone(),
                 success,
                 data_size,
             })

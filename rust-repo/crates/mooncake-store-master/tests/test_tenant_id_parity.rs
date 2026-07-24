@@ -213,6 +213,25 @@ async fn object_count(service: &MasterServiceImpl) -> usize {
     .len()
 }
 
+fn local_disk_replica(client_id: Uuid, size: u64) -> proto::ReplicaDescriptor {
+    proto::ReplicaDescriptor {
+        status: proto::replica_descriptor::ReplicaStatus::Complete as i32,
+        replica_type: proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        size,
+        holder_client_id: Some(proto_uuid(client_id)),
+        ..Default::default()
+    }
+}
+
+fn offload_metadata(key: &str, size: i64) -> proto::StorageObjectMetadata {
+    proto::StorageObjectMetadata {
+        key_size: key.len() as i64,
+        data_size: size,
+        transport_endpoint: "disk-holder".into(),
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn strict_put_rejects_empty_and_invalid_tenants_before_mutation() {
     let service = strict_service(false);
@@ -235,6 +254,197 @@ async fn strict_put_rejects_empty_and_invalid_tenants_before_mutation() {
         assert_eq!(error.code(), Code::ResourceExhausted);
         assert_eq!(object_count(&service).await, 0);
     }
+}
+
+#[tokio::test]
+async fn strict_add_replica_rejects_unregistered_tenant_without_mutation() {
+    let service = strict_service(false);
+    let client_id = Uuid::new_v4();
+
+    let error = MasterService::add_replica(
+        &service,
+        Request::new(proto::AddReplicaRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "must-not-exist".into(),
+            replica: Some(local_disk_replica(client_id, 128)),
+            tenant_id: "unregistered".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(object_count(&service).await, 0);
+}
+
+#[tokio::test]
+async fn admitted_offload_task_can_complete_after_tenant_registration_is_removed() {
+    let service = strict_service(true);
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "orphan-offload:1").await;
+    mount_local_disk(&service, client_id).await;
+    service.upsert_tenant_quota_policy("orphan", 4096).unwrap();
+    put_complete(
+        &service,
+        client_id,
+        "orphan-offload:1",
+        "orphan",
+        "orphan",
+        "in-flight",
+    )
+    .await;
+    assert_eq!(
+        service.replica_refcnts_for_test("in-flight", ReplicaType::Memory, "orphan"),
+        vec![1]
+    );
+
+    service.remove_tenant_registration_for_test("orphan");
+    assert!(
+        !service
+            .get_tenant_quota_snapshot("orphan")
+            .unwrap()
+            .unwrap()
+            .has_explicit_policy
+    );
+
+    MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec![],
+            tasks: vec![proto::OffloadTaskItem {
+                tenant_id: "orphan".into(),
+                key: "in-flight".into(),
+                size: 128,
+            }],
+            metadatas: vec![offload_metadata("in-flight", 128)],
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        service.replica_refcnts_for_test("in-flight", ReplicaType::Memory, "orphan"),
+        vec![0]
+    );
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "in-flight".into(),
+            tenant_id: "orphan".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert!(replicas.iter().any(|replica| {
+        replica.replica_type == proto::replica_descriptor::ReplicaType::LocalDisk as i32
+    }));
+}
+
+#[tokio::test]
+async fn unsolicited_offload_success_rejects_unregistered_tenant_without_mutation() {
+    let service = strict_service_with_unregistered_object("unregistered", "unsolicited");
+    let client_id = Uuid::new_v4();
+    assert_eq!(object_count(&service).await, 1);
+
+    let error = MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec![],
+            tasks: vec![proto::OffloadTaskItem {
+                tenant_id: "unregistered".into(),
+                key: "unsolicited".into(),
+                size: 128,
+            }],
+            metadatas: vec![offload_metadata("unsolicited", 128)],
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(object_count(&service).await, 1);
+    let snapshot = service.capture_loaded_snapshot("after-rejection");
+    let object = snapshot
+        .objects
+        .iter()
+        .find(|(key, _)| key == "unregistered\0unsolicited")
+        .unwrap();
+    assert!(object.1.replicas.is_empty());
+}
+
+#[tokio::test]
+async fn mixed_offload_batch_rejection_does_not_clear_or_mutate_earlier_task() {
+    let service = strict_service(true);
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "atomic-offload:1").await;
+    mount_local_disk(&service, client_id).await;
+    service
+        .upsert_tenant_quota_policy("registered", 4096)
+        .unwrap();
+    put_complete(
+        &service,
+        client_id,
+        "atomic-offload:1",
+        "registered",
+        "registered",
+        "admitted",
+    )
+    .await;
+    assert_eq!(
+        service.replica_refcnts_for_test("admitted", ReplicaType::Memory, "registered"),
+        vec![1]
+    );
+
+    let error = MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec![],
+            tasks: vec![
+                proto::OffloadTaskItem {
+                    tenant_id: "registered".into(),
+                    key: "admitted".into(),
+                    size: 128,
+                },
+                proto::OffloadTaskItem {
+                    tenant_id: "unregistered".into(),
+                    key: "unsolicited".into(),
+                    size: 128,
+                },
+            ],
+            metadatas: vec![
+                offload_metadata("admitted", 128),
+                offload_metadata("unsolicited", 128),
+            ],
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    assert_eq!(
+        service.replica_refcnts_for_test("admitted", ReplicaType::Memory, "registered"),
+        vec![1]
+    );
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "admitted".into(),
+            tenant_id: "registered".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert!(replicas.iter().all(|replica| {
+        replica.replica_type != proto::replica_descriptor::ReplicaType::LocalDisk as i32
+    }));
+    assert!(!exists(&service, "unregistered", "unsolicited").await);
 }
 
 #[tokio::test]

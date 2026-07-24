@@ -733,8 +733,9 @@ pub(crate) fn clear_invalid_handles(state: &MasterState, alive_clients: &HashSet
 // =============================================================================
 
 /// Sentinel delimiter between tenant_id and user_key.
-/// NUL byte ('\0') is used because it cannot appear in user-provided keys.
-/// NUL 字节分隔符，因为用户提供的 key 不能包含 '\0'。
+/// The first NUL byte separates tenant identity from the opaque local key;
+/// later NUL bytes remain part of that local key for C++ compatibility.
+/// 第一个 NUL 字节分隔租户与原始 local key；后续 NUL 属于 local key。
 pub const TENANT_SCOPE_DELIMITER: char = '\0';
 
 pub fn resolve_request_tenant(raw: &str, strict: bool) -> Result<TenantId, Status> {
