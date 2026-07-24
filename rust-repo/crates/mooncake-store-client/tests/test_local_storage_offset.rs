@@ -7,7 +7,8 @@ fn offset_config(root_dir: std::path::PathBuf) -> OffsetAllocatorConfig {
         root_dir,
         fsdir: "offset".to_string(),
         eviction_policy: OffsetEvictionPolicy::Fifo,
-        quota_bytes: 12,
+        // A one-byte key and four-byte value occupy a 4,100-byte v3 record.
+        quota_bytes: 12_300,
         total_keys_limit: 16,
         high_ratio: 0.90,
         low_ratio: 0.80,
@@ -34,12 +35,12 @@ fn offset_allocator_fifo_eviction_reuses_released_extent() {
     assert!(!backend.exists("a"));
     assert_eq!(backend.read_object("b").unwrap(), b"bbbb");
     assert_eq!(backend.read_object("c").unwrap(), b"cccc");
-    assert_eq!(backend.space_usage(), (8, 12));
+    assert_eq!(backend.space_usage(), (8_200, 12_300));
     assert_eq!(
         std::fs::metadata(temp.path().join("offset/offset_allocator.data"))
             .unwrap()
             .len(),
-        8
+        8_200
     );
 
     let restarted = OffsetAllocatorStorageBackend::new(config);
@@ -47,7 +48,7 @@ fn offset_allocator_fifo_eviction_reuses_released_extent() {
     assert!(!restarted.exists("a"));
     assert_eq!(restarted.read_object("b").unwrap(), b"bbbb");
     assert_eq!(restarted.read_object("c").unwrap(), b"cccc");
-    assert_eq!(restarted.space_usage(), (8, 12));
+    assert_eq!(restarted.space_usage(), (8_200, 12_300));
 }
 
 #[test]
@@ -61,13 +62,13 @@ fn offset_allocator_restores_prepared_fifo_victims_on_notification_failure() {
     let pending = backend.prepare_write("c", 4).unwrap();
     assert_eq!(pending.keys(), vec!["a"]);
     assert_eq!(backend.read_object("a").unwrap(), b"aaaa");
-    assert_eq!(backend.space_usage(), (8, 12));
+    assert_eq!(backend.space_usage(), (8_200, 12_300));
     backend.rollback_eviction(pending);
 
     assert_eq!(backend.read_object("a").unwrap(), b"aaaa");
     assert_eq!(backend.read_object("b").unwrap(), b"bbbb");
     assert!(!backend.exists("c"));
-    assert_eq!(backend.space_usage(), (8, 12));
+    assert_eq!(backend.space_usage(), (8_200, 12_300));
 
     // The restored object keeps its original FIFO position.
     assert_eq!(backend.write_object("c", b"cccc").unwrap(), vec!["a"]);
@@ -86,7 +87,7 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
     .unwrap();
 
     let mut config = offset_config(temp.path().to_path_buf());
-    config.quota_bytes = 16;
+    config.quota_bytes = 16 * 1024;
     let backend = OffsetAllocatorStorageBackend::new(config);
     backend.init().unwrap();
     backend.write_object("c", b"cccc").unwrap();
@@ -94,9 +95,10 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
     assert_eq!(backend.read_object("a").unwrap(), b"aaaa");
     assert_eq!(backend.read_object("b").unwrap(), b"bbbb");
     assert_eq!(backend.read_object("c").unwrap(), b"cccc");
-    assert_eq!(
-        std::fs::read(data_dir.join("offset_allocator.data")).unwrap(),
-        b"aaaabbbbcccc"
+    assert!(
+        std::fs::read(data_dir.join("offset_allocator.data"))
+            .unwrap()
+            .starts_with(b"aaaabbbb")
     );
 }
 
@@ -123,7 +125,7 @@ fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
 fn offset_allocator_uses_fallback_batch_after_key_high_watermark_is_exceeded() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = offset_config(temp.path().to_path_buf());
-    config.quota_bytes = 1024;
+    config.quota_bytes = 64 * 1024;
     config.total_keys_limit = 3;
     config.keys_high_ratio = 0.90;
     config.keys_low_ratio = 0.80;
@@ -163,5 +165,5 @@ fn offset_allocator_keeps_notified_victims_evicted_when_new_write_fails() {
     assert!(!backend.exists("a"));
     assert!(backend.exists("b"));
     assert!(!backend.exists("c"));
-    assert_eq!(backend.space_usage(), (4, 12));
+    assert_eq!(backend.space_usage(), (4_100, 12_300));
 }

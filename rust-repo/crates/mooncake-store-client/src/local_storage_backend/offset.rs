@@ -8,19 +8,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Task 1 establishes these primitives before Tasks 2-3 wire them into I/O.
-#[allow(dead_code)]
 const RECORD_HEADER_SIZE: usize = 24;
-#[allow(dead_code)]
 const RECORD_HEADER_PREFIX_SIZE: usize = 20;
-#[allow(dead_code)]
 const RECORD_FLAG_HAS_CRC: u32 = 1;
-#[allow(dead_code)]
 const RECORD_KNOWN_FLAGS: u32 = RECORD_FLAG_HAS_CRC;
-#[allow(dead_code)]
 const RECORD_VALUE_ALIGNMENT: u64 = 4096;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecordHeader {
     key_len: u32,
@@ -30,11 +23,9 @@ struct RecordHeader {
     crc32: u32,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecordFormatError(&'static str);
 
-#[allow(dead_code)]
 impl RecordHeader {
     fn encode_prefix(&self) -> [u8; RECORD_HEADER_PREFIX_SIZE] {
         let mut encoded = [0; RECORD_HEADER_PREFIX_SIZE];
@@ -115,6 +106,7 @@ impl RecordHeader {
         Ok(())
     }
 
+    #[cfg(test)]
     fn verify_crc(&self, key: &[u8], value: &[u8]) -> Result<(), RecordFormatError> {
         if key.len() != self.key_len as usize || value.len() != self.value_len as usize {
             return Err(RecordFormatError("record lengths do not match header"));
@@ -128,11 +120,9 @@ impl RecordHeader {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 struct Crc32c(u32);
 
-#[allow(dead_code)]
 impl Crc32c {
     fn new() -> Self {
         Self(u32::MAX)
@@ -156,7 +146,6 @@ impl Crc32c {
     }
 }
 
-#[allow(dead_code)]
 fn crc32c<I, B>(chunks: I) -> u32
 where
     I: IntoIterator<Item = B>,
@@ -169,12 +158,62 @@ where
     crc.finish()
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OffsetEntryFormat {
+    #[default]
+    LegacyRaw,
+    V3,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct OffsetEntry {
+    /// Start of the raw value for legacy entries and of the complete record for v3.
     offset: u64,
+    /// Raw value length for legacy entries and complete record extent length for v3.
     len: u64,
     #[serde(default)]
     fifo_seq: u64,
+    #[serde(default)]
+    format: OffsetEntryFormat,
+    /// Offset of the value relative to `offset`; zero for legacy raw values.
+    #[serde(default)]
+    value_offset: u64,
+    /// Value length stored in a v3 header; `len` is authoritative for legacy values.
+    #[serde(default)]
+    value_len: u64,
+    /// Expected on-disk record sequence. Zero is reserved for legacy entries.
+    #[serde(default)]
+    write_seq: u64,
+}
+
+impl OffsetEntry {
+    #[cfg(test)]
+    fn legacy(offset: u64, len: u64, fifo_seq: u64) -> Self {
+        Self {
+            offset,
+            len,
+            fifo_seq,
+            format: OffsetEntryFormat::LegacyRaw,
+            value_offset: 0,
+            value_len: 0,
+            write_seq: 0,
+        }
+    }
+
+    fn value_len(&self) -> u64 {
+        match self.format {
+            OffsetEntryFormat::LegacyRaw => self.len,
+            OffsetEntryFormat::V3 => self.value_len,
+            OffsetEntryFormat::Unknown => 0,
+        }
+    }
+
+    fn absolute_value_offset(&self) -> Option<u64> {
+        self.offset.checked_add(self.value_offset)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -215,12 +254,41 @@ enum CheckpointBoundary {
     DirectorySync,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableWriteBoundary {
+    RecordWritten,
+    DataSynced,
+    CheckpointPublish,
+}
+
+#[derive(Debug)]
 struct OffsetState {
     index: PersistedIndex,
     free_extents: BTreeMap<u64, u64>,
     used_bytes: u64,
     quota_bytes: u64,
+    next_write_seq: u64,
+    tombstones: Vec<String>,
+}
+
+impl Default for OffsetState {
+    fn default() -> Self {
+        Self {
+            index: PersistedIndex::default(),
+            free_extents: BTreeMap::new(),
+            used_bytes: 0,
+            quota_bytes: 0,
+            next_write_seq: 1,
+            tombstones: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LoadedCheckpoint {
+    index: PersistedIndex,
+    next_write_seq: u64,
+    tombstones: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -232,6 +300,54 @@ impl PendingOffsetEviction {
     pub fn keys(&self) -> Vec<String> {
         self.victims.iter().map(|(key, _)| key.clone()).collect()
     }
+}
+
+fn record_format_store_error(error: RecordFormatError) -> StoreError {
+    StoreError::InvalidParams(error.0.to_string())
+}
+
+fn record_header(
+    key: &str,
+    value: &[u8],
+    write_seq: u64,
+    enable_crc: bool,
+) -> StoreResult<(RecordHeader, u64)> {
+    if write_seq == 0 {
+        return Err(StoreError::Internal(
+            "offset allocator v3 write sequence must be nonzero".to_string(),
+        ));
+    }
+    let key_len = u32::try_from(key.len()).map_err(|_| {
+        StoreError::InvalidParams("offset allocator key length exceeds u32".to_string())
+    })?;
+    let value_len = u32::try_from(value.len()).map_err(|_| {
+        StoreError::InvalidParams("offset allocator value length exceeds u32".to_string())
+    })?;
+    let mut header = RecordHeader {
+        key_len,
+        value_len,
+        write_seq,
+        flags: if enable_crc { RECORD_FLAG_HAS_CRC } else { 0 },
+        crc32: 0,
+    };
+    header
+        .checked_record_size()
+        .map_err(record_format_store_error)?;
+    if enable_crc {
+        header.crc32 = crc32c([header.encode_prefix().as_slice(), key.as_bytes(), value]);
+    }
+    let padding = RecordHeader::value_padding(key_len.into()).map_err(record_format_store_error)?;
+    Ok((header, padding))
+}
+
+fn write_zero_padding(writer: &mut impl Write, mut len: u64) -> StoreResult<()> {
+    const ZEROS: [u8; 4096] = [0; 4096];
+    while len > 0 {
+        let chunk = len.min(ZEROS.len() as u64) as usize;
+        writer.write_all(&ZEROS[..chunk])?;
+        len -= chunk as u64;
+    }
+    Ok(())
 }
 
 /// Append/reuse offset allocator used by the client SSD offload path.
@@ -274,27 +390,37 @@ impl OffsetAllocatorStorageBackend {
         std::fs::create_dir_all(self.data_dir())?;
 
         remove_stale_checkpoint_tmp(&self.index_path())?;
-        let mut index = load_persisted_index(&self.index_path())?;
-        let file_len = std::fs::metadata(self.data_path())
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let upgraded = normalize_loaded_index(&mut index, file_len);
+        let loaded = load_checkpoint(&self.index_path())?;
+        let file_len = match std::fs::metadata(self.data_path()) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let mut recovered = recover_checkpoint(loaded, &self.data_path(), file_len)?;
+        let upgraded = normalize_loaded_index(&mut recovered.index, file_len);
         let quota_bytes = if self.config.quota_bytes > 0 {
             self.config.quota_bytes
         } else {
             (fs2::available_space(self.data_dir())? as f64 * 0.90) as u64
         };
-        let used_bytes = index.entries.values().map(|entry| entry.len).sum();
-        let free_extents = rebuild_free_extents(&index, file_len);
+        let used_bytes = recovered
+            .index
+            .entries
+            .values()
+            .map(|entry| entry.len)
+            .sum();
+        let free_extents = rebuild_free_extents(&recovered.index, file_len);
         *self.state.lock() = OffsetState {
-            index,
+            index: recovered.index,
             free_extents,
             used_bytes,
             quota_bytes,
+            next_write_seq: recovered.next_write_seq.max(1),
+            tombstones: recovered.tombstones,
         };
         if upgraded {
             let state = self.state.lock();
-            self.persist_index(&state.index)?;
+            self.persist_state(&state)?;
         }
         self.initialized.store(true, Ordering::Release);
         Ok(())
@@ -319,6 +445,8 @@ impl OffsetAllocatorStorageBackend {
 
     pub fn prepare_write(&self, key: &str, required: u64) -> StoreResult<PendingOffsetEviction> {
         self.ensure_init()?;
+        let required = RecordHeader::record_size(key.len() as u64, required)
+            .map_err(record_format_store_error)?;
         let state = self.state.lock();
         if required > state.quota_bytes {
             return Err(StoreError::NoAvailableHandle);
@@ -386,8 +514,19 @@ impl OffsetAllocatorStorageBackend {
         data: &[u8],
         pending: PendingOffsetEviction,
     ) -> StoreResult<()> {
+        self.commit_write_with_hook(key, data, pending, |_| Ok(()))
+    }
+
+    fn commit_write_with_hook(
+        &self,
+        key: &str,
+        data: &[u8],
+        pending: PendingOffsetEviction,
+        mut boundary_hook: impl FnMut(DurableWriteBoundary) -> StoreResult<()>,
+    ) -> StoreResult<()> {
         self.ensure_init()?;
-        let required = data.len() as u64;
+        let required = RecordHeader::record_size(key.len() as u64, data.len() as u64)
+            .map_err(record_format_store_error)?;
         let mut state = self.state.lock();
         let replaced = state.index.entries.get(key).cloned();
         let committed_victims = apply_pending_eviction(&mut state, pending);
@@ -406,6 +545,12 @@ impl OffsetAllocatorStorageBackend {
             return Err(StoreError::NoAvailableHandle);
         };
 
+        let write_seq = state.next_write_seq;
+        let next_write_seq = write_seq.checked_add(1).ok_or_else(|| {
+            StoreError::Internal("offset allocator write sequence exhausted".to_string())
+        })?;
+        let (header, padding) = record_header(key, data, write_seq, self.config.enable_record_crc)?;
+        debug_assert_eq!(header.checked_record_size().ok(), Some(required));
         let write_result = (|| -> StoreResult<()> {
             let mut data_file = std::fs::OpenOptions::new()
                 .create(true)
@@ -414,8 +559,13 @@ impl OffsetAllocatorStorageBackend {
                 .truncate(false)
                 .open(self.data_path())?;
             data_file.seek(SeekFrom::Start(offset))?;
+            data_file.write_all(&header.encode())?;
+            data_file.write_all(key.as_bytes())?;
+            write_zero_padding(&mut data_file, padding)?;
             data_file.write_all(data)?;
+            boundary_hook(DurableWriteBoundary::RecordWritten)?;
             data_file.sync_data()?;
+            boundary_hook(DurableWriteBoundary::DataSynced)?;
             Ok(())
         })();
         if let Err(error) = write_result {
@@ -425,6 +575,7 @@ impl OffsetAllocatorStorageBackend {
 
         state.free_extents = candidate_free;
         state.index.next_offset = candidate_next_offset;
+        state.next_write_seq = next_write_seq;
 
         if let Some(old) = replaced {
             state.index.entries.remove(key);
@@ -439,10 +590,16 @@ impl OffsetAllocatorStorageBackend {
                 offset,
                 len: required,
                 fifo_seq,
+                format: OffsetEntryFormat::V3,
+                value_offset: RecordHeader::value_offset(key.len() as u64)
+                    .map_err(record_format_store_error)?,
+                value_len: data.len() as u64,
+                write_seq,
             },
         );
         state.used_bytes = state.used_bytes.saturating_add(required);
-        self.persist_index(&state.index)?;
+        boundary_hook(DurableWriteBoundary::CheckpointPublish)?;
+        self.persist_state(&state)?;
         Ok(())
     }
 
@@ -457,8 +614,14 @@ impl OffsetAllocatorStorageBackend {
             .cloned()
             .ok_or_else(|| StoreError::KeyNotFound(key.to_string()))?;
         let mut file = std::fs::File::open(self.data_path())?;
-        file.seek(SeekFrom::Start(entry.offset))?;
-        let mut value = vec![0; entry.len as usize];
+        let value_offset = entry.absolute_value_offset().ok_or_else(|| {
+            StoreError::Internal("offset allocator value offset overflow".to_string())
+        })?;
+        file.seek(SeekFrom::Start(value_offset))?;
+        let value_len = usize::try_from(entry.value_len()).map_err(|_| {
+            StoreError::Internal("offset allocator value length exceeds usize".to_string())
+        })?;
+        let mut value = vec![0; value_len];
         file.read_exact(&mut value)?;
         Ok(value)
     }
@@ -530,7 +693,7 @@ impl OffsetAllocatorStorageBackend {
         if let Some(entry) = state.index.entries.remove(key) {
             state.used_bytes = state.used_bytes.saturating_sub(entry.len);
             insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
-            self.persist_index(&state.index)?;
+            self.persist_state(&state)?;
         }
         Ok(())
     }
@@ -555,8 +718,13 @@ impl OffsetAllocatorStorageBackend {
         Ok(count)
     }
 
-    fn persist_index(&self, index: &PersistedIndex) -> StoreResult<()> {
-        write_checkpoint(&self.index_path(), index)
+    fn persist_state(&self, state: &OffsetState) -> StoreResult<()> {
+        write_checkpoint_state(
+            &self.index_path(),
+            &state.index,
+            state.next_write_seq,
+            &state.tombstones,
+        )
     }
 
     fn finalize_evicted_entries(
@@ -567,7 +735,7 @@ impl OffsetAllocatorStorageBackend {
         for entry in entries {
             insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
         }
-        self.persist_index(&state.index)
+        self.persist_state(state)
     }
 }
 
@@ -603,15 +771,24 @@ fn canonical_json_bytes(value: &serde_json::Value) -> StoreResult<Vec<u8>> {
     Ok(serde_json::to_vec(&canonicalize(value))?)
 }
 
+#[cfg(test)]
 fn checkpoint_envelope(index: &PersistedIndex) -> StoreResult<CheckpointEnvelope> {
+    checkpoint_envelope_state(index, 1, &[])
+}
+
+fn checkpoint_envelope_state(
+    index: &PersistedIndex,
+    next_write_seq: u64,
+    tombstones: &[String],
+) -> StoreResult<CheckpointEnvelope> {
     let payload = serde_json::to_value(CheckpointPayload {
         index: PersistedIndex {
             entries: index.entries.clone(),
             next_offset: index.next_offset,
             next_fifo_seq: index.next_fifo_seq,
         },
-        next_write_seq: 0,
-        tombstones: Vec::new(),
+        next_write_seq: next_write_seq.max(1),
+        tombstones: tombstones.to_vec(),
     })?;
     Ok(CheckpointEnvelope {
         format: CHECKPOINT_FORMAT.to_string(),
@@ -621,53 +798,98 @@ fn checkpoint_envelope(index: &PersistedIndex) -> StoreResult<CheckpointEnvelope
     })
 }
 
-fn load_persisted_index(path: &Path) -> StoreResult<PersistedIndex> {
+fn empty_loaded_checkpoint() -> LoadedCheckpoint {
+    LoadedCheckpoint {
+        index: PersistedIndex::default(),
+        next_write_seq: 1,
+        tombstones: Vec::new(),
+    }
+}
+
+fn load_checkpoint(path: &Path) -> StoreResult<LoadedCheckpoint> {
     let mut bytes = Vec::new();
     match std::fs::File::open(path) {
         Ok(mut file) => file.read_to_end(&mut bytes)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(PersistedIndex::default());
+            return Ok(empty_loaded_checkpoint());
         }
         Err(error) => return Err(error.into()),
     };
 
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return Ok(PersistedIndex::default());
+        return Ok(empty_loaded_checkpoint());
     };
     if value.get("format").and_then(serde_json::Value::as_str) != Some(CHECKPOINT_FORMAT) {
-        return Ok(serde_json::from_value(value).unwrap_or_default());
+        return Ok(LoadedCheckpoint {
+            index: serde_json::from_value(value).unwrap_or_default(),
+            next_write_seq: 1,
+            tombstones: Vec::new(),
+        });
     }
 
     let Ok(envelope) = serde_json::from_value::<CheckpointEnvelope>(value) else {
-        return Ok(PersistedIndex::default());
+        return Ok(empty_loaded_checkpoint());
     };
     if envelope.version != CHECKPOINT_VERSION {
-        return Ok(PersistedIndex::default());
+        return Ok(empty_loaded_checkpoint());
     }
     let Ok(payload_bytes) = canonical_json_bytes(&envelope.payload) else {
-        return Ok(PersistedIndex::default());
+        return Ok(empty_loaded_checkpoint());
     };
     if crc32c([payload_bytes]) != envelope.payload_crc32c {
-        return Ok(PersistedIndex::default());
+        return Ok(empty_loaded_checkpoint());
     }
-    Ok(
-        serde_json::from_value::<CheckpointPayload>(envelope.payload)
-            .map(|payload| payload.index)
-            .unwrap_or_default(),
-    )
+    let Ok(payload) = serde_json::from_value::<CheckpointPayload>(envelope.payload) else {
+        return Ok(empty_loaded_checkpoint());
+    };
+    Ok(LoadedCheckpoint {
+        index: payload.index,
+        next_write_seq: payload.next_write_seq.max(1),
+        tombstones: payload.tombstones,
+    })
 }
 
+#[cfg(test)]
+fn load_persisted_index(path: &Path) -> StoreResult<PersistedIndex> {
+    load_checkpoint(path).map(|loaded| loaded.index)
+}
+
+#[cfg(test)]
 fn write_checkpoint(path: &Path, index: &PersistedIndex) -> StoreResult<()> {
     write_checkpoint_with_hook(path, index, |_| Ok(()))
 }
 
+#[cfg(test)]
 fn write_checkpoint_with_hook(
     path: &Path,
     index: &PersistedIndex,
     mut boundary_hook: impl FnMut(CheckpointBoundary) -> std::io::Result<()>,
 ) -> StoreResult<()> {
+    write_checkpoint_state_with_hook(path, index, 1, &[], &mut boundary_hook)
+}
+
+fn write_checkpoint_state(
+    path: &Path,
+    index: &PersistedIndex,
+    next_write_seq: u64,
+    tombstones: &[String],
+) -> StoreResult<()> {
+    write_checkpoint_state_with_hook(path, index, next_write_seq, tombstones, &mut |_| Ok(()))
+}
+
+fn write_checkpoint_state_with_hook(
+    path: &Path,
+    index: &PersistedIndex,
+    next_write_seq: u64,
+    tombstones: &[String],
+    boundary_hook: &mut impl FnMut(CheckpointBoundary) -> std::io::Result<()>,
+) -> StoreResult<()> {
     let temporary = checkpoint_tmp_path(path);
-    let bytes = serde_json::to_vec(&checkpoint_envelope(index)?)?;
+    let bytes = serde_json::to_vec(&checkpoint_envelope_state(
+        index,
+        next_write_seq,
+        tombstones,
+    )?)?;
     let result = (|| -> StoreResult<()> {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -693,6 +915,163 @@ fn write_checkpoint_with_hook(
     result
 }
 
+fn recover_checkpoint(
+    mut loaded: LoadedCheckpoint,
+    arena_path: &Path,
+    arena_len: u64,
+) -> StoreResult<LoadedCheckpoint> {
+    if loaded.index.entries.is_empty() {
+        loaded.index.next_offset = 0;
+        return Ok(loaded);
+    }
+
+    let mut arena = match std::fs::File::open(arena_path) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mut candidates: Vec<_> = std::mem::take(&mut loaded.index.entries)
+        .into_iter()
+        .collect();
+    candidates.sort_by(|(left_key, left), (right_key, right)| {
+        left.offset
+            .cmp(&right.offset)
+            .then_with(|| left_key.cmp(right_key))
+    });
+
+    let mut survivors = HashMap::new();
+    let mut occupied: Vec<(u64, u64)> = Vec::new();
+    for (key, entry) in candidates {
+        let Some(end) = entry.offset.checked_add(entry.len) else {
+            continue;
+        };
+        if end > arena_len {
+            continue;
+        }
+        if occupied
+            .iter()
+            .any(|(start, occupied_end)| entry.offset < *occupied_end && *start < end)
+        {
+            continue;
+        }
+
+        let valid = match entry.format {
+            OffsetEntryFormat::LegacyRaw => {
+                entry.value_offset == 0
+                    && entry.value_len == 0
+                    && entry.write_seq == 0
+                    && (entry.len == 0 || arena.is_some())
+            }
+            OffsetEntryFormat::V3 => {
+                let Some(file) = arena.as_mut() else {
+                    continue;
+                };
+                validate_v3_record(file, arena_len, &key, &entry, loaded.next_write_seq)?
+            }
+            OffsetEntryFormat::Unknown => false,
+        };
+        if valid {
+            occupied.push((entry.offset, end));
+            survivors.insert(key, entry);
+        }
+    }
+    loaded.index.entries = survivors;
+    Ok(loaded)
+}
+
+fn read_exact_record_part(
+    file: &mut std::fs::File,
+    offset: u64,
+    bytes: &mut [u8],
+) -> StoreResult<bool> {
+    file.seek(SeekFrom::Start(offset))?;
+    match file.read_exact(bytes) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_v3_record(
+    file: &mut std::fs::File,
+    arena_len: u64,
+    checkpoint_key: &str,
+    entry: &OffsetEntry,
+    next_write_seq: u64,
+) -> StoreResult<bool> {
+    if entry.write_seq == 0
+        || entry.write_seq >= next_write_seq
+        || entry.value_len > u32::MAX.into()
+    {
+        return Ok(false);
+    }
+    let mut encoded_header = [0; RECORD_HEADER_SIZE];
+    if !read_exact_record_part(file, entry.offset, &mut encoded_header)? {
+        return Ok(false);
+    }
+    let Ok(header) = RecordHeader::decode(&encoded_header) else {
+        return Ok(false);
+    };
+    let Ok(record_size) = header.checked_record_size() else {
+        return Ok(false);
+    };
+    let Ok(value_offset) = RecordHeader::value_offset(header.key_len.into()) else {
+        return Ok(false);
+    };
+    if header.write_seq != entry.write_seq
+        || header.key_len as usize != checkpoint_key.len()
+        || u64::from(header.value_len) != entry.value_len
+        || record_size != entry.len
+        || value_offset != entry.value_offset
+        || header.validate_extent(entry.offset, arena_len).is_err()
+    {
+        return Ok(false);
+    }
+
+    let mut key = vec![0; header.key_len as usize];
+    let Some(key_offset) = entry.offset.checked_add(RECORD_HEADER_SIZE as u64) else {
+        return Ok(false);
+    };
+    if !read_exact_record_part(file, key_offset, &mut key)? || key != checkpoint_key.as_bytes() {
+        return Ok(false);
+    }
+
+    let key_end = RECORD_HEADER_SIZE as u64 + u64::from(header.key_len);
+    let padding_len = value_offset - key_end;
+    let mut padding = vec![0; padding_len as usize];
+    let Some(padding_offset) = entry.offset.checked_add(key_end) else {
+        return Ok(false);
+    };
+    if !read_exact_record_part(file, padding_offset, &mut padding)?
+        || padding.iter().any(|byte| *byte != 0)
+    {
+        return Ok(false);
+    }
+
+    let Some(value_absolute) = entry.offset.checked_add(value_offset) else {
+        return Ok(false);
+    };
+    if header.flags & RECORD_FLAG_HAS_CRC == 0 {
+        return Ok(true);
+    }
+    file.seek(SeekFrom::Start(value_absolute))?;
+    let mut checksum = Crc32c::new();
+    checksum.extend(&header.encode_prefix());
+    checksum.extend(&key);
+    let mut remaining = u64::from(header.value_len);
+    let mut chunk = vec![0; 1024 * 1024];
+    while remaining > 0 {
+        let read_len = remaining.min(chunk.len() as u64) as usize;
+        match file.read_exact(&mut chunk[..read_len]) {
+            Ok(()) => checksum.extend(&chunk[..read_len]),
+            Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        remaining -= read_len as u64;
+    }
+    Ok(checksum.finish() == header.crc32)
+}
+
 fn key_watermarks(config: &OffsetAllocatorConfig) -> (usize, usize) {
     let high = (config.total_keys_limit as f64 * config.keys_high_ratio) as usize;
     let mut low = (config.total_keys_limit as f64 * config.keys_low_ratio) as usize;
@@ -713,13 +1092,27 @@ fn normalize_loaded_index(index: &mut PersistedIndex, file_len: u64) -> bool {
     let mut changed = safe_next_offset != index.next_offset;
     index.next_offset = safe_next_offset;
 
-    if !index.entries.is_empty() && index.next_fifo_seq == 0 {
-        let mut keys_by_offset: Vec<_> = index.entries.keys().cloned().collect();
-        keys_by_offset.sort_by_key(|key| index.entries[key].offset);
-        for (fifo_seq, key) in keys_by_offset.into_iter().enumerate() {
-            index.entries.get_mut(&key).unwrap().fifo_seq = fifo_seq as u64;
+    let mut keys_by_fifo: Vec<_> = index.entries.keys().cloned().collect();
+    keys_by_fifo.sort_by(|left, right| {
+        let left_entry = &index.entries[left];
+        let right_entry = &index.entries[right];
+        left_entry
+            .fifo_seq
+            .cmp(&right_entry.fifo_seq)
+            .then_with(|| left_entry.offset.cmp(&right_entry.offset))
+            .then_with(|| left.cmp(right))
+    });
+    for (fifo_seq, key) in keys_by_fifo.into_iter().enumerate() {
+        let fifo_seq = fifo_seq as u64;
+        let entry = index.entries.get_mut(&key).unwrap();
+        if entry.fifo_seq != fifo_seq {
+            entry.fifo_seq = fifo_seq;
+            changed = true;
         }
-        index.next_fifo_seq = index.entries.len() as u64;
+    }
+    let repaired_next_fifo_seq = index.entries.len() as u64;
+    if index.next_fifo_seq != repaired_next_fifo_seq {
+        index.next_fifo_seq = repaired_next_fifo_seq;
         changed = true;
     }
 
@@ -808,22 +1201,15 @@ fn insert_free_extent(extents: &mut BTreeMap<u64, u64>, offset: u64, len: u64) {
 mod checkpoint_tests {
     use super::{
         CHECKPOINT_VERSION, CheckpointBoundary, OffsetEntry, PersistedIndex, checkpoint_envelope,
-        checkpoint_tmp_path, load_persisted_index, remove_stale_checkpoint_tmp, write_checkpoint,
-        write_checkpoint_with_hook,
+        checkpoint_tmp_path, load_checkpoint, load_persisted_index, remove_stale_checkpoint_tmp,
+        write_checkpoint, write_checkpoint_state, write_checkpoint_with_hook,
     };
     use std::collections::HashMap;
     use std::io::Error;
 
     fn index(key: &str, offset: u64) -> PersistedIndex {
         PersistedIndex {
-            entries: HashMap::from([(
-                key.to_string(),
-                OffsetEntry {
-                    offset,
-                    len: 4,
-                    fifo_seq: offset,
-                },
-            )]),
+            entries: HashMap::from([(key.to_string(), OffsetEntry::legacy(offset, 4, offset))]),
             next_offset: offset + 4,
             next_fifo_seq: offset + 1,
         }
@@ -841,6 +1227,21 @@ mod checkpoint_tests {
             load_persisted_index(&path).unwrap().entries,
             expected.entries
         );
+    }
+
+    #[test]
+    fn checkpoint_state_round_trips_sequence_and_future_tombstone_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("offset_allocator.index.json");
+        let expected = index("a", 8);
+        let tombstones = vec!["evicted".to_string()];
+
+        write_checkpoint_state(&path, &expected, 42, &tombstones).unwrap();
+        let loaded = load_checkpoint(&path).unwrap();
+
+        assert_eq!(loaded.index.entries, expected.entries);
+        assert_eq!(loaded.next_write_seq, 42);
+        assert_eq!(loaded.tombstones, tombstones);
     }
 
     #[test]
@@ -1119,5 +1520,405 @@ mod record_primitive_tests {
         header.crc32 = expected;
         assert!(header.verify_crc(b"key", b"value").is_ok());
         assert!(header.verify_crc(b"key", b"Value").is_err());
+    }
+}
+
+#[cfg(test)]
+mod durable_recovery_tests {
+    use super::super::OffsetPersistMode;
+    use super::{
+        DurableWriteBoundary, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
+        OffsetEvictionPolicy, RECORD_FLAG_HAS_CRC, RECORD_HEADER_SIZE, RecordHeader,
+        canonical_json_bytes, crc32c,
+    };
+    use mooncake_store_core::StoreError;
+    use std::path::{Path, PathBuf};
+
+    fn config(root_dir: PathBuf, mode: OffsetPersistMode, crc: bool) -> OffsetAllocatorConfig {
+        OffsetAllocatorConfig {
+            root_dir,
+            fsdir: "offset".to_string(),
+            eviction_policy: OffsetEvictionPolicy::Fifo,
+            quota_bytes: 64 * 1024,
+            total_keys_limit: 64,
+            high_ratio: 0.95,
+            low_ratio: 0.80,
+            keys_high_ratio: 0.95,
+            keys_low_ratio: 0.80,
+            max_evict_per_offload: 64,
+            fallback_evict_batch: 2,
+            persist_mode: mode,
+            persist_interval_seconds: 60,
+            enable_record_crc: crc,
+        }
+    }
+
+    fn arena(root: &Path) -> PathBuf {
+        root.join("offset/offset_allocator.data")
+    }
+
+    fn checkpoint(root: &Path) -> PathBuf {
+        root.join("offset/offset_allocator.index.json")
+    }
+
+    fn checkpoint_json(root: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(checkpoint(root)).unwrap()).unwrap()
+    }
+
+    fn checkpoint_entry(root: &Path, key: &str) -> serde_json::Value {
+        checkpoint_json(root)["payload"]["index"]["entries"][key].clone()
+    }
+
+    fn rewrite_checkpoint_payload(root: &Path, mutate: impl FnOnce(&mut serde_json::Value)) {
+        let mut envelope = checkpoint_json(root);
+        mutate(&mut envelope["payload"]);
+        envelope["payload_crc32c"] = serde_json::json!(crc32c([canonical_json_bytes(
+            &envelope["payload"]
+        )
+        .unwrap()]));
+        std::fs::write(checkpoint(root), serde_json::to_vec(&envelope).unwrap()).unwrap();
+    }
+
+    fn write_at(path: &Path, offset: u64, bytes: &[u8]) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_data().unwrap();
+    }
+
+    fn record_offset(root: &Path, key: &str) -> u64 {
+        checkpoint_entry(root, key)["offset"].as_u64().unwrap()
+    }
+
+    fn value_offset(root: &Path, key: &str) -> u64 {
+        let entry = checkpoint_entry(root, key);
+        entry["offset"].as_u64().unwrap() + entry["value_offset"].as_u64().unwrap()
+    }
+
+    fn restart(root: &Path, mode: OffsetPersistMode, crc: bool) -> OffsetAllocatorStorageBackend {
+        let backend = OffsetAllocatorStorageBackend::new(config(root.to_path_buf(), mode, crc));
+        backend.init().unwrap();
+        backend
+    }
+
+    #[test]
+    fn strict_v3_record_and_nonzero_sequence_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("alpha", b"value-a").unwrap();
+        drop(backend);
+
+        let durable = checkpoint_json(temp.path());
+        assert!(durable["payload"]["next_write_seq"].as_u64().unwrap() > 1);
+        let entry = &durable["payload"]["index"]["entries"]["alpha"];
+        assert_eq!(entry["format"], "v3");
+        assert!(entry["write_seq"].as_u64().unwrap() > 0);
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert_eq!(restarted.read_object("alpha").unwrap(), b"value-a");
+    }
+
+    #[test]
+    fn record_data_is_synced_before_checkpoint_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        let pending = backend.prepare_write("ordered", 5).unwrap();
+        let mut observed = Vec::new();
+
+        let result = backend.commit_write_with_hook("ordered", b"value", pending, |boundary| {
+            observed.push(boundary);
+            if boundary == DurableWriteBoundary::CheckpointPublish {
+                Err(StoreError::Internal(
+                    "injected before checkpoint publication".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            observed,
+            [
+                DurableWriteBoundary::RecordWritten,
+                DurableWriteBoundary::DataSynced,
+                DurableWriteBoundary::CheckpointPublish,
+            ]
+        );
+        assert!(arena(temp.path()).exists());
+        assert!(!checkpoint(temp.path()).exists());
+        drop(backend);
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("ordered"));
+    }
+
+    #[test]
+    fn abrupt_relaxed_restart_recovers_only_the_older_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Relaxed, true);
+        backend.write_object("before", b"durable").unwrap();
+        let older_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+        backend.write_object("after", b"not-checkpointed").unwrap();
+        std::fs::write(checkpoint(temp.path()), older_checkpoint).unwrap();
+        std::mem::forget(backend);
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Relaxed, true);
+        assert_eq!(restarted.read_object("before").unwrap(), b"durable");
+        assert!(!restarted.exists("after"));
+    }
+
+    #[test]
+    fn truncated_header_drops_only_the_affected_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("good", b"good-value").unwrap();
+        backend.write_object("torn", b"torn-value").unwrap();
+        let torn = record_offset(temp.path(), "torn");
+        drop(backend);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(arena(temp.path()))
+            .unwrap()
+            .set_len(torn + RECORD_HEADER_SIZE as u64 - 1)
+            .unwrap();
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+        assert!(!restarted.exists("torn"));
+    }
+
+    #[test]
+    fn truncated_value_drops_only_the_affected_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("good", b"good-value").unwrap();
+        backend.write_object("torn", b"torn-value").unwrap();
+        let entry = checkpoint_entry(temp.path(), "torn");
+        let end = entry["offset"].as_u64().unwrap() + entry["len"].as_u64().unwrap();
+        drop(backend);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(arena(temp.path()))
+            .unwrap()
+            .set_len(end - 1)
+            .unwrap();
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+        assert!(!restarted.exists("torn"));
+    }
+
+    #[test]
+    fn unknown_record_flags_drop_only_the_affected_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        let bad = record_offset(temp.path(), "bad");
+        drop(backend);
+        write_at(&arena(temp.path()), bad + 16, &2u32.to_le_bytes());
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn key_length_and_sequence_mismatches_are_isolated() {
+        for (case, mutate) in [("key", 0u8), ("length", 1u8), ("sequence", 2u8)] {
+            let temp = tempfile::tempdir().unwrap();
+            let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+            backend.write_object("bad", b"bad-value").unwrap();
+            backend.write_object("good", b"good-value").unwrap();
+            let bad = record_offset(temp.path(), "bad");
+            let entry = checkpoint_entry(temp.path(), "bad");
+            drop(backend);
+            match mutate {
+                0 => write_at(&arena(temp.path()), bad + RECORD_HEADER_SIZE as u64, b"B"),
+                1 => {
+                    let changed = entry["value_len"].as_u64().unwrap() as u32 + 1;
+                    write_at(&arena(temp.path()), bad + 4, &changed.to_le_bytes());
+                }
+                2 => {
+                    let changed = entry["write_seq"].as_u64().unwrap() + 1;
+                    write_at(&arena(temp.path()), bad + 8, &changed.to_le_bytes());
+                }
+                _ => unreachable!(),
+            }
+
+            let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+            assert!(!restarted.exists("bad"), "{case}");
+            assert_eq!(
+                restarted.read_object("good").unwrap(),
+                b"good-value",
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn crc_corruption_drops_one_key_and_rebuilds_allocator_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        let bad_record = checkpoint_entry(temp.path(), "bad");
+        let bad_record_offset = bad_record["offset"].as_u64().unwrap();
+        let bad_value = value_offset(temp.path(), "bad");
+        let arena_len = std::fs::metadata(arena(temp.path())).unwrap().len();
+        drop(backend);
+        write_at(&arena(temp.path()), bad_value, b"B");
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+        let used_after_recovery = restarted.space_usage().0;
+        restarted.write_object("replacement", b"new-value").unwrap();
+        assert!(restarted.space_usage().0 > used_after_recovery);
+        assert_eq!(
+            checkpoint_entry(temp.path(), "replacement")["offset"],
+            bad_record_offset
+        );
+        assert_eq!(
+            std::fs::metadata(arena(temp.path())).unwrap().len(),
+            arena_len
+        );
+    }
+
+    #[test]
+    fn recovery_preserves_fifo_order_among_surviving_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("a", b"aaaa").unwrap();
+        backend.write_object("b", b"bbbb").unwrap();
+        backend.write_object("c", b"cccc").unwrap();
+        let a_value = value_offset(temp.path(), "a");
+        drop(backend);
+        write_at(&arena(temp.path()), a_value, b"A");
+
+        let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        constrained.quota_bytes = 8_200;
+        let restarted = OffsetAllocatorStorageBackend::new(constrained);
+        restarted.init().unwrap();
+        assert!(!restarted.exists("a"));
+        assert_eq!(restarted.prepare_write("d", 4).unwrap().keys(), ["b", "c"]);
+    }
+
+    #[test]
+    fn crc_disabled_round_trip_still_rejects_post_checkpoint_sequence() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, false);
+        backend.write_object("stale", b"old-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        let stale = record_offset(temp.path(), "stale");
+        let stale_entry = checkpoint_entry(temp.path(), "stale");
+        let flags = std::fs::read(arena(temp.path())).unwrap()
+            [stale as usize + 16..stale as usize + 20]
+            .try_into()
+            .map(u32::from_le_bytes)
+            .unwrap();
+        assert_eq!(flags & RECORD_FLAG_HAS_CRC, 0);
+        drop(backend);
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, false);
+        assert_eq!(restarted.read_object("stale").unwrap(), b"old-value");
+        drop(restarted);
+
+        let post_checkpoint_seq = stale_entry["write_seq"].as_u64().unwrap() + 10;
+        write_at(
+            &arena(temp.path()),
+            stale + 8,
+            &post_checkpoint_seq.to_le_bytes(),
+        );
+        let rejected = restart(temp.path(), OffsetPersistMode::Strict, false);
+        assert!(!rejected.exists("stale"));
+        assert_eq!(rejected.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn checkpoint_entry_mismatch_is_not_partially_published() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        drop(backend);
+        rewrite_checkpoint_payload(temp.path(), |payload| {
+            payload["index"]["entries"]["bad"]["write_seq"] = serde_json::json!(u64::MAX);
+        });
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn unknown_entry_format_drops_only_that_checkpoint_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        drop(backend);
+        rewrite_checkpoint_payload(temp.path(), |payload| {
+            payload["index"]["entries"]["bad"]["format"] = serde_json::json!("future_v4");
+        });
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn mixed_legacy_raw_and_v3_records_survive_checkpoint_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("offset");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(arena(temp.path()), b"legacy-value").unwrap();
+        std::fs::write(
+            checkpoint(temp.path()),
+            r#"{"entries":{"legacy":{"offset":0,"len":12,"fifo_seq":4}},"next_offset":12,"next_fifo_seq":5}"#,
+        )
+        .unwrap();
+
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert_eq!(backend.read_object("legacy").unwrap(), b"legacy-value");
+        backend.write_object("v3", b"new-value").unwrap();
+        drop(backend);
+
+        let durable = checkpoint_json(temp.path());
+        assert_eq!(
+            durable["payload"]["index"]["entries"]["legacy"]["format"],
+            "legacy_raw"
+        );
+        assert_eq!(durable["payload"]["index"]["entries"]["v3"]["format"], "v3");
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert_eq!(restarted.read_object("legacy").unwrap(), b"legacy-value");
+        assert_eq!(restarted.read_object("v3").unwrap(), b"new-value");
+    }
+
+    #[test]
+    fn encoded_record_layout_contains_zero_padding() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("key", b"value").unwrap();
+        let entry = checkpoint_entry(temp.path(), "key");
+        let bytes = std::fs::read(arena(temp.path())).unwrap();
+        let start = entry["offset"].as_u64().unwrap() as usize;
+        let value = start + entry["value_offset"].as_u64().unwrap() as usize;
+        assert_eq!(
+            &bytes[start + RECORD_HEADER_SIZE..start + RECORD_HEADER_SIZE + 3],
+            b"key"
+        );
+        assert!(
+            bytes[start + RECORD_HEADER_SIZE + 3..value]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert_eq!(&bytes[value..value + 5], b"value");
+
+        let header = RecordHeader::decode(&bytes[start..start + RECORD_HEADER_SIZE]).unwrap();
+        assert_eq!(header.key_len, 3);
+        assert_eq!(header.value_len, 5);
     }
 }
