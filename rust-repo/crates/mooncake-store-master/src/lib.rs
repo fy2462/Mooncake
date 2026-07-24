@@ -43,10 +43,12 @@ pub mod oplog;
 pub mod service;
 pub mod storage_backend;
 pub mod storage_distributed;
+pub mod tenant_id;
 pub mod tenant_quota;
 pub mod tenant_quota_policy_store;
 
 pub use service::{MasterRuntimeConfig, MasterServiceImpl};
+pub use tenant_id::{DEFAULT_TENANT, TenantId, TenantIdError};
 // Re-export tenant helpers for integration test use
 pub use service::helpers::{make_tenant_scoped_key, normalize_tenant_id};
 
