@@ -7,13 +7,13 @@ use super::snapshot::{
 };
 use super::types::HaError;
 use crate::TenantId;
-use crate::make_tenant_scoped_key;
 use crate::proto::SegmentStatus;
 use crate::service::{ObjectEntry, SegmentEntry};
 use crate::storage_backend::LocalDiskSnapshotEntry;
 use chrono::{Datelike, Timelike};
 use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 use rmpv::Value;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -309,7 +309,7 @@ fn encode_metadata(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
         .collect::<HashMap<_, _>>();
     let mut metadata = Vec::new();
     for (scoped_key, object) in &snapshot.objects {
-        let (tenant_id, user_key) = tenant_and_user_key(scoped_key, object);
+        let user_key = validated_user_key(scoped_key, object)?;
         let mut fields = vec![
             object.client_id.to_string().into(),
             system_time_ms(object.put_start_time.unwrap_or(UNIX_EPOCH))?.into(),
@@ -326,8 +326,8 @@ fn encode_metadata(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
         fields.push(object.hard_pinned.into());
         fields.push(object.group_id.clone().into());
         metadata.push(Value::Array(vec![
-            tenant_id.into(),
-            user_key.into(),
+            object.tenant_id.as_str().into(),
+            user_key.as_ref().into(),
             Value::Array(fields),
         ]));
     }
@@ -412,14 +412,31 @@ fn encode_compressed_value(value: &Value) -> Result<Vec<u8>, HaError> {
     zstd::stream::encode_all(Cursor::new(encode_value(value)?), 3).map_err(snapshot_io)
 }
 
-fn tenant_and_user_key<'a>(scoped_key: &'a str, object: &'a ObjectEntry) -> (&'a str, &'a str) {
-    let tenant_id = object.tenant_id.as_str();
-    if !object.user_key.is_empty() {
-        return (tenant_id, object.user_key.as_str());
+fn validated_user_key<'a>(
+    scoped_key: &'a str,
+    object: &'a ObjectEntry,
+) -> Result<Cow<'a, str>, HaError> {
+    if scoped_key.contains('\0') {
+        let (scoped_tenant, scoped_user_key) = TenantId::parse_scoped_key(scoped_key)
+            .map_err(|error| snapshot_error(format!("invalid scoped tenant id: {error}")))?;
+        if scoped_tenant != object.tenant_id {
+            return Err(snapshot_error(format!(
+                "object tenant mismatch: scoped={scoped_tenant}, metadata={}",
+                object.tenant_id
+            )));
+        }
+        if !object.user_key.is_empty() && object.user_key != scoped_user_key {
+            return Err(snapshot_error(
+                "object user key mismatch between scoped key and metadata",
+            ));
+        }
+        return Ok(Cow::Owned(scoped_user_key));
     }
-    scoped_key
-        .split_once('\0')
-        .unwrap_or((tenant_id, scoped_key))
+    if object.user_key.is_empty() {
+        Ok(Cow::Borrowed(scoped_key))
+    } else {
+        Ok(Cow::Borrowed(object.user_key.as_str()))
+    }
 }
 
 fn system_time_ms(value: SystemTime) -> Result<u64, HaError> {
@@ -578,16 +595,40 @@ fn decode_metadata(
         for item in value_array(map_field(&shard, "metadata")?, "metadata entries")? {
             let item = value_array(item, "metadata item")?;
             let (tenant_id, user_key, metadata) = match item {
-                [key, metadata] => ("default", value_str(key, "object key")?, metadata),
-                [tenant, key, metadata] => (
-                    value_str(tenant, "tenant id")?,
-                    value_str(key, "object key")?,
-                    metadata,
-                ),
+                [key, metadata] => {
+                    let key = value_str(key, "object key")?;
+                    let (tenant_id, user_key) =
+                        TenantId::parse_scoped_key(key).map_err(|error| {
+                            snapshot_error(format!(
+                                "invalid tenant id in legacy object key: {error}"
+                            ))
+                        })?;
+                    (tenant_id, user_key, metadata)
+                }
+                [tenant, key, metadata] => {
+                    let tenant_id = TenantId::new(value_str(tenant, "tenant id")?.to_string())
+                        .map_err(|error| snapshot_error(format!("invalid tenant id: {error}")))?;
+                    let key = value_str(key, "object key")?;
+                    let user_key = if key.contains('\0') {
+                        let (scoped_tenant, user_key) =
+                            TenantId::parse_scoped_key(key).map_err(|error| {
+                                snapshot_error(format!("invalid scoped tenant id: {error}"))
+                            })?;
+                        if scoped_tenant != tenant_id {
+                            return Err(snapshot_error(format!(
+                                "object tenant mismatch: scoped={scoped_tenant}, metadata={tenant_id}"
+                            )));
+                        }
+                        user_key
+                    } else {
+                        key.to_string()
+                    };
+                    (tenant_id, user_key, metadata)
+                }
                 _ => return Err(snapshot_error("metadata item has invalid shape")),
             };
-            if let Some(entry) = decode_object(metadata, tenant_id, user_key, segments, now)? {
-                objects.push((make_tenant_scoped_key(tenant_id, user_key), entry));
+            if let Some(entry) = decode_object(metadata, &tenant_id, &user_key, segments, now)? {
+                objects.push((tenant_id.make_scoped_key(&user_key), entry));
             }
         }
     }
@@ -596,7 +637,7 @@ fn decode_metadata(
 
 fn decode_object(
     value: &Value,
-    tenant_id: &str,
+    tenant_id: &TenantId,
     user_key: &str,
     segments: &HashMap<Uuid, DecodedSegment>,
     now: SystemTime,
@@ -676,8 +717,7 @@ fn decode_object(
         put_start_time: Some(time_from_ms(put_start_ms)?),
         lease_timeout: Some(lease_timeout),
         soft_pin_timeout,
-        tenant_id: TenantId::new(tenant_id.to_owned())
-            .map_err(|error| snapshot_error(format!("invalid tenant id: {error}")))?,
+        tenant_id: tenant_id.clone(),
         group_id,
         quota_committed: true,
         memory_cache_total_accounted: false,

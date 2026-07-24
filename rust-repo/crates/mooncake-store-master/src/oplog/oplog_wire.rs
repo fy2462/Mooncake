@@ -13,6 +13,7 @@ pub(super) fn serialize_etcd_oplog_value(entry: &OpLogRecord) -> Result<String, 
 
 pub(super) fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, HaError> {
     if let Ok(entry) = serde_json::from_str::<OpLogRecord>(value) {
+        validate_recovered_record_identity(&entry)?;
         return Ok(entry);
     }
 
@@ -20,11 +21,32 @@ pub(super) fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, H
         .map_err(|e| HaError::InvalidBackend(format!("oplog wire deserialize: {e}")))?;
     validate_wire_entry_size(&wire)?;
     let payload = rust_payload_from_cpp_wire_entry(&wire)?;
-    Ok(OpLogRecord {
+    let entry = OpLogRecord {
         seq: wire.sequence_id,
         producer_view_version: 0,
         payload,
-    })
+    };
+    validate_recovered_record_identity(&entry)?;
+    Ok(entry)
+}
+
+fn validate_recovered_record_identity(entry: &OpLogRecord) -> Result<(), HaError> {
+    let payload = match decode_record_payload_value(&entry.payload) {
+        Ok(payload) => payload,
+        Err(error) if entry.payload.starts_with(OPLOG_MSGPACK_RECORD_PREFIX) => {
+            return Err(error);
+        }
+        Err(_) => return Ok(()),
+    };
+    if payload.get("op").and_then(serde_json::Value::as_str) != Some("put_end") {
+        return Ok(());
+    }
+    let Some(key) = payload.get("key").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let _ = key;
+    recover_object_identity_from_payload(&payload)?;
+    Ok(())
 }
 
 pub(super) fn validate_record_size(entry: &OpLogRecord) -> Result<(), HaError> {
@@ -221,8 +243,10 @@ pub(super) fn decode_put_end_msgpack_typed(
     let body = bytes
         .strip_prefix(PUT_END_MSGPACK_MAGIC)
         .ok_or_else(|| HaError::InvalidBackend("put_end msgpack magic mismatch".into()))?;
-    rmp_serde::from_slice(body)
-        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))
+    let payload: PutEndMetadataPayloadV1 = rmp_serde::from_slice(body)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))?;
+    recover_object_identity(&payload.key, &payload.tenant_id, &payload.user_key)?;
+    Ok(payload)
 }
 
 pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, HaError> {

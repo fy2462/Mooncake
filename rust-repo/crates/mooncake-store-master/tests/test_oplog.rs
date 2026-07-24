@@ -53,6 +53,20 @@ fn test_oplog_manager_records_put_revoke() {
 }
 
 #[test]
+fn test_oplog_manager_derives_fallback_put_end_identity_from_scoped_key() {
+    let store = InMemoryOpLog::new(1000);
+    let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
+
+    manager.record_put_end("tenant-a\0k1", 42);
+
+    let store = manager.into_store().unwrap();
+    let entries = store.read_since(1, 10).unwrap();
+    let payload = decode_record_payload_value_for_test(&entries[0].payload).unwrap();
+    assert_eq!(payload["tenant_id"], "tenant-a");
+    assert_eq!(payload["user_key"], "k1");
+}
+
+#[test]
 fn test_local_fs_append_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
@@ -301,6 +315,112 @@ fn test_etcd_oplog_value_reads_versioned_msgpack_put_end() {
     assert_eq!(value["size"], 42);
     assert_eq!(value["tenant_id"], "tenant-a");
     assert_eq!(value["group_id"], "group-a");
+}
+
+#[test]
+fn test_etcd_oplog_value_rejects_invalid_put_end_tenant() {
+    let payload = json!({
+        "op": "put_end",
+        "key": "bad\nname\0k1",
+        "size": 42,
+        "tenant_id": "bad\nname",
+        "user_key": "k1",
+        "replicas": [],
+    });
+    let bytes = encode_put_end_msgpack_from_json_for_test(&payload).unwrap();
+    let wire = CppWireTestEntry {
+        sequence_id: 22,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "bad\nname\0k1".to_string(),
+        payload: BASE64_STANDARD.encode(&bytes),
+        checksum: compute_cpp_checksum_for_test(&bytes),
+        prefix_hash: compute_cpp_prefix_hash_for_test("bad\nname\0k1"),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("tenant"), "{error}");
+}
+
+#[test]
+fn test_etcd_oplog_value_rejects_conflicting_put_end_tenant_identity() {
+    let payload = json!({
+        "op": "put_end",
+        "key": "tenant-b\0k1",
+        "size": 42,
+        "tenant_id": "tenant-a",
+        "user_key": "k1",
+        "replicas": [],
+    });
+    let bytes = encode_put_end_msgpack_from_json_for_test(&payload).unwrap();
+    let wire = CppWireTestEntry {
+        sequence_id: 23,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "tenant-b\0k1".to_string(),
+        payload: BASE64_STANDARD.encode(&bytes),
+        checksum: compute_cpp_checksum_for_test(&bytes),
+        prefix_hash: compute_cpp_prefix_hash_for_test("tenant-b\0k1"),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("tenant"), "{error}");
+    assert!(error.to_string().contains("mismatch"), "{error}");
+}
+
+#[test]
+fn test_etcd_oplog_value_rejects_non_string_put_end_tenant() {
+    let entry = OpLogRecord {
+        seq: 24,
+        producer_view_version: 1,
+        payload: json!({
+            "op": "put_end",
+            "key": "k1",
+            "size": 42,
+            "tenant_id": 42,
+            "user_key": "k1",
+            "replicas": [],
+        })
+        .to_string(),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&entry).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("tenant"), "{error}");
+    assert!(error.to_string().contains("string"), "{error}");
+}
+
+#[test]
+fn test_etcd_oplog_value_accepts_legacy_empty_tenant_for_scoped_key() {
+    let payload = json!({
+        "op": "put_end",
+        "key": "tenant-a\0k1",
+        "size": 42,
+        "tenant_id": "",
+        "user_key": "",
+        "replicas": [],
+    });
+    let bytes = encode_put_end_msgpack_from_json_for_test(&payload).unwrap();
+    let wire = CppWireTestEntry {
+        sequence_id: 25,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "tenant-a\0k1".to_string(),
+        payload: BASE64_STANDARD.encode(&bytes),
+        checksum: compute_cpp_checksum_for_test(&bytes),
+        prefix_hash: compute_cpp_prefix_hash_for_test("tenant-a\0k1"),
+    };
+
+    let record = deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap();
+    let restored = decode_record_payload_value_for_test(&record.payload).unwrap();
+
+    assert_eq!(restored["tenant_id"], "");
+    assert_eq!(restored["key"], "tenant-a\0k1");
 }
 
 #[test]

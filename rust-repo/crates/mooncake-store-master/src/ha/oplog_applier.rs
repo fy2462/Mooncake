@@ -13,9 +13,8 @@ use parking_lot::Mutex;
 use std::time::SystemTime;
 use uuid::Uuid;
 
-use crate::TenantId;
 use crate::ha::types::OpLogRecord;
-use crate::oplog::{OpLogStore, decode_record_payload_value};
+use crate::oplog::{OpLogStore, decode_record_payload_value, recover_object_identity_from_payload};
 use crate::service::helpers::release_object_replicas;
 use crate::service::state::{MasterState, ObjectEntry};
 use crate::service::sync_cache_total_accounting;
@@ -146,16 +145,24 @@ impl OpLogApplier {
 
         match op {
             "put_end" => {
-                let Some(key) = v["key"].as_str() else {
+                let Some(durable_key) = v["key"].as_str() else {
                     return false;
                 };
-                if key.len() > MAX_OBJECT_KEY_SIZE {
+                if durable_key.len() > MAX_OBJECT_KEY_SIZE {
                     return false;
                 }
+                let recovered_identity = match recover_object_identity_from_payload(&v) {
+                    Ok(identity) => identity,
+                    Err(_) => return false,
+                };
+                let key = recovered_identity.as_ref().map_or_else(
+                    || durable_key.to_string(),
+                    |identity| identity.scoped_key.clone(),
+                );
                 let size = v["size"].as_u64().unwrap_or(0);
                 // PutEnd: mark Allocating replicas as Complete.
                 // The actual size is recorded on the object entry.
-                match state.objects.get_mut(key) {
+                match state.objects.get_mut(&key) {
                     Some(mut entry) => {
                         for replica in &mut entry.replicas {
                             if replica.status == mooncake_store_core::ReplicaStatus::Allocating {
@@ -175,12 +182,9 @@ impl OpLogApplier {
                                 .as_str()
                                 .and_then(|id| Uuid::parse_str(id).ok())
                                 .unwrap_or_else(Uuid::nil);
-                            let Ok(tenant_id) = TenantId::new(
-                                v["tenant_id"].as_str().unwrap_or("default").to_string(),
-                            ) else {
+                            let Some(identity) = recovered_identity.as_ref() else {
                                 return false;
                             };
-                            let user_key = v["user_key"].as_str().unwrap_or(key).to_string();
                             let mut object = ObjectEntry {
                                 replicas,
                                 size,
@@ -191,19 +195,19 @@ impl OpLogApplier {
                                 put_start_time: None,
                                 lease_timeout: None,
                                 soft_pin_timeout: None,
-                                tenant_id,
+                                tenant_id: identity.tenant_id.clone(),
                                 group_id: v["group_id"].as_str().unwrap_or_default().to_string(),
                                 quota_committed: true,
                                 memory_cache_total_accounted: false,
                                 disk_cache_total_accounted: false,
-                                user_key,
+                                user_key: identity.user_key.clone(),
                             };
                             sync_cache_total_accounting(&mut object);
-                            state.objects.insert(key.to_string(), object);
+                            state.objects.insert(key.clone(), object);
                         }
                     }
                 }
-                state.processing_keys.remove(key);
+                state.processing_keys.remove(&key);
                 true
             }
             "remove" | "put_revoke" => {
@@ -248,6 +252,7 @@ impl OpLogApplier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TenantId;
     use crate::ha::OpLogRecord;
     use dashmap::DashMap;
     use parking_lot::RwLock;
@@ -383,7 +388,7 @@ mod tests {
         };
         let payload = serde_json::json!({
             "op": "put_end",
-            "key": "tenant-a/k1",
+            "key": "tenant-a\0k1",
             "size": 256,
             "client_id": client_id.to_string(),
             "tenant_id": "tenant-a",
@@ -400,7 +405,7 @@ mod tests {
         }]);
 
         assert_eq!(n, 1);
-        let object = state.objects.get("tenant-a/k1").unwrap();
+        let object = state.objects.get("tenant-a\0k1").unwrap();
         assert_eq!(object.size, 256);
         assert_eq!(object.client_id, client_id);
         assert_eq!(object.tenant_id.as_str(), "tenant-a");
@@ -408,6 +413,79 @@ mod tests {
         assert_eq!(object.user_key, "k1");
         assert_eq!(object.replicas.len(), 1);
         assert_eq!(object.replicas[0].segment_id, segment_id);
+    }
+
+    #[test]
+    fn test_apply_put_end_normalizes_empty_tenant_and_rebuilds_scoped_key() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let payload = serde_json::json!({
+            "op": "put_end",
+            "key": "legacy-key",
+            "size": 1,
+            "tenant_id": "",
+            "user_key": "legacy-key",
+            "replicas": [],
+        })
+        .to_string();
+
+        let applied = applier.apply_op_log_entries(&[OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload,
+        }]);
+
+        assert_eq!(applied, 1);
+        let object = state.objects.get("default\0legacy-key").unwrap();
+        assert_eq!(object.tenant_id, TenantId::default());
+    }
+
+    #[test]
+    fn test_apply_put_end_rejects_invalid_tenant() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let payload = serde_json::json!({
+            "op": "put_end",
+            "key": "bad\nname\0k1",
+            "size": 1,
+            "tenant_id": "bad\nname",
+            "user_key": "k1",
+            "replicas": [],
+        })
+        .to_string();
+
+        let applied = applier.apply_op_log_entries(&[OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload,
+        }]);
+
+        assert_eq!(applied, 0);
+        assert!(state.objects.is_empty());
+    }
+
+    #[test]
+    fn test_apply_put_end_rejects_conflicting_scoped_and_metadata_tenants() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let payload = serde_json::json!({
+            "op": "put_end",
+            "key": "tenant-b\0k1",
+            "size": 1,
+            "tenant_id": "tenant-a",
+            "user_key": "k1",
+            "replicas": [],
+        })
+        .to_string();
+
+        let applied = applier.apply_op_log_entries(&[OpLogRecord {
+            seq: 1,
+            producer_view_version: 1,
+            payload,
+        }]);
+
+        assert_eq!(applied, 0);
+        assert!(state.objects.is_empty());
     }
 
     #[test]

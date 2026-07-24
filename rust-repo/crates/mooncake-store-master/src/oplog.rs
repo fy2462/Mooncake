@@ -37,6 +37,7 @@
 // - EtcdOpLogStore: etcd key-value store, suitable for distributed deployment.
 //   EtcdOpLogStore: etcd 键值存储，适合分布式部署。
 
+use crate::TenantId;
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use crate::metrics;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -85,6 +86,111 @@ pub(crate) struct PutEndMetadataPayloadV1 {
     pub(crate) group_id: String,
     pub(crate) user_key: String,
     pub(crate) replicas: Vec<ReplicaDescriptor>,
+}
+
+impl PutEndMetadataPayloadV1 {
+    fn new(
+        key: &str,
+        size: u64,
+        client_id: Option<Uuid>,
+        tenant_id: &TenantId,
+        group_id: &str,
+        user_key: &str,
+        replicas: &[ReplicaDescriptor],
+    ) -> Self {
+        Self {
+            op: "put_end".to_string(),
+            key: key.to_string(),
+            size,
+            client_id: client_id.map(|id| id.to_string()),
+            tenant_id: tenant_id.as_str().to_string(),
+            group_id: group_id.to_string(),
+            user_key: user_key.to_string(),
+            replicas: replicas.to_vec(),
+        }
+    }
+}
+
+pub(crate) struct RecoveredObjectIdentity {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) user_key: String,
+    pub(crate) scoped_key: String,
+}
+
+pub(crate) fn recover_object_identity(
+    durable_key: &str,
+    metadata_tenant: &str,
+    metadata_user_key: &str,
+) -> Result<RecoveredObjectIdentity, HaError> {
+    let durable_identity = if durable_key.contains('\0') {
+        Some(TenantId::parse_scoped_key(durable_key).map_err(|error| {
+            HaError::InvalidBackend(format!(
+                "oplog put_end has invalid scoped tenant id: {error}"
+            ))
+        })?)
+    } else {
+        None
+    };
+    let tenant_id = if metadata_tenant.is_empty() {
+        durable_identity
+            .as_ref()
+            .map(|(tenant_id, _)| tenant_id.clone())
+            .unwrap_or_default()
+    } else {
+        TenantId::new(metadata_tenant.to_string()).map_err(|error| {
+            HaError::InvalidBackend(format!("oplog put_end has invalid tenant id: {error}"))
+        })?
+    };
+    let user_key = if let Some((durable_tenant, durable_user_key)) = durable_identity {
+        if durable_tenant != tenant_id {
+            return Err(HaError::InvalidBackend(format!(
+                "oplog put_end tenant mismatch: scoped={durable_tenant}, metadata={tenant_id}"
+            )));
+        }
+        if !metadata_user_key.is_empty() && metadata_user_key != durable_user_key {
+            return Err(HaError::InvalidBackend(
+                "oplog put_end user key mismatch between scoped key and metadata".to_string(),
+            ));
+        }
+        durable_user_key
+    } else if metadata_user_key.is_empty() {
+        durable_key.to_string()
+    } else {
+        metadata_user_key.to_string()
+    };
+    let scoped_key = tenant_id.make_scoped_key(&user_key);
+    Ok(RecoveredObjectIdentity {
+        tenant_id,
+        user_key,
+        scoped_key,
+    })
+}
+
+pub(crate) fn recover_object_identity_from_payload(
+    payload: &serde_json::Value,
+) -> Result<Option<RecoveredObjectIdentity>, HaError> {
+    let Some(durable_key) = payload.get("key").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    if payload.get("tenant_id").is_none()
+        && payload.get("user_key").is_none()
+        && payload.get("replicas").is_none()
+    {
+        return Ok(None);
+    }
+    let string_field = |name| match payload.get(name) {
+        None => Ok(""),
+        Some(serde_json::Value::String(value)) => Ok(value.as_str()),
+        Some(_) => Err(HaError::InvalidBackend(format!(
+            "oplog put_end {name} must be a string"
+        ))),
+    };
+    recover_object_identity(
+        durable_key,
+        string_field("tenant_id")?,
+        string_field("user_key")?,
+    )
+    .map(Some)
 }
 
 // =============================================================================

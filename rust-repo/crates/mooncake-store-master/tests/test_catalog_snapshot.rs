@@ -78,7 +78,13 @@ fn cxx_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
     ]))
 }
 
-fn cxx_metadata(segment_id: Uuid, client_id: Uuid, lease_timeout_ms: u64) -> Vec<u8> {
+fn cxx_metadata(
+    segment_id: Uuid,
+    client_id: Uuid,
+    tenant_id: Option<&str>,
+    object_key: &str,
+    lease_timeout_ms: u64,
+) -> Vec<u8> {
     let replica = Value::Array(vec![
         7_u64.into(),
         3.into(),
@@ -104,14 +110,11 @@ fn cxx_metadata(segment_id: Uuid, client_id: Uuid, lease_timeout_ms: u64) -> Vec
         true.into(),
         "group-a".into(),
     ]);
-    let shard = Value::Map(vec![(
-        "metadata".into(),
-        Value::Array(vec![Value::Array(vec![
-            "tenant-a".into(),
-            "key-a".into(),
-            metadata,
-        ])]),
-    )]);
+    let item = match tenant_id {
+        Some(tenant_id) => Value::Array(vec![tenant_id.into(), object_key.into(), metadata]),
+        None => Value::Array(vec![object_key.into(), metadata]),
+    };
+    let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
     encode(&Value::Map(vec![(
         "shards".into(),
         Value::Map(vec![(0.into(), Value::Binary(compress(&shard)))]),
@@ -132,6 +135,20 @@ fn cxx_tasks(task_id: Uuid, client_id: Uuid) -> Vec<u8> {
 }
 
 fn publish_fixture(
+    lease_timeout_ms: u64,
+) -> (
+    tempfile::TempDir,
+    CatalogBackedSnapshotProvider,
+    Uuid,
+    Uuid,
+    Uuid,
+) {
+    publish_fixture_with_identity(Some("tenant-a"), "key-a", lease_timeout_ms)
+}
+
+fn publish_fixture_with_identity(
+    tenant_id: Option<&str>,
+    object_key: &str,
     lease_timeout_ms: u64,
 ) -> (
     tempfile::TempDir,
@@ -161,7 +178,13 @@ fn publish_fixture(
     object_store
         .upload_buffer(
             &format!("{}metadata", descriptor.object_prefix),
-            &cxx_metadata(segment_id, client_id, lease_timeout_ms),
+            &cxx_metadata(
+                segment_id,
+                client_id,
+                tenant_id,
+                object_key,
+                lease_timeout_ms,
+            ),
         )
         .unwrap();
     object_store
@@ -214,6 +237,50 @@ fn test_catalog_provider_loads_cxx_snapshot_payloads() {
     assert_eq!(snapshot.local_disk_segments.len(), 1);
     assert_eq!(snapshot.local_disk_segments[0].client_id, client_id);
     assert_eq!(snapshot.local_disk_segments[0].ssd_total_capacity_bytes, 0);
+}
+
+#[test]
+fn test_catalog_provider_normalizes_empty_tenant_metadata() {
+    let (_root, provider, _, _, _) =
+        publish_fixture_with_identity(Some(""), "legacy-key", u64::MAX / 2);
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.objects[0].0, "default\0legacy-key");
+    assert_eq!(snapshot.objects[0].1.tenant_id, TenantId::default());
+}
+
+#[test]
+fn test_catalog_provider_rejects_invalid_explicit_tenant_metadata() {
+    let (_root, provider, _, _, _) =
+        publish_fixture_with_identity(Some("_reserved"), "key-a", u64::MAX / 2);
+
+    let error = provider.load_latest_snapshot("cluster-a").unwrap_err();
+
+    assert!(error.to_string().contains("tenant"), "{error}");
+}
+
+#[test]
+fn test_catalog_provider_parses_legacy_scoped_key_identity() {
+    let (_root, provider, _, _, _) =
+        publish_fixture_with_identity(None, "tenant-a\0key-a", u64::MAX / 2);
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.objects[0].0, "tenant-a\0key-a");
+    assert_eq!(snapshot.objects[0].1.tenant_id.as_str(), "tenant-a");
+    assert_eq!(snapshot.objects[0].1.user_key, "key-a");
+}
+
+#[test]
+fn test_catalog_provider_rejects_conflicting_scoped_and_metadata_tenants() {
+    let (_root, provider, _, _, _) =
+        publish_fixture_with_identity(Some("tenant-a"), "tenant-b\0key-a", u64::MAX / 2);
+
+    let error = provider.load_latest_snapshot("cluster-a").unwrap_err();
+
+    assert!(error.to_string().contains("tenant"), "{error}");
+    assert!(error.to_string().contains("mismatch"), "{error}");
 }
 
 #[test]

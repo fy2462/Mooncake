@@ -187,7 +187,7 @@ impl MasterServiceImpl {
                             scoped_key,
                             size,
                             Some(entry.client_id),
-                            entry.tenant_id.as_str(),
+                            &entry.tenant_id,
                             &entry.group_id,
                             &entry.user_key,
                             &entry.replicas,

@@ -103,7 +103,11 @@ impl OpLogManager {
     }
 
     pub fn record_put_end(&mut self, key: &str, size: u64) {
-        self.record_put_end_with_metadata(key, size, None, "", "", "", &[]);
+        let Ok((tenant_id, user_key)) = TenantId::parse_scoped_key(key) else {
+            warn!("OpLogManager: refusing to record put_end with invalid scoped tenant key");
+            return;
+        };
+        self.record_put_end_with_metadata(key, size, None, &tenant_id, "", &user_key, &[]);
     }
 
     /// Record a put_end mutation with enough metadata for standby replay to
@@ -113,22 +117,15 @@ impl OpLogManager {
         key: &str,
         size: u64,
         client_id: Option<Uuid>,
-        tenant_id: &str,
+        tenant_id: &TenantId,
         group_id: &str,
         user_key: &str,
         replicas: &[ReplicaDescriptor],
     ) {
         if let Some(store) = &mut self.store {
-            let payload = PutEndMetadataPayloadV1 {
-                op: "put_end".to_string(),
-                key: key.to_string(),
-                size,
-                client_id: client_id.map(|id| id.to_string()),
-                tenant_id: tenant_id.to_string(),
-                group_id: group_id.to_string(),
-                user_key: user_key.to_string(),
-                replicas: replicas.to_vec(),
-            };
+            let payload = PutEndMetadataPayloadV1::new(
+                key, size, client_id, tenant_id, group_id, user_key, replicas,
+            );
             let record = OpLogRecord {
                 seq: 0,
                 producer_view_version: self.view_version,

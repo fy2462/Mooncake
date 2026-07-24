@@ -121,7 +121,8 @@ impl EtcdOpLogStore {
 
 #[cfg(test)]
 mod tests {
-    use super::EtcdOpLogStore;
+    use super::{EtcdOpLogStore, decode_etcd_range_entry};
+    use crate::ha::OpLogRecord;
 
     #[test]
     fn inclusive_read_range_starts_at_requested_sequence() {
@@ -134,6 +135,29 @@ mod tests {
             ),
             "/oplog/cluster/00000000000000000007"
         );
+    }
+
+    #[test]
+    fn corrupt_range_entry_returns_contextual_error() {
+        let key = b"/oplog/cluster/00000000000000000024";
+        let value = serde_json::to_vec(&OpLogRecord {
+            seq: 24,
+            producer_view_version: 1,
+            payload: serde_json::json!({
+                "op": "put_end",
+                "key": "k1",
+                "tenant_id": 42,
+                "user_key": "k1",
+                "replicas": [],
+            })
+            .to_string(),
+        })
+        .unwrap();
+
+        let error = decode_etcd_range_entry(key, &value).unwrap_err();
+
+        assert!(error.to_string().contains("00000000000000000024"));
+        assert!(error.to_string().contains("tenant"));
     }
 }
 
@@ -390,6 +414,18 @@ async fn sleep_reconnect_delay(
     }
 }
 
+fn decode_etcd_range_entry(key: &[u8], value: &[u8]) -> Result<OpLogRecord, HaError> {
+    let key = String::from_utf8_lossy(key);
+    let value = std::str::from_utf8(value).map_err(|error| {
+        HaError::InvalidBackend(format!(
+            "etcd oplog value for key {key:?} is not UTF-8: {error}"
+        ))
+    })?;
+    deserialize_etcd_oplog_value(value).map_err(|error| {
+        HaError::InvalidBackend(format!("corrupt etcd oplog record at key {key:?}: {error}"))
+    })
+}
+
 // =============================================================================
 // EtcdOpLogStore — async extension methods
 // =============================================================================
@@ -432,13 +468,9 @@ impl EtcdOpLogStore {
             Ok(resp) => {
                 let revision = resp.header().map(|h| h.revision()).unwrap_or_default();
                 for kv in resp.kvs().iter().take(max_count) {
-                    if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
-                        if let Ok(entry) = deserialize_etcd_oplog_value(&val) {
-                            entries.push(entry);
-                            if entries.len() >= max_count {
-                                break;
-                            }
-                        }
+                    entries.push(decode_etcd_range_entry(kv.key(), kv.value())?);
+                    if entries.len() >= max_count {
+                        break;
                     }
                 }
                 revision
