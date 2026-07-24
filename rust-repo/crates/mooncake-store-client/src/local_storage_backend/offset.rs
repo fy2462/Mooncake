@@ -799,6 +799,7 @@ impl OffsetAllocatorStorageBackend {
         let count = state.index.entries.len();
         state.index = PersistedIndex::default();
         state.free_extents.clear();
+        state.deferred_free_extents.clear();
         state.used_bytes = 0;
         match std::fs::remove_file(self.data_path()) {
             Ok(()) => {}
@@ -1858,6 +1859,52 @@ mod durable_recovery_tests {
         ));
         continue_read.wait();
         assert_eq!(reader.join().unwrap().unwrap(), b"old-value");
+    }
+
+    #[test]
+    fn remove_all_detaches_deferred_extents_from_the_new_arena() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = OffsetAllocatorStorageBackend::new(config(
+            temp.path().to_path_buf(),
+            OffsetPersistMode::Strict,
+            true,
+        ));
+        backend.init().unwrap();
+        backend.write_object("a", b"old-a").unwrap();
+        backend.write_object("b", b"old-b").unwrap();
+
+        let first_a = backend.prepare_read("a").unwrap();
+        let second_a = backend.prepare_read("a").unwrap();
+        let old_b = backend.prepare_read("b").unwrap();
+        backend.delete_object("a").unwrap();
+        backend.write_object("b", b"replacement-b").unwrap();
+        {
+            let state = backend.state.lock();
+            assert_eq!(state.pinned_extents.values().sum::<usize>(), 3);
+            assert_eq!(state.deferred_free_extents.len(), 2);
+        }
+
+        assert_eq!(backend.remove_all().unwrap(), 1);
+        backend.write_object("new", b"new-arena-value").unwrap();
+        assert_eq!(record_offset(temp.path(), "new"), 0);
+
+        drop(first_a);
+        assert_eq!(
+            backend.state.lock().pinned_extents.values().sum::<usize>(),
+            2
+        );
+        drop(second_a);
+        drop(old_b);
+        {
+            let state = backend.state.lock();
+            assert!(state.pinned_extents.is_empty());
+            assert!(state.deferred_free_extents.is_empty());
+            assert!(state.free_extents.is_empty());
+        }
+
+        backend.write_object("later", b"later-value").unwrap();
+        assert_ne!(record_offset(temp.path(), "later"), 0);
+        assert_eq!(backend.read_object("new").unwrap(), b"new-arena-value");
     }
 
     #[test]
