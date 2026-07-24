@@ -13,6 +13,7 @@ const RECORD_HEADER_PREFIX_SIZE: usize = 20;
 const RECORD_FLAG_HAS_CRC: u32 = 1;
 const RECORD_KNOWN_FLAGS: u32 = RECORD_FLAG_HAS_CRC;
 const RECORD_VALUE_ALIGNMENT: u64 = 4096;
+const MAX_KEY_LEN: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecordHeader {
@@ -62,6 +63,11 @@ impl RecordHeader {
     }
 
     fn value_padding(key_len: u64) -> Result<u64, RecordFormatError> {
+        if key_len > MAX_KEY_LEN as u64 {
+            return Err(RecordFormatError(
+                "offset allocator key length exceeds 1 MiB",
+            ));
+        }
         if key_len > u32::MAX.into() {
             return Err(RecordFormatError("record key length exceeds u32"));
         }
@@ -257,6 +263,7 @@ enum CheckpointBoundary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DurableWriteBoundary {
     RecordWritten,
+    DataSync,
     DataSynced,
     CheckpointPublish,
 }
@@ -269,6 +276,8 @@ struct OffsetState {
     quota_bytes: u64,
     next_write_seq: u64,
     tombstones: Vec<String>,
+    pinned_extents: HashMap<ExtentIdentity, usize>,
+    deferred_free_extents: HashMap<ExtentIdentity, OffsetEntry>,
 }
 
 impl Default for OffsetState {
@@ -280,7 +289,37 @@ impl Default for OffsetState {
             quota_bytes: 0,
             next_write_seq: 1,
             tombstones: Vec::new(),
+            pinned_extents: HashMap::new(),
+            deferred_free_extents: HashMap::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExtentIdentity {
+    offset: u64,
+    len: u64,
+    write_seq: u64,
+}
+
+impl From<&OffsetEntry> for ExtentIdentity {
+    fn from(entry: &OffsetEntry) -> Self {
+        Self {
+            offset: entry.offset,
+            len: entry.len,
+            write_seq: entry.write_seq,
+        }
+    }
+}
+
+struct ReadExtentLease<'a> {
+    backend: &'a OffsetAllocatorStorageBackend,
+    entry: OffsetEntry,
+}
+
+impl Drop for ReadExtentLease<'_> {
+    fn drop(&mut self) {
+        self.backend.release_extent(&self.entry);
     }
 }
 
@@ -417,6 +456,8 @@ impl OffsetAllocatorStorageBackend {
             quota_bytes,
             next_write_seq: recovered.next_write_seq.max(1),
             tombstones: recovered.tombstones,
+            pinned_extents: HashMap::new(),
+            deferred_free_extents: HashMap::new(),
         };
         if upgraded {
             let state = self.state.lock();
@@ -533,7 +574,12 @@ impl OffsetAllocatorStorageBackend {
 
         let mut candidate_free = state.free_extents.clone();
         for entry in &committed_victims {
-            insert_free_extent(&mut candidate_free, entry.offset, entry.len);
+            if !state
+                .pinned_extents
+                .contains_key(&ExtentIdentity::from(entry))
+            {
+                insert_free_extent(&mut candidate_free, entry.offset, entry.len);
+            }
         }
         let Some((offset, candidate_next_offset)) = allocate_extent(
             &mut candidate_free,
@@ -564,6 +610,7 @@ impl OffsetAllocatorStorageBackend {
             write_zero_padding(&mut data_file, padding)?;
             data_file.write_all(data)?;
             boundary_hook(DurableWriteBoundary::RecordWritten)?;
+            boundary_hook(DurableWriteBoundary::DataSync)?;
             data_file.sync_data()?;
             boundary_hook(DurableWriteBoundary::DataSynced)?;
             Ok(())
@@ -574,13 +621,14 @@ impl OffsetAllocatorStorageBackend {
         }
 
         state.free_extents = candidate_free;
+        defer_pinned_extents(&mut state, &committed_victims);
         state.index.next_offset = candidate_next_offset;
         state.next_write_seq = next_write_seq;
 
         if let Some(old) = replaced {
             state.index.entries.remove(key);
             state.used_bytes = state.used_bytes.saturating_sub(old.len);
-            insert_free_extent(&mut state.free_extents, old.offset, old.len);
+            retire_extent(&mut state, old);
         }
         let fifo_seq = state.index.next_fifo_seq;
         state.index.next_fifo_seq = state.index.next_fifo_seq.saturating_add(1);
@@ -604,26 +652,62 @@ impl OffsetAllocatorStorageBackend {
     }
 
     pub fn read_object(&self, key: &str) -> StoreResult<Vec<u8>> {
+        self.read_object_with_hook(key, || {})
+    }
+
+    fn read_object_with_hook(
+        &self,
+        key: &str,
+        after_entry_lookup: impl FnOnce(),
+    ) -> StoreResult<Vec<u8>> {
         self.ensure_init()?;
-        let entry = self
-            .state
-            .lock()
-            .index
-            .entries
-            .get(key)
-            .cloned()
-            .ok_or_else(|| StoreError::KeyNotFound(key.to_string()))?;
+        let lease = self.pin_extent(key)?;
+        after_entry_lookup();
         let mut file = std::fs::File::open(self.data_path())?;
-        let value_offset = entry.absolute_value_offset().ok_or_else(|| {
+        let value_offset = lease.entry.absolute_value_offset().ok_or_else(|| {
             StoreError::Internal("offset allocator value offset overflow".to_string())
         })?;
         file.seek(SeekFrom::Start(value_offset))?;
-        let value_len = usize::try_from(entry.value_len()).map_err(|_| {
+        let value_len = usize::try_from(lease.entry.value_len()).map_err(|_| {
             StoreError::Internal("offset allocator value length exceeds usize".to_string())
         })?;
         let mut value = vec![0; value_len];
         file.read_exact(&mut value)?;
         Ok(value)
+    }
+
+    fn pin_extent(&self, key: &str) -> StoreResult<ReadExtentLease<'_>> {
+        let mut state = self.state.lock();
+        let entry = state
+            .index
+            .entries
+            .get(key)
+            .cloned()
+            .ok_or_else(|| StoreError::KeyNotFound(key.to_string()))?;
+        *state
+            .pinned_extents
+            .entry(ExtentIdentity::from(&entry))
+            .or_default() += 1;
+        Ok(ReadExtentLease {
+            backend: self,
+            entry,
+        })
+    }
+
+    fn release_extent(&self, entry: &OffsetEntry) {
+        let identity = ExtentIdentity::from(entry);
+        let mut state = self.state.lock();
+        let Some(readers) = state.pinned_extents.get_mut(&identity) else {
+            debug_assert!(false, "offset allocator extent lease was not pinned");
+            return;
+        };
+        *readers -= 1;
+        if *readers == 0 {
+            state.pinned_extents.remove(&identity);
+            if let Some(entry) = state.deferred_free_extents.remove(&identity) {
+                insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
+            }
+        }
     }
 
     pub fn exists(&self, key: &str) -> bool {
@@ -692,7 +776,7 @@ impl OffsetAllocatorStorageBackend {
         let mut state = self.state.lock();
         if let Some(entry) = state.index.entries.remove(key) {
             state.used_bytes = state.used_bytes.saturating_sub(entry.len);
-            insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
+            retire_extent(&mut state, entry);
             self.persist_state(&state)?;
         }
         Ok(())
@@ -733,7 +817,7 @@ impl OffsetAllocatorStorageBackend {
         entries: Vec<OffsetEntry>,
     ) -> StoreResult<()> {
         for entry in entries {
-            insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
+            retire_extent(state, entry);
         }
         self.persist_state(state)
     }
@@ -1088,7 +1172,10 @@ fn normalize_loaded_index(index: &mut PersistedIndex, file_len: u64) -> bool {
         .map(|entry| entry.offset.saturating_add(entry.len))
         .max()
         .unwrap_or(0);
-    let safe_next_offset = index.next_offset.max(occupied_end).max(file_len);
+    // The durable high-water mark is advisory. Rebuild it from the arena and
+    // validated survivors so a corrupt oversized checkpoint value cannot
+    // permanently make the allocator report that its quota is exhausted.
+    let safe_next_offset = occupied_end.max(file_len);
     let mut changed = safe_next_offset != index.next_offset;
     index.next_offset = safe_next_offset;
 
@@ -1173,6 +1260,24 @@ fn apply_pending_eviction(
         removed.push(entry);
     }
     removed
+}
+
+fn defer_pinned_extents(state: &mut OffsetState, entries: &[OffsetEntry]) {
+    for entry in entries {
+        let identity = ExtentIdentity::from(entry);
+        if state.pinned_extents.contains_key(&identity) {
+            state.deferred_free_extents.insert(identity, entry.clone());
+        }
+    }
+}
+
+fn retire_extent(state: &mut OffsetState, entry: OffsetEntry) {
+    let identity = ExtentIdentity::from(&entry);
+    if state.pinned_extents.contains_key(&identity) {
+        state.deferred_free_extents.insert(identity, entry);
+    } else {
+        insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
+    }
 }
 
 fn insert_free_extent(extents: &mut BTreeMap<u64, u64>, offset: u64, len: u64) {
@@ -1409,8 +1514,8 @@ mod record_primitive_tests {
     #[test]
     fn record_header_uses_explicit_little_endian_v3_layout() {
         let header = RecordHeader {
-            key_len: 0x0102_0304,
-            value_len: 0x1112_1314,
+            key_len: 0x000f_0304,
+            value_len: 0x0012_1314,
             write_seq: 0x2122_2324_2526_2728,
             flags: RECORD_FLAG_HAS_CRC,
             crc32: 0x3132_3334,
@@ -1422,7 +1527,7 @@ mod record_primitive_tests {
         assert_eq!(
             encoded,
             [
-                0x04, 0x03, 0x02, 0x01, 0x14, 0x13, 0x12, 0x11, 0x28, 0x27, 0x26, 0x25, 0x24, 0x23,
+                0x04, 0x03, 0x0f, 0x00, 0x14, 0x13, 0x12, 0x00, 0x28, 0x27, 0x26, 0x25, 0x24, 0x23,
                 0x22, 0x21, 0x01, 0x00, 0x00, 0x00, 0x34, 0x33, 0x32, 0x31,
             ]
         );
@@ -1533,6 +1638,7 @@ mod durable_recovery_tests {
     };
     use mooncake_store_core::StoreError;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Barrier};
 
     fn config(root_dir: PathBuf, mode: OffsetPersistMode, crc: bool) -> OffsetAllocatorConfig {
         OffsetAllocatorConfig {
@@ -1620,6 +1726,199 @@ mod durable_recovery_tests {
     }
 
     #[test]
+    fn active_reader_keeps_deleted_extent_until_value_copy_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        constrained.quota_bytes = 4_100;
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new(constrained));
+        backend.init().unwrap();
+        backend.write_object("a", b"aaaa").unwrap();
+        let original_offset = record_offset(temp.path(), "a");
+
+        let looked_up = Arc::new(Barrier::new(3));
+        let continue_first = Arc::new(Barrier::new(2));
+        let continue_second = Arc::new(Barrier::new(2));
+        let first_reader = {
+            let backend = Arc::clone(&backend);
+            let looked_up = Arc::clone(&looked_up);
+            let continue_read = Arc::clone(&continue_first);
+            std::thread::spawn(move || {
+                backend.read_object_with_hook("a", || {
+                    looked_up.wait();
+                    continue_read.wait();
+                })
+            })
+        };
+        let second_reader = {
+            let backend = Arc::clone(&backend);
+            let looked_up = Arc::clone(&looked_up);
+            let continue_read = Arc::clone(&continue_second);
+            std::thread::spawn(move || {
+                backend.read_object_with_hook("a", || {
+                    looked_up.wait();
+                    continue_read.wait();
+                })
+            })
+        };
+
+        looked_up.wait();
+        backend.delete_object("a").unwrap();
+        assert!(matches!(
+            backend.write_object("b", b"bbbb"),
+            Err(StoreError::NoAvailableHandle)
+        ));
+        continue_first.wait();
+        assert_eq!(first_reader.join().unwrap().unwrap(), b"aaaa");
+        assert!(matches!(
+            backend.write_object("b", b"bbbb"),
+            Err(StoreError::NoAvailableHandle)
+        ));
+        continue_second.wait();
+        assert_eq!(second_reader.join().unwrap().unwrap(), b"aaaa");
+        backend.write_object("b", b"bbbb").unwrap();
+        assert_eq!(record_offset(temp.path(), "b"), original_offset);
+    }
+
+    #[test]
+    fn active_reader_keeps_evicted_extent_out_of_the_reuse_pool() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        constrained.quota_bytes = 4_100;
+        let backend = Arc::new(OffsetAllocatorStorageBackend::new(constrained));
+        backend.init().unwrap();
+        backend.write_object("a", b"aaaa").unwrap();
+        let original_offset = record_offset(temp.path(), "a");
+        let looked_up = Arc::new(Barrier::new(2));
+        let continue_read = Arc::new(Barrier::new(2));
+        let reader = {
+            let backend = Arc::clone(&backend);
+            let looked_up = Arc::clone(&looked_up);
+            let continue_read = Arc::clone(&continue_read);
+            std::thread::spawn(move || {
+                backend.read_object_with_hook("a", || {
+                    looked_up.wait();
+                    continue_read.wait();
+                })
+            })
+        };
+
+        looked_up.wait();
+        assert!(matches!(
+            backend.write_object("b", b"bbbb"),
+            Err(StoreError::NoAvailableHandle)
+        ));
+        assert!(!backend.exists("a"));
+        continue_read.wait();
+        assert_eq!(reader.join().unwrap().unwrap(), b"aaaa");
+        backend.write_object("b", b"bbbb").unwrap();
+        assert_eq!(record_offset(temp.path(), "b"), original_offset);
+    }
+
+    #[test]
+    fn write_key_limit_accepts_one_mib_and_rejects_the_next_byte() {
+        const ONE_MIB: usize = 1024 * 1024;
+        let temp = tempfile::tempdir().unwrap();
+        let mut roomy = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        roomy.quota_bytes = 4 * 1024 * 1024;
+        let backend = OffsetAllocatorStorageBackend::new(roomy);
+        backend.init().unwrap();
+        let maximum = "m".repeat(ONE_MIB);
+        backend.write_object(&maximum, b"value").unwrap();
+        let arena_len = std::fs::metadata(arena(temp.path())).unwrap().len();
+
+        let oversized = "x".repeat(ONE_MIB + 1);
+        assert!(matches!(
+            backend.write_object(&oversized, b"value"),
+            Err(StoreError::InvalidParams(_))
+        ));
+        assert_eq!(
+            std::fs::metadata(arena(temp.path())).unwrap().len(),
+            arena_len
+        );
+    }
+
+    #[test]
+    fn recovery_rebuilds_next_offset_instead_of_trusting_checkpoint_high_water() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("a", b"aaaa").unwrap();
+        let arena_len = std::fs::metadata(arena(temp.path())).unwrap().len();
+        drop(backend);
+        rewrite_checkpoint_payload(temp.path(), |payload| {
+            payload["index"]["next_offset"] = serde_json::json!(u64::MAX - 1);
+        });
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert_eq!(restarted.read_object("a").unwrap(), b"aaaa");
+        restarted.write_object("b", b"bbbb").unwrap();
+        assert_eq!(record_offset(temp.path(), "b"), arena_len);
+    }
+
+    #[test]
+    fn recovery_rejects_extent_overflow_without_dropping_other_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        drop(backend);
+        rewrite_checkpoint_payload(temp.path(), |payload| {
+            payload["index"]["entries"]["bad"]["offset"] = serde_json::json!(u64::MAX - 10);
+            payload["index"]["entries"]["bad"]["len"] = serde_json::json!(100);
+        });
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn recovery_rejects_header_key_over_one_mib_before_allocating_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("bad", b"bad-value").unwrap();
+        backend.write_object("good", b"good-value").unwrap();
+        let bad = record_offset(temp.path(), "bad");
+        drop(backend);
+        write_at(
+            &arena(temp.path()),
+            bad,
+            &((1024 * 1024 + 1) as u32).to_le_bytes(),
+        );
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("bad"));
+        assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn data_sync_failure_does_not_publish_record_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        let pending = backend.prepare_write("unsynced", 5).unwrap();
+
+        let result = backend.commit_write_with_hook("unsynced", b"value", pending, |boundary| {
+            if boundary == DurableWriteBoundary::DataSync {
+                Err(StoreError::Internal(
+                    "injected sync_data failure".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_err());
+        assert!(!backend.exists("unsynced"));
+        assert!(
+            checkpoint_json(temp.path())["payload"]["index"]["entries"]
+                .get("unsynced")
+                .is_none()
+        );
+        drop(backend);
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+        assert!(!restarted.exists("unsynced"));
+    }
+
+    #[test]
     fn record_data_is_synced_before_checkpoint_publication() {
         let temp = tempfile::tempdir().unwrap();
         let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
@@ -1642,6 +1941,7 @@ mod durable_recovery_tests {
             observed,
             [
                 DurableWriteBoundary::RecordWritten,
+                DurableWriteBoundary::DataSync,
                 DurableWriteBoundary::DataSynced,
                 DurableWriteBoundary::CheckpointPublish,
             ]
