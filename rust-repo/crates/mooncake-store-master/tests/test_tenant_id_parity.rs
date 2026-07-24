@@ -57,6 +57,13 @@ fn strict_remote_pull_service() -> MasterServiceImpl {
     })
 }
 
+fn non_strict_remote_pull_service() -> MasterServiceImpl {
+    MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        remote_source_enabled: true,
+        ..Default::default()
+    })
+}
+
 fn non_strict_service() -> MasterServiceImpl {
     MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         lease_ttl: std::time::Duration::ZERO,
@@ -599,6 +606,64 @@ async fn strict_remote_pull_coordination_is_tenant_scoped_and_validated() {
     assert_eq!(
         acquire("tenant-b").await.unwrap().into_inner().action,
         proto::RemotePullAction::Wait as i32
+    );
+}
+
+#[tokio::test]
+async fn non_strict_remote_pull_coordination_uses_one_default_tenant_key() {
+    let service = non_strict_remote_pull_service();
+    let client_id = Uuid::new_v4();
+
+    let acquire = |tenant_id: &str| {
+        MasterService::acquire_remote_pull(
+            &service,
+            Request::new(proto::AcquireRemotePullRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "shared-key".into(),
+                tenant_id: tenant_id.into(),
+            }),
+        )
+    };
+
+    assert_eq!(
+        acquire("_reserved").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Pull as i32
+    );
+    assert_eq!(
+        acquire("tenant-a").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Wait as i32
+    );
+
+    MasterService::complete_remote_pull(
+        &service,
+        Request::new(proto::CompleteRemotePullRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "shared-key".into(),
+            success: true,
+            data_size: 128,
+            tenant_id: "bad\ncompletion-tenant".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        acquire("tenant-b").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Pull as i32
+    );
+
+    MasterService::release_remote_pull(
+        &service,
+        Request::new(proto::ReleaseRemotePullRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "shared-key".into(),
+            tenant_id: "_another-reserved-value".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        acquire("tenant-c").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Pull as i32
     );
 }
 
