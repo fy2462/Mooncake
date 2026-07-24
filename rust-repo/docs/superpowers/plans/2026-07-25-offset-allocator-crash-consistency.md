@@ -51,4 +51,3 @@ Design: `docs/superpowers/specs/2026-07-25-offset-allocator-crash-consistency-de
 - Request independent whole-slice review and fix every Critical/Important
   finding with RED/GREEN evidence.
 - Commit: `[Store] record OffsetAllocator persistence parity`.
-

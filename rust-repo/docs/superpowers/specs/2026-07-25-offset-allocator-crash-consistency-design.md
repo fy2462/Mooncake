@@ -2,6 +2,23 @@
 
 Date: 2026-07-25
 
+## Implementation status
+
+Completed on 2026-07-25. Commits `18485720` through `0bd6e962`
+implement the approved client-side persistence design, including follow-up
+review fixes for record bounds, read-extent lifetime, arena generations,
+ownership, retry behavior, and relaxed-generation rollover. The final
+verification and disposition are recorded in
+`change_logs/2026-07-25-001.md`.
+
+The delivered boundary remains Rust-owned: neither protobuf nor C++ Store
+code is a runtime dependency, and the master crate's separate append-only
+`StorageBackendType::OffsetAllocator` adapter is unchanged. The verified
+limitations are the Rust-native checkpoint/allocator representation, legacy
+raw-record integrity, unconditional per-record `sync_data` cost, best-effort
+`Drop` error visibility, and logical abrupt-exit tests rather than a physical
+power-loss harness.
+
 ## Goal and compatibility oracle
 
 Port the observable persistence and recovery contract introduced by C++ Store
@@ -164,4 +181,3 @@ TDD coverage must include:
 Keep public read/write/eviction APIs source compatible. Changing the default
 persistence mode to `Disabled` is intentional C++ parity; restart tests that
 require recovery must opt into `Strict` or `Relaxed` explicitly.
-

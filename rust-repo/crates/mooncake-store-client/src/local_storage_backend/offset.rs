@@ -473,10 +473,10 @@ impl OffsetAllocatorStorageBackend {
         *self.owner_lock.lock() = Some(owner_file);
 
         let result = self.init_owned_directory();
-        if result.is_err() {
-            if let Some(file) = self.owner_lock.lock().take() {
-                let _ = FileExt::unlock(&file);
-            }
+        if result.is_err()
+            && let Some(file) = self.owner_lock.lock().take()
+        {
+            let _ = FileExt::unlock(&file);
         }
         result
     }
@@ -808,14 +808,15 @@ impl OffsetAllocatorStorageBackend {
                 insert_free_extent(&mut state.free_extents, entry.offset, entry.len);
             }
         }
-        if state.pinned_extents.is_empty() && state.deferred_free_extents.is_empty() {
-            if let Some(arena_len) = state.pending_rebuild_arena_len.take() {
-                // Rebuild from the current live index, not from the index that
-                // existed when the checkpoint completed. Mutations between
-                // checkpoint and final unpin therefore cannot resurrect an
-                // extent from the detached generation (ABA).
-                state.free_extents = rebuild_free_extents(&state.index, arena_len);
-            }
+        if state.pinned_extents.is_empty()
+            && state.deferred_free_extents.is_empty()
+            && let Some(arena_len) = state.pending_rebuild_arena_len.take()
+        {
+            // Rebuild from the current live index, not from the index that
+            // existed when the checkpoint completed. Mutations between
+            // checkpoint and final unpin therefore cannot resurrect an
+            // extent from the detached generation (ABA).
+            state.free_extents = rebuild_free_extents(&state.index, arena_len);
         }
     }
 
@@ -1784,7 +1785,7 @@ mod checkpoint_tests {
         let checkpoint = b"recoverable-checkpoint";
         std::fs::write(&path, checkpoint).unwrap();
         std::fs::write(&arena, b"recoverable-arena").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0)).unwrap();
 
         let result = load_persisted_index(&path);
 
@@ -2552,6 +2553,21 @@ mod durable_recovery_tests {
         let rejected = restart(temp.path(), OffsetPersistMode::Strict, false);
         assert!(!rejected.exists("stale"));
         assert_eq!(rejected.read_object("good").unwrap(), b"good-value");
+    }
+
+    #[test]
+    fn crc_disabled_recovery_documents_undetected_in_place_value_corruption() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, false);
+        backend.write_object("weak", b"old-value").unwrap();
+        let weak_value = value_offset(temp.path(), "weak");
+        drop(backend);
+
+        write_at(&arena(temp.path()), weak_value, b"O");
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, false);
+        assert!(restarted.exists("weak"));
+        assert_eq!(restarted.read_object("weak").unwrap(), b"Old-value");
     }
 
     #[test]
