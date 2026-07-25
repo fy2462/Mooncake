@@ -133,6 +133,7 @@ fn offset_allocator_upgrades_legacy_index_before_appending() {
 fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
     let temp = tempfile::tempdir().unwrap();
     let config = offset_config(temp.path().to_path_buf());
+    let expected_quota_bytes = config.quota_bytes;
     let backend = OffsetAllocatorStorageBackend::new_with_persistence(
         config,
         persistence(OffsetPersistMode::Strict),
@@ -145,9 +146,10 @@ fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
     )
     .unwrap();
     assert_eq!(checkpoint["format"], "mooncake-offset-allocator-checkpoint");
-    assert_eq!(checkpoint["version"], 2);
+    assert_eq!(checkpoint["version"], 3);
     assert!(checkpoint["payload_crc32c"].is_u64());
     assert!(checkpoint["payload"].is_object());
+    assert_eq!(checkpoint["payload"]["quota_bytes"], expected_quota_bytes);
 }
 
 #[test]

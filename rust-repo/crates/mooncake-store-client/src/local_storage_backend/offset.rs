@@ -243,7 +243,8 @@ struct PersistedIndex {
 }
 
 const CHECKPOINT_FORMAT: &str = "mooncake-offset-allocator-checkpoint";
-const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_VERSION: u32 = 3;
+const MIN_SUPPORTED_CHECKPOINT_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct CheckpointPayload {
@@ -252,6 +253,8 @@ struct CheckpointPayload {
     next_write_seq: u64,
     #[serde(default)]
     tombstones: Vec<String>,
+    #[serde(default)]
+    quota_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,6 +287,7 @@ struct OffsetState {
     free_extents: BTreeMap<u64, u64>,
     used_bytes: u64,
     quota_bytes: u64,
+    configured_quota_bytes: u64,
     next_write_seq: u64,
     tombstones: Vec<String>,
     dirty: bool,
@@ -300,6 +304,7 @@ impl Default for OffsetState {
             free_extents: BTreeMap::new(),
             used_bytes: 0,
             quota_bytes: 0,
+            configured_quota_bytes: 0,
             next_write_seq: 1,
             tombstones: Vec::new(),
             dirty: false,
@@ -349,6 +354,8 @@ struct LoadedCheckpoint {
     index: PersistedIndex,
     next_write_seq: u64,
     tombstones: Vec<String>,
+    quota_bytes: Option<u64>,
+    entry_flags_authenticated: bool,
     recovered_checkpoint: bool,
 }
 
@@ -514,6 +521,7 @@ impl OffsetAllocatorStorageBackend {
             };
             *self.state.lock() = OffsetState {
                 quota_bytes,
+                configured_quota_bytes: self.config.quota_bytes,
                 ..OffsetState::default()
             };
             self.initialized.store(true, Ordering::Release);
@@ -521,19 +529,36 @@ impl OffsetAllocatorStorageBackend {
         }
 
         remove_stale_checkpoint_tmp(&self.index_path())?;
-        let loaded = load_checkpoint(&self.index_path())?;
-        let file_len = match std::fs::metadata(self.data_path()) {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-            Err(error) => return Err(error.into()),
-        };
-        let mut recovered = recover_checkpoint(loaded, &self.data_path(), file_len)?;
-        let upgraded = normalize_loaded_index(&mut recovered.index, file_len);
         let quota_bytes = if self.config.quota_bytes > 0 {
             self.config.quota_bytes
         } else {
             (fs2::available_space(self.data_dir())? as f64 * 0.90) as u64
         };
+        let mut loaded = load_checkpoint(&self.index_path())?;
+        let mut file_len = match std::fs::metadata(self.data_path()) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let capacity_compatible = match loaded.quota_bytes {
+            Some(checkpoint_quota) => {
+                checkpoint_quota == self.config.quota_bytes && file_len <= quota_bytes
+            }
+            None => loaded.recovered_checkpoint && file_len <= quota_bytes,
+        };
+        if !capacity_compatible {
+            // Semantic corruption, unsupported state, an orphan arena, or a
+            // configured-capacity mismatch starts a new generation. Read/open
+            // errors have already returned above, so they cannot reach this
+            // destructive cleanup path.
+            remove_file_if_present(&self.index_path())?;
+            remove_file_if_present(&self.data_path())?;
+            loaded = empty_loaded_checkpoint();
+            file_len = 0;
+        }
+        let mut recovered = recover_checkpoint(loaded, &self.data_path(), file_len)?;
+        let upgraded = normalize_loaded_index(&mut recovered.index, file_len)
+            || (recovered.recovered_checkpoint && recovered.quota_bytes.is_none());
         let used_bytes = recovered
             .index
             .entries
@@ -541,12 +566,13 @@ impl OffsetAllocatorStorageBackend {
             .map(|entry| entry.len)
             .sum();
         let free_extents = rebuild_free_extents(&recovered.index, file_len);
-        let last_checkpoint_at = recovered.recovered_checkpoint.then(|| (self.clock)());
+        let last_checkpoint_at = Some((self.clock)());
         *self.state.lock() = OffsetState {
             index: recovered.index,
             free_extents,
             used_bytes,
             quota_bytes,
+            configured_quota_bytes: self.config.quota_bytes,
             next_write_seq: recovered.next_write_seq.max(1),
             tombstones: recovered.tombstones,
             dirty: false,
@@ -977,6 +1003,7 @@ impl OffsetAllocatorStorageBackend {
             &state.index,
             state.next_write_seq,
             &state.tombstones,
+            state.configured_quota_bytes,
         )
     }
 
@@ -1171,13 +1198,14 @@ fn canonical_json_bytes(value: &serde_json::Value) -> StoreResult<Vec<u8>> {
 
 #[cfg(test)]
 fn checkpoint_envelope(index: &PersistedIndex) -> StoreResult<CheckpointEnvelope> {
-    checkpoint_envelope_state(index, 1, &[])
+    checkpoint_envelope_state(index, 1, &[], u64::MAX)
 }
 
 fn checkpoint_envelope_state(
     index: &PersistedIndex,
     next_write_seq: u64,
     tombstones: &[String],
+    quota_bytes: u64,
 ) -> StoreResult<CheckpointEnvelope> {
     let payload = serde_json::to_value(CheckpointPayload {
         index: PersistedIndex {
@@ -1187,6 +1215,7 @@ fn checkpoint_envelope_state(
         },
         next_write_seq: next_write_seq.max(1),
         tombstones: tombstones.to_vec(),
+        quota_bytes: Some(quota_bytes),
     })?;
     Ok(CheckpointEnvelope {
         format: CHECKPOINT_FORMAT.to_string(),
@@ -1201,6 +1230,8 @@ fn empty_loaded_checkpoint() -> LoadedCheckpoint {
         index: PersistedIndex::default(),
         next_write_seq: 1,
         tombstones: Vec::new(),
+        quota_bytes: None,
+        entry_flags_authenticated: false,
         recovered_checkpoint: false,
     }
 }
@@ -1224,6 +1255,8 @@ fn load_checkpoint(path: &Path) -> StoreResult<LoadedCheckpoint> {
                 index,
                 next_write_seq: 1,
                 tombstones: Vec::new(),
+                quota_bytes: None,
+                entry_flags_authenticated: false,
                 recovered_checkpoint: true,
             },
             Err(_) => empty_loaded_checkpoint(),
@@ -1233,7 +1266,7 @@ fn load_checkpoint(path: &Path) -> StoreResult<LoadedCheckpoint> {
     let Ok(envelope) = serde_json::from_value::<CheckpointEnvelope>(value) else {
         return Ok(empty_loaded_checkpoint());
     };
-    if envelope.version != CHECKPOINT_VERSION {
+    if !(MIN_SUPPORTED_CHECKPOINT_VERSION..=CHECKPOINT_VERSION).contains(&envelope.version) {
         return Ok(empty_loaded_checkpoint());
     }
     let Ok(payload_bytes) = canonical_json_bytes(&envelope.payload) else {
@@ -1245,10 +1278,15 @@ fn load_checkpoint(path: &Path) -> StoreResult<LoadedCheckpoint> {
     let Ok(payload) = serde_json::from_value::<CheckpointPayload>(envelope.payload) else {
         return Ok(empty_loaded_checkpoint());
     };
+    if envelope.version == CHECKPOINT_VERSION && payload.quota_bytes.is_none() {
+        return Ok(empty_loaded_checkpoint());
+    }
     Ok(LoadedCheckpoint {
         index: payload.index,
         next_write_seq: payload.next_write_seq.max(1),
         tombstones: payload.tombstones,
+        quota_bytes: payload.quota_bytes,
+        entry_flags_authenticated: envelope.version >= 2,
         recovered_checkpoint: true,
     })
 }
@@ -1269,7 +1307,7 @@ fn write_checkpoint_with_hook(
     index: &PersistedIndex,
     mut boundary_hook: impl FnMut(CheckpointBoundary) -> std::io::Result<()>,
 ) -> StoreResult<()> {
-    write_checkpoint_state_with_hook(path, index, 1, &[], &mut boundary_hook)
+    write_checkpoint_state_with_hook(path, index, 1, &[], u64::MAX, &mut boundary_hook)
 }
 
 fn write_checkpoint_state(
@@ -1277,8 +1315,16 @@ fn write_checkpoint_state(
     index: &PersistedIndex,
     next_write_seq: u64,
     tombstones: &[String],
+    quota_bytes: u64,
 ) -> StoreResult<()> {
-    write_checkpoint_state_with_hook(path, index, next_write_seq, tombstones, &mut |_| Ok(()))
+    write_checkpoint_state_with_hook(
+        path,
+        index,
+        next_write_seq,
+        tombstones,
+        quota_bytes,
+        &mut |_| Ok(()),
+    )
 }
 
 fn write_checkpoint_state_with_hook(
@@ -1286,6 +1332,7 @@ fn write_checkpoint_state_with_hook(
     index: &PersistedIndex,
     next_write_seq: u64,
     tombstones: &[String],
+    quota_bytes: u64,
     boundary_hook: &mut impl FnMut(CheckpointBoundary) -> std::io::Result<()>,
 ) -> StoreResult<()> {
     let temporary = checkpoint_tmp_path(path);
@@ -1293,6 +1340,7 @@ fn write_checkpoint_state_with_hook(
         index,
         next_write_seq,
         tombstones,
+        quota_bytes,
     )?)?;
     let result = (|| -> StoreResult<()> {
         let mut file = std::fs::OpenOptions::new()
@@ -1354,7 +1402,7 @@ fn recover_checkpoint_with_overlap_probe(
 
     let mut survivors = HashMap::new();
     let mut last_occupied: Option<(u64, u64)> = None;
-    for (key, entry) in candidates {
+    for (key, mut entry) in candidates {
         let Some(end) = entry.offset.checked_add(entry.len) else {
             continue;
         };
@@ -1379,7 +1427,14 @@ fn recover_checkpoint_with_overlap_probe(
                 let Some(file) = arena.as_mut() else {
                     continue;
                 };
-                validate_v3_record(file, arena_len, &key, &entry, loaded.next_write_seq)?
+                validate_v3_record(
+                    file,
+                    arena_len,
+                    &key,
+                    &mut entry,
+                    loaded.next_write_seq,
+                    loaded.entry_flags_authenticated,
+                )?
             }
             OffsetEntryFormat::Unknown => false,
         };
@@ -1414,13 +1469,14 @@ fn validate_v3_record(
     file: &mut std::fs::File,
     arena_len: u64,
     checkpoint_key: &str,
-    entry: &OffsetEntry,
+    entry: &mut OffsetEntry,
     next_write_seq: u64,
+    entry_flags_authenticated: bool,
 ) -> StoreResult<bool> {
     if entry.write_seq == 0
         || entry.write_seq >= next_write_seq
         || entry.value_len > u32::MAX.into()
-        || entry.record_flags & !RECORD_KNOWN_FLAGS != 0
+        || (entry_flags_authenticated && entry.record_flags & !RECORD_KNOWN_FLAGS != 0)
     {
         return Ok(false);
     }
@@ -1438,7 +1494,7 @@ fn validate_v3_record(
         return Ok(false);
     };
     if header.write_seq != entry.write_seq
-        || header.flags != entry.record_flags
+        || (entry_flags_authenticated && header.flags != entry.record_flags)
         || header.key_len as usize != checkpoint_key.len()
         || u64::from(header.value_len) != entry.value_len
         || record_size != entry.len
@@ -1446,6 +1502,9 @@ fn validate_v3_record(
         || header.validate_extent(entry.offset, arena_len).is_err()
     {
         return Ok(false);
+    }
+    if !entry_flags_authenticated {
+        entry.record_flags = header.flags;
     }
 
     let mut key = vec![0; header.key_len as usize];
@@ -1567,19 +1626,25 @@ fn allocate_extent(
 ) -> Option<(u64, u64)> {
     let reusable = free_extents
         .iter()
-        .find(|(_, len)| **len >= required)
+        .find(|(offset, len)| {
+            **len >= required
+                && offset
+                    .checked_add(required)
+                    .is_some_and(|end| end <= quota_bytes)
+        })
         .map(|(offset, len)| (*offset, *len));
     if let Some((offset, len)) = reusable {
         free_extents.remove(&offset);
         if len > required {
-            free_extents.insert(offset + required, len - required);
+            free_extents.insert(offset.checked_add(required)?, len - required);
         }
         return Some((offset, next_offset));
     }
-    if next_offset.saturating_add(required) > quota_bytes {
+    let end = next_offset.checked_add(required)?;
+    if end > quota_bytes {
         return None;
     }
-    Some((next_offset, next_offset.saturating_add(required)))
+    Some((next_offset, end))
 }
 
 fn apply_pending_eviction(
@@ -1683,7 +1748,7 @@ mod checkpoint_tests {
         let expected = index("a", 8);
         let tombstones = vec!["evicted".to_string()];
 
-        write_checkpoint_state(&path, &expected, 42, &tombstones).unwrap();
+        write_checkpoint_state(&path, &expected, 42, &tombstones, 8 * 1024).unwrap();
         let loaded = load_checkpoint(&path).unwrap();
 
         assert_eq!(loaded.index.entries, expected.entries);
@@ -1976,12 +2041,15 @@ mod durable_recovery_tests {
     use super::{
         DurableWriteBoundary, OffsetAllocatorConfig, OffsetAllocatorStorageBackend, OffsetEntry,
         OffsetEntryFormat, OffsetEvictionPolicy, OffsetPersistenceConfig, PersistedIndex,
-        RECORD_FLAG_HAS_CRC, RECORD_HEADER_SIZE, RecordHeader, canonical_json_bytes, crc32c,
-        recover_checkpoint_with_overlap_probe,
+        RECORD_FLAG_HAS_CRC, RECORD_HEADER_SIZE, RecordHeader, allocate_extent,
+        canonical_json_bytes, crc32c, recover_checkpoint_with_overlap_probe,
     };
     use mooncake_store_core::StoreError;
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
+    use std::time::Duration;
 
     fn config(root_dir: PathBuf, _mode: OffsetPersistMode, _crc: bool) -> OffsetAllocatorConfig {
         OffsetAllocatorConfig {
@@ -2033,6 +2101,29 @@ mod durable_recovery_tests {
         std::fs::write(checkpoint(root), serde_json::to_vec(&envelope).unwrap()).unwrap();
     }
 
+    fn rewrite_checkpoint_as_legacy_version(root: &Path, version: u32) {
+        let mut envelope = checkpoint_json(root);
+        envelope["version"] = serde_json::json!(version);
+        envelope["payload"]
+            .as_object_mut()
+            .unwrap()
+            .remove("quota_bytes");
+        if version == 1 {
+            for entry in envelope["payload"]["index"]["entries"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+            {
+                entry.as_object_mut().unwrap().remove("record_flags");
+            }
+        }
+        envelope["payload_crc32c"] = serde_json::json!(crc32c([canonical_json_bytes(
+            &envelope["payload"]
+        )
+        .unwrap()]));
+        std::fs::write(checkpoint(root), serde_json::to_vec(&envelope).unwrap()).unwrap();
+    }
+
     fn write_at(path: &Path, offset: u64, bytes: &[u8]) {
         use std::io::{Seek, SeekFrom, Write};
         let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
@@ -2077,6 +2168,189 @@ mod durable_recovery_tests {
     }
 
     #[test]
+    fn checkpoint_authenticates_configured_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+
+        backend.write_object("alpha", b"value-a").unwrap();
+
+        let durable = checkpoint_json(temp.path());
+        assert_eq!(durable["version"], 3);
+        assert_eq!(durable["payload"]["quota_bytes"], 64 * 1024);
+    }
+
+    #[test]
+    fn automatic_quota_checkpoint_recovers_across_dynamic_capacity_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut automatic = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        automatic.quota_bytes = 0;
+        let original = OffsetAllocatorStorageBackend::new_with_persistence(
+            automatic.clone(),
+            persistence(OffsetPersistMode::Strict, true),
+        );
+        original.init().unwrap();
+        original.write_object("auto", b"auto-value").unwrap();
+        assert_eq!(checkpoint_json(temp.path())["payload"]["quota_bytes"], 0);
+        original.simulate_abrupt_exit();
+
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            automatic,
+            persistence(OffsetPersistMode::Strict, true),
+        );
+        restarted.init().unwrap();
+
+        assert_eq!(restarted.read_object("auto").unwrap(), b"auto-value");
+    }
+
+    #[test]
+    fn quota_reduction_fresh_starts_without_exceeding_new_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = restart(temp.path(), OffsetPersistMode::Strict, true);
+        original.write_object("old", b"old-value").unwrap();
+        original.simulate_abrupt_exit();
+
+        let quota = RecordHeader::record_size(3, 9).unwrap();
+        let mut reduced = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        reduced.eviction_policy = OffsetEvictionPolicy::None;
+        reduced.quota_bytes = quota;
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            reduced,
+            persistence(OffsetPersistMode::Strict, true),
+        );
+        restarted.init().unwrap();
+
+        assert!(!restarted.exists("old"));
+        restarted.write_object("new", b"new-value").unwrap();
+        let entry = checkpoint_entry(temp.path(), "new");
+        assert!(entry["offset"].as_u64().unwrap() + entry["len"].as_u64().unwrap() <= quota);
+        assert!(restarted.space_usage().0 <= quota);
+        assert!(std::fs::metadata(arena(temp.path())).unwrap().len() <= quota);
+    }
+
+    #[test]
+    fn quota_increase_fresh_starts_instead_of_recovering_old_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let record_len = RecordHeader::record_size(3, 9).unwrap();
+        let mut small = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        small.eviction_policy = OffsetEvictionPolicy::None;
+        small.quota_bytes = record_len;
+        let original = OffsetAllocatorStorageBackend::new_with_persistence(
+            small,
+            persistence(OffsetPersistMode::Strict, true),
+        );
+        original.init().unwrap();
+        original.write_object("old", b"old-value").unwrap();
+        original.simulate_abrupt_exit();
+
+        let quota = record_len * 2;
+        let mut expanded = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        expanded.eviction_policy = OffsetEvictionPolicy::None;
+        expanded.quota_bytes = quota;
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            expanded,
+            persistence(OffsetPersistMode::Strict, true),
+        );
+        restarted.init().unwrap();
+
+        assert!(!restarted.exists("old"));
+        restarted.write_object("new", b"new-value").unwrap();
+        assert_eq!(checkpoint_entry(temp.path(), "new")["offset"], 0);
+        assert!(std::fs::metadata(arena(temp.path())).unwrap().len() <= quota);
+    }
+
+    #[test]
+    fn legacy_v1_checkpoint_recovers_within_quota_and_upgrades_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = restart(temp.path(), OffsetPersistMode::Strict, false);
+        original.write_object("legacy", b"v1-value").unwrap();
+        original.simulate_abrupt_exit();
+        rewrite_checkpoint_as_legacy_version(temp.path(), 1);
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, false);
+
+        assert_eq!(restarted.read_object("legacy").unwrap(), b"v1-value");
+        let upgraded = checkpoint_json(temp.path());
+        assert_eq!(upgraded["version"], 3);
+        assert_eq!(upgraded["payload"]["quota_bytes"], 64 * 1024);
+    }
+
+    #[test]
+    fn legacy_v2_checkpoint_recovers_within_quota_and_upgrades_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = restart(temp.path(), OffsetPersistMode::Strict, true);
+        original.write_object("legacy", b"v2-value").unwrap();
+        original.simulate_abrupt_exit();
+        rewrite_checkpoint_as_legacy_version(temp.path(), 2);
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
+
+        assert_eq!(restarted.read_object("legacy").unwrap(), b"v2-value");
+        let upgraded = checkpoint_json(temp.path());
+        assert_eq!(upgraded["version"], 3);
+        assert_eq!(upgraded["payload"]["quota_bytes"], 64 * 1024);
+    }
+
+    #[test]
+    fn oversized_legacy_checkpoint_fresh_starts_within_current_quota() {
+        let temp = tempfile::tempdir().unwrap();
+        let original = restart(temp.path(), OffsetPersistMode::Strict, true);
+        original.write_object("legacy", b"v2-value").unwrap();
+        original.simulate_abrupt_exit();
+        rewrite_checkpoint_as_legacy_version(temp.path(), 2);
+
+        let quota = RecordHeader::record_size(3, 1).unwrap();
+        let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        constrained.eviction_policy = OffsetEvictionPolicy::None;
+        constrained.quota_bytes = quota;
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            constrained,
+            persistence(OffsetPersistMode::Strict, true),
+        );
+        restarted.init().unwrap();
+
+        assert!(!restarted.exists("legacy"));
+        assert!(!arena(temp.path()).exists());
+        restarted.write_object("new", b"1").unwrap();
+        assert!(std::fs::metadata(arena(temp.path())).unwrap().len() <= quota);
+    }
+
+    #[test]
+    fn oversized_orphan_arena_is_discarded_before_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("offset")).unwrap();
+        let quota = RecordHeader::record_size(3, 9).unwrap();
+        std::fs::File::create(arena(temp.path()))
+            .unwrap()
+            .set_len(quota + 1)
+            .unwrap();
+        let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
+        constrained.eviction_policy = OffsetEvictionPolicy::None;
+        constrained.quota_bytes = quota;
+        let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            constrained,
+            persistence(OffsetPersistMode::Strict, true),
+        );
+
+        backend.init().unwrap();
+
+        assert!(!arena(temp.path()).exists());
+        backend.write_object("new", b"new-value").unwrap();
+        let entry = checkpoint_entry(temp.path(), "new");
+        assert!(entry["offset"].as_u64().unwrap() + entry["len"].as_u64().unwrap() <= quota);
+        assert!(std::fs::metadata(arena(temp.path())).unwrap().len() <= quota);
+    }
+
+    #[test]
+    fn reusable_extent_cannot_cross_configured_capacity() {
+        let mut free_extents = BTreeMap::from([(9, 100)]);
+
+        let allocation = allocate_extent(&mut free_extents, 11, 10, 2);
+
+        assert_eq!(allocation, None);
+        assert_eq!(free_extents, BTreeMap::from([(9, 100)]));
+    }
+
+    #[test]
     fn recovery_overlap_validation_is_linear_in_checkpoint_entries() {
         const ENTRY_COUNT: u64 = 10_000;
         let temp = tempfile::tempdir().unwrap();
@@ -2107,6 +2381,8 @@ mod durable_recovery_tests {
             },
             next_write_seq: 1,
             tombstones: Vec::new(),
+            quota_bytes: None,
+            entry_flags_authenticated: false,
             recovered_checkpoint: true,
         };
         let mut overlap_comparisons = 0;
@@ -2480,7 +2756,15 @@ mod durable_recovery_tests {
     #[test]
     fn abrupt_relaxed_restart_recovers_only_the_older_checkpoint() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = restart(temp.path(), OffsetPersistMode::Relaxed, true);
+        let now = Arc::new(AtomicU64::new(100));
+        let mut backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            config(temp.path().to_path_buf(), OffsetPersistMode::Relaxed, true),
+            persistence(OffsetPersistMode::Relaxed, true),
+        );
+        let test_now = Arc::clone(&now);
+        backend.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
+        backend.init().unwrap();
+        now.store(160, Ordering::SeqCst);
         backend.write_object("before", b"durable").unwrap();
         let older_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
         backend.write_object("after", b"not-checkpointed").unwrap();
@@ -2640,7 +2924,8 @@ mod durable_recovery_tests {
         write_at(&arena(temp.path()), a_value, b"A");
 
         let mut constrained = config(temp.path().to_path_buf(), OffsetPersistMode::Strict, true);
-        constrained.quota_bytes = 8_200;
+        constrained.high_ratio = 0.15;
+        constrained.low_ratio = 0.05;
         let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
             constrained,
             persistence(OffsetPersistMode::Strict, true),
@@ -2973,7 +3258,14 @@ mod persistence_mode_tests {
         assert!(relaxed.state.lock().index.entries["c"].offset < record_len * 2);
         relaxed.simulate_abrupt_exit();
 
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let mut restart_config = config(temp.path(), OffsetPersistMode::Relaxed);
+        restart_config.eviction_policy = OffsetEvictionPolicy::None;
+        restart_config.quota_bytes = record_len * 2;
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            restart_config,
+            persistence(OffsetPersistMode::Relaxed),
+        );
+        restarted.init().unwrap();
         assert_eq!(restarted.read_object("c").unwrap(), b"3");
         assert!(!restarted.exists("a"));
         assert!(!restarted.exists("b"));
@@ -3008,7 +3300,14 @@ mod persistence_mode_tests {
         relaxed.write_object("b", b"2").unwrap();
         relaxed.simulate_abrupt_exit();
 
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let mut restart_config = config(temp.path(), OffsetPersistMode::Relaxed);
+        restart_config.eviction_policy = OffsetEvictionPolicy::None;
+        restart_config.quota_bytes = record_len;
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            restart_config,
+            persistence(OffsetPersistMode::Relaxed),
+        );
+        restarted.init().unwrap();
         assert!(!restarted.exists("a"));
         assert_eq!(restarted.read_object("b").unwrap(), b"2");
     }
@@ -3054,7 +3353,14 @@ mod persistence_mode_tests {
         assert_eq!(relaxed.read_object("d").unwrap(), b"4");
         relaxed.simulate_abrupt_exit();
 
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let mut restart_config = config(temp.path(), OffsetPersistMode::Relaxed);
+        restart_config.eviction_policy = OffsetEvictionPolicy::None;
+        restart_config.quota_bytes = record_len * 3;
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            restart_config,
+            persistence(OffsetPersistMode::Relaxed),
+        );
+        restarted.init().unwrap();
         assert!(!restarted.exists("a"));
         assert!(!restarted.exists("b"));
         assert!(!restarted.exists("c"));
@@ -3143,21 +3449,21 @@ mod persistence_mode_tests {
     }
 
     #[test]
-    fn relaxed_first_mutation_checkpoints_but_second_waits_for_interval() {
+    fn fresh_relaxed_waits_for_interval_before_first_checkpoint() {
         let temp = tempfile::tempdir().unwrap();
-        let relaxed = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
 
+        now.store(159, Ordering::SeqCst);
         relaxed.write_object("first", b"one").unwrap();
-        let first_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+        assert!(!checkpoint(temp.path()).exists());
+
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("second", b"two").unwrap();
 
-        assert_eq!(
-            std::fs::read(checkpoint(temp.path())).unwrap(),
-            first_checkpoint
-        );
         let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
         assert!(durable.index.entries.contains_key("first"));
-        assert!(!durable.index.entries.contains_key("second"));
+        assert!(durable.index.entries.contains_key("second"));
         relaxed.simulate_abrupt_exit();
     }
 
@@ -3166,6 +3472,7 @@ mod persistence_mode_tests {
         let temp = tempfile::tempdir().unwrap();
         let now = Arc::new(AtomicU64::new(100));
         let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("durable", b"one").unwrap();
         let recovered_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
         relaxed.simulate_abrupt_exit();
@@ -3268,7 +3575,13 @@ mod persistence_mode_tests {
     #[test]
     fn relaxed_drop_waits_for_last_arc_without_deadlocking() {
         let temp = tempfile::tempdir().unwrap();
-        let relaxed = Arc::new(backend(temp.path(), OffsetPersistMode::Relaxed));
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = Arc::new(backend_with_clock(
+            temp.path(),
+            OffsetPersistMode::Relaxed,
+            Arc::clone(&now),
+        ));
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("first", b"one").unwrap();
         let first_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
         relaxed.write_object("last-arc", b"two").unwrap();
@@ -3334,6 +3647,7 @@ mod persistence_mode_tests {
         let temp = tempfile::tempdir().unwrap();
         let now = Arc::new(AtomicU64::new(100));
         let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("checkpointed", b"old-value").unwrap();
         let pending = relaxed.prepare_watermark_eviction(0.01, 0.001).unwrap();
         assert_eq!(pending.keys(), ["checkpointed"]);
@@ -3341,7 +3655,8 @@ mod persistence_mode_tests {
         assert!(!relaxed.exists("checkpointed"));
         relaxed.simulate_abrupt_exit();
 
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let restarted =
+            backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
         assert_eq!(restarted.read_object("checkpointed").unwrap(), b"old-value");
     }
 
@@ -3350,6 +3665,7 @@ mod persistence_mode_tests {
         let temp = tempfile::tempdir().unwrap();
         let now = Arc::new(AtomicU64::new(100));
         let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("a", b"aaaa").unwrap();
         relaxed.write_object("b", b"bbbb").unwrap();
         let pending = relaxed.prepare_watermark_eviction(0.10, 0.05).unwrap();
@@ -3359,14 +3675,15 @@ mod persistence_mode_tests {
 
         relaxed.write_object("a", b"rewritten").unwrap();
         assert!(!relaxed.state.lock().tombstones.contains(&"a".to_string()));
-        now.store(160, Ordering::SeqCst);
+        now.store(220, Ordering::SeqCst);
         relaxed.write_object("trigger", b"checkpoint").unwrap();
 
         let durable = load_checkpoint(&checkpoint(temp.path())).unwrap();
         assert!(durable.index.entries.contains_key("a"));
         assert!(!durable.tombstones.contains(&"a".to_string()));
         relaxed.simulate_abrupt_exit();
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let restarted =
+            backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
         assert_eq!(restarted.read_object("a").unwrap(), b"rewritten");
     }
 
@@ -3444,7 +3761,9 @@ mod persistence_mode_tests {
     #[test]
     fn abrupt_relaxed_remove_all_recovers_last_checkpoint_until_interval() {
         let temp = tempfile::tempdir().unwrap();
-        let relaxed = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let now = Arc::new(AtomicU64::new(100));
+        let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("checkpointed", b"old-value").unwrap();
         let prior_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
 
@@ -3457,7 +3776,8 @@ mod persistence_mode_tests {
         assert!(arena(temp.path()).exists());
         relaxed.simulate_abrupt_exit();
 
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let restarted =
+            backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
         assert_eq!(restarted.read_object("checkpointed").unwrap(), b"old-value");
     }
 
@@ -3466,17 +3786,19 @@ mod persistence_mode_tests {
         let temp = tempfile::tempdir().unwrap();
         let now = Arc::new(AtomicU64::new(100));
         let relaxed = backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
+        now.store(160, Ordering::SeqCst);
         relaxed.write_object("old", b"old-value").unwrap();
         let old_arena_len = std::fs::metadata(arena(temp.path())).unwrap().len();
         relaxed.remove_all().unwrap();
         relaxed.write_object("new", b"new-value").unwrap();
         assert!(relaxed.state.lock().index.entries["new"].offset >= old_arena_len);
 
-        now.store(160, Ordering::SeqCst);
+        now.store(220, Ordering::SeqCst);
         relaxed.write_object("trigger", b"checkpoint").unwrap();
         relaxed.simulate_abrupt_exit();
 
-        let restarted = backend(temp.path(), OffsetPersistMode::Relaxed);
+        let restarted =
+            backend_with_clock(temp.path(), OffsetPersistMode::Relaxed, Arc::clone(&now));
         assert!(!restarted.exists("old"));
         assert_eq!(restarted.read_object("new").unwrap(), b"new-value");
         assert_eq!(restarted.read_object("trigger").unwrap(), b"checkpoint");

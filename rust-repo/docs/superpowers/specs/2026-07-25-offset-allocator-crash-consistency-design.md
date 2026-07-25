@@ -7,7 +7,8 @@ Date: 2026-07-25
 Completed on 2026-07-25. Commits `18485720` through `0bd6e962`
 implement the approved client-side persistence design, including follow-up
 review fixes for record bounds, read-extent lifetime, arena generations,
-ownership, retry behavior, and relaxed-generation rollover. The final
+ownership, retry behavior, relaxed-generation rollover, capacity-bound
+recovery, and fresh Relaxed scheduling. The final
 verification and disposition are recorded in
 `change_logs/2026-07-25-001.md`.
 
@@ -56,8 +57,9 @@ field layout.
 
 - `Disabled` is the C++-compatible default. No checkpoint is recovered or
   written.
-- `Relaxed` checkpoints the first dirty write and then when the configured
-  interval elapses; a graceful destructor performs a final checkpoint.
+- `Relaxed` starts its interval clock when a fresh or recovered backend is
+  initialized, checkpoints dirty state once that interval elapses, and makes a
+  best-effort final checkpoint from its graceful destructor.
 - `Strict` performs a data durability barrier and checkpoint for every
   successful write/eviction mutation. A barrier or checkpoint failure is
   returned to the caller.
@@ -106,11 +108,18 @@ The checkpoint is a versioned Rust index containing:
 - current key-to-record entries;
 - allocator high-water offset needed to rebuild free extents;
 - finalized eviction tombstones accumulated since the last checkpoint.
+- configured allocator capacity (`quota_bytes`), where zero preserves the
+  automatic-capacity configuration rather than a transient resolved value.
 
-The checkpoint file is written as a version-2 envelope with a CRC-32C over its
-serialized payload. Each entry records the expected record flags so recovery
-cannot downgrade a checksummed record by trusting a corrupted arena flag. The
-exact file is Rust-owned; protobuf and C++ formats do not change.
+The checkpoint file is written as a version-3 envelope with a CRC-32C over its
+serialized payload, including capacity. Each entry records the expected record
+flags so recovery cannot downgrade a checksummed record by trusting a corrupted
+arena flag. Version-1 and version-2 envelopes remain deliberate legacy inputs:
+they are accepted only when their arena and every recovered extent fit the
+current quota, then upgraded to version 3 at the next required checkpoint.
+Version-1 flags are recovered from the validated arena header because the older
+envelope did not carry an independently authenticated copy. The exact file is
+Rust-owned; protobuf and C++ formats do not change.
 
 Checkpoint ordering is:
 
@@ -135,12 +144,23 @@ Recovery is transactional: build a candidate state, validate all metadata and
 records, then publish it. It never partially installs a recovered index.
 
 - No checkpoint in an enabled mode means a genuine fresh start.
+- A version-3 checkpoint is recovered only when its authenticated capacity
+  exactly equals the current configured capacity (including zero for automatic
+  capacity) and its arena is no larger than the currently resolved capacity. A
+  mismatch starts fresh and removes the incompatible
+  checkpoint/arena generation while the backend holds directory ownership.
+- Legacy unversioned, version-1, and version-2 state is recovered only when its
+  arena and all surviving extents are within the current quota, and is marked
+  for a capacity-bearing upgrade.
 - An unsupported version, invalid envelope checksum, malformed checkpoint,
   missing/truncated arena, or corrupt records causes a safe fresh index while
   preserving valid records from the same checkpoint when record-level recovery
   can isolate them.
 - Resource/open/permission failures are returned and do not truncate potentially
   recoverable data.
+- Fresh-start orphan cleanup occurs only after checkpoint and arena inspection
+  succeeds; cleanup I/O failures are returned. Reusable and appended allocations
+  also independently reject any requested end beyond the configured quota.
 - Record-level corruption drops only the affected key and frees its extent.
 - Tombstoned keys are removed after record scanning.
 - FIFO state is repaired deterministically from surviving sequence numbers.
@@ -180,6 +200,9 @@ TDD coverage must include:
 - CRC-disabled round trip and overwrite detection through the sequence guard;
 - finalized eviction versus rollback and tombstone/rewrite behavior;
 - legacy raw-index compatibility;
+- capacity-authenticated checkpoints, v1/v2 upgrade, quota increase/decrease,
+  oversized legacy/orphan cleanup, and defensive free-extent bounds;
+- injected-clock fresh Relaxed behavior before and at the configured interval;
 - no schema, C++ dependency, or unrelated master-backend change.
 
 ## Delivery boundary
