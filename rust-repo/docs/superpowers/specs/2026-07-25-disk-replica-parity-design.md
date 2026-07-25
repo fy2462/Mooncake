@@ -19,9 +19,10 @@ offload/promotion changes, and access-heat visualization are outside scope.
 When the master's configured storage root is non-empty, C++ `PutStart`
 allocates one `Disk` replica in addition to the requested Memory and NoF
 replicas. Its descriptor contains a deterministic file path and object size.
-The client writes that disk replica before transferring Memory or NoF replicas,
-then reports `PutEnd(Disk)` or `PutRevoke(Disk)` independently of the other
-replica types.
+The client copies the caller-owned slices into a client-owned payload and
+schedules that disk replica before transferring Memory or NoF replicas. The
+background write then reports `PutEnd(Disk)` or `PutRevoke(Disk)` independently
+of the foreground result for the other replica types.
 
 The Rust implementation must preserve these externally visible properties:
 
@@ -100,22 +101,31 @@ The client must not expose OffsetAllocator arena offsets in replica metadata.
 Scalar put, unsafe put-from/parts, and batch put follow the same ordering:
 
 1. Call put-start and partition returned descriptors by replica type.
-2. If a Disk descriptor exists, gather the source slices and write it through
-   the attached Disk role first.
-3. On disk success, issue `PutEnd(Disk)`; on disk failure, issue
-   `PutRevoke(Disk)` and retain the original storage error for finalization.
-4. Transfer Memory and NoFSsd replicas through Transfer Engine as today.
-5. Apply the existing reliability-mode decision to Memory/NoFSsd results while
-   accounting for the independently finalized Disk result exactly as C++ does.
+2. If a Disk descriptor exists, synchronously copy the caller-owned source
+   slices into one client-owned payload and enqueue a managed background job.
+3. Continue foreground Memory and NoFSsd transfers through Transfer Engine
+   without waiting for disk I/O.
+4. The background job writes through the attached Disk role, then issues
+   `PutEnd(Disk)` on success or `PutRevoke(Disk)` on failure.
+5. Apply the existing reliability-mode decision only to the foreground
+   Memory/NoFSsd results. The independently scheduled Disk result does not
+   change the return value of a successful foreground put, matching C++.
+
+The queue is bounded and owned by the client lifecycle. Enqueue failure occurs
+before the foreground transfer and triggers `PutRevoke(Disk)`; it is returned
+when no foreground replica can satisfy the requested reliability mode. Client
+shutdown stops accepting new jobs and drains accepted jobs before releasing the
+Master connection and storage backend. Tests use an injected executor so task
+ordering and failures are deterministic without sleeps.
 
 Only one Disk descriptor is accepted. Multiple Disk descriptors or a Disk
 descriptor with an empty path are treated as invalid master responses and are
 revoked rather than partially written.
 
-Upsert must use the same Disk-first rule and replace the durable object
-atomically according to the selected backend. Remove and remove-all delete the
-backend object only after the corresponding Master operation succeeds, matching
-the existing Rust cleanup boundary.
+Upsert must use the same copy-and-schedule Disk-first rule and replace the
+durable object atomically according to the selected backend. Remove and
+remove-all delete the backend object only after the corresponding Master
+operation succeeds, matching the existing Rust cleanup boundary.
 
 ### Read lifecycle
 
@@ -157,8 +167,11 @@ replica type are allowed, per-key Prometheus labels are not.
 
 - Master path construction or configuration failure aborts put-start before
   publishing a Disk descriptor.
-- Backend write failure is followed by `PutRevoke(Disk)`; revoke failure is
-  reported without hiding the original write failure.
+- Backend write failure is followed by `PutRevoke(Disk)` and recorded in client
+  metrics/logs; because the job is asynchronous, it does not retroactively
+  change the completed foreground call.
+- Queue rejection is synchronous, revokes the Disk allocation, and remains
+  visible to foreground reliability/error handling.
 - `PutEnd(Disk)` failure leaves the stored bytes orphaned but not visible as a
   completed replica. Cleanup/reconciliation may remove the orphan; it must not
   be returned by reads.
@@ -204,8 +217,10 @@ LocalDisk rather than Disk.
 
 - FilePerKey and OffsetAllocator each pass put/read/remove Disk lifecycle tests.
 - Disk is written before Memory/NoF finalization.
-- Disk success, write failure, end failure, and revoke failure have explicit
-  assertions.
+- Disk scheduling occurs before Memory/NoF transfer, but foreground put does not
+  wait for the accepted disk job.
+- Disk success, queue rejection, write failure, end failure, revoke failure,
+  and shutdown drain have explicit assertions.
 - Batch results remain aligned with input keys under mixed disk outcomes.
 - Reads select LocalDisk before Disk and bypass Transfer Engine for Disk.
 - Disk backend eviction sends the correct replica type.
