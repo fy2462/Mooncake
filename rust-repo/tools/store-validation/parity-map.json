@@ -1521,6 +1521,64 @@
       "reason": "Rust hot-cache unit tests cover cache operations, but no client Get test supplies a remote replica and proves cache-hit redirection, strategy choice, and payload integrity in both handshake modes.",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp CacheHitUsesLocalMemcpy and Rust hot_cache/read path", "reviewed": true},
       "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "The C++ raw-byte serializer round-trips a user-defined class implementing serialize_to/deserialize_from.",
+      "boundary": ["cpp-only", "serializer", "template-api", "round-trip"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassSerialization"},
+      "reason": "Rust Store uses typed serde/prost/rmp-serde codecs and does not port the C++ serialize_to template or native-layout byte writer API.",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerialization and Rust typed codec usage", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ raw-byte serializer accepts a non-null shared_ptr and round-trips its pointee.",
+      "boundary": ["cpp-only", "serializer", "shared-pointer"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassSerializationWithSharedPtr"},
+      "reason": "Rust serializers operate on borrowed/owned typed values without a shared_ptr overload, so this C++ ownership convenience boundary is absent.",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerializationWithSharedPtr and Rust ownership model", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ shared_ptr serializer rejects a null pointer with INVALID_PARAMS.",
+      "boundary": ["cpp-only", "serializer", "shared-pointer", "null-pointer"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassSerializationNullPointer"},
+      "reason": "Rust has no nullable shared_ptr serializer overload; optional values use explicit Option encoding rather than this C++ invalid-pointer contract.",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerializationNullPointer and Rust typed codecs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ example deserializer converts a truncated native-layout buffer into a null result.",
+      "boundary": ["cpp-only", "serializer", "raw-byte-buffer", "corruption"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassDeserializationCorruptedBuffer"},
+      "reason": "This exercises the removed C++ raw-memory reader and example class; Rust codec corruption behavior is tested at each actual persisted/wire format instead.",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassDeserializationCorruptedBuffer and Rust format-specific decoders", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ serializer wrapper converts an exception thrown by a user deserializer into a null result.",
+      "boundary": ["cpp-only", "serializer", "exception-adapter"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassDeserializationWithException"},
+      "reason": "Safe Rust codecs return Result and do not have a C++ exception-to-null adapter boundary.",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassDeserializationWithException and Rust Result-based codecs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ MessagePack mounted-segment representation preserves the physical host_id field through snapshot serialization.",
+      "boundary": ["master", "snapshot", "messagepack", "segment", "host-id"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.MountedSegmentSerializationPreservesHostId"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp MountedSegmentSerializationPreservesHostId and Rust synthetic C++ snapshot restore", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_loads_synthetic_cpp_wire_shapes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ legacy eight-field MessagePack mounted-segment representation remains readable and defaults the absent host_id to empty.",
+      "boundary": ["master", "snapshot", "messagepack", "segment", "legacy"],
+      "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.MountedSegmentDeserializesLegacyFormatWithoutHostId"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp MountedSegmentDeserializesLegacyFormatWithoutHostId and Rust segment snapshot decoder", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_snapshot.rs", "test": "segment_decoder_accepts_legacy_mounted_segment_without_host_id"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1

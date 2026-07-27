@@ -1671,6 +1671,35 @@ mod tests {
     }
 
     #[test]
+    fn segment_decoder_accepts_legacy_mounted_segment_without_host_id() {
+        let segment_id = Uuid::new_v4();
+        let mounted = Value::Array(vec![
+            segment_id.to_string().into(),
+            "legacy-segment".into(),
+            0x300000000_u64.into(),
+            (1024_u64 * 1024).into(),
+            "legacy-segment".into(),
+            1.into(),
+            false.into(),
+            Value::Nil,
+        ]);
+        let payload = encode_compressed_value(&Value::Map(vec![
+            (
+                "ms".into(),
+                Value::Map(vec![(segment_id.to_string().into(), mounted)]),
+            ),
+            ("cs".into(), Value::Map(Vec::new())),
+        ]))
+        .unwrap();
+
+        let decoded = decode_segments(&payload).unwrap();
+        let segment = &decoded[&segment_id].entry.segment;
+        assert_eq!(segment.id, segment_id);
+        assert_eq!(segment.name, "legacy-segment");
+        assert_eq!(segment.host_id, "");
+    }
+
+    #[test]
     fn metadata_decoder_rejects_duplicate_object_identity() {
         let item = Value::Array(vec![
             "tenant-a".into(),
