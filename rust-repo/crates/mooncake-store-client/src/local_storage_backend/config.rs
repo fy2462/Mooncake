@@ -88,10 +88,7 @@ impl DistributedStorageConfig {
 }
 
 fn parse_bool_env(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    crate::utils::string_to_bool(value).unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

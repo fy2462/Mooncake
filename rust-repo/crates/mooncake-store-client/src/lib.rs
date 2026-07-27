@@ -60,6 +60,7 @@ mod memory_ffi;
 pub mod offload;
 mod pinned_memory;
 pub mod remote_source;
+pub mod utils;
 
 pub use client::{
     BufferHandle, BufferRegistrationId, CachedQueryResultResponse, ClientBackgroundConfig,

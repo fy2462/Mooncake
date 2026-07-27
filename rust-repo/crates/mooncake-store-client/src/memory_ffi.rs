@@ -619,10 +619,7 @@ impl HugepagePolicy {
 }
 
 fn parse_true(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "on" | "yes"
-    )
+    crate::utils::string_to_bool(value).unwrap_or(false)
 }
 
 fn parse_hugepage_size(value: Option<&str>) -> usize {

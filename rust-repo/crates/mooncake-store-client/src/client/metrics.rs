@@ -741,10 +741,11 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
     let Ok(value) = std::env::var(name) else {
         return default;
     };
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" | "enable" => true,
-        "0" | "false" | "no" | "off" | "disable" => false,
-        _ => {
+    match crate::utils::string_to_bool(&value) {
+        Some(parsed) => parsed,
+        None if value.eq_ignore_ascii_case("enable") => true,
+        None if value.eq_ignore_ascii_case("disable") => false,
+        None => {
             tracing::warn!(%name, %value, default, "invalid boolean environment value");
             default
         }
