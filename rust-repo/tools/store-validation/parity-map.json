@@ -964,64 +964,64 @@
       "behavior": "Batch remove returns one successful result for every existing key and removes all requested objects.",
       "boundary": ["client", "master", "batch-remove", "end-to-end"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.BasicFunctionality"},
-      "reason": "The existing Rust test removes entries directly from a DashMap and does not invoke the batch-remove RPC or client result mapping.",
+      "reason": "Rust drives existing keys through the public client, gRPC, and Master removal path and verifies every object is gone.",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp BasicFunctionality and Rust batch_remove_impl/test_batch_remove_logic", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity"}],
+      "status": "covered"
     },
     {
       "behavior": "Batch remove preserves input order while returning success for existing keys and not-found for missing keys in the same request.",
       "boundary": ["client", "master", "batch-remove", "per-item-status"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.MixedExistence"},
-      "reason": "No Rust test invokes batch_remove_impl with a mixed existing/missing request and asserts ordered per-item statuses.",
+      "reason": "Rust asserts ordered [success, not-found, success] statuses through the public client path.",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp MixedExistence and Rust batch_remove_impl", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity"}],
+      "status": "covered"
     },
     {
       "behavior": "An empty batch returns no results, while duplicate keys are processed sequentially so only the first removal succeeds.",
       "boundary": ["client", "master", "batch-remove", "empty-input", "duplicates"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.EmptyAndDuplicate"},
-      "reason": "The Rust empty test only asserts that a local vector is empty, and no test exercises duplicate-key sequencing through batch_remove_impl.",
+      "reason": "Rust verifies an empty public batch and sequential duplicate statuses [success, not-found, not-found].",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp EmptyAndDuplicate and Rust test_batch_remove_empty/batch_remove_impl", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity"}],
+      "status": "covered"
     },
     {
       "behavior": "Single remove and one-item batch remove return consistent success and not-found results.",
       "boundary": ["client", "master", "batch-remove", "single-remove", "error-parity"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.ConsistencyWithSingleRemove"},
-      "reason": "No Rust test compares the public single-remove and batch-remove paths for existing and missing keys.",
+      "reason": "Rust compares public single and one-item batch removal for both present and missing keys.",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp ConsistencyWithSingleRemove and Rust remove/batch_remove implementations", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity"}],
+      "status": "covered"
     },
     {
       "behavior": "A missing-key batch result maps to the public OBJECT_NOT_FOUND or RPC_FAIL error domain rather than an invalid numeric value.",
       "boundary": ["client", "master", "batch-remove", "error-code"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.ErrorCodeFormat"},
-      "reason": "Rust has internal BatchStatus mapping tests for other batch RPCs, but no client-level assertion for missing-key BatchRemove error conversion.",
+      "reason": "Rust locks missing-key BatchRemove to the public -1 not-found status and confirms single remove reports an error.",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp ErrorCodeFormat and Rust batch-remove status mapping", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity"}],
+      "status": "covered"
     },
     {
       "behavior": "A 1000-key batch remove completes successfully for every key within five seconds and records reproducible throughput.",
       "boundary": ["client", "master", "batch-remove", "performance", "benchmark"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.LargeBatch"},
-      "reason": "Rust has no equivalent 1000-key batch-remove workload, latency assertion, or benchmark artifact.",
+      "reason": "Rust performs the same 1000-key, 1 KiB-value public batch workload and enforces the C++ five-second budget.",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp LargeBatch and the absence of Rust batch-remove benchmarks", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_thousand_keys_completes_within_cpp_budget"}],
+      "status": "covered"
     },
     {
       "behavior": "Batch remove accepts keys containing spaces, slashes, colons, punctuation, and UTF-8 text without changing their identity.",
       "boundary": ["client", "master", "batch-remove", "key-encoding", "utf8"],
       "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.SpecialCharacters"},
-      "reason": "No Rust batch-remove test sends special-character and UTF-8 keys through the public RPC path.",
+      "reason": "Rust sends spaces, slashes, colons, punctuation, and Chinese UTF-8 keys through public batch put/remove and verifies exact identity removal.",
       "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp SpecialCharacters and Rust tenant key canonicalization/batch_remove_impl", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity"}],
+      "status": "covered"
     },
     {
       "behavior": "ObjectDataType uses the stable RFC numeric values UNKNOWN=0 through GENERAL=9.",

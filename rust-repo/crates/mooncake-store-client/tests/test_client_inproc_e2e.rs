@@ -98,6 +98,136 @@ async fn batch_duplicate_keys_and_mixed_group_ids_preserve_cpp_client_results() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_remove_preserves_cpp_order_errors_duplicates_and_key_identity() {
+    let (master, shutdown) = start_master().await;
+    let mut client = create_tcp_client(&master).await;
+    let existing = vec![
+        "plain-a".to_string(),
+        "key with spaces".to_string(),
+        "key/with/slashes".to_string(),
+        "key:with:colons".to_string(),
+        "key#hash".to_string(),
+        "key@at".to_string(),
+        "unicode_中文".to_string(),
+    ];
+    let values = existing
+        .iter()
+        .map(|_| b"value".as_slice())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        client
+            .batch_put(
+                &existing,
+                &values,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0; existing.len()]
+    );
+
+    let missing = "missing-key".to_string();
+    let mixed = vec![existing[0].clone(), missing.clone(), existing[1].clone()];
+    assert_eq!(
+        client.batch_remove(&mixed, true).await.unwrap(),
+        vec![0, -1, 0]
+    );
+    assert!(client.remove(&missing, true).await.is_err());
+    assert_eq!(
+        client.batch_remove(&[missing.clone()], true).await.unwrap(),
+        vec![-1]
+    );
+    assert!(client.batch_remove(&[], true).await.unwrap().is_empty());
+
+    let duplicate = existing[2].clone();
+    assert_eq!(
+        client
+            .batch_remove(&[duplicate.clone(), duplicate.clone(), duplicate], true)
+            .await
+            .unwrap(),
+        vec![0, -1, -1]
+    );
+    assert_eq!(
+        client.batch_remove(&existing[3..], true).await.unwrap(),
+        vec![0; existing.len() - 3]
+    );
+    for key in &existing {
+        assert!(!client.exists(key).await.unwrap());
+    }
+
+    let single_key = "single-remove";
+    let batch_key = "batch-remove";
+    for key in [single_key, batch_key] {
+        client
+            .put(
+                key,
+                b"value",
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    client.remove(single_key, true).await.unwrap();
+    assert_eq!(
+        client
+            .batch_remove(&[batch_key.to_string()], true)
+            .await
+            .unwrap(),
+        vec![0]
+    );
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_remove_thousand_keys_completes_within_cpp_budget() {
+    let (master, shutdown) = start_master().await;
+    let mut client = create_tcp_client(&master).await;
+    let keys = (0..1000)
+        .map(|index| format!("large-batch-remove-{index}"))
+        .collect::<Vec<_>>();
+    let value = vec![7_u8; 1024];
+    let values = keys.iter().map(|_| value.as_slice()).collect::<Vec<_>>();
+    assert_eq!(
+        client
+            .batch_put(
+                &keys,
+                &values,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0; keys.len()]
+    );
+
+    let started = std::time::Instant::now();
+    assert_eq!(
+        client.batch_remove(&keys, true).await.unwrap(),
+        vec![0; keys.len()]
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "1000-key batch remove exceeded the C++ five-second budget"
+    );
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batch_replica_clear_handles_single_multiple_empty_and_missing_keys() {
     let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
         lease_ttl: std::time::Duration::from_millis(20),
