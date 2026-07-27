@@ -1094,6 +1094,78 @@
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp PutStartDefaultDataType and Rust put tests/default config", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "The C++ FileUtil string helper writes exact text bytes to a file.",
+      "boundary": ["cpp-only", "utility", "filesystem", "text-write"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_Basic"},
+      "reason": "Rust has no FileUtil wrapper identity; persistence call sites use std::fs/File::write_all directly and test their product-level formats and recovery behavior.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_Basic and Rust std::fs call sites", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ FileUtil string helper creates missing parent directories before writing.",
+      "boundary": ["cpp-only", "utility", "filesystem", "directory-creation"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_CreatesSubdirectories"},
+      "reason": "Rust call sites invoke std::fs::create_dir_all explicitly before writing; there is no shared FileUtil helper whose wrapper contract can be tested.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_CreatesSubdirectories and Rust create_dir_all call sites", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ FileUtil string helper creates a zero-length file for empty content.",
+      "boundary": ["cpp-only", "utility", "filesystem", "empty-write"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_EmptyContent"},
+      "reason": "Rust relies on the standard File/fs::write empty-slice contract instead of exposing the C++ convenience helper.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_EmptyContent and Rust standard filesystem usage", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ FileUtil binary helper preserves arbitrary byte values exactly.",
+      "boundary": ["cpp-only", "utility", "filesystem", "binary-write"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveBinaryToFile_Basic"},
+      "reason": "Rust writes byte slices through std::fs/File directly and has no FileUtil binary-wrapper API; product serializers have their own round-trip tests.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_Basic and Rust byte-oriented persistence call sites", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ FileUtil binary helper creates missing parent directories before writing.",
+      "boundary": ["cpp-only", "utility", "filesystem", "binary-write", "directory-creation"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveBinaryToFile_CreatesSubdirectories"},
+      "reason": "Rust persistence modules explicitly combine std::fs::create_dir_all with byte writes instead of exposing this C++ helper contract.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_CreatesSubdirectories and Rust persistence call sites", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ EnsureDirExists helper recursively creates a missing directory.",
+      "boundary": ["cpp-only", "utility", "filesystem", "directory-creation"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_CreateNew"},
+      "reason": "Rust uses std::fs::create_dir_all directly; there is no repository-specific EnsureDirExists wrapper to preserve.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_CreateNew and Rust create_dir_all call sites", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ EnsureDirExists helper succeeds idempotently for an existing directory.",
+      "boundary": ["cpp-only", "utility", "filesystem", "idempotence"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_AlreadyExists"},
+      "reason": "Rust delegates this wrapper-level behavior to std::fs::create_dir_all and does not expose an equivalent helper API.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_AlreadyExists and Rust standard filesystem usage", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ EnsureDirExists helper rejects a path occupied by a regular file.",
+      "boundary": ["cpp-only", "utility", "filesystem", "type-conflict"],
+      "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_PathIsFile_ReturnsError"},
+      "reason": "Rust call sites receive the standard create_dir_all error directly and have no FileUtil-specific error surface to match.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_PathIsFile_ReturnsError and Rust standard filesystem usage", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
     }
   ],
   "schema_version": 1
