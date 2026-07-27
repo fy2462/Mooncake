@@ -1698,6 +1698,96 @@
       "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp AllocateFreeCycle and Rust OwnedBuffer lifecycle", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/src/memory_ffi.rs", "test": "regular_registration_repeated_allocate_free_preserves_alignment"}],
       "status": "covered"
+    },
+    {
+      "behavior": "Pending deadline records execute in ascending deadline order.",
+      "boundary": ["master", "scheduler", "deadline-order"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.RunsRecordsInDeadlineOrder"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RunsRecordsInDeadlineOrder and Rust GracefulUnmountRecord heap ordering", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_orders_deadlines_and_preempts_wait"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A newly scheduled earlier deadline wakes and preempts the scheduler's current timed wait.",
+      "boundary": ["master", "scheduler", "deadline-preemption"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.EarlierRecordPreemptsCurrentWait"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp EarlierRecordPreemptsCurrentWait and Rust GracefulUnmountScheduler condvar loop", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_orders_deadlines_and_preempts_wait"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Resynchronizing from authoritative durable state drops removed pending records while retaining matching records.",
+      "boundary": ["master", "scheduler", "cancellation", "durable-state"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.RemoveIfDropsPendingRecords"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RemoveIfDropsPendingRecords; Rust uses sync_from_state instead of a predicate-only volatile removal API", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_sync_replaces_pending_queue"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Stopping the deadline scheduler cancels pending work before its deadline.",
+      "boundary": ["master", "scheduler", "shutdown", "cancellation"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.StopCancelsPendingRecords"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp StopCancelsPendingRecords and Rust GracefulUnmountScheduler::stop", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_stop_cancels_pending_and_is_idempotent"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Stopping an empty deadline scheduler is a safe no-op.",
+      "boundary": ["master", "scheduler", "shutdown", "empty-queue"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.StopOnEmptySchedulerIsNoOp"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp StopOnEmptySchedulerIsNoOp and Rust GracefulUnmountScheduler::stop", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_empty_sync_and_stop_are_noops"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Removing pending records from an empty deadline scheduler is a safe no-op.",
+      "boundary": ["master", "scheduler", "cancellation", "empty-queue"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.RemoveIfOnEmptySchedulerIsNoOp"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RemoveIfOnEmptySchedulerIsNoOp; Rust empty authoritative-state synchronization", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_empty_sync_and_stop_are_noops"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The scheduler accepts and executes new records after its queue drains.",
+      "boundary": ["master", "scheduler", "queue-lifecycle"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.ContinuesSchedulingAfterQueueDrains"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp ContinuesSchedulingAfterQueueDrains and Rust GracefulUnmountScheduler worker loop", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_runs_expired_then_accepts_more_work"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Replacing the authoritative pending set with an empty set drains the scheduler queue without running removed records.",
+      "boundary": ["master", "scheduler", "cancellation", "durable-state"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.RemoveAllDrainsQueueWithoutRunning"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RemoveAllDrainsQueueWithoutRunning; Rust sync_from_state queue replacement", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_sync_replaces_pending_queue"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A record whose deadline has already expired executes immediately.",
+      "boundary": ["master", "scheduler", "expired-deadline"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.RunsAlreadyExpiredRecordImmediately"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RunsAlreadyExpiredRecordImmediately and Rust GracefulUnmountScheduler expiry loop", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_runs_expired_then_accepts_more_work"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "An already-expired record executes before an existing future record.",
+      "boundary": ["master", "scheduler", "expired-deadline", "deadline-order"],
+      "cpp": {"file": "deadline_scheduler_test.cpp", "test": "DeadlineSchedulerTest.RunsExpiredBeforePendingRecord"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RunsExpiredBeforePendingRecord and Rust GracefulUnmountScheduler expiry loop", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_runs_expired_then_accepts_more_work"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1

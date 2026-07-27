@@ -616,3 +616,156 @@ impl DrainWorker {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::GracefulUnmountSnapshotEntry;
+
+    fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        predicate()
+    }
+
+    fn add_pending(state: &MasterState, deadline_epoch_ms: u64) -> (Uuid, Uuid) {
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        state.graceful_unmounts.insert(
+            segment_id,
+            GracefulUnmountSnapshotEntry {
+                segment_id,
+                client_id,
+                deadline_epoch_ms,
+            },
+        );
+        (segment_id, client_id)
+    }
+
+    #[test]
+    fn graceful_unmount_scheduler_orders_deadlines_and_preempts_wait() {
+        let mut queue = BinaryHeap::new();
+        let ordered_ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        for (segment_id, deadline_epoch_ms) in ordered_ids.into_iter().zip([90, 30, 60]) {
+            queue.push(GracefulUnmountRecord {
+                segment_id,
+                client_id: Uuid::new_v4(),
+                deadline_epoch_ms,
+            });
+        }
+        assert_eq!(queue.pop().unwrap().segment_id, ordered_ids[1]);
+        assert_eq!(queue.pop().unwrap().segment_id, ordered_ids[2]);
+        assert_eq!(queue.pop().unwrap().segment_id, ordered_ids[0]);
+
+        let state = Arc::new(MasterState::empty());
+        let mut scheduler = GracefulUnmountScheduler::new(state.clone());
+        let now = current_epoch_millis();
+        let (late_segment, late_client) = add_pending(&state, now + 500);
+        scheduler.schedule_at(late_segment, late_client, now + 500);
+        thread::sleep(Duration::from_millis(20));
+
+        let (early_segment, early_client) = add_pending(&state, now + 60);
+        scheduler.schedule_at(early_segment, early_client, now + 60);
+
+        assert!(wait_until(Duration::from_millis(250), || !state
+            .graceful_unmounts
+            .contains_key(&early_segment)));
+        assert!(state.graceful_unmounts.contains_key(&late_segment));
+        scheduler.stop();
+    }
+
+    #[test]
+    fn graceful_unmount_scheduler_sync_replaces_pending_queue() {
+        let state = Arc::new(MasterState::empty());
+        let mut scheduler = GracefulUnmountScheduler::new(state.clone());
+        let removed_deadline = current_epoch_millis() + 200;
+        let (removed_segment, removed_client) = add_pending(&state, removed_deadline);
+        scheduler.schedule_at(removed_segment, removed_client, removed_deadline);
+        let kept_deadline = current_epoch_millis() + 250;
+        let (kept_segment, kept_client) = add_pending(&state, kept_deadline);
+        scheduler.schedule_at(kept_segment, kept_client, kept_deadline);
+
+        state.graceful_unmounts.remove(&removed_segment);
+        scheduler.sync_from_state(&state, true);
+        {
+            let guard = scheduler
+                .inner
+                .state
+                .lock()
+                .expect("scheduler mutex poisoned");
+            assert_eq!(guard.queue.len(), 1);
+            assert_eq!(guard.queue.peek().unwrap().segment_id, kept_segment);
+        }
+
+        state.graceful_unmounts.clear();
+        scheduler.sync_from_state(&state, true);
+
+        let guard = scheduler
+            .inner
+            .state
+            .lock()
+            .expect("scheduler mutex poisoned");
+        assert!(guard.queue.is_empty());
+        drop(guard);
+        scheduler.stop();
+    }
+
+    #[test]
+    fn graceful_unmount_scheduler_stop_cancels_pending_and_is_idempotent() {
+        let state = Arc::new(MasterState::empty());
+        let mut scheduler = GracefulUnmountScheduler::new(state.clone());
+        let deadline = current_epoch_millis() + 80;
+        let (segment_id, client_id) = add_pending(&state, deadline);
+        scheduler.schedule_at(segment_id, client_id, deadline);
+
+        scheduler.stop();
+        scheduler.stop();
+        thread::sleep(Duration::from_millis(120));
+
+        assert!(state.graceful_unmounts.contains_key(&segment_id));
+    }
+
+    #[test]
+    fn graceful_unmount_scheduler_empty_sync_and_stop_are_noops() {
+        let state = Arc::new(MasterState::empty());
+        let mut scheduler = GracefulUnmountScheduler::new(state.clone());
+
+        scheduler.sync_from_state(&state, true);
+        scheduler.stop();
+        scheduler.stop();
+
+        assert!(state.graceful_unmounts.is_empty());
+    }
+
+    #[test]
+    fn graceful_unmount_scheduler_runs_expired_then_accepts_more_work() {
+        let state = Arc::new(MasterState::empty());
+        let mut scheduler = GracefulUnmountScheduler::new(state.clone());
+        let now = current_epoch_millis();
+        let (future_segment, future_client) = add_pending(&state, now + 100);
+        scheduler.schedule_at(future_segment, future_client, now + 100);
+        let (expired_segment, expired_client) = add_pending(&state, now.saturating_sub(1));
+        scheduler.schedule_at(expired_segment, expired_client, now.saturating_sub(1));
+
+        assert!(wait_until(Duration::from_millis(50), || !state
+            .graceful_unmounts
+            .contains_key(&expired_segment)));
+        assert!(state.graceful_unmounts.contains_key(&future_segment));
+        assert!(wait_until(Duration::from_millis(250), || !state
+            .graceful_unmounts
+            .contains_key(&future_segment)));
+
+        let next_deadline = current_epoch_millis();
+        let (next_segment, next_client) = add_pending(&state, next_deadline);
+        scheduler.schedule_at(next_segment, next_client, next_deadline);
+        assert!(wait_until(Duration::from_millis(100), || !state
+            .graceful_unmounts
+            .contains_key(&next_segment)));
+        scheduler.stop();
+    }
+}
