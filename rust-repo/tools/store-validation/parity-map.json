@@ -331,17 +331,19 @@
       "behavior": "Snapshot-only standby startup with no available snapshot succeeds from an empty metadata and sequence baseline.",
       "boundary": ["master", "ha", "snapshot", "empty-baseline"],
       "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartUsesEmptyBaselineWhenSnapshotMissing"},
-      "reason": "Rust tests snapshot load success and failure fallback paths, but has no direct snapshot-only no-snapshot test asserting empty state and zero applied/primary sequence.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and missing-snapshot startup", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing"}],
+      "status": "covered"
     },
     {
       "behavior": "If standby startup fails due to invalid snapshot configuration, promotion returns the same failure instead of hiding it.",
       "boundary": ["master", "ha", "promotion", "error-propagation"],
       "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "StandbyControllerTest.PromoteStandbyReturnsStartFailure"},
-      "reason": "Rust tests bootstrap and promotion failures independently, but has no controller test proving promotion propagates a prior standby-start configuration failure.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and StandbyController", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_controller_promotion_preserves_standby_start_failure"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1

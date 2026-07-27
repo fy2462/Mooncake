@@ -9,9 +9,10 @@ use mooncake_store_master::ha::{
     CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
     LeaderRole, LeadershipSession, LocalFileSnapshotObjectStore, LocalSnapshotProvider,
     MasterRuntimeState, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
-    SnapshotCatalogStore, SnapshotDescriptor, SnapshotObjectStore, SnapshotProvider,
-    StandbyController, StandbyRuntimeCapabilities, StandbyState, StandbySyncStatus,
-    build_standby_runtime_capabilities, map_standby_runtime_state, parse_ha_backend_type,
+    SnapshotCatalogStore, SnapshotCatalogStoreType, SnapshotDescriptor, SnapshotObjectStore,
+    SnapshotObjectStoreType, SnapshotProvider, StandbyController, StandbyRuntimeCapabilities,
+    StandbyState, StandbySyncStatus, build_standby_runtime_capabilities, map_standby_runtime_state,
+    parse_ha_backend_type,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
 use mooncake_store_master::storage_backend::{StorageBackend, StorageBackendType};
@@ -460,6 +461,31 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
         controller.get_standby_runtime_state(),
         MasterRuntimeState::Standby
     );
+}
+
+#[test]
+fn test_controller_promotion_preserves_standby_start_failure() {
+    let spec = HABackendSpec {
+        backend_type: HABackendType::Unknown,
+        connstring: String::new(),
+        cluster_namespace: "start-failure".into(),
+        pod_identity: None,
+    };
+    let config = MasterServiceSupervisorConfig {
+        cluster_id: "start-failure".into(),
+        enable_snapshot_restore: true,
+        snapshot_backup_dir: Some(temp_dir()),
+        snapshot_object_store_type: Some(SnapshotObjectStoreType::Local),
+        snapshot_catalog_store_type: SnapshotCatalogStoreType::Redis,
+        ..Default::default()
+    };
+    let mut controller = CapabilityDrivenStandbyController::new(spec, config);
+
+    let start_error = controller.start_standby(None).unwrap_err();
+    let promotion_error = controller.promote_standby().unwrap_err();
+
+    assert!(matches!(&start_error, HaError::InvalidParams(_)));
+    assert_eq!(promotion_error.to_string(), start_error.to_string());
 }
 
 #[test]

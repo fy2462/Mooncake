@@ -438,8 +438,14 @@ impl StandbyController for CapabilityDrivenStandbyController {
         // A follower thread that exhausted bounded reconnects leaves the state
         // machine in Failed. Stop resets it before creating a fresh follower.
         self.service.stop();
-        self.ensure_oplog_store()?;
-        block_on_runtime(self.service.start())?;
+        if let Err(error) = self
+            .ensure_oplog_store()
+            .and_then(|()| block_on_runtime(self.service.start()))
+        {
+            self.last_error = Some(error.clone());
+            self.notify_runtime_state_if_changed();
+            return Err(error);
+        }
 
         self.last_error = None;
         self.notify_runtime_state_if_changed();

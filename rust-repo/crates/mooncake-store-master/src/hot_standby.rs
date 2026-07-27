@@ -93,7 +93,7 @@ impl Default for HotStandbyConfig {
 mod tests {
     use super::*;
     use crate::TenantId;
-    use crate::ha::{OpLogPollResult, OpLogRecord, SnapshotProvider};
+    use crate::ha::{NoopSnapshotProvider, OpLogPollResult, OpLogRecord, SnapshotProvider};
     use crate::oplog::{
         InMemoryOpLog, OpLogChangeNotifier, OpLogEntryCallback, OpLogErrorCallback, OpLogStore,
     };
@@ -493,6 +493,30 @@ mod tests {
             service.start().await,
             Err(HaError::Snapshot(message)) if message == "snapshot unavailable"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(NoopSnapshotProvider));
+
+        service.start().await.unwrap();
+
+        assert!(state.objects.is_empty());
+        assert!(state.segments.is_empty());
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, 0);
+        assert_eq!(status.primary_seq_id, 0);
+        service.stop();
     }
 
     #[tokio::test]
