@@ -2423,6 +2423,20 @@
       "reason": "The behavioral reference is explicitly disabled and therefore is not part of the executable C++ correctness oracle; active Rust large-object and batch tests cover the supported paths without treating a disabled stress loop as a required parity gate.",
       "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp DISABLED_AllocateTest", "reviewed": true},
       "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Replica copy retries can recover after target capacity is released, permanently full targets reach a failed task state, and successful multi-client copy/move preserves placement and bytes.", "boundary": ["client", "master", "task-worker", "copy", "move", "capacity-retry", "multi-node"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.ReplicaCopyAndMoveOperations"},
+      "reason": "Rust now covers real three-client copy/move, a full-target failure, and success after capacity release. It still lacks one task-worker integration assertion that an unreleased full target exhausts all configured retries and publishes the terminal FAILED task status.",
+      "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp ReplicaCopyAndMoveOperations and Rust three-client P2P transfer/task implementation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments"}], "status": "missing"
+    },
+    {
+      "behavior": "File-per-key FIFO eviction notifies Master so the oldest object's Disk replica disappears while newer Disk replicas remain routable.", "boundary": ["client", "master", "disk", "fifo-eviction", "notification", "end-to-end"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "EvictionNotificationTest.DiskReplicaRemovedAfterEviction"},
+      "reason": "Rust separately tests FIFO backend eviction, partial notification retry, and Master disk-replica removal, but has no single live client/Master test proving the complete quota-triggered notification chain and surviving replica set.",
+      "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp DiskReplicaRemovedAfterEviction and Rust local-storage eviction notification paths", "reviewed": true},
+      "rust": [], "status": "missing"
     }
   ],
   "schema_version": 1

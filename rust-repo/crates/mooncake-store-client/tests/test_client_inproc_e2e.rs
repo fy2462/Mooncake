@@ -335,7 +335,13 @@ async fn client_integration_basic_remove_batch_upsert_and_large_payload_parity()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments() {
-    let (master, shutdown) = start_master().await;
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        put_start_release_timeout: std::time::Duration::from_millis(20),
+        reaper_interval: std::time::Duration::from_millis(5),
+        lease_ttl: std::time::Duration::from_millis(20),
+        ..Default::default()
+    })
+    .await;
     let mut source = create_tcp_client(&master).await;
     let mut copy_target = create_tcp_client(&master).await;
     let mut move_target = create_tcp_client(&master).await;
@@ -356,6 +362,74 @@ async fn three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments
         )
         .await
         .unwrap();
+
+    let filler = vec![0x33; 1024 * 1024];
+    let mut filler_keys = Vec::new();
+    for index in 0..32 {
+        let key = format!("copy-target-filler-{index}");
+        if copy_target
+            .put(
+                &key,
+                &filler,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: copy_target_name.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .is_err()
+        {
+            break;
+        }
+        filler_keys.push(key);
+    }
+    assert!(!filler_keys.is_empty());
+    assert!(
+        source
+            .copy(
+                "copy-move-object",
+                &source_name,
+                std::slice::from_ref(&copy_target_name),
+            )
+            .await
+            .is_err()
+    );
+    let used_before_remove = copy_target
+        .get_segments_detail()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|segment| segment.segment_name == copy_target_name)
+        .unwrap()
+        .allocator_used_bytes;
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert_eq!(
+        copy_target
+            .batch_replica_clear(&filler_keys, copy_target.client_id(), "", "",)
+            .await
+            .unwrap(),
+        filler_keys
+    );
+    let release_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let used = copy_target
+            .get_segments_detail()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|segment| segment.segment_name == copy_target_name)
+            .unwrap()
+            .allocator_used_bytes;
+        if used < used_before_remove {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < release_deadline,
+            "removed target allocation was not released before retry"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     source
         .copy(
             "copy-move-object",

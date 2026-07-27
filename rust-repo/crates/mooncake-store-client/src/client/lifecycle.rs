@@ -960,6 +960,7 @@ impl MooncakeClient {
             }
             tonic::Code::NotFound => StoreError::KeyNotFound(status.message().to_string()),
             tonic::Code::AlreadyExists => StoreError::ObjectExists(status.message().to_string()),
+            tonic::Code::ResourceExhausted => StoreError::NoAvailableHandle,
             tonic::Code::Unavailable => StoreError::ServiceUnavailable,
             _ => StoreError::Internal(status.to_string()),
         }

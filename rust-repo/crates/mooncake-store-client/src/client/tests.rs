@@ -184,6 +184,10 @@ fn rpc_status_mapping_preserves_remote_fallback_signal() {
         MooncakeClient::rpc_status_to_error(tonic::Status::unavailable("master down"));
     assert!(matches!(unavailable, StoreError::ServiceUnavailable));
 
+    let exhausted =
+        MooncakeClient::rpc_status_to_error(tonic::Status::resource_exhausted("segment full"));
+    assert!(matches!(exhausted, StoreError::NoAvailableHandle));
+
     let cancelled = MooncakeClient::rpc_status_to_error(tonic::Status::cancelled("caller left"));
     assert!(matches!(cancelled, StoreError::Internal(_)));
 }
