@@ -1166,6 +1166,69 @@
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_PathIsFile_ReturnsError and Rust standard filesystem usage", "reviewed": true},
       "rust": [],
       "status": "not-applicable"
+    },
+    {
+      "behavior": "Health check reports NOT_INITIALIZED before client setup.",
+      "boundary": ["client", "health", "lifecycle", "status-code"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.ReturnsOneBeforeSetup"},
+      "reason": "Rust client construction is async and its public health API returns Result/bool rather than the C++ 0/1/2 status code; no binding test locks the before-setup disposition.",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp ReturnsOneBeforeSetup and Rust/Python health_check APIs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Health check reports HEALTHY after setup and a successful master ping.",
+      "boundary": ["client", "master", "health", "status-code"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.ReturnsZeroWhenHealthy"},
+      "reason": "Rust tests the internal health flag and an opt-in live health call, but no deterministic setup test asserts the C++ HEALTHY status contract.",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp ReturnsZeroWhenHealthy and Rust health state/live E2E", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Health check returns to NOT_INITIALIZED after complete client teardown.",
+      "boundary": ["client", "health", "lifecycle", "teardown", "status-code"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.ReturnsOneAfterTeardown"},
+      "reason": "Rust HTTP state can represent a closed client, but no public client/binding health test exercises teardown and asserts the C++ NOT_INITIALIZED disposition.",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp ReturnsOneAfterTeardown and Rust client close/health paths", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Background ping transitions health to MASTER_UNREACHABLE after the connected master stops.",
+      "boundary": ["client", "master", "health", "failure-detection", "status-code"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.ReturnsTwoWhenMasterDown"},
+      "reason": "Rust unit tests toggle the health flag directly and the live E2E only proves a healthy master; no deterministic test stops a master and observes the background transition.",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp ReturnsTwoWhenMasterDown and Rust health worker/state tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The client HTTP health endpoint returns 200 with healthy/code=0 while the master health flag is good.",
+      "boundary": ["client", "http", "health"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.HttpReturns200WhenHealthy"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp HttpReturns200WhenHealthy and Rust ClientHttpServerState health endpoint", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/http.rs", "test": "health_and_prometheus_metrics_reflect_shared_state"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The client HTTP health endpoint returns 503 with master_unreachable/code=2 after health failure.",
+      "boundary": ["client", "http", "health", "failure-reporting"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.HttpReturns503WhenMasterDown"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp HttpReturns503WhenMasterDown and Rust ClientHttpServerState unhealthy endpoint", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/http.rs", "test": "health_and_prometheus_metrics_reflect_shared_state"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "HTTP metrics endpoints remain available and expose write/read byte totals plus put/get latency counts after real transfers.",
+      "boundary": ["client", "http", "metrics", "put", "get", "end-to-end"],
+      "cpp": {"file": "health_check_test.cpp", "test": "HealthCheckTest.MetricsEndpointsReturnCorrectData"},
+      "reason": "Rust verifies endpoint availability, a health gauge, and a summary header, but does not perform put/get operations or assert transfer byte and latency metrics.",
+      "review": {"oracle": "mooncake-store/tests/health_check_test.cpp MetricsEndpointsReturnCorrectData and Rust client/http.rs tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
