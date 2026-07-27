@@ -104,6 +104,7 @@ impl MooncakeClient {
                 && let Some(metrics) = &self.metrics
             {
                 metrics.observe_transfer_bytes(TransferOperationKind::Read, data.len() as u64);
+                metrics.observe_read_strategy("local_memcpy");
             }
             return result;
         }
@@ -217,6 +218,7 @@ impl MooncakeClient {
         );
         if let Some(metrics) = &self.metrics {
             metrics.observe_transfer_bytes(TransferOperationKind::Read, result.len() as u64);
+            metrics.observe_read_strategy("transfer_engine");
         }
         Ok(result)
     }

@@ -197,12 +197,8 @@ impl MooncakeClient {
                 .iter()
                 .map(super::OwnedStoreSegment::base_addr)
                 .collect::<Vec<_>>();
-            let owned_transport_endpoint = if self.protocol == "cxl" {
-                self.local_hostname.clone()
-            } else {
-                self.engine.get_local_ip_and_port()?
-            };
-            let mut te_endpoints = vec![owned_transport_endpoint; self.owned_store_segments.len()];
+            let mut te_endpoints =
+                vec![self.local_transport_endpoint.clone(); self.owned_store_segments.len()];
             let mut protocols = vec![self.protocol.clone(); self.owned_store_segments.len()];
             let mut host_ids = vec![self.host_id.clone(); self.owned_store_segments.len()];
             let mut segment_ids = self

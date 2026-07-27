@@ -250,7 +250,10 @@ impl MooncakeClient {
                 let endpoints = self.local_endpoints.read();
                 replicas.iter().find(|r| {
                     r.status == mooncake_store_core::ReplicaStatus::Complete
-                        && endpoints.contains(&r.segment_name)
+                        && super::transfer_local::contains_same_process_endpoint(
+                            &endpoints,
+                            &r.segment_name,
+                        )
                 })
             };
             let replica = match prefer_same_node

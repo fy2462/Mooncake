@@ -154,6 +154,10 @@ pub struct MooncakeClient {
     /// 本节点的主机名（可含端口），如 "node01:12345"。
     /// 用作 segment 解析的传输端点名称。
     pub(crate) local_hostname: String,
+    /// Stable endpoint identity published for client-owned memory segments.
+    /// P2P uses the native ip:port; metadata-backed discovery uses the
+    /// logical client endpoint under which Transfer Engine metadata is stored.
+    pub(crate) local_transport_endpoint: String,
     /// Stable physical-host identity attached to placement requests.
     pub(crate) host_id: String,
 

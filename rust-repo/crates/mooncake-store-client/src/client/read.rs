@@ -138,6 +138,9 @@ impl MooncakeClient {
         if let Some(ref cache) = self.hot_cache {
             if let Some(data) = cache.get(cache_key.as_ref()) {
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: HIT hot cache");
+                if let Some(metrics) = &self.metrics {
+                    metrics.observe_read_strategy("local_memcpy");
+                }
                 return Ok(data);
             }
         }
@@ -256,7 +259,7 @@ impl MooncakeClient {
         let buffer = self.resolve_writable_buffer_region(buffer, object_size)?;
         if replica.replica_type == mooncake_store_core::ReplicaType::Disk
             || (replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
-                && !self.local_endpoints.read().contains(&replica.segment_name))
+                && !self.is_local_replica(replica))
         {
             let data = self
                 .read_from_replica_for_tenant(key, &tenant_id, replica)

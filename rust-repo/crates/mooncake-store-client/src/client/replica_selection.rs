@@ -2,6 +2,8 @@ use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use super::transfer_local::contains_same_process_endpoint;
+
 /// Scores a remote MEMORY replica; lower values are preferred.
 pub type ReplicaScorer = Arc<dyn Fn(&ReplicaDescriptor) -> f64 + Send + Sync>;
 
@@ -89,13 +91,13 @@ pub(super) fn select_best_replica<'a>(
         }
         match replica.replica_type {
             ReplicaType::Memory => {
-                if local_endpoints.contains(&replica.segment_name) {
+                if contains_same_process_endpoint(local_endpoints, &replica.segment_name) {
                     return Some(replica);
                 }
                 first_memory.get_or_insert(replica);
             }
             ReplicaType::NoFSsd => {
-                if local_endpoints.contains(&replica.segment_name) {
+                if contains_same_process_endpoint(local_endpoints, &replica.segment_name) {
                     return Some(replica);
                 }
                 first_nof.get_or_insert(replica);
@@ -110,7 +112,7 @@ pub(super) fn select_best_replica<'a>(
         for replica in replicas {
             if replica.status != ReplicaStatus::Complete
                 || replica.replica_type != ReplicaType::Memory
-                || local_endpoints.contains(&replica.segment_name)
+                || contains_same_process_endpoint(local_endpoints, &replica.segment_name)
             {
                 continue;
             }

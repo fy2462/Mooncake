@@ -175,6 +175,7 @@ pub(crate) struct ClientMetrics {
     closed: IntGauge,
     transfer_read_bytes: IntCounter,
     transfer_write_bytes: IntCounter,
+    read_strategy_count: IntCounterVec,
     get_latency_us: Histogram,
     put_latency_us: Histogram,
     batch_get_latency_us: Histogram,
@@ -274,6 +275,14 @@ impl ClientMetrics {
         let transfer_write_bytes =
             IntCounter::with_opts(opts("mooncake_transfer_write_bytes", "Total bytes written"))
                 .map_err(metric_error)?;
+        let read_strategy_count = IntCounterVec::new(
+            opts(
+                "mooncake_transfer_read_strategy_total",
+                "Successful reads by data-path strategy",
+            ),
+            &["strategy"],
+        )
+        .map_err(metric_error)?;
         let get_latency_us = Histogram::with_opts(histogram_opts(
             "mooncake_transfer_get_latency",
             "Get transfer latency (us)",
@@ -419,6 +428,7 @@ impl ClientMetrics {
             Box::new(closed.clone()),
             Box::new(transfer_read_bytes.clone()),
             Box::new(transfer_write_bytes.clone()),
+            Box::new(read_strategy_count.clone()),
             Box::new(get_latency_us.clone()),
             Box::new(put_latency_us.clone()),
             Box::new(batch_get_latency_us.clone()),
@@ -457,6 +467,7 @@ impl ClientMetrics {
             closed,
             transfer_read_bytes,
             transfer_write_bytes,
+            read_strategy_count,
             get_latency_us,
             put_latency_us,
             batch_get_latency_us,
@@ -513,6 +524,12 @@ impl ClientMetrics {
             TransferOperationKind::Read => self.transfer_read_bytes.inc_by(bytes),
             TransferOperationKind::Write => self.transfer_write_bytes.inc_by(bytes),
         }
+    }
+
+    pub(crate) fn observe_read_strategy(&self, strategy: &str) {
+        self.read_strategy_count
+            .with_label_values(&[strategy])
+            .inc();
     }
 
     pub(crate) fn observe_operation(

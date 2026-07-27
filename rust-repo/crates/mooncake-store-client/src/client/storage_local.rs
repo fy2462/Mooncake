@@ -907,11 +907,7 @@ impl MooncakeClient {
                 "mounted Memory segment overlaps an existing local segment".to_string(),
             ));
         }
-        let transport_endpoint = if self.protocol == "cxl" {
-            self.local_hostname.clone()
-        } else {
-            self.engine.get_local_ip_and_port()?
-        };
+        let transport_endpoint = self.local_transport_endpoint.clone();
         let expected_segment_id = mooncake_store_core::stable_memory_segment_id(
             self.client_id,
             segment_name,

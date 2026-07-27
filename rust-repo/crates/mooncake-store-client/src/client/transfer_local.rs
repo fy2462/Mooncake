@@ -33,6 +33,19 @@ fn unregistered_buffer_error() -> StoreError {
     StoreError::InvalidParams("buffer is not within externally registered memory".to_string())
 }
 
+pub(crate) fn is_same_process_endpoint(local: &str, remote: &str) -> bool {
+    !local.is_empty() && local == remote
+}
+
+pub(crate) fn contains_same_process_endpoint(
+    local_endpoints: &std::collections::HashSet<String>,
+    remote: &str,
+) -> bool {
+    local_endpoints
+        .iter()
+        .any(|local| is_same_process_endpoint(local, remote))
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ReadableBufferRegion {
     len: usize,
@@ -141,7 +154,7 @@ impl MooncakeClient {
     /// Check whether a replica's segment is locally mounted on this node.
     /// 检查副本的 segment 是否在本地节点上挂载。
     pub(super) fn is_local_replica(&self, replica: &ReplicaDescriptor) -> bool {
-        self.local_endpoints.read().contains(&replica.segment_name)
+        contains_same_process_endpoint(&self.local_endpoints.read(), &replica.segment_name)
     }
 
     pub(super) fn local_owned_segment(
@@ -317,5 +330,26 @@ mod tests {
         assert!(ranges_overlap(100, 200, 50, 101));
         assert!(!ranges_overlap(100, 200, 200, 300));
         assert!(!ranges_overlap(100, 200, 0, 100));
+    }
+
+    #[test]
+    fn same_process_endpoint_requires_identical_non_empty_identity() {
+        assert!(!is_same_process_endpoint("", ""));
+        assert!(!is_same_process_endpoint("", "192.168.1.10:12345"));
+        assert!(!is_same_process_endpoint("192.168.1.10:12345", ""));
+        assert!(is_same_process_endpoint(
+            "192.168.1.10:12345",
+            "192.168.1.10:12345"
+        ));
+        assert!(!is_same_process_endpoint(
+            "192.168.1.10:12345",
+            "192.168.1.10:12346"
+        ));
+        assert!(!is_same_process_endpoint(
+            "192.168.1.10:12345",
+            "192.168.1.11:12345"
+        ));
+        assert!(is_same_process_endpoint("host-a", "host-a"));
+        assert!(!is_same_process_endpoint("host-a", "host-b"));
     }
 }

@@ -440,7 +440,17 @@ impl MooncakeClient {
         let mut owned_store_segments: Vec<OwnedStoreSegment> = Vec::new();
         let mut cxl_segment_registration = None;
         let mut cxl_segment_id = None;
-        let mut local_transport_endpoint = local_host.to_string();
+        let local_transport_endpoint = if uses_transfer_engine
+            && effective_protocol != "cxl"
+            && metadata_conn_string == "P2PHANDSHAKE"
+        {
+            engine
+                .as_deref()
+                .expect("P2P data-plane client requires Transfer Engine")
+                .get_local_ip_and_port()?
+        } else {
+            local_host.to_string()
+        };
         if effective_protocol == "cxl" {
             let engine = engine
                 .as_deref()
@@ -571,7 +581,6 @@ impl MooncakeClient {
             let engine = engine
                 .as_deref()
                 .expect("data-plane segment validation requires Transfer Engine");
-            local_transport_endpoint = engine.get_local_ip_and_port()?;
             let max_mr_size = Self::resolve_max_mr_size(
                 effective_protocol,
                 global_segment_size,
@@ -791,7 +800,7 @@ impl MooncakeClient {
         // 用于 SelectBestReplica 的本地性优先判断。
         // C++ 等价：Client::GetLocalEndpoints() 返回所有已挂载 segment 的 te_endpoint。
         let mut endpoints = HashSet::new();
-        endpoints.insert(local_transport_endpoint);
+        endpoints.insert(local_transport_endpoint.clone());
 
         let hot_cache_settings =
             LocalHotCacheSettings::from_environment().map_err(StoreError::InvalidParams)?;
@@ -826,6 +835,7 @@ impl MooncakeClient {
             accelerator: Arc::new(crate::data_plane_ffi::NativeAcceleratorBackend),
             client_id,
             local_hostname: local_host.to_string(),
+            local_transport_endpoint: local_transport_endpoint.clone(),
             host_id,
             protocol: effective_protocol.to_string(),
             memory_segment_alignment,

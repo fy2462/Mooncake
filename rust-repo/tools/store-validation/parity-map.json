@@ -1486,41 +1486,36 @@
       "behavior": "With P2P handshake and no memcpy override, reading a complete replica mounted by the same client automatically uses the LOCAL_MEMCPY strategy and returns exact bytes.",
       "boundary": ["client", "tcp", "p2p", "local-memcpy", "read-strategy"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.P2PLocalReplicaUsesLocalMemcpy"},
-      "reason": "Rust implements local endpoint registration and a direct-copy branch, but no test drives a P2P client Get through strategy selection and proves both exact data and local-memcpy dispatch.",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp P2PLocalReplicaUsesLocalMemcpy and Rust transfer_read/transfer_local", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "tcp_local_and_remote_reads_report_the_actual_transfer_strategy"}], "status": "covered"
     },
     {
       "behavior": "With metadata discovery, a replica advertised under the client's local host alias is recognized as local even when it differs from the transport endpoint and is read with LOCAL_MEMCPY.",
       "boundary": ["client", "tcp", "metadata", "local-alias", "local-memcpy"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.MetadataLocalReplicaUsesLocalMemcpy"},
-      "reason": "Rust registers local segment aliases, but has no metadata-mode Get test proving alias locality, differing transport endpoint, direct-copy strategy, and payload integrity together.",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp MetadataLocalReplicaUsesLocalMemcpy and Rust local endpoint registration", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "http_metadata_local_and_remote_endpoints_choose_exact_transfer_strategy"}], "status": "covered"
     },
     {
       "behavior": "Two P2P clients on the same TCP host but with different endpoints treat each other's replicas as remote and use TransferEngine rather than local memcpy.",
       "boundary": ["client", "tcp", "p2p", "remote-replica", "transfer-engine"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.P2PRemoteReplicaOnSameTcpHostUsesTransferEngine"},
-      "reason": "Rust locality is keyed by exact segment name, but no two-client P2P test proves that same-host/different-port endpoints are not collapsed into local memcpy and that the remote transfer succeeds.",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp P2PRemoteReplicaOnSameTcpHostUsesTransferEngine and Rust replica locality", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "tcp_local_and_remote_reads_report_the_actual_transfer_strategy"}], "status": "covered"
     },
     {
       "behavior": "Two metadata-discovered clients on the same TCP host but with different host aliases treat each other's replicas as remote and use TransferEngine.",
       "boundary": ["client", "tcp", "metadata", "remote-replica", "transfer-engine"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.MetadataRemoteReplicaOnSameTcpHostUsesTransferEngine"},
-      "reason": "Rust has no metadata-mode two-client test proving distinct aliases remain remote through Get strategy dispatch and return the exact payload via TransferEngine.",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp MetadataRemoteReplicaOnSameTcpHostUsesTransferEngine and Rust transfer strategy selection", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "http_metadata_local_and_remote_endpoints_choose_exact_transfer_strategy"}], "status": "covered"
     },
     {
       "behavior": "For both P2P and metadata handshakes, a hot-cache hit redirects a nominally remote memory replica to LOCAL_MEMCPY and returns the cached bytes.",
       "boundary": ["client", "hot-cache", "p2p", "metadata", "local-memcpy"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "HotCacheRedirectStrategyTest.CacheHitUsesLocalMemcpy"},
-      "reason": "Rust hot-cache unit tests cover cache operations, but no client Get test supplies a remote replica and proves cache-hit redirection, strategy choice, and payload integrity in both handshake modes.",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp CacheHitUsesLocalMemcpy and Rust hot_cache/read path", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "hot_cache_hit_bypasses_missing_master_metadata_in_both_handshake_modes"}], "status": "covered"
     },
     {
       "behavior": "The C++ raw-byte serializer round-trips a user-defined class implementing serialize_to/deserialize_from.",
@@ -1879,9 +1874,8 @@
       "behavior": "Only identical non-empty endpoint identities are same-process; same-host endpoints with different ports remain remote.",
       "boundary": ["client", "transfer", "endpoint-identity", "same-host", "safety"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.IsSameProcessEndpoint"},
-      "reason": "Rust keys locality by exact mounted segment identity, but lacks a two-client endpoint test proving empty, identical, same-host/different-port, different-host, and hostname cases cannot cause a foreign virtual address to enter local memcpy.",
       "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp IsSameProcessEndpoint and Rust local_endpoints strategy selection", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/transfer_local.rs", "test": "same_process_endpoint_requires_identical_non_empty_identity"}], "status": "covered"
     },
     {
       "behavior": "The C++ TransferStrategy enum has fixed integer values and stream names for five native strategy variants.",

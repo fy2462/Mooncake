@@ -1,12 +1,13 @@
 #![cfg(feature = "link-native")]
 
 use mooncake_store_client::{
-    ClientBackgroundConfig, ClientHealthStatus, LocalStorageBackend, LocalStorageConfig,
-    MooncakeClient,
+    ClientBackgroundConfig, ClientHealthStatus, LocalHotCache, LocalStorageBackend,
+    LocalStorageConfig, MooncakeClient,
 };
 use mooncake_store_core::ReplicateConfig;
 use mooncake_store_master::MasterRuntimeConfig;
 use mooncake_store_master::MasterServiceImpl;
+use mooncake_store_master::http_metadata::serve_metadata_listener_with_service_gate;
 use mooncake_store_master::proto::master_service_server::MasterServiceServer;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -39,6 +40,52 @@ fn spawn_master(
             .unwrap();
     });
     (shutdown_tx, server)
+}
+
+async fn start_master_with_http_metadata() -> (
+    String,
+    String,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let grpc_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let grpc_address = grpc_listener.local_addr().unwrap();
+    let metadata_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let metadata_address = metadata_listener.local_addr().unwrap();
+    let service = Arc::new(MasterServiceImpl::with_runtime_config(
+        MasterRuntimeConfig::default(),
+    ));
+    service
+        .metadata_state()
+        .set_master_addr(format!("http://{grpc_address}"))
+        .await;
+    let metadata_state = service.metadata_state();
+    let metadata_service = Arc::clone(&service);
+    let metadata_server = tokio::spawn(async move {
+        serve_metadata_listener_with_service_gate(
+            metadata_listener,
+            metadata_state,
+            metadata_service,
+        )
+        .await
+        .unwrap();
+    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(MasterServiceServer::from_arc(service))
+            .serve_with_incoming_shutdown(TcpListenerStream::new(grpc_listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    (
+        grpc_address.to_string(),
+        format!("http://{metadata_address}/metadata"),
+        shutdown_tx,
+        metadata_server,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -154,6 +201,100 @@ async fn wait_for_healthy(slot: &Arc<tokio::sync::Mutex<Option<MooncakeClient>>>
     })
     .await
     .expect("storage heartbeat did not become healthy");
+}
+
+fn assert_prometheus_counter(metrics: &str, sample: &str, expected: u64) {
+    let line = metrics
+        .lines()
+        .find(|line| line.starts_with(sample))
+        .unwrap_or_else(|| {
+            let strategy_lines = metrics
+                .lines()
+                .filter(|line| line.contains("strategy"))
+                .collect::<Vec<_>>();
+            panic!("missing Prometheus sample {sample:?}; strategy lines: {strategy_lines:?}")
+        });
+    assert_eq!(line, format!("{sample} {expected}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_local_and_remote_reads_report_the_actual_transfer_strategy() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client(&master).await;
+    let mut reader = create_tcp_client(&master).await;
+    let payload = b"locality-strategy-exact-bytes";
+    writer
+        .put(
+            "locality-strategy",
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(writer.get("locality-strategy").await.unwrap(), payload);
+    assert_prometheus_counter(
+        &writer.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"local_memcpy\"}",
+        1,
+    );
+
+    assert_eq!(reader.get("locality-strategy").await.unwrap(), payload);
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"transfer_engine\"}",
+        1,
+    );
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hot_cache_hit_bypasses_missing_master_metadata_in_both_handshake_modes() {
+    let (master, shutdown) = start_master().await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    cache.put("p2p-hot-cache-only", b"p2p-hot-cache-exact-bytes");
+    let mut client = create_tcp_client(&master).await.with_hot_cache(cache);
+
+    assert_eq!(
+        client.get("p2p-hot-cache-only").await.unwrap(),
+        b"p2p-hot-cache-exact-bytes"
+    );
+    assert_prometheus_counter(
+        &client.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"local_memcpy\"}",
+        1,
+    );
+
+    drop(client);
+    let _ = shutdown.send(());
+
+    let (master, metadata_url, shutdown, metadata_server) = start_master_with_http_metadata().await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    cache.put("metadata-hot-cache-only", b"metadata-hot-cache-exact-bytes");
+    let mut client = create_tcp_client_with_metadata(&master, &metadata_url, 16 * 1024 * 1024)
+        .await
+        .with_hot_cache(cache);
+    assert_eq!(
+        client.get("metadata-hot-cache-only").await.unwrap(),
+        b"metadata-hot-cache-exact-bytes"
+    );
+    assert_prometheus_counter(
+        &client.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"local_memcpy\"}",
+        1,
+    );
+
+    drop(client);
+    let _ = shutdown.send(());
+    metadata_server.abort();
+    let _ = metadata_server.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -570,6 +711,68 @@ async fn create_tcp_client_with_segment_size(master: &str, segment_size: u64) ->
     )
     .await
     .unwrap()
+}
+
+async fn create_tcp_client_with_metadata(
+    master: &str,
+    metadata_url: &str,
+    segment_size: u64,
+) -> MooncakeClient {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_host = probe.local_addr().unwrap().to_string();
+    drop(probe);
+    MooncakeClient::create(
+        master,
+        metadata_url,
+        &local_host,
+        "tcp",
+        "",
+        segment_size,
+        8 * 1024 * 1024,
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_metadata_local_and_remote_endpoints_choose_exact_transfer_strategy() {
+    let (master, metadata_url, shutdown, metadata_server) = start_master_with_http_metadata().await;
+    let mut writer =
+        create_tcp_client_with_metadata(&master, &metadata_url, 16 * 1024 * 1024).await;
+    let mut reader =
+        create_tcp_client_with_metadata(&master, &metadata_url, 16 * 1024 * 1024).await;
+    let payload = b"http-metadata-locality-exact-bytes";
+    writer
+        .put(
+            "http-metadata-locality",
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(writer.get("http-metadata-locality").await.unwrap(), payload);
+    assert_prometheus_counter(
+        &writer.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"local_memcpy\"}",
+        1,
+    );
+    assert_eq!(reader.get("http-metadata-locality").await.unwrap(), payload);
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"transfer_engine\"}",
+        1,
+    );
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+    metadata_server.abort();
+    let _ = metadata_server.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
