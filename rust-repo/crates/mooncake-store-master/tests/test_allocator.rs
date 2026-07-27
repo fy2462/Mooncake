@@ -279,6 +279,126 @@ fn test_replica_count_zero() {
 }
 
 #[test]
+fn checked_allocation_reports_cpp_parameter_and_capacity_errors() {
+    let mut empty = SegmentAllocator::new();
+    let preferred = ReplicateConfig {
+        preferred_segment: "preferred:1".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        empty
+            .allocate_checked("key", 100, 1, &preferred)
+            .unwrap_err(),
+        SegmentAllocationError::NoAvailableHandle
+    );
+
+    let mut allocator = SegmentAllocator::new();
+    allocator.add_segment(make_seg("segment:1", 1024), 0, Uuid::new_v4());
+    assert_eq!(
+        allocator
+            .allocate_checked("key", 0, 1, &ReplicateConfig::default())
+            .unwrap_err(),
+        SegmentAllocationError::InvalidParams
+    );
+    assert_eq!(
+        allocator
+            .allocate_checked("key", 100, 0, &ReplicateConfig::default())
+            .unwrap_err(),
+        SegmentAllocationError::InvalidParams
+    );
+}
+
+#[test]
+fn plural_preference_and_exclusion_match_cpp_candidate_selection() {
+    let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
+    for name in ["fallback:1", "preferred-a:1", "preferred-b:1", "excluded:1"] {
+        allocator.add_segment(make_seg(name, 4096), 0, Uuid::new_v4());
+    }
+    let preferred = ReplicateConfig {
+        preferred_segments: vec!["preferred-a:1".into(), "preferred-b:1".into()],
+        ..Default::default()
+    };
+    let replicas = allocator.allocate("plural", 128, 2, &preferred);
+    assert_eq!(
+        replicas
+            .iter()
+            .map(|replica| replica.segment_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["preferred-a:1", "preferred-b:1"]
+    );
+    allocator.release(&replicas).unwrap();
+
+    let preferred = ReplicateConfig {
+        preferred_segment: "preferred-a:1".into(),
+        ..Default::default()
+    };
+    let replicas =
+        allocator.allocate_with_exclusions("excluded", 128, 3, &preferred, &["excluded:1".into()]);
+    assert_eq!(replicas.len(), 3);
+    assert_eq!(replicas[0].segment_name, "preferred-a:1");
+    assert!(
+        replicas
+            .iter()
+            .all(|replica| replica.segment_name != "excluded:1")
+    );
+}
+
+#[test]
+fn ssd_strategy_falls_back_filters_and_clamps_cpp_metrics_cases() {
+    let mut fallback = SegmentAllocator::new().with_strategy(AllocationStrategy::SsdFreeRatioFirst);
+    fallback.add_segment(make_seg("fallback:1", 4096), 0, Uuid::new_v4());
+    assert_eq!(
+        fallback
+            .allocate("fallback", 128, 1, &ReplicateConfig::default())
+            .len(),
+        1
+    );
+
+    let mut allocator =
+        SegmentAllocator::new().with_strategy(AllocationStrategy::SsdFreeRatioFirst);
+    let over_capacity = Uuid::new_v4();
+    let normal = Uuid::new_v4();
+    let excluded = Uuid::new_v4();
+    allocator.add_segment(make_seg("over:1", 4096), 0, over_capacity);
+    allocator.add_segment(make_seg("normal:1", 4096), 0, normal);
+    allocator.add_segment(make_seg("excluded:1", 4096), 0, excluded);
+    let metrics = HashMap::from([
+        (
+            over_capacity,
+            SsdUsageMetrics {
+                total_capacity_bytes: 1000,
+                used_bytes: 1500,
+            },
+        ),
+        (
+            normal,
+            SsdUsageMetrics {
+                total_capacity_bytes: 1000,
+                used_bytes: 100,
+            },
+        ),
+        (
+            excluded,
+            SsdUsageMetrics {
+                total_capacity_bytes: 1000,
+                used_bytes: 0,
+            },
+        ),
+    ]);
+    let replicas = allocator.allocate_for_client_with_exclusions(
+        "metrics",
+        None,
+        128,
+        1,
+        &ReplicateConfig::default(),
+        &["excluded:1".into()],
+        Some(&metrics),
+    );
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].segment_name, "normal:1");
+}
+
+#[test]
 fn test_not_enough_segments_for_replicas() {
     let mut a = SegmentAllocator::new();
     a.add_segment(make_seg("n:1", 1000), 0, Uuid::new_v4());
@@ -389,6 +509,51 @@ fn test_free_ratio_sort_order() {
     assert_eq!(repls.len(), 2);
     assert_eq!(repls[0].segment_name, "most_free:1");
     assert_eq!(repls[1].segment_name, "some_free:1");
+}
+
+#[test]
+fn free_ratio_first_balances_differently_sized_segments_within_cpp_tolerance() {
+    const MIB: u64 = 1024 * 1024;
+    const SLICE_SIZE: u64 = 64 * 1024;
+    let capacities = [32 * MIB, 64 * MIB, 128 * MIB];
+    let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::FreeRatioFirst);
+    let mut segment_ids = Vec::new();
+    for (index, capacity) in capacities.into_iter().enumerate() {
+        let segment = make_seg(&format!("{index}-segment"), capacity);
+        segment_ids.push(segment.id);
+        allocator.add_segment(segment, 0, Uuid::new_v4());
+    }
+
+    for index in 0..3000 {
+        assert_eq!(
+            allocator
+                .allocate(
+                    &format!("balanced-{index}"),
+                    SLICE_SIZE,
+                    1,
+                    &ReplicateConfig::default(),
+                )
+                .len(),
+            1
+        );
+    }
+
+    let utilization = segment_ids
+        .iter()
+        .zip(capacities)
+        .map(|(segment_id, capacity)| {
+            allocator.used_bytes(segment_id).unwrap() as f64 * 100.0 / capacity as f64
+        })
+        .collect::<Vec<_>>();
+    let minimum = utilization.iter().copied().fold(f64::INFINITY, f64::min);
+    let maximum = utilization
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        maximum - minimum < 15.0,
+        "utilization {utilization:?} exceeds the C++ 15% balance tolerance"
+    );
 }
 
 #[test]

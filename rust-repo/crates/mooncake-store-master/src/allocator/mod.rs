@@ -685,6 +685,31 @@ impl SegmentAllocator {
         self.allocate_for_client(key, None, slice_size, replica_count, config)
     }
 
+    /// C++-compatible checked allocation boundary.
+    ///
+    /// Internal placement callers retain the best-effort `Vec` API because a
+    /// request for more replicas than available segments legitimately returns
+    /// a partial result. Callers that need the public strategy error contract
+    /// use this method to distinguish invalid parameters from exhausted or
+    /// absent allocators.
+    pub fn allocate_checked(
+        &mut self,
+        key: &str,
+        slice_size: u64,
+        replica_count: usize,
+        config: &ReplicateConfig,
+    ) -> Result<Vec<ReplicaDescriptor>, SegmentAllocationError> {
+        if slice_size == 0 || replica_count == 0 {
+            return Err(SegmentAllocationError::InvalidParams);
+        }
+        let replicas = self.allocate(key, slice_size, replica_count, config);
+        if replicas.is_empty() {
+            Err(SegmentAllocationError::NoAvailableHandle)
+        } else {
+            Ok(replicas)
+        }
+    }
+
     /// Allocate replica_count memory replicas for a specific client.
     /// 为指定 client 分配 replica_count 个内存副本。
     ///
