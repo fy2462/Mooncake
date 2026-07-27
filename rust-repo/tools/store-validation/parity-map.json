@@ -2326,6 +2326,72 @@
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesZeroSizeMemoryReplica"},
       "reason": "Rust rejects zero-length object transfers at API validation and has no raw-pointer allocateSlices adapter.",
       "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesZeroSizeMemoryReplica and Rust transfer validation", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Two Store clients preserve exact bytes through put, query, Transfer Engine routing, and get.", "boundary": ["client", "master", "tcp", "end-to-end"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BasicPutGetOperations"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BasicPutGetOperations and the in-process TCP data-plane test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "two_tcp_clients_roundtrip_exact_bytes_through_one_master"}], "status": "covered"
+    },
+    {
+      "behavior": "Removing a completed object makes it absent to subsequent client existence checks.", "boundary": ["client", "master", "remove", "end-to-end"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.RemoveOperation"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp RemoveOperation and the in-process TCP client integration test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "A preferred local segment receives the object and remains readable from a different client over its published transport endpoint.", "boundary": ["client", "master", "placement", "transport-endpoint"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.LocalPreferredAllocationTest"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp LocalPreferredAllocationTest and the in-process TCP client integration test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "A multi-megabyte object can be allocated, transferred, and read back byte-for-byte.", "boundary": ["client", "master", "large-object", "end-to-end"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.LargeAllocateTest"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp LargeAllocateTest and the 5 MiB TCP round trip", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Batch put and batch get preserve input order and every object's exact bytes.", "boundary": ["client", "master", "batch", "end-to-end"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchPutGetOperations"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchPutGetOperations and the in-process TCP batch test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Batch existence results remain input-aligned before and after removing one member.", "boundary": ["client", "master", "batch-exist", "ordering"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchIsExistOperations"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchIsExistOperations and the in-process TCP batch test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Batch client-address lookup returns one entry for each mounted client identity.", "boundary": ["client", "master", "batch-query-ip", "multi-node"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchQueryIpOperations"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchQueryIpOperations and the in-process two-client lookup", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Upsert creates a new key and publishes bytes readable by another client.", "boundary": ["client", "master", "upsert", "new-key"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.UpsertNewKey"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp UpsertNewKey and the in-process TCP upsert test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Upsert replaces an existing object's content through the client data plane.", "boundary": ["client", "master", "upsert", "same-size"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.UpsertSameSize"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp UpsertSameSize and the in-process TCP upsert test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Upsert replaces an existing object with a differently sized payload and preserves exact bytes.", "boundary": ["client", "master", "upsert", "different-size"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.UpsertDifferentSize"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp UpsertDifferentSize and the in-process TCP batch-upsert test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Batch upsert replaces multiple existing objects with mixed payload sizes while preserving result order.", "boundary": ["client", "master", "batch-upsert", "mixed-size"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchUpsertMixed"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchUpsertMixed and the in-process TCP batch-upsert test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
     }
   ],
   "schema_version": 1

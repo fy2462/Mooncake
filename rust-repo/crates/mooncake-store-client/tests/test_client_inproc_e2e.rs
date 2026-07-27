@@ -106,10 +106,15 @@ async fn client_integration_basic_remove_batch_upsert_and_large_payload_parity()
     );
 
     writer
-        .upsert("batch-a", b"same-size", Some(config.clone()))
+        .upsert("upsert-new", b"created", Some(config.clone()))
         .await
         .unwrap();
-    assert_eq!(reader.get("batch-a").await.unwrap(), b"same-size");
+    assert_eq!(reader.get("upsert-new").await.unwrap(), b"created");
+    writer
+        .upsert("batch-a", b"other", Some(config.clone()))
+        .await
+        .unwrap();
+    assert_eq!(reader.get("batch-a").await.unwrap(), b"other");
     let replacement = b"different-sized-replacement".as_slice();
     assert_eq!(
         writer
