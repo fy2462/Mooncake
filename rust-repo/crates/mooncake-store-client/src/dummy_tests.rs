@@ -6,6 +6,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::mem;
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::time::{Duration, Instant};
 
 fn as_bytes<T>(value: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts(value as *const T as *const u8, mem::size_of::<T>()) }
@@ -161,4 +162,41 @@ fn ipc_channel_rejects_fd_with_partial_payload() {
         libc::close(fds[0]);
         libc::close(fds[1]);
     }
+}
+
+#[test]
+fn ipc_connect_rejects_zero_timeout_before_socket_access() {
+    let error =
+        DummyIpcChannel::connect_with_timeout("/path/that/must/not/be/accessed", Duration::ZERO)
+            .err()
+            .unwrap();
+    assert!(error.to_string().contains("timeout"));
+}
+
+#[test]
+fn ipc_connect_to_missing_endpoint_fails_promptly_with_path_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket_path = temp.path().join("missing.sock");
+    let started = Instant::now();
+    let error = DummyIpcChannel::connect_with_timeout(&socket_path, Duration::from_millis(10))
+        .err()
+        .unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(error.to_string().contains(socket_path.to_str().unwrap()));
+}
+
+#[test]
+fn ipc_connect_restores_blocking_mode_after_timed_connect() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket_path = temp.path().join("listener.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+    let accept = std::thread::spawn(move || listener.accept().unwrap());
+
+    let channel =
+        DummyIpcChannel::connect_with_timeout(&socket_path, Duration::from_secs(1)).unwrap();
+    assert!(!channel.is_nonblocking_for_test().unwrap());
+
+    drop(channel);
+    drop(accept.join().unwrap());
 }

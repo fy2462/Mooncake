@@ -455,17 +455,17 @@
       "behavior": "A Unix-domain connector rejects a non-positive connection timeout before attempting to connect.",
       "boundary": ["client", "uds", "timeout", "validation"],
       "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectRejectsNonPositiveTimeout"},
-      "reason": "Rust DummyIpcChannel has no configurable connect-timeout parameter or validation contract.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnector timeout validation", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_connect_rejects_zero_timeout_before_socket_access"}], "status": "covered"
     },
     {
       "behavior": "Connecting to a missing Unix-domain endpoint with a short timeout fails promptly and identifies the endpoint.",
       "boundary": ["client", "uds", "timeout", "failure-reporting"],
       "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectFailureReturnsPromptlyWithShortTimeout"},
-      "reason": "Rust uses blocking UnixStream::connect without an explicit timeout budget and has no prompt-failure/error-context test.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnector timed connect", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_connect_to_missing_endpoint_fails_promptly_with_path_context"}], "status": "covered"
     },
     {
       "behavior": "After a timed Unix-domain connect succeeds, the connector clears its temporary socket send timeout.",

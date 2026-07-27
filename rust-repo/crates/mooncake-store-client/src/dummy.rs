@@ -4,10 +4,10 @@ use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::mem;
-use std::os::fd::RawFd;
-use std::os::unix::io::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 mod dummy_fd;
@@ -256,8 +256,35 @@ impl DummyIpcChannel {
     pub(crate) fn from_stream(stream: UnixStream) -> Self {
         Self { stream }
     }
+    #[cfg(test)]
+    pub(crate) fn is_nonblocking_for_test(&self) -> std::io::Result<bool> {
+        let flags = unsafe { libc::fcntl(self.stream.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(flags & libc::O_NONBLOCK != 0)
+        }
+    }
     pub fn connect(socket_path: impl AsRef<Path>) -> DummyClientResult<Self> {
-        let stream = UnixStream::connect(socket_path)?;
+        Self::connect_with_timeout(socket_path, Duration::from_secs(5))
+    }
+
+    pub fn connect_with_timeout(
+        socket_path: impl AsRef<Path>,
+        timeout: Duration,
+    ) -> DummyClientResult<Self> {
+        if timeout.is_zero() {
+            return Err(DummyClientError::InvalidInput(
+                "Unix socket connect timeout must be greater than zero".to_string(),
+            ));
+        }
+        let path = socket_path.as_ref();
+        let stream = connect_unix_with_timeout(path, timeout).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to connect Unix socket {}: {error}", path.display()),
+            )
+        })?;
         Ok(Self { stream })
     }
 
@@ -380,4 +407,60 @@ impl DummyIpcChannel {
             DummyClientError::InvalidInput("invalid i32 response size".to_string())
         })?))
     }
+}
+
+fn connect_unix_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    let address = socket2::SockAddr::unix(path)?;
+    match socket.connect(&address) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == Some(libc::EINPROGRESS) =>
+        {
+            let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Unix socket connect timeout exceeds the supported clock range",
+                )
+            })?;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Unix socket connect timeout expired",
+                    ));
+                }
+                let timeout_ms = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                let mut descriptor = libc::pollfd {
+                    fd: socket.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+                if result == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Unix socket connect timeout expired",
+                    ));
+                }
+                if result < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if let Some(error) = socket.take_error()? {
+                    return Err(error);
+                }
+                break;
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    socket.set_nonblocking(false)?;
+    Ok(unsafe { UnixStream::from_raw_fd(socket.into_raw_fd()) })
 }
