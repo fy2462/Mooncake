@@ -11,7 +11,7 @@ touch "$temp_dir/native/libtransfer_engine.so" "$temp_dir/native/libtent_shared.
 
 cat >"$fake_bin/cargo" <<'SH'
 #!/usr/bin/env bash
-echo "cargo $*" >>"$MODULE_GATE_TRACE"
+echo "cargo CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-} $*" >>"$MODULE_GATE_TRACE"
 if [[ "$*" == *"mooncake-store-master"* ]]; then exit 7; fi
 exit 0
 SH
@@ -35,6 +35,7 @@ export MODULE_GATE_TRACE="$temp_dir/trace"
 export MOONCAKE_TE_LIB_DIR="$temp_dir/native"
 export MOONCAKE_VALIDATION_PYTHON="$fake_bin/validation-python"
 export MOONCAKE_VALIDATION_MATURIN="$fake_bin/validation-maturin"
+export MOONCAKE_VALIDATION_CARGO_TARGET_DIR="$temp_dir/shared-cargo-target"
 export PATH="$fake_bin:$PATH"
 set +e
 bash "$tool_dir/run-module-gate.sh" --artifact-root "$temp_dir/artifacts"
@@ -49,6 +50,7 @@ assert result["status"] == "FAIL", result
 assert result["first_failure"]["name"] == "store-master", result
 assert any(item["name"] == "native-tent" for item in result["commands"]), result
 assert "mooncake-store-master" in trace and "--workspace" in trace, trace
+assert "CARGO_TARGET_DIR=" in trace and "shared-cargo-target" in trace, trace
 assert "cmake" not in trace.lower(), trace
 PY
 

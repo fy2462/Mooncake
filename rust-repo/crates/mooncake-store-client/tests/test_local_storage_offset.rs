@@ -231,7 +231,7 @@ fn offset_allocator_writes_a_versioned_checksummed_checkpoint() {
     )
     .unwrap();
     assert_eq!(checkpoint["format"], "mooncake-offset-allocator-checkpoint");
-    assert_eq!(checkpoint["version"], 3);
+    assert_eq!(checkpoint["version"], 4);
     assert!(checkpoint["payload_crc32c"].is_u64());
     assert!(checkpoint["payload"].is_object());
     assert_eq!(checkpoint["payload"]["quota_bytes"], expected_quota_bytes);
@@ -326,7 +326,7 @@ fn synthetic_cpp_v3_shape_migrates_without_a_fifo_index() {
         persistence(OffsetPersistMode::Strict),
     );
     backend.init().unwrap();
-    assert_eq!(backend.read_object("default\0k").unwrap(), b"v");
+    assert_eq!(backend.read_object("v1:7:defaultk").unwrap(), b"v");
 }
 
 /// Hand-assembled bytes matching the audited C++ v3 layout. This is decoder

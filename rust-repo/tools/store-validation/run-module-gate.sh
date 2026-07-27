@@ -32,6 +32,8 @@ started_epoch=$(date +%s.%N)
 started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 command_index=0
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-5}
+native_cargo_target=${MOONCAKE_VALIDATION_CARGO_TARGET_DIR:-$artifact_root/cargo-target/native}
+python_cargo_target=${MOONCAKE_VALIDATION_PYTHON_CARGO_TARGET_DIR:-$native_cargo_target}
 
 record_command() {
   local name=$1
@@ -88,7 +90,7 @@ record_command conductor cargo test -p mooncake-conductor
 
 if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
   record_command store-client env \
-    "CARGO_TARGET_DIR=$artifact_root/cargo-target/native" \
+    "CARGO_TARGET_DIR=$native_cargo_target" \
     "RUSTFLAGS=-L native=$native_dir" \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     cargo test -p mooncake-store-client --features link-native
@@ -97,12 +99,12 @@ else
 fi
 if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" && -f "$native_dir/libtent_shared.so" ]]; then
   record_command native-tent env \
-    "CARGO_TARGET_DIR=$artifact_root/cargo-target/native" \
+    "CARGO_TARGET_DIR=$native_cargo_target" \
     "RUSTFLAGS=-L native=$native_dir" \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     cargo test -p transfer-engine-ffi --features link-tent-native
   record_command workspace env \
-    "CARGO_TARGET_DIR=$artifact_root/cargo-target/native" \
+    "CARGO_TARGET_DIR=$native_cargo_target" \
     "RUSTFLAGS=-L native=$native_dir" \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     cargo test --workspace --exclude mooncake-store-py \
@@ -116,7 +118,7 @@ validation_python=${MOONCAKE_VALIDATION_PYTHON:-$repo_root/.venv/bin/python}
 validation_maturin=${MOONCAKE_VALIDATION_MATURIN:-$repo_root/.venv/bin/maturin}
 if [[ -x "$validation_python" && -x "$validation_maturin" && -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" && -f "$native_dir/libtent_shared.so" ]]; then
   record_command python-binding-build env \
-    "CARGO_TARGET_DIR=$artifact_root/cargo-target/python" \
+    "CARGO_TARGET_DIR=$python_cargo_target" \
     "RUSTFLAGS=-L native=$native_dir" \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "$validation_maturin" develop --manifest-path python/Cargo.toml
