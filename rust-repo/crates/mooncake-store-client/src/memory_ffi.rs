@@ -213,6 +213,8 @@ unsafe impl StableMemoryOwner for RegisteredOwnedBuffer {
 }
 
 impl OwnedBuffer {
+    const REGULAR_REGISTRATION_ALIGNMENT: usize = 4096;
+
     pub(crate) fn allocate(size: usize) -> Self {
         Self::Vec(vec![0u8; size])
     }
@@ -247,7 +249,7 @@ impl OwnedBuffer {
         }
         let policy = HugepagePolicy::from_environment();
         if !policy.requested {
-            return Self::allocate_aligned(size, alignment);
+            return Self::allocate_regular_registration(size, alignment);
         }
 
         #[cfg(target_os = "linux")]
@@ -267,8 +269,15 @@ impl OwnedBuffer {
                     "MC_STORE_USE_HUGEPAGE requires Linux HugeTLB support",
                 ));
             }
-            Self::allocate_aligned(size, alignment)
+            Self::allocate_regular_registration(size, alignment)
         }
+    }
+
+    fn allocate_regular_registration(size: usize, alignment: usize) -> io::Result<Self> {
+        if alignment > 1 && !alignment.is_power_of_two() {
+            return Self::allocate_aligned(size, alignment);
+        }
+        Self::allocate_aligned(size, alignment.max(Self::REGULAR_REGISTRATION_ALIGNMENT))
     }
 
     #[cfg(target_os = "linux")]
@@ -304,7 +313,7 @@ impl OwnedBuffer {
             page_size = policy.page_size,
             "legacy hugepage request failed; falling back to regular aligned allocation"
         );
-        Self::allocate_aligned(size, alignment)
+        Self::allocate_regular_registration(size, alignment)
     }
 
     pub(crate) fn populate_before_registration(&mut self, protocol: &str) -> io::Result<()> {
@@ -765,6 +774,27 @@ mod tests {
     }
 
     #[test]
+    fn regular_registration_fallback_is_page_aligned_for_odd_size() {
+        let mut buffer = OwnedBuffer::allocate_regular_registration(65_000, 64).unwrap();
+        assert_eq!(buffer.as_ptr() as usize % 4096, 0);
+        buffer[0] = 0xcd;
+        buffer[64_999] = 0xab;
+        assert_eq!(buffer[0], 0xcd);
+        assert_eq!(buffer[64_999], 0xab);
+    }
+
+    #[test]
+    fn regular_registration_repeated_allocate_free_preserves_alignment() {
+        for value in 0..8_u8 {
+            let mut buffer = OwnedBuffer::allocate_regular_registration(128 * 1024, 64).unwrap();
+            assert_eq!(buffer.as_ptr() as usize % 4096, 0);
+            buffer.fill(value);
+            assert_eq!(buffer[0], value);
+            assert_eq!(buffer[buffer.len() - 1], value);
+        }
+    }
+
+    #[test]
     fn page_ranges_cover_every_page_once_without_overlap() {
         let ranges = page_ranges(5, 3).expect("valid page ranges");
 
@@ -817,8 +847,8 @@ mod tests {
         let buffer =
             OwnedBuffer::allocate_with_hugepage_allocator(16, 1, legacy, |_| None).unwrap();
 
-        assert!(matches!(buffer, OwnedBuffer::Vec(_)));
         assert_eq!(buffer.len(), 16);
+        assert_eq!(buffer.as_ptr() as usize % 4096, 0);
 
         let strict = HugepagePolicy {
             strict: true,

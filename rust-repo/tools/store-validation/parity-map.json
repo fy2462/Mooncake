@@ -1685,17 +1685,19 @@
       "behavior": "Without a hugepage request, an odd-sized Store allocation remains page-aligned, writable, and safely freeable.",
       "boundary": ["client", "memory", "fallback", "page-alignment", "lifecycle"],
       "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.NoHugepagesAllocFree"},
-      "reason": "Rust tests requested alignment but do not prove the C++ fallback invariant that an allocation requested with alignment 64 is nevertheless 4096-byte page aligned, especially for an odd size.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp NoHugepagesAllocFree and Rust OwnedBuffer fallback", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/memory_ffi.rs", "test": "regular_registration_fallback_is_page_aligned_for_odd_size"}],
+      "status": "covered"
     },
     {
       "behavior": "Repeated fallback allocate/write/free cycles preserve alignment and do not exhaust or corrupt allocator state.",
       "boundary": ["client", "memory", "fallback", "allocation-cycle"],
       "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.AllocateFreeCycle"},
-      "reason": "Rust has single-allocation lifecycle tests but no repeated allocation/free stress gate matching the C++ cycle coverage.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp AllocateFreeCycle and Rust OwnedBuffer lifecycle", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/memory_ffi.rs", "test": "regular_registration_repeated_allocate_free_preserves_alignment"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
