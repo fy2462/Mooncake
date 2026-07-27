@@ -958,6 +958,9 @@ impl MooncakeClient {
     pub(super) fn rpc_status_to_error(status: tonic::Status) -> StoreError {
         match status.code() {
             tonic::Code::DeadlineExceeded => StoreError::RpcTimeout(status.to_string()),
+            tonic::Code::Cancelled if status.message() == "Timeout expired" => {
+                StoreError::RpcTimeout(status.to_string())
+            }
             tonic::Code::NotFound => StoreError::KeyNotFound(status.message().to_string()),
             tonic::Code::AlreadyExists => StoreError::ObjectExists(status.message().to_string()),
             tonic::Code::Unavailable => StoreError::ServiceUnavailable,

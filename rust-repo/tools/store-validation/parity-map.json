@@ -67,19 +67,19 @@
       "behavior": "An RPC bind host already expressed as a bare IPv4 address passes through unchanged and can start the RPC server.",
       "boundary": ["client", "rpc", "configuration"],
       "cpp": {"file": "host_port_fix_test.cpp", "test": "HostPortFixTest.BareHostPassesThrough"},
-      "reason": "Rust has segment-name routing normalization tests but no equivalent test that derives and binds the Client RPC host from a bare configured address.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/host_port_fix_test.cpp and getHostNameWithoutPort", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "explicit_and_bare_ipv4_derive_bindable_rpc_host"}],
+      "status": "covered"
     },
     {
       "behavior": "A configured IPv4 host with a data-plane port is stripped to the bare host before RPC server binding, allowing the server to start.",
       "boundary": ["client", "rpc", "configuration"],
       "cpp": {"file": "host_port_fix_test.cpp", "test": "HostPortFixTest.StripsPortForRpcServer"},
-      "reason": "Rust has segment-name routing normalization tests but no equivalent assertion on Client RPC bind-host derivation and successful binding.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/host_port_fix_test.cpp, getHostNameWithoutPort, and coro_rpc_server startup", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "explicit_and_bare_ipv4_derive_bindable_rpc_host"}],
+      "status": "covered"
     },
     {
       "behavior": "Decimal and 0x/0X hexadecimal object keys parse as complete unsigned sequence hashes, while empty, malformed, and trailing-garbage keys are rejected.",
@@ -185,9 +185,9 @@
       "behavior": "Adding and removing keys from the LRU policy updates its visible candidate count.",
       "boundary": ["master", "eviction", "lru"],
       "cpp": {"file": "eviction_strategy_test.cpp", "test": "EvictionStrategyTest.AddAndRemoveKey"},
-      "reason": "Rust tests LRU victim ordering but has no direct candidate lifecycle/count test equivalent to add, remove, and cleanup.",
+      "reason": "C++ stores an internal mutable LRU key queue, while Rust derives each eviction candidate set directly from the authoritative object catalog and has no separate add/remove lifecycle or candidate-count API. Rust victim ordering and catalog deletion behavior are covered at their product boundaries.",
       "review": {"oracle": "mooncake-store/tests/eviction_strategy_test.cpp and LRUEvictionStrategy", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "LRU eviction returns the least recently used key first and moves updated keys behind untouched newer candidates.",
@@ -263,9 +263,9 @@
       "behavior": "A configured short RPC timeout bounds an unanswered readiness call and reports timeout rather than generic RPC failure.",
       "boundary": ["client", "rpc", "timeout", "fault-injection"],
       "cpp": {"file": "rpc_timeout_test.cpp", "test": "RpcTimeoutTest.RpcTimesOutAgainstUnresponsiveMaster"},
-      "reason": "Rust separately tests timeout configuration parsing and deadline status mapping, but has no black-hole server test proving an actual RPC honors the configured wall-clock budget.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/rpc_timeout_test.cpp and BlackHoleServer", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/tests.rs", "test": "rpc_request_timeout_bounds_unresponsive_master"}], "status": "covered"
     },
     {
       "behavior": "Republishing byte-identical RPC metadata is idempotent and leaves the original metadata available.",

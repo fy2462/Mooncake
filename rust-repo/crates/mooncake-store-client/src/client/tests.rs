@@ -4,10 +4,10 @@ use super::finalize::{
     ReplicaFinalizeDecision, ReplicaTransferSummary, determine_finalize_decision,
 };
 use super::read::scoped_cache_key;
-use super::{CachedQueryResultResponse, ClientHttpConfig, MooncakeClient};
+use super::{CachedQueryResultResponse, ClientHttpConfig, MooncakeClient, proto};
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::ffi::c_void;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn client_bootstrap_config_carries_http_configuration() {
@@ -135,6 +135,46 @@ fn deadline_exceeded_maps_to_rpc_timeout() {
     assert!(matches!(err, StoreError::RpcTimeout(_)));
 }
 
+#[tokio::test]
+async fn rpc_request_timeout_bounds_unresponsive_master() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let black_hole = tokio::spawn(async move {
+        let (_connection, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+
+    let mut master = MooncakeClient::connect_master_addr(&address.to_string(), None)
+        .await
+        .unwrap();
+    let timeout = Duration::from_millis(50);
+    let started = Instant::now();
+    let status = master
+        .service_ready(MooncakeClient::rpc_request_with_timeout(
+            proto::ServiceReadyRequest {},
+            Some(timeout),
+        ))
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+
+    black_hole.abort();
+    assert_eq!(status.code(), tonic::Code::Cancelled);
+    assert_eq!(status.message(), "Timeout expired");
+    assert!(matches!(
+        MooncakeClient::rpc_status_to_error(status),
+        StoreError::RpcTimeout(_)
+    ));
+    assert!(
+        elapsed >= timeout,
+        "request returned before its deadline: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "request exceeded its bounded deadline: {elapsed:?}"
+    );
+}
+
 #[test]
 fn rpc_status_mapping_preserves_remote_fallback_signal() {
     let missing = MooncakeClient::rpc_status_to_error(tonic::Status::not_found("missing-key"));
@@ -143,6 +183,9 @@ fn rpc_status_mapping_preserves_remote_fallback_signal() {
     let unavailable =
         MooncakeClient::rpc_status_to_error(tonic::Status::unavailable("master down"));
     assert!(matches!(unavailable, StoreError::ServiceUnavailable));
+
+    let cancelled = MooncakeClient::rpc_status_to_error(tonic::Status::cancelled("caller left"));
+    assert!(matches!(cancelled, StoreError::Internal(_)));
 }
 
 #[test]

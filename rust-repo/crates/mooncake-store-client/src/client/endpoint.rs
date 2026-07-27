@@ -220,8 +220,8 @@ fn reserve_port(port: u16) -> std::io::Result<PortReservation> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedClientEndpoint, format_host_port, reserve_endpoint, validated_port_range,
-        validated_setup_retries,
+        ParsedClientEndpoint, ResolvedClientEndpoint, format_host_port, reserve_endpoint,
+        validated_port_range, validated_setup_retries,
     };
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
@@ -259,6 +259,16 @@ mod tests {
             format_host_port("2001:db8::1", 12300),
             "[2001:db8::1]:12300"
         );
+    }
+
+    #[test]
+    fn explicit_and_bare_ipv4_derive_bindable_rpc_host() {
+        for server_name in ["127.0.0.1:18007", "127.0.0.1"] {
+            let endpoint = ResolvedClientEndpoint::from_environment(server_name).unwrap();
+            assert_eq!(endpoint.host, "127.0.0.1");
+            let listener = TcpListener::bind((endpoint.host.as_str(), 0)).unwrap();
+            assert_eq!(listener.local_addr().unwrap().ip(), Ipv4Addr::LOCALHOST);
+        }
     }
 
     #[test]
