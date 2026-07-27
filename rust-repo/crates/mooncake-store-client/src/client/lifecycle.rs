@@ -440,6 +440,7 @@ impl MooncakeClient {
         let mut owned_store_segments: Vec<OwnedStoreSegment> = Vec::new();
         let mut cxl_segment_registration = None;
         let mut cxl_segment_id = None;
+        let mut local_transport_endpoint = local_host.to_string();
         if effective_protocol == "cxl" {
             let engine = engine
                 .as_deref()
@@ -570,7 +571,7 @@ impl MooncakeClient {
             let engine = engine
                 .as_deref()
                 .expect("data-plane segment validation requires Transfer Engine");
-            let transport_endpoint = engine.get_local_ip_and_port()?;
+            local_transport_endpoint = engine.get_local_ip_and_port()?;
             let max_mr_size = Self::resolve_max_mr_size(
                 effective_protocol,
                 global_segment_size,
@@ -613,7 +614,7 @@ impl MooncakeClient {
                     local_host,
                     seg_buf.as_ptr() as u64,
                     size,
-                    &transport_endpoint,
+                    &local_transport_endpoint,
                     effective_protocol,
                     &host_id,
                 );
@@ -625,7 +626,7 @@ impl MooncakeClient {
                     segment_name: local_host.to_string(),
                     size,
                     base_addr: seg_buf.as_ptr() as u64,
-                    te_endpoint: transport_endpoint.clone(),
+                    te_endpoint: local_transport_endpoint.clone(),
                     protocol: effective_protocol.to_string(),
                     host_id: host_id.clone(),
                 };
@@ -790,7 +791,7 @@ impl MooncakeClient {
         // 用于 SelectBestReplica 的本地性优先判断。
         // C++ 等价：Client::GetLocalEndpoints() 返回所有已挂载 segment 的 te_endpoint。
         let mut endpoints = HashSet::new();
-        endpoints.insert(local_host.to_string());
+        endpoints.insert(local_transport_endpoint);
 
         let hot_cache_settings =
             LocalHotCacheSettings::from_environment().map_err(StoreError::InvalidParams)?;

@@ -149,7 +149,7 @@ impl MooncakeClient {
         replica: &ReplicaDescriptor,
     ) -> Option<&super::OwnedStoreSegment> {
         self.owned_store_segments.iter().find(|segment| {
-            segment.segment_name == replica.segment_name && segment.base_addr() == replica.base_addr
+            segment.segment_id == replica.segment_id && segment.base_addr() == replica.base_addr
         })
     }
 

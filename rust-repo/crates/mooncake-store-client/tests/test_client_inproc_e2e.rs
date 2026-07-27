@@ -136,3 +136,49 @@ async fn client_integration_basic_remove_batch_upsert_and_large_payload_parity()
     drop(reader);
     let _ = shutdown.send(());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments() {
+    let (master, shutdown) = start_master().await;
+    let mut source = create_tcp_client(&master).await;
+    let mut copy_target = create_tcp_client(&master).await;
+    let mut move_target = create_tcp_client(&master).await;
+    let source_name = source.get_hostname();
+    let copy_target_name = copy_target.get_hostname();
+    let move_target_name = move_target.get_hostname();
+    let payload = b"three-node-copy-move-payload";
+
+    source
+        .put(
+            "copy-move-object",
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: source_name.clone(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    source
+        .copy(
+            "copy-move-object",
+            &source_name,
+            std::slice::from_ref(&copy_target_name),
+        )
+        .await
+        .unwrap();
+    assert_eq!(copy_target.get("copy-move-object").await.unwrap(), payload);
+
+    source
+        .move_object("copy-move-object", &source_name, &move_target_name)
+        .await
+        .unwrap();
+    assert_eq!(copy_target.get("copy-move-object").await.unwrap(), payload);
+    assert_eq!(move_target.get("copy-move-object").await.unwrap(), payload);
+
+    drop(source);
+    drop(copy_target);
+    drop(move_target);
+    let _ = shutdown.send(());
+}
