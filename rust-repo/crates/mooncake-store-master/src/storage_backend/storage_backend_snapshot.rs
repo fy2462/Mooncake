@@ -1031,6 +1031,7 @@ impl StorageBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
     use serde_json::json;
 
     fn empty_snapshot(format_version: u32) -> Snapshot {
@@ -1178,6 +1179,122 @@ mod tests {
         assert_eq!(objects[0].1.soft_pin_timeout, Some(soft_pin_timeout));
         assert_eq!(objects[0].1.reserved_quota_charge_bytes, 150);
         assert_eq!(objects[0].1.pending_replaced_quota_charge_bytes, 100);
+    }
+
+    #[test]
+    fn native_snapshot_roundtrips_mixed_local_disk_holders_and_offloading_flags() {
+        let temp = tempfile::tempdir().expect("create snapshot directory");
+        let backend = StorageBackend::new(StorageBackendType::LocalDisk, temp.path());
+        let objects = DashMap::new();
+        let local_disk_segments = DashMap::new();
+        let client_a = Uuid::new_v4();
+        let client_b = Uuid::new_v4();
+        let storage_a = Uuid::new_v4();
+        let storage_b = Uuid::new_v4();
+
+        for (storage_id, client_id, enabled) in
+            [(storage_a, client_a, true), (storage_b, client_b, false)]
+        {
+            local_disk_segments.insert(
+                storage_id,
+                LocalDiskSnapshotEntry {
+                    storage_id,
+                    client_id,
+                    enable_offloading: enabled,
+                    offloading_objects: HashMap::from([(format!("key-{client_id}"), 1024)]),
+                    ssd_total_capacity_bytes: 0,
+                },
+            );
+        }
+
+        let local_replica = |storage_id, client_id, size| ReplicaDescriptor {
+            segment_id: Uuid::nil(),
+            segment_name: format!("local://{storage_id}"),
+            offset: 0,
+            size,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::LocalDisk,
+            holder_client_id: Some(client_id),
+            local_disk_storage_id: Some(storage_id),
+            local_disk_generation_id: Some(Uuid::new_v4()),
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+            protocol: String::new(),
+        };
+        let mut disk_only = object_with_runtime_deadlines(None, None, None);
+        disk_only.size = 1024;
+        disk_only.user_key = "disk-only".into();
+        disk_only.replicas = vec![local_replica(storage_a, client_a, 1024)];
+        objects.insert("default\0disk-only".into(), disk_only);
+
+        let mut mixed = object_with_runtime_deadlines(None, None, None);
+        mixed.size = 2048;
+        mixed.user_key = "mixed".into();
+        mixed.replicas = vec![
+            local_replica(storage_b, client_b, 2048),
+            ReplicaDescriptor {
+                segment_id: Uuid::new_v4(),
+                segment_name: "memory-segment".into(),
+                offset: 4096,
+                size: 2048,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Memory,
+                holder_client_id: Some(client_b),
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
+                refcnt: 0,
+                handle_valid: true,
+                base_addr: 0x1000,
+                protocol: "rdma".into(),
+            },
+        ];
+        objects.insert("default\0mixed".into(), mixed);
+
+        backend
+            .save_with_local_disk(
+                &DashMap::new(),
+                &DashMap::new(),
+                &objects,
+                &DashMap::new(),
+                &local_disk_segments,
+            )
+            .expect("save native snapshot");
+        let (_, _, loaded_objects, _, loaded_local_disks) = backend
+            .load_with_local_disk()
+            .expect("load native snapshot")
+            .expect("snapshot exists");
+
+        let loaded_objects = loaded_objects.into_iter().collect::<HashMap<_, _>>();
+        let disk_only = &loaded_objects["default\0disk-only"];
+        assert_eq!(disk_only.replicas.len(), 1);
+        assert_eq!(disk_only.replicas[0].replica_type, ReplicaType::LocalDisk);
+        assert_eq!(disk_only.replicas[0].holder_client_id, Some(client_a));
+        assert_eq!(disk_only.replicas[0].local_disk_storage_id, Some(storage_a));
+        assert_eq!(disk_only.replicas[0].size, 1024);
+
+        let mixed = &loaded_objects["default\0mixed"];
+        assert_eq!(mixed.replicas.len(), 2);
+        assert!(mixed.replicas.iter().any(|replica| {
+            replica.replica_type == ReplicaType::LocalDisk
+                && replica.holder_client_id == Some(client_b)
+                && replica.local_disk_storage_id == Some(storage_b)
+        }));
+        assert!(
+            mixed
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Memory)
+        );
+
+        let loaded_local_disks = loaded_local_disks
+            .into_iter()
+            .map(|entry| (entry.storage_id, entry))
+            .collect::<HashMap<_, _>>();
+        assert!(loaded_local_disks[&storage_a].enable_offloading);
+        assert!(!loaded_local_disks[&storage_b].enable_offloading);
+        assert_eq!(loaded_local_disks[&storage_a].client_id, client_a);
+        assert_eq!(loaded_local_disks[&storage_b].client_id, client_b);
     }
 
     #[test]

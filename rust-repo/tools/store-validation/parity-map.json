@@ -2051,6 +2051,51 @@
       "reason": "This byte-identical root-level source is not the CMake target; the canonical ha/oplog copy is covered by the Rust LocalFS integration test.",
       "review": {"oracle": "duplicate source comparison and mooncake-store/tests/CMakeLists.txt", "reviewed": true},
       "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "A LocalDisk replica snapshot round-trip preserves its type, holder identity, durable storage identity, generation, and object size.",
+      "boundary": ["master", "snapshot", "promotion", "local-disk", "round-trip"],
+      "cpp": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.LocalDiskReplicaRoundTrip"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp LocalDiskReplicaRoundTrip and Rust native snapshot DTO", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/storage_backend/storage_backend_snapshot.rs", "test": "native_snapshot_roundtrips_mixed_local_disk_holders_and_offloading_flags"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "An object containing both Memory and LocalDisk replicas preserves both descriptor variants through snapshot round-trip.",
+      "boundary": ["master", "snapshot", "promotion", "mixed-replicas"],
+      "cpp": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.MixedMemoryAndLocalDiskRoundTrip"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp MixedMemoryAndLocalDiskRoundTrip and Rust snapshot object codec", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/storage_backend/storage_backend_snapshot.rs", "test": "native_snapshot_roundtrips_mixed_local_disk_holders_and_offloading_flags"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "LocalDisk segment enable_offloading state is preserved by snapshot serialization and restoration.",
+      "boundary": ["master", "snapshot", "promotion", "local-disk", "offloading"],
+      "cpp": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.LocalDiskSegmentEnableOffloadingPreserved"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp LocalDiskSegmentEnableOffloadingPreserved and Rust LocalDiskSnapshotEntry", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/storage_backend/storage_backend_snapshot.rs", "test": "native_snapshot_roundtrips_mixed_local_disk_holders_and_offloading_flags"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Multiple LocalDisk holders retain independent client, storage, size, and offloading metadata across snapshot round-trip.",
+      "boundary": ["master", "snapshot", "promotion", "local-disk", "multi-client"],
+      "cpp": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.MultipleLocalDiskHoldersRoundTrip"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp MultipleLocalDiskHoldersRoundTrip and Rust LocalDisk snapshot maps", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/storage_backend/storage_backend_snapshot.rs", "test": "native_snapshot_roundtrips_mixed_local_disk_holders_and_offloading_flags"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Snapshotting with an in-flight promotion is safe: transient promotion state may be discarded, while the committed LocalDisk source remains visible and any orphan Memory range is quarantined.",
+      "boundary": ["master", "snapshot", "promotion", "in-flight", "recovery"],
+      "cpp": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.InFlightPromotionTaskSnapshotSafe"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp InFlightPromotionTaskSnapshotSafe and Rust restore transient-promotion cleanup", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "snapshot_restore_keeps_committed_object_readable_and_quarantines_orphan_promotion_range"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
