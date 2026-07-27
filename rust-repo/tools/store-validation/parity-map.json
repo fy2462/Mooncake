@@ -1966,6 +1966,91 @@
       "reason": "Rust Store client configuration has no parser for etcd://, redis://, or k8s:// master entries, so it cannot currently discover a leader from the C++-compatible Kubernetes URI.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/ha_backend_availability_test.cpp ClientSpecParsingMatchesK8sBuildFlag and Rust client lifecycle/configuration", "reviewed": true},
       "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A standby backed by a separate LocalFS oplog reader catches up to all primary records, exposes the reconstructed metadata, and reports matching applied and primary sequences.",
+      "boundary": ["master", "ha", "localfs", "hot-standby", "integration"],
+      "cpp": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestPrimaryStandbySync"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestPrimaryStandbySync and Rust LocalFsOpLogStore follower", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "localfs_writer_and_standby_sync_mixed_state_then_promote"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A fully synchronized LocalFS standby is ready for promotion, promotes at the final sequence, and preserves reconstructed metadata.",
+      "boundary": ["master", "ha", "localfs", "promotion", "integration"],
+      "cpp": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestStandbyPromotion"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestStandbyPromotion and Rust HotStandbyService::promote", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "localfs_writer_and_standby_sync_mixed_state_then_promote"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "After the LocalFS primary writer exits, the synchronized standby retains exact state and can promote at the last durable sequence.",
+      "boundary": ["master", "ha", "localfs", "primary-failure", "promotion"],
+      "cpp": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestFailoverScenario"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestFailoverScenario and Rust LocalFS writer-drop promotion", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "localfs_writer_and_standby_sync_mixed_state_then_promote"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Mixed durable PUT and REMOVE records replay through LocalFS to exactly the expected final standby key set.",
+      "boundary": ["master", "ha", "localfs", "oplog-replay", "data-consistency"],
+      "cpp": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestDataConsistency"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestDataConsistency and Rust v3 object/remove replay", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "localfs_writer_and_standby_sync_mixed_state_then_promote"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A running LocalFS standby catches up after at least one hundred primary mutations and reports zero final replication lag.",
+      "boundary": ["master", "ha", "localfs", "oplog-replay", "throughput"],
+      "cpp": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestHighThroughputSync"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestHighThroughputSync and Rust 120-record LocalFS integration", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "localfs_writer_and_standby_sync_mixed_state_then_promote"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The root-level LocalFS primary/standby sync source is an exact duplicate of the canonical HA oplog test source.",
+      "boundary": ["cpp-only", "duplicate-test-source", "localfs", "ha"],
+      "cpp": {"file": "localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestPrimaryStandbySync"},
+      "reason": "This byte-identical root-level source is not the CMake target; the canonical ha/oplog copy is covered by the Rust LocalFS integration test.",
+      "review": {"oracle": "cmp of mooncake-store/tests/localfs_hot_standby_integration_test.cpp and ha/oplog copy plus tests/CMakeLists.txt", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The root-level LocalFS promotion source is an exact duplicate of the canonical HA oplog test source.",
+      "boundary": ["cpp-only", "duplicate-test-source", "localfs", "ha"],
+      "cpp": {"file": "localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestStandbyPromotion"},
+      "reason": "This byte-identical root-level source is not the CMake target; the canonical ha/oplog copy is covered by the Rust LocalFS integration test.",
+      "review": {"oracle": "duplicate source comparison and mooncake-store/tests/CMakeLists.txt", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The root-level LocalFS failover source is an exact duplicate of the canonical HA oplog test source.",
+      "boundary": ["cpp-only", "duplicate-test-source", "localfs", "ha"],
+      "cpp": {"file": "localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestFailoverScenario"},
+      "reason": "This byte-identical root-level source is not the CMake target; the canonical ha/oplog copy is covered by the Rust LocalFS integration test.",
+      "review": {"oracle": "duplicate source comparison and mooncake-store/tests/CMakeLists.txt", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The root-level LocalFS data-consistency source is an exact duplicate of the canonical HA oplog test source.",
+      "boundary": ["cpp-only", "duplicate-test-source", "localfs", "ha"],
+      "cpp": {"file": "localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestDataConsistency"},
+      "reason": "This byte-identical root-level source is not the CMake target; the canonical ha/oplog copy is covered by the Rust LocalFS integration test.",
+      "review": {"oracle": "duplicate source comparison and mooncake-store/tests/CMakeLists.txt", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The root-level LocalFS throughput source is an exact duplicate of the canonical HA oplog test source.",
+      "boundary": ["cpp-only", "duplicate-test-source", "localfs", "ha"],
+      "cpp": {"file": "localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestHighThroughputSync"},
+      "reason": "This byte-identical root-level source is not the CMake target; the canonical ha/oplog copy is covered by the Rust LocalFS integration test.",
+      "review": {"oracle": "duplicate source comparison and mooncake-store/tests/CMakeLists.txt", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1

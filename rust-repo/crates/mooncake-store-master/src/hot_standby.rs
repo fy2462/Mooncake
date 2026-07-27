@@ -78,6 +78,13 @@ pub struct HotStandbyConfig {
     pub cluster_id: String,
 }
 
+fn observed_primary_sequence(store: &dyn OpLogStore, applied: u64) -> u64 {
+    store
+        .max_sequence_id()
+        .unwrap_or_else(|_| store.latest_sequence())
+        .max(applied)
+}
+
 impl Default for HotStandbyConfig {
     fn default() -> Self {
         Self {
@@ -95,7 +102,8 @@ mod tests {
     use crate::TenantId;
     use crate::ha::{NoopSnapshotProvider, OpLogPollResult, OpLogRecord, SnapshotProvider};
     use crate::oplog::{
-        InMemoryOpLog, OpLogChangeNotifier, OpLogEntryCallback, OpLogErrorCallback, OpLogStore,
+        InMemoryOpLog, LocalFsOpLogStore, OpLogChangeNotifier, OpLogEntryCallback,
+        OpLogErrorCallback, OpLogManager, OpLogStore,
     };
     use crate::service::{
         ObjectEntry, ReplicationTaskKind, ReplicationTaskSnapshotEntry, SegmentEntry,
@@ -340,6 +348,94 @@ mod tests {
         assert_eq!(status.lag_entries, 0);
 
         service.stop();
+    }
+
+    #[tokio::test]
+    async fn localfs_writer_and_standby_sync_mixed_state_then_promote() {
+        let directory = tempfile::tempdir().unwrap();
+        let writer = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+        let reader = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+        let mut writer = OpLogManager::new(Some(Box::new(writer)), 1);
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "localfs-integration-segment".into(),
+            base: 0,
+            size: 128 * 1024,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        };
+        state.segments.insert(
+            segment.id,
+            SegmentEntry {
+                segment: segment.clone(),
+                used: 0,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            },
+        );
+        state
+            .allocator
+            .write()
+            .add_segment(segment.clone(), 0, client_id);
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "localfs-integration".into(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(reader));
+        service.start().await.unwrap();
+
+        for index in 0..100 {
+            let key = format!("localfs-key-{index}");
+            let mut object = snapshot_object(&key, &segment, index * 1024, 1024);
+            object.client_id = client_id;
+            writer
+                .record_object_image_durable(&TenantId::default().make_scoped_key(&key), &object)
+                .unwrap();
+        }
+        for index in 0..20 {
+            writer
+                .record_remove_durable(
+                    &TenantId::default().make_scoped_key(&format!("localfs-key-{index}")),
+                )
+                .unwrap();
+        }
+        let target_sequence = writer.latest_sequence();
+
+        let caught_up = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while service.sync_status().applied_seq_id < target_sequence {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            caught_up.is_ok(),
+            "LocalFS standby did not catch up: status={:?}, objects={}",
+            service.sync_status(),
+            state.objects.len()
+        );
+
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, target_sequence);
+        assert_eq!(status.primary_seq_id, target_sequence);
+        assert_eq!(status.lag_entries, 0);
+        for index in 0..100 {
+            let scoped_key = TenantId::default().make_scoped_key(&format!("localfs-key-{index}"));
+            assert_eq!(state.objects.contains_key(&scoped_key), index >= 20);
+        }
+
+        drop(writer);
+        assert!(service.is_ready_for_promotion());
+        assert_eq!(service.promote().await.unwrap(), target_sequence);
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
     }
 
     #[tokio::test]
@@ -1136,7 +1232,8 @@ impl HotStandbyService {
                                 callback_applier.apply_op_log_entries(&[entry]);
                                 let expected = callback_applier.get_expected_sequence_id();
                                 let applied = expected.saturating_sub(1);
-                                let primary = callback_store.latest_sequence();
+                                let primary =
+                                    observed_primary_sequence(callback_store.as_ref(), applied);
                                 let rejected_expected =
                                     entry_seq == before_apply && expected == before_apply;
                                 if rejected_expected {
@@ -1187,7 +1284,8 @@ impl HotStandbyService {
                                     }
                                     let expected = applier_clone.get_expected_sequence_id();
                                     let applied = expected.saturating_sub(1);
-                                    let primary = store.latest_sequence();
+                                    let primary =
+                                        observed_primary_sequence(store.as_ref(), applied);
                                     if let Some(status) = sync_status_ref.upgrade() {
                                         let mut st = status.write();
                                         st.applied_seq_id = applied;
@@ -1306,7 +1404,7 @@ impl HotStandbyService {
                     let applied = if expected > 0 { expected - 1 } else { 0 };
                     let primary = oplog_store
                         .as_ref()
-                        .map(|s| s.latest_sequence())
+                        .map(|store| observed_primary_sequence(store.as_ref(), applied))
                         .unwrap_or(applied);
 
                     if let Some(s) = sync_status_ref.upgrade() {
