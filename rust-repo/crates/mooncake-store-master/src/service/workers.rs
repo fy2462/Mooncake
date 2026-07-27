@@ -29,7 +29,7 @@ use super::background_ops::{
 use super::helpers::{
     bump_view_version, clear_invalid_handles_locked, get_alive_clients_snapshot,
     host_from_segment_name, sync_client_segments, unmount_nof_segment_owned_durable,
-    unmount_nof_segment_owned_durable_locked, unmount_segment_owned_durable_locked,
+    unmount_segment_owned_durable_locked,
 };
 use super::state::{MasterState, NoFHeartbeatState};
 use crate::http_metadata::MetadataState;
@@ -417,8 +417,10 @@ impl EvictionWorker {
 /// 优先使用 O(client_keys) 的索引查找（client_objects），
 /// 仅在索引缺失时回退到全表扫描（兼容旧客户端）。
 ///
-/// Fully purge an expired client: release all its replicas, unmount its segments,
-/// delete its tasks, clean offload/promotion queues, and finally remove from client list.
+/// Fully purge an expired client: release all its replicas, unmount its Memory
+/// segments, delete its tasks, clean offload/promotion queues, and finally
+/// remove it from the client list. NoF segments have an independent heartbeat
+/// lifecycle and survive client expiry.
 /// Prefers O(N_keys) index lookup via client_objects;
 /// falls back to full scan only when the index is missing (legacy client compatibility).
 fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, client_id: Uuid) {
@@ -454,26 +456,6 @@ fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, cli
         local_disk.recovered_objects.clear();
         local_disk.offloading_objects.clear();
         local_disk.promotion_objects.clear();
-    }
-
-    // 卸载该 client 拥有的所有 NOF segment / Unmount all NoF segments owned by this client
-    let nof_segment_ids = state
-        .nof_segments
-        .iter()
-        .filter(|entry| entry.segment.client_id == client_id)
-        .map(|entry| entry.segment.id)
-        .collect::<Vec<_>>();
-    for segment_id in nof_segment_ids {
-        if unmount_nof_segment_owned_durable_locked(
-            state,
-            segment_id,
-            client_id,
-            "expired_client_unmount_nof",
-        )
-        .is_err()
-        {
-            return;
-        }
     }
 
     // 卸载该 client 拥有的所有常规 Memory segment / Unmount all Memory segments owned by this client
@@ -620,7 +602,7 @@ impl DrainWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::GracefulUnmountSnapshotEntry;
+    use crate::service::{GracefulUnmountSnapshotEntry, NoFSegmentEntry};
 
     fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
@@ -767,5 +749,31 @@ mod tests {
             .graceful_unmounts
             .contains_key(&next_segment)));
         scheduler.stop();
+    }
+
+    #[test]
+    fn expired_client_cleanup_preserves_nof_segment_for_heartbeat_ownership() {
+        let state = MasterState::empty();
+        let client_id = Uuid::new_v4();
+        let segment_id = Uuid::new_v4();
+        state.nof_segments.insert(
+            segment_id,
+            NoFSegmentEntry {
+                segment: mooncake_store_core::NoFSegment {
+                    id: segment_id,
+                    name: "nof-survives-client-expiry".into(),
+                    base: 0x5000_0000_0,
+                    size: 16 * 1024 * 1024,
+                    te_endpoint: "nof-endpoint".into(),
+                    client_id,
+                },
+                used: 0,
+                status: crate::proto::SegmentStatus::Active,
+            },
+        );
+
+        purge_expired_client(&state, &MetadataState::new("master"), client_id);
+
+        assert!(state.nof_segments.contains_key(&segment_id));
     }
 }

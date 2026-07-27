@@ -1788,6 +1788,60 @@
       "review": {"oracle": "mooncake-store/tests/deadline_scheduler_test.cpp RunsExpiredBeforePendingRecord and Rust GracefulUnmountScheduler expiry loop", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "graceful_unmount_scheduler_runs_expired_then_accepts_more_work"}],
       "status": "covered"
+    },
+    {
+      "behavior": "A healthy NoF segment remains mounted and its consecutive heartbeat failure count is zero after a successful probe.",
+      "boundary": ["master", "nof", "heartbeat", "healthy"],
+      "cpp": {"file": "nof_heartbeat_test.cpp", "test": "NoFHeartbeatTest.HealthyNoFSegmentDoesNotUnmount"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/nof_heartbeat_test.cpp HealthyNoFSegmentDoesNotUnmount and Rust NofHeartbeatWorker", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers/nof_heartbeat.rs", "test": "healthy_segment_resets_failures_after_initial_probe_grace"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A newly mounted NoF segment receives one full heartbeat interval of grace before its first probe.",
+      "boundary": ["master", "nof", "heartbeat", "initial-grace"],
+      "cpp": {"file": "nof_heartbeat_test.cpp", "test": "NoFHeartbeatTest.NewlyMountedNoFSegmentHasInitialGracePeriod"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/nof_heartbeat_test.cpp NewlyMountedNoFSegmentHasInitialGracePeriod and Rust initial next_probe_at", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers/nof_heartbeat.rs", "test": "healthy_segment_resets_failures_after_initial_probe_grace"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A continuously failing NoF segment is automatically unmounted after the configured heartbeat failure window.",
+      "boundary": ["master", "nof", "heartbeat", "failure-threshold", "auto-unmount"],
+      "cpp": {"file": "nof_heartbeat_test.cpp", "test": "NoFHeartbeatTest.FailedNoFSegmentUnmountsAfterThreshold"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/nof_heartbeat_test.cpp FailedNoFSegmentUnmountsAfterThreshold and Rust NofHeartbeatWorker", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers/nof_heartbeat.rs", "test": "failed_segment_unmounts_only_after_heartbeat_threshold"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A successful NoF heartbeat after transient failures resets the consecutive failure count and preserves the segment.",
+      "boundary": ["master", "nof", "heartbeat", "recovery"],
+      "cpp": {"file": "nof_heartbeat_test.cpp", "test": "NoFHeartbeatTest.FailureCountResetsAfterRecovery"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/nof_heartbeat_test.cpp FailureCountResetsAfterRecovery and Rust success handling", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers/nof_heartbeat.rs", "test": "successful_probe_recovers_failure_count_without_unmounting"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "When one of two NoF endpoints fails, heartbeat cleanup unmounts only the failed segment and leaves the healthy segment active.",
+      "boundary": ["master", "nof", "heartbeat", "isolation", "multi-segment"],
+      "cpp": {"file": "nof_heartbeat_test.cpp", "test": "NoFHeartbeatTest.OnlyFailedSegmentIsUnmounted"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/nof_heartbeat_test.cpp OnlyFailedSegmentIsUnmounted and Rust per-segment heartbeat state", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers/nof_heartbeat.rs", "test": "heartbeat_unmount_isolated_to_failed_segment"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Client TTL expiry does not unmount a NoF segment because NoF ownership is governed by its independent heartbeat lifecycle.",
+      "boundary": ["master", "nof", "heartbeat", "client-expiry", "lifecycle"],
+      "cpp": {"file": "nof_heartbeat_test.cpp", "test": "NoFHeartbeatTest.ClientExpiryDoesNotUnmountNoFSegment"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/nof_heartbeat_test.cpp ClientExpiryDoesNotUnmountNoFSegment and Rust purge_expired_client", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/workers.rs", "test": "expired_client_cleanup_preserves_nof_segment_for_heartbeat_ownership"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1

@@ -73,23 +73,25 @@ impl NofHeartbeatWorker {
                 // Sync heartbeat states: add new, remove stale.
                 let active_ids: std::collections::HashSet<Uuid> =
                     active_segments.iter().map(|(id, _, _, _)| *id).collect();
-                for (id, _client_id, name, te) in &active_segments {
-                    state.nof_heartbeat_states.entry(*id).or_insert_with(|| {
-                        // Stagger initial probe time across the interval.
-                        let spread = std::time::Duration::from_secs_f64(
-                            interval.as_secs_f64()
-                                * (state.nof_heartbeat_states.len() as f64
-                                    / active_segments.len().max(1) as f64),
-                        );
-                        NoFHeartbeatState {
+                for (index, (id, _client_id, name, te)) in active_segments.iter().enumerate() {
+                    // Compute the stagger before acquiring the DashMap entry
+                    // lock. Re-entering the same map from `or_insert_with`
+                    // can deadlock when `len()` needs the locked shard.
+                    let spread = std::time::Duration::from_secs_f64(
+                        interval.as_secs_f64()
+                            * (index as f64 / active_segments.len().max(1) as f64),
+                    );
+                    state
+                        .nof_heartbeat_states
+                        .entry(*id)
+                        .or_insert_with(|| NoFHeartbeatState {
                             segment_id: *id,
                             segment_name: name.clone(),
                             te_endpoint: te.clone(),
                             next_probe_at: now + interval + spread,
                             last_success_at: now,
                             consecutive_failures: 0,
-                        }
-                    });
+                        });
                 }
                 // Remove heartbeat state for unmounted segments.
                 state
@@ -172,5 +174,165 @@ impl NofHeartbeatWorker {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::NoFSegmentEntry;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn state_with_heartbeat(interval: Duration, threshold: u32) -> Arc<MasterState> {
+        let mut state = MasterState::empty();
+        state.runtime_config.nof_heartbeat_interval = interval;
+        state.runtime_config.nof_heartbeat_probe_timeout = Duration::from_millis(10);
+        state.runtime_config.nof_heartbeat_failures_threshold = threshold;
+        Arc::new(state)
+    }
+
+    fn mount_nof(state: &MasterState, endpoint: &str, base: u64) -> Uuid {
+        let segment_id = Uuid::new_v4();
+        state.nof_segments.insert(
+            segment_id,
+            NoFSegmentEntry {
+                segment: mooncake_store_core::NoFSegment {
+                    id: segment_id,
+                    name: format!("nof-{endpoint}"),
+                    base,
+                    size: 16 * 1024 * 1024,
+                    te_endpoint: endpoint.into(),
+                    client_id: Uuid::new_v4(),
+                },
+                used: 0,
+                status: crate::proto::SegmentStatus::Active,
+            },
+        );
+        segment_id
+    }
+
+    fn wait_until(timeout: Duration, predicate: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if predicate() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        predicate()
+    }
+
+    #[test]
+    fn healthy_segment_resets_failures_after_initial_probe_grace() {
+        let state = state_with_heartbeat(Duration::from_millis(300), 3);
+        let segment_id = mount_nof(&state, "healthy", 0x5000_0000_0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe_calls = calls.clone();
+        let mut worker = NofHeartbeatWorker::new(
+            state.clone(),
+            Box::new(move |_, _| {
+                probe_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }),
+        );
+
+        thread::sleep(Duration::from_millis(180));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert!(state.nof_segments.contains_key(&segment_id));
+        assert!(wait_until(Duration::from_millis(400), || calls
+            .load(Ordering::Relaxed)
+            >= 1));
+        assert_eq!(
+            state
+                .nof_heartbeat_states
+                .get(&segment_id)
+                .unwrap()
+                .consecutive_failures,
+            0
+        );
+        worker.stop();
+    }
+
+    #[test]
+    fn failed_segment_unmounts_only_after_heartbeat_threshold() {
+        let state = state_with_heartbeat(Duration::from_millis(100), 3);
+        let segment_id = mount_nof(&state, "failed", 0x5000_0000_0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe_calls = calls.clone();
+        let mut worker = NofHeartbeatWorker::new(
+            state.clone(),
+            Box::new(move |_, _| {
+                probe_calls.fetch_add(1, Ordering::Relaxed);
+                Err("submit_fail".into())
+            }),
+        );
+
+        assert!(wait_until(Duration::from_secs(1), || !state
+            .nof_segments
+            .contains_key(&segment_id)));
+        assert!(calls.load(Ordering::Relaxed) >= 3);
+        assert!(!state.nof_heartbeat_states.contains_key(&segment_id));
+        worker.stop();
+    }
+
+    #[test]
+    fn successful_probe_recovers_failure_count_without_unmounting() {
+        let state = state_with_heartbeat(Duration::from_millis(100), 3);
+        let segment_id = mount_nof(&state, "recovers", 0x5000_0000_0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe_calls = calls.clone();
+        let mut worker = NofHeartbeatWorker::new(
+            state.clone(),
+            Box::new(move |_, _| {
+                let call = probe_calls.fetch_add(1, Ordering::Relaxed);
+                if call < 2 {
+                    Err("submit_fail".into())
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+
+        assert!(wait_until(Duration::from_secs(1), || {
+            calls.load(Ordering::Relaxed) >= 4
+                && state
+                    .nof_heartbeat_states
+                    .get(&segment_id)
+                    .map(|entry| entry.consecutive_failures == 0)
+                    .unwrap_or(false)
+        }));
+        assert!(state.nof_segments.contains_key(&segment_id));
+        worker.stop();
+    }
+
+    #[test]
+    fn heartbeat_unmount_isolated_to_failed_segment() {
+        let state = state_with_heartbeat(Duration::from_millis(300), 2);
+        let good_segment = mount_nof(&state, "good", 0x5000_0000_0);
+        let bad_segment = mount_nof(&state, "bad", 0x5010_0000_0);
+        let good_calls = Arc::new(AtomicUsize::new(0));
+        let bad_calls = Arc::new(AtomicUsize::new(0));
+        let good_probe_calls = good_calls.clone();
+        let bad_probe_calls = bad_calls.clone();
+        let mut worker = NofHeartbeatWorker::new(
+            state.clone(),
+            Box::new(move |endpoint, _| {
+                if endpoint == "good" {
+                    good_probe_calls.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                } else {
+                    bad_probe_calls.fetch_add(1, Ordering::Relaxed);
+                    Err("submit_fail".into())
+                }
+            }),
+        );
+
+        assert!(wait_until(Duration::from_secs(2), || !state
+            .nof_segments
+            .contains_key(&bad_segment)));
+        assert!(state.nof_segments.contains_key(&good_segment));
+        assert!(good_calls.load(Ordering::Relaxed) >= 1);
+        assert!(bad_calls.load(Ordering::Relaxed) >= 2);
+        worker.stop();
     }
 }
