@@ -38,7 +38,8 @@ pub(crate) fn detach_staged_promotion_replica(
 /// Periodically reap expired background tasks (offload / promotion / remote_pull).
 /// Tasks exceeding their TTL are considered failed; their held resources and locks are released to prevent leaks.
 pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
-    let ttl = state.runtime_config.put_start_release_timeout;
+    let release_timeout = state.runtime_config.put_start_release_timeout;
+    let discard_timeout = state.runtime_config.put_start_discard_timeout;
     let system_now = SystemTime::now();
     reap_client_tasks(state);
     if state.service_fenced.load(AtomicOrdering::Acquire) {
@@ -109,7 +110,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
         sync_cache_total_accounting(&mut object);
         let authoritative_object = object.clone();
         drop(object);
-        let Some(deadline) = system_now.checked_add(ttl) else {
+        let Some(deadline) = system_now.checked_add(release_timeout) else {
             state.fence_after_invariant_failure(
                 "reap_orphaned_staged_deadline",
                 &format!("key={key:?} has no representable delayed-release deadline"),
@@ -150,10 +151,9 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
             stale_processing_markers.push(key);
             continue;
         }
-        if object
-            .put_start_time
-            .is_some_and(|start| system_now.duration_since(start).unwrap_or_default() >= ttl)
-        {
+        if object.put_start_time.is_some_and(|start| {
+            system_now.duration_since(start).unwrap_or_default() >= discard_timeout
+        }) {
             expired_processing.push(key);
         }
     }
@@ -170,7 +170,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
         if let Some(mut object) = state.objects.get_mut(&key) {
             release_deadline = object
                 .put_start_time
-                .and_then(|start| start.checked_add(ttl));
+                .and_then(|start| start.checked_add(release_timeout));
             if release_deadline.is_none() {
                 drop(object);
                 state.fence_after_invariant_failure(
@@ -299,7 +299,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
     let expired_replications = state
         .replication_tasks
         .iter()
-        .filter(|entry| now.saturating_duration_since(entry.start_time) >= ttl)
+        .filter(|entry| now.saturating_duration_since(entry.start_time) >= release_timeout)
         .map(|entry| entry.key().clone())
         .collect::<Vec<_>>();
     for key in expired_replications {
@@ -415,7 +415,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
     let expired_offloads = state
         .offloading_tasks
         .iter()
-        .filter(|entry| now.saturating_duration_since(entry.start_time) >= ttl)
+        .filter(|entry| now.saturating_duration_since(entry.start_time) >= release_timeout)
         .map(|entry| entry.key().clone())
         .collect::<Vec<_>>();
     for key in expired_offloads {
@@ -433,7 +433,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
     let expired_promotions = state
         .promotion_tasks
         .iter()
-        .filter(|entry| now.saturating_duration_since(entry.start_time) >= ttl)
+        .filter(|entry| now.saturating_duration_since(entry.start_time) >= release_timeout)
         .map(|entry| entry.key().clone())
         .collect::<Vec<_>>();
     for key in expired_promotions {

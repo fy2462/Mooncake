@@ -113,6 +113,7 @@ async fn expired_partial_put_settles_surviving_nof_object_quota() {
         default_tenant_quota_bytes: 512,
         tenant_quota_connector_uri: temp_policy_uri(),
         tenant_quota_pool_capacity_bytes: 512,
+        put_start_discard_timeout: std::time::Duration::ZERO,
         put_start_release_timeout: std::time::Duration::ZERO,
         ..Default::default()
     });

@@ -210,6 +210,394 @@ async fn test_timed_out_put_start_releases_dashmap_guard_before_remove() {
 }
 
 #[tokio::test]
+async fn test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "discard-incomplete-replicas".into(),
+        put_start_discard_timeout: Duration::from_millis(20),
+        put_start_release_timeout: Duration::from_secs(5),
+        reaper_interval: Duration::from_millis(5),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "discard-incomplete:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    for (key, completed_type, discarded_type) in [
+        (
+            "discard-disk",
+            proto::replica_descriptor::ReplicaType::Memory,
+            proto::replica_descriptor::ReplicaType::Disk,
+        ),
+        (
+            "discard-memory",
+            proto::replica_descriptor::ReplicaType::Disk,
+            proto::replica_descriptor::ReplicaType::Memory,
+        ),
+    ] {
+        let started = MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                slice_length: 128,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "discard-incomplete:1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 2);
+
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: completed_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let replicas = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(replicas.replicas.len(), 1);
+        assert_eq!(replicas.replicas[0].replica_type, completed_type as i32);
+
+        // Match C++ discarded_replicas_: a late completion is accepted as a
+        // no-op and must not resurrect the discarded replica.
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: discarded_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let after_late_end = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(after_late_end.replicas.len(), 1);
+        assert_eq!(
+            after_late_end.replicas[0].replica_type,
+            completed_type as i32
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_memory_and_global_disk_put_revoke_remove_parity() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "memory-disk-lifecycle".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "memory-disk-lifecycle:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    async fn start(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
+        let response = MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                slice_length: 128,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "memory-disk-lifecycle:1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.replicas.len(), 2);
+    }
+
+    async fn end(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        replica_type: proto::replica_descriptor::ReplicaType,
+    ) {
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn revoke(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        replica_type: proto::replica_descriptor::ReplicaType,
+    ) {
+        MasterService::put_revoke(
+            service,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn replicas(service: &MasterServiceImpl, key: &str) -> Vec<proto::ReplicaDescriptor> {
+        MasterService::get_replica_list(
+            service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas
+    }
+
+    use proto::replica_descriptor::{ReplicaStatus as Status, ReplicaType as Type};
+
+    start(&service, client_id, "complete-both").await;
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "complete-both".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+    end(&service, client_id, "complete-both", Type::Memory).await;
+    end(&service, client_id, "complete-both", Type::Disk).await;
+    let complete = replicas(&service, "complete-both").await;
+    assert_eq!(complete.len(), 2);
+    assert!(
+        complete
+            .iter()
+            .all(|replica| replica.status == Status::Complete as i32)
+    );
+
+    start(&service, client_id, "revoke-disk").await;
+    end(&service, client_id, "revoke-disk", Type::Memory).await;
+    revoke(&service, client_id, "revoke-disk", Type::Disk).await;
+    let memory_only = replicas(&service, "revoke-disk").await;
+    assert_eq!(memory_only.len(), 1);
+    assert_eq!(memory_only[0].replica_type, Type::Memory as i32);
+
+    start(&service, client_id, "revoke-memory").await;
+    revoke(&service, client_id, "revoke-memory", Type::Memory).await;
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "revoke-memory".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+    end(&service, client_id, "revoke-memory", Type::Disk).await;
+    let disk_only = replicas(&service, "revoke-memory").await;
+    assert_eq!(disk_only.len(), 1);
+    assert_eq!(disk_only[0].replica_type, Type::Disk as i32);
+
+    start(&service, client_id, "revoke-both").await;
+    revoke(&service, client_id, "revoke-both", Type::Disk).await;
+    revoke(&service, client_id, "revoke-both", Type::Memory).await;
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "revoke-both".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+
+    start(&service, client_id, "remove-both").await;
+    end(&service, client_id, "remove-both", Type::Memory).await;
+    end(&service, client_id, "remove-both", Type::Disk).await;
+    MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "remove-both".into(),
+            force: true,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "remove-both".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn test_global_disk_keeps_object_readable_after_memory_capacity_eviction() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "global-disk-eviction".into(),
+        lease_ttl: Duration::ZERO,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "global-disk-eviction:1".into(),
+            size: 128,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let put = |key: &str| {
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "global-disk-eviction:1".into(),
+                ..Default::default()
+            }),
+        })
+    };
+    MasterService::put_start(&service, put("evicted-to-disk"))
+        .await
+        .unwrap();
+    for replica_type in [
+        proto::replica_descriptor::ReplicaType::Memory,
+        proto::replica_descriptor::ReplicaType::Disk,
+    ] {
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "evicted-to-disk".into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        service.run_eviction_cycle_for_test(1),
+        vec!["evicted-to-disk".to_string()]
+    );
+    let retained = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "evicted-to-disk".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(retained.replicas.len(), 1);
+    assert_eq!(
+        retained.replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::Disk as i32
+    );
+
+    let replacement = MasterService::put_start(&service, put("reuses-memory-capacity"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(replacement.replicas.len(), 2);
+}
+
+#[tokio::test]
 async fn test_concurrent_initial_put_start_has_single_winner() {
     const WRITERS: usize = 32;
 

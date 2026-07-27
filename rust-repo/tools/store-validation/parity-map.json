@@ -2152,6 +2152,78 @@
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp DecodeWithInvalidTaskFieldTypeReturnsError and Rust task decoder", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "malformed_or_duplicate_tasks_fail_closed"}],
       "status": "covered"
+    },
+    {
+      "behavior": "A PutStart backed by Memory and global Disk is unreadable until both replicas complete, then returns both as Complete.",
+      "boundary": ["master", "ssd", "put-lifecycle", "memory-disk"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutEndBothReplica"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutEndBothReplica and Rust global Disk lifecycle", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Restoring a snapshot containing one complete Memory replica and one complete SSD Disk replica rebuilds both cache-total gauges and keeps the object readable.",
+      "boundary": ["master", "snapshot", "ssd", "metrics", "restore"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.RestorePreservesCacheTotalMetrics"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RestorePreservesCacheTotalMetrics and Rust restore accounting", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_storage.rs", "test": "test_snapshot_restore_rebuilds_memory_and_disk_cache_total_metrics"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Revoking the unfinished Disk replica after Memory PutEnd leaves one readable complete Memory replica.",
+      "boundary": ["master", "ssd", "put-revoke", "disk"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeDiskReplica"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeDiskReplica and Rust typed revoke", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Revoking the unfinished Memory replica keeps the object not-ready until Disk PutEnd, after which one complete Disk replica is readable.",
+      "boundary": ["master", "ssd", "put-revoke", "memory"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeMemoryReplica"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeMemoryReplica and Rust typed revoke", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Revoking both unfinished Memory and Disk replicas removes the object completely.",
+      "boundary": ["master", "ssd", "put-revoke", "object-removal"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeBothReplica"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeBothReplica and Rust typed revoke", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Removing an object with complete Memory and Disk replicas removes it from lookup.",
+      "boundary": ["master", "ssd", "remove", "memory-disk"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.RemoveKey"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RemoveKey and Rust remove lifecycle", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Memory pressure can evict the Memory copy while the global Disk copy keeps the object readable and allows the released Memory capacity to be reused.",
+      "boundary": ["master", "ssd", "eviction", "capacity"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.EvictObject"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp EvictObject and Rust memory-pressure eviction with global Disk", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_global_disk_keeps_object_readable_after_memory_capacity_eviction"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "For either Memory or Disk, an unfinished sibling replica is discarded at put_start_discard_timeout, released only after the longer grace timeout, and a late PutEnd is an idempotent no-op.",
+      "boundary": ["master", "ssd", "put-timeout", "delayed-release"],
+      "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutStartExpires"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires and Rust background reaper", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1

@@ -895,10 +895,10 @@ fn has_completed_memory_cache_replica(object: &ObjectEntry) -> bool {
 }
 
 fn has_completed_disk_cache_replica(object: &ObjectEntry) -> bool {
-    object
-        .replicas
-        .iter()
-        .any(|r| r.replica_type == ReplicaType::LocalDisk && r.status == ReplicaStatus::Complete)
+    object.replicas.iter().any(|r| {
+        matches!(r.replica_type, ReplicaType::Disk | ReplicaType::LocalDisk)
+            && r.status == ReplicaStatus::Complete
+    })
 }
 
 pub(crate) fn sync_cache_total_accounting(object: &mut ObjectEntry) {

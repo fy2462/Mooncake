@@ -389,6 +389,7 @@ async fn test_background_eviction_records_remove_for_standby() {
 #[tokio::test]
 async fn test_expired_put_start_reaper_records_remove_for_standby() {
     let service = service_with_oplog(MasterRuntimeConfig {
+        put_start_discard_timeout: Duration::ZERO,
         put_start_release_timeout: Duration::ZERO,
         ..Default::default()
     });

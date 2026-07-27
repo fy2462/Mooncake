@@ -5,6 +5,7 @@ use common::{proto_uuid, temp_dir};
 
 use mooncake_store_master::TenantId;
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
+use mooncake_store_master::metrics;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
 use mooncake_store_master::proto::master_service_server::MasterService;
@@ -45,6 +46,11 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
 }
 
 fn hf3fs_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn cache_total_metrics_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -166,6 +172,64 @@ fn test_storage_backend_save_and_load() {
     assert_eq!(loaded_objs[0].1.replicas[0].segment_name, "node1:12345");
     assert_eq!(loaded_objs[0].1.replicas[0].offset, 0x1000);
     assert_eq!(loaded_objs[0].1.size, 256);
+}
+
+#[test]
+fn test_snapshot_restore_rebuilds_memory_and_disk_cache_total_metrics() {
+    let _guard = cache_total_metrics_test_lock().lock().unwrap();
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let segments = DashMap::new();
+    let nof_segments = DashMap::new();
+    let objects = DashMap::new();
+    let tasks = DashMap::new();
+    let segment_id = Uuid::new_v4();
+    segments.insert(
+        segment_id,
+        SegmentEntry {
+            segment: Segment {
+                id: segment_id,
+                name: "snapshot-cache:1".into(),
+                size: 4096,
+                base: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            },
+            used: 128,
+            client_id: Uuid::new_v4(),
+            status: ProtoSegmentStatus::Active,
+        },
+    );
+    objects.insert(
+        "snapshot-cache-totals".into(),
+        make_entry(
+            vec![
+                make_mem_replica(segment_id, "snapshot-cache:1", 0, 128),
+                make_disk_replica(segment_id, "/snapshot-cache/object", 0, 128),
+            ],
+            128,
+        ),
+    );
+    backend
+        .save(&segments, &nof_segments, &objects, &tasks)
+        .unwrap();
+
+    let base_memory_total = metrics::MEM_CACHE_TOTAL.get();
+    let base_disk_total = metrics::FILE_CACHE_TOTAL.get();
+    let restored = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp));
+
+    assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_memory_total + 1);
+    assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_disk_total + 1);
+    let snapshot = restored.capture_loaded_snapshot("cache-total-metrics");
+    assert_eq!(snapshot.objects.len(), 1);
+    assert_eq!(snapshot.objects[0].1.replicas.len(), 2);
+
+    // Cache-total gauges are process-global, while dropping a service does not
+    // mean its durable inventory was removed. Isolate this integration test's
+    // synthetic restore from the remaining tests in this process.
+    metrics::MEM_CACHE_TOTAL.set(base_memory_total);
+    metrics::FILE_CACHE_TOTAL.set(base_disk_total);
 }
 
 #[test]
