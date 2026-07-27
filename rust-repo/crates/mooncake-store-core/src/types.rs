@@ -357,6 +357,23 @@ impl TryFrom<i32> for ObjectDataType {
     }
 }
 
+impl std::fmt::Display for ObjectDataType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unknown => "UNKNOWN",
+            Self::Kvcache => "KVCACHE",
+            Self::Tensor => "TENSOR",
+            Self::Weight => "WEIGHT",
+            Self::Sample => "SAMPLE",
+            Self::Activation => "ACTIVATION",
+            Self::Gradient => "GRADIENT",
+            Self::OptimizerState => "OPTIMIZER_STATE",
+            Self::Metadata => "METADATA",
+            Self::General => "GENERAL",
+        })
+    }
+}
+
 /// Describes a single replica — the unit of data placement.
 ///
 /// Each replica represents a copy (or fragment) of a stored object placed on
@@ -605,6 +622,41 @@ impl Default for ReplicateConfig {
             host_id: String::new(),
             group_ids: vec![],
         }
+    }
+}
+
+impl std::fmt::Display for ReplicateConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "ReplicateConfig: {{ replica_num: {}, nof_replica_num: {}, with_soft_pin: {}, with_hard_pin: {}, preferred_segments: [{}]",
+            self.replica_num,
+            self.nof_replica_num,
+            self.with_soft_pin,
+            self.with_hard_pin,
+            self.preferred_segments.join(", ")
+        )?;
+        if !self.preferred_segment.is_empty() {
+            write!(
+                formatter,
+                ", preferred_segment (deprecated): {}",
+                self.preferred_segment
+            )?;
+        }
+        write!(
+            formatter,
+            ", preferred_nof_segments: [{}], prefer_alloc_in_same_node: {}, data_type: {}",
+            self.preferred_nof_segments.join(", "),
+            self.prefer_alloc_in_same_node,
+            self.data_type
+        )?;
+        if !self.host_id.is_empty() {
+            write!(formatter, ", host_id: {}", self.host_id)?;
+        }
+        if !self.group_ids.is_empty() {
+            write!(formatter, ", group_ids: [{}]", self.group_ids.join(", "))?;
+        }
+        formatter.write_str(" }")
     }
 }
 

@@ -1027,73 +1027,73 @@
       "behavior": "ObjectDataType uses the stable RFC numeric values UNKNOWN=0 through GENERAL=9.",
       "boundary": ["core", "object-data-type", "wire-compatibility"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.EnumValues"},
-      "reason": "Rust declares matching discriminants, but no discoverable test locks all numeric values against the C++ wire contract.",
+      "reason": "Rust locks every stable numeric discriminant against the C++ wire contract.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp EnumValues and Rust ObjectDataType discriminants", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "object_data_type_matches_cpp_numeric_and_text_contract"}],
+      "status": "covered"
     },
     {
       "behavior": "Every valid ObjectDataType value round-trips through its integer representation.",
       "boundary": ["core", "object-data-type", "conversion"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.EnumRoundtrip"},
-      "reason": "Rust implements TryFrom<i32> but has no test covering all ten round trips and unknown-value rejection.",
+      "reason": "Rust tests all ten integer round trips and rejects an unknown value without constructing an invalid enum.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp EnumRoundtrip and Rust ObjectDataType::try_from", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "object_data_type_matches_cpp_numeric_and_text_contract"}],
+      "status": "covered"
     },
     {
       "behavior": "ObjectDataType formatting emits the canonical uppercase names and maps an out-of-range value to UNKNOWN.",
       "boundary": ["core", "object-data-type", "diagnostics"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.StreamOperator"},
-      "reason": "Rust only derives Debug, whose variant spelling differs from the canonical C++ uppercase format, and it has no equivalent unknown-value formatter.",
+      "reason": "Rust Display emits the canonical uppercase names; its checked integer conversion rejects out-of-range values instead of creating the invalid enum value that C++ formats as UNKNOWN.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp StreamOperator and Rust ObjectDataType Debug implementation", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "object_data_type_matches_cpp_numeric_and_text_contract"}],
+      "status": "covered"
     },
     {
       "behavior": "ReplicateConfig defaults data_type to UNKNOWN.",
       "boundary": ["core", "replicate-config", "object-data-type", "default"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.ReplicateConfigDefaultDataType"},
-      "reason": "Rust initializes the same default in source, but no discoverable test guards this compatibility contract.",
+      "reason": "Rust explicitly tests the UNKNOWN ReplicateConfig default.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp ReplicateConfigDefaultDataType and Rust ReplicateConfig::default", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "test_replicate_config_default"}],
+      "status": "covered"
     },
     {
       "behavior": "ReplicateConfig accepts and retains a non-default ObjectDataType value.",
       "boundary": ["core", "replicate-config", "object-data-type"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.ReplicateConfigSetDataType"},
-      "reason": "No Rust test constructs a ReplicateConfig with a non-default data type and asserts it is retained.",
+      "reason": "Rust constructs a ReplicateConfig with TENSOR and asserts the value is retained.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp ReplicateConfigSetDataType and Rust ReplicateConfig", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "replicate_config_retains_and_formats_non_default_data_type"}],
+      "status": "covered"
     },
     {
       "behavior": "ReplicateConfig diagnostics include the canonical data_type name.",
       "boundary": ["core", "replicate-config", "object-data-type", "diagnostics"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.ReplicateConfigStreamIncludesDataType"},
-      "reason": "Rust derives Debug and has no compatibility formatter or assertion containing the C++ 'data_type: TENSOR' representation.",
+      "reason": "Rust ReplicateConfig Display follows the C++ diagnostic shape and includes 'data_type: TENSOR'.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp ReplicateConfigStreamIncludesDataType and Rust ReplicateConfig Debug", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "replicate_config_retains_and_formats_non_default_data_type"}],
+      "status": "covered"
     },
     {
       "behavior": "PutStart accepts a non-default WEIGHT data type and completes the memory replica lifecycle.",
       "boundary": ["master", "put", "object-data-type", "end-to-end"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.PutStartWithDataType"},
-      "reason": "Rust stores config.data_type during PutStart, but no test submits a non-default data type through the service and verifies successful completion and retained metadata.",
+      "reason": "Rust submits WEIGHT through PutStart, completes PutEnd, and verifies the completed object remains queryable.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp PutStartWithDataType and Rust grpc_objects_put", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "put_start_preserves_default_and_non_default_object_data_types"}],
+      "status": "covered"
     },
     {
       "behavior": "PutStart remains backward compatible when data_type is left at its UNKNOWN default.",
       "boundary": ["master", "put", "object-data-type", "backward-compatibility"],
       "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.PutStartDefaultDataType"},
-      "reason": "Many Rust put tests use UNKNOWN incidentally, but none identifies and locks this backward-compatibility contract as an ObjectDataType parity test.",
+      "reason": "The named Rust parity test submits UNKNOWN through the complete PutStart/PutEnd lifecycle and verifies the object remains queryable.",
       "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp PutStartDefaultDataType and Rust put tests/default config", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "put_start_preserves_default_and_non_default_object_data_types"}],
+      "status": "covered"
     },
     {
       "behavior": "The C++ FileUtil string helper writes exact text bytes to a file.",

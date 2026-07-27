@@ -11,6 +11,77 @@ use tonic::Request;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn put_start_preserves_default_and_non_default_object_data_types() {
+    let service = MasterServiceImpl::new(None, None);
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "data-type:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    for (index, data_type) in [
+        proto::ObjectDataType::Unknown,
+        proto::ObjectDataType::Weight,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = format!("data-type-{index}");
+        let started = MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.clone(),
+                slice_length: 128,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    data_type: data_type as i32,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 1);
+
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.clone(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let replicas = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(replicas.replicas.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn test_batch_replica_clear_respects_client_and_segment_name() {
     let service = MasterServiceImpl::new_with_runtime_config_and_oplog(
         None,

@@ -1,6 +1,6 @@
 use mooncake_store_core::{
-    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment, StorageObjectMetadata,
-    TaskAssignment, TaskCompleteRequest, TaskInfo, TaskStatus, TaskType,
+    ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment,
+    StorageObjectMetadata, TaskAssignment, TaskCompleteRequest, TaskInfo, TaskStatus, TaskType,
 };
 
 #[test]
@@ -62,6 +62,41 @@ fn test_replicate_config_default() {
     assert!(!cfg.with_hard_pin);
     assert!(cfg.preferred_segment.is_empty());
     assert!(!cfg.prefer_alloc_in_same_node);
+    assert_eq!(cfg.data_type, ObjectDataType::Unknown);
+}
+
+#[test]
+fn object_data_type_matches_cpp_numeric_and_text_contract() {
+    let values = [
+        (ObjectDataType::Unknown, 0, "UNKNOWN"),
+        (ObjectDataType::Kvcache, 1, "KVCACHE"),
+        (ObjectDataType::Tensor, 2, "TENSOR"),
+        (ObjectDataType::Weight, 3, "WEIGHT"),
+        (ObjectDataType::Sample, 4, "SAMPLE"),
+        (ObjectDataType::Activation, 5, "ACTIVATION"),
+        (ObjectDataType::Gradient, 6, "GRADIENT"),
+        (ObjectDataType::OptimizerState, 7, "OPTIMIZER_STATE"),
+        (ObjectDataType::Metadata, 8, "METADATA"),
+        (ObjectDataType::General, 9, "GENERAL"),
+    ];
+
+    for (value, raw, name) in values {
+        assert_eq!(value as i32, raw);
+        assert_eq!(ObjectDataType::try_from(raw).unwrap(), value);
+        assert_eq!(value.to_string(), name);
+    }
+    assert!(ObjectDataType::try_from(200).is_err());
+}
+
+#[test]
+fn replicate_config_retains_and_formats_non_default_data_type() {
+    let cfg = ReplicateConfig {
+        data_type: ObjectDataType::Tensor,
+        ..ReplicateConfig::default()
+    };
+
+    assert_eq!(cfg.data_type, ObjectDataType::Tensor);
+    assert!(cfg.to_string().contains("data_type: TENSOR"));
 }
 
 #[test]
