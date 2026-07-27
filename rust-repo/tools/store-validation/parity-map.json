@@ -1637,6 +1637,65 @@
       "reason": "Rust has no per-operation StorageFile lock wrapper; backend ownership and namespace locks are validated at their own product boundaries instead of reproducing this internal lock-state API.",
       "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp FileLocking and Rust backend synchronization architecture", "reviewed": true},
       "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "HugeTLB population touches the first byte of every configured huge page, including a final partial page, using the configured page stride.",
+      "boundary": ["client", "memory", "hugetlb", "population", "page-stride"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.PopulateHugetlbMappingUsesConfiguredPageStride"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp PopulateHugetlbMappingUsesConfiguredPageStride and Rust populate_hugetlb_pages", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/memory_ffi.rs", "test": "population_touches_only_the_first_byte_of_each_page"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "NUMA-aware HugeTLB population touches every page across all configured NUMA regions.",
+      "boundary": ["client", "memory", "hugetlb", "numa", "population"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.PopulateNumaHugetlbMappingTouchesEveryRegion"},
+      "reason": "Rust parallel HugeTLB population partitions pages across workers but does not implement or test NUMA-node region binding/population parity.",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp PopulateNumaHugetlbMappingTouchesEveryRegion and Rust memory_ffi population", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A failed initialization of the C++ process-global mmap arena is attempted only once and permanently selects its fallback path.",
+      "boundary": ["cpp-only", "memory", "mmap-arena", "call-once"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.ArenaInitFailureIsStickyForProcessLifetime"},
+      "reason": "Rust performs owned per-allocation aligned/HugeTLB allocation and has no process-global mmap arena or one-shot initialization state machine.",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp ArenaInitFailureIsStickyForProcessLifetime and Rust OwnedBuffer architecture", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "An explicit MC_STORE_USE_HUGEPAGE request fails closed when HugeTLB allocation fails rather than silently using regular pages.",
+      "boundary": ["client", "memory", "hugetlb", "strict-fallback"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.ExplicitHugepageRequestDoesNotSilentlyFallbackToRegularPages"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp ExplicitHugepageRequestDoesNotSilentlyFallbackToRegularPages and Rust hugepage policy", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/memory_ffi.rs", "test": "legacy_hugepage_failure_falls_back_but_cpp_request_is_strict"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Store fallback memory honors the requested power-of-two alignment and remains writable across the full allocation.",
+      "boundary": ["client", "memory", "fallback", "alignment"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.HonorsPageAlignment"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp HonorsPageAlignment and Rust aligned OwnedBuffer", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/memory_ffi.rs", "test": "aligned_store_allocation_preserves_base_alignment"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Without a hugepage request, an odd-sized Store allocation remains page-aligned, writable, and safely freeable.",
+      "boundary": ["client", "memory", "fallback", "page-alignment", "lifecycle"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.NoHugepagesAllocFree"},
+      "reason": "Rust tests requested alignment but do not prove the C++ fallback invariant that an allocation requested with alignment 64 is nevertheless 4096-byte page aligned, especially for an odd size.",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp NoHugepagesAllocFree and Rust OwnedBuffer fallback", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Repeated fallback allocate/write/free cycles preserve alignment and do not exhaust or corrupt allocator state.",
+      "boundary": ["client", "memory", "fallback", "allocation-cycle"],
+      "cpp": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.AllocateFreeCycle"},
+      "reason": "Rust has single-allocation lifecycle tests but no repeated allocation/free stress gate matching the C++ cycle coverage.",
+      "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp AllocateFreeCycle and Rust OwnedBuffer lifecycle", "reviewed": true},
+      "rust": [], "status": "missing"
     }
   ],
   "schema_version": 1
