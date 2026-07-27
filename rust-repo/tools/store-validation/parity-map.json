@@ -482,6 +482,75 @@
       "reason": "Rust Dummy IPC exposes no handler-registration or background acceptor API; callers invoke the one-shot listener and process the returned channel directly.",
       "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::start, and Rust DummyIpcChannel::listen_once", "reviewed": true},
       "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Zstd compression and decompression round-trip a textual snapshot payload exactly.",
+      "boundary": ["master", "snapshot", "zstd", "roundtrip"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_String"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and zstd string helpers", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "bounded_zstd_roundtrip_preserves_text_and_binary_bytes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Zstd compression and decompression preserve a binary byte-vector payload.",
+      "boundary": ["master", "snapshot", "zstd", "roundtrip"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_Vector"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and binary zstd helpers", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "bounded_zstd_roundtrip_preserves_text_and_binary_bytes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ raw-pointer Zstd overload round-trips a caller-provided pointer and length.",
+      "boundary": ["cpp-only", "snapshot", "zstd", "raw-pointer"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_RawPointer"},
+      "reason": "Rust Zstd APIs consume safe byte slices/readers rather than exposing the C++ raw-pointer overload; byte preservation is covered at the safe API boundary.",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust zstd::stream APIs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ explicit-output-size Zstd overload reconstructs a payload when the caller supplies its exact decompressed size.",
+      "boundary": ["cpp-only", "snapshot", "zstd", "overload"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_WithExplicitSize"},
+      "reason": "Rust streaming decompression discovers the output length and has no caller-supplied exact-size overload; exact byte roundtrip is covered separately.",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust zstd streaming decoder", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Bounded Zstd decompression succeeds when the decoded snapshot payload remains within its configured maximum.",
+      "boundary": ["master", "snapshot", "zstd", "size-limit"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_WithMaxSize"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and bounded decompression", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "bounded_zstd_roundtrip_preserves_text_and_binary_bytes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Invalid Zstd bytes fail closed rather than producing snapshot metadata.",
+      "boundary": ["master", "snapshot", "zstd", "corruption"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Decompress_InvalidData_Throws"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and invalid-frame handling", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "invalid_zstd_payload_fails_closed"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Bounded Zstd decompression rejects a decoded payload that exceeds its configured maximum.",
+      "boundary": ["master", "snapshot", "zstd", "resource-limit"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.DecompressWithMaxSize_ExceedsLimit_Throws"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust decode_task_manager bounded reader", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "bounded_zstd_rejects_decoded_size_above_limit"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ raw-pointer bounded decompressor rejects a null input pointer even for zero input length.",
+      "boundary": ["cpp-only", "snapshot", "zstd", "raw-pointer"],
+      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.DecompressWithMaxSize_NullInput_Throws"},
+      "reason": "Safe Rust decompression accepts a slice/reader, which cannot represent a null pointer with an independent length; this raw-pointer validation contract is not applicable.",
+      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust slice safety", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1

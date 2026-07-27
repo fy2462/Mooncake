@@ -25,16 +25,7 @@ pub(super) fn load_task_manager(
 }
 
 pub(super) fn decode_task_manager(data: &[u8]) -> Result<Vec<TaskEntry>, HaError> {
-    let decoder = zstd::stream::read::Decoder::new(Cursor::new(data))
-        .map_err(|error| snapshot_error(error.to_string()))?;
-    let mut decoded = Vec::new();
-    decoder
-        .take(MAX_TASK_PAYLOAD_SIZE + 1)
-        .read_to_end(&mut decoded)
-        .map_err(|error| snapshot_error(error.to_string()))?;
-    if decoded.len() as u64 > MAX_TASK_PAYLOAD_SIZE {
-        return Err(snapshot_error("task manager payload exceeds 1 GiB"));
-    }
+    let decoded = decode_zstd_bounded(data, MAX_TASK_PAYLOAD_SIZE)?;
     let mut cursor = Cursor::new(decoded.as_slice());
     let root =
         rmpv::decode::read_value(&mut cursor).map_err(|error| snapshot_error(error.to_string()))?;
@@ -64,6 +55,22 @@ pub(super) fn decode_task_manager(data: &[u8]) -> Result<Vec<TaskEntry>, HaError
         result.push(entry);
     }
     Ok(result)
+}
+
+fn decode_zstd_bounded(data: &[u8], max_size: u64) -> Result<Vec<u8>, HaError> {
+    let decoder = zstd::stream::read::Decoder::new(Cursor::new(data))
+        .map_err(|error| snapshot_error(error.to_string()))?;
+    let mut decoded = Vec::new();
+    decoder
+        .take(max_size.saturating_add(1))
+        .read_to_end(&mut decoded)
+        .map_err(|error| snapshot_error(error.to_string()))?;
+    if decoded.len() as u64 > max_size {
+        return Err(snapshot_error(format!(
+            "decompressed payload exceeds {max_size} bytes"
+        )));
+    }
+    Ok(decoded)
 }
 
 pub(super) fn encode_task_manager(tasks: &[TaskEntry]) -> Result<Vec<u8>, HaError> {
@@ -237,7 +244,7 @@ fn snapshot_error(message: impl Into<String>) -> HaError {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_task_manager;
+    use super::{decode_task_manager, decode_zstd_bounded};
     use rmpv::Value;
     use std::io::Cursor;
     use uuid::Uuid;
@@ -279,5 +286,29 @@ mod tests {
             decode_task_manager(&encoded_tasks(vec![task(id, payload), task(id, payload)]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn invalid_zstd_payload_fails_closed() {
+        let error = decode_task_manager(&[0xde, 0xad, 0xbe, 0xef]).unwrap_err();
+        assert!(matches!(error, crate::ha::HaError::Snapshot(_)));
+    }
+
+    #[test]
+    fn bounded_zstd_roundtrip_preserves_text_and_binary_bytes() {
+        for payload in [
+            b"Mooncake snapshot roundtrip test data!".as_slice(),
+            &[0, 1, 2, 128, 254, 255, 0, 127],
+        ] {
+            let compressed = zstd::stream::encode_all(Cursor::new(payload), 3).unwrap();
+            assert_eq!(decode_zstd_bounded(&compressed, 1024).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn bounded_zstd_rejects_decoded_size_above_limit() {
+        let compressed = zstd::stream::encode_all(Cursor::new(b"too large"), 3).unwrap();
+        let error = decode_zstd_bounded(&compressed, 5).unwrap_err();
+        assert!(error.to_string().contains("exceeds 5 bytes"));
     }
 }
