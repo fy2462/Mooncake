@@ -180,6 +180,72 @@
       "reason": "Rust classify_pointer delegates directly to native code and has no discoverable test proving null is rejected without a native device query.",
       "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::FindDeviceForPointer", "reviewed": true},
       "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Adding and removing keys from the LRU policy updates its visible candidate count.",
+      "boundary": ["master", "eviction", "lru"],
+      "cpp": {"file": "eviction_strategy_test.cpp", "test": "EvictionStrategyTest.AddAndRemoveKey"},
+      "reason": "Rust tests LRU victim ordering but has no direct candidate lifecycle/count test equivalent to add, remove, and cleanup.",
+      "review": {"oracle": "mooncake-store/tests/eviction_strategy_test.cpp and LRUEvictionStrategy", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "LRU eviction returns the least recently used key first and moves updated keys behind untouched newer candidates.",
+      "boundary": ["master", "eviction", "lru"],
+      "cpp": {"file": "eviction_strategy_test.cpp", "test": "EvictionStrategyTest.EvictKey"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/eviction_strategy_test.cpp and LRUEvictionStrategy ordering", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_eviction.rs", "test": "test_eviction_returns_lru_order"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ FIFO policy keeps randomly removed keys in its internal lazy queue and reports the unchanged queue size until eviction cleanup.",
+      "boundary": ["client", "local-storage", "fifo"],
+      "cpp": {"file": "eviction_strategy_test.cpp", "test": "EvictionStrategyTest.FIFOAddAndRemoveKey"},
+      "reason": "C++ tests a lazy-queue implementation detail. Rust couples FIFO entries to its storage index and removes deleted records eagerly; externally visible deletion and eviction correctness are covered separately.",
+      "review": {"oracle": "mooncake-store/tests/eviction_strategy_test.cpp and FIFOEvictionStrategy::RemoveKey", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "FIFO eviction returns the oldest inserted key and key updates do not reorder later FIFO victims.",
+      "boundary": ["client", "local-storage", "fifo"],
+      "cpp": {"file": "eviction_strategy_test.cpp", "test": "EvictionStrategyTest.FIFOEvictKey"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/eviction_strategy_test.cpp and FIFOEvictionStrategy ordering", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_eviction_fifo_order"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ generic ThreadPool executes all enqueued tasks.",
+      "boundary": ["cpp-only", "thread-pool"],
+      "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.BasicTaskExecution"},
+      "reason": "Rust Store uses Tokio and component-owned workers rather than the C++ ThreadPool class; this internal class contract is outside the Rust product boundary.",
+      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ generic ThreadPool bounds concurrent task execution by its configured worker count.",
+      "boundary": ["cpp-only", "thread-pool"],
+      "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.ParallelExecution"},
+      "reason": "Rust Store uses Tokio and component-owned workers rather than the C++ ThreadPool class; this internal scheduler implementation is outside the Rust product boundary.",
+      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Stopping the C++ generic ThreadPool waits for accepted work and rejects later enqueue attempts.",
+      "boundary": ["cpp-only", "thread-pool"],
+      "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.ProperStop"},
+      "reason": "Rust Store has component-specific shutdown contracts rather than the C++ ThreadPool class; its enqueue-after-stop exception is not a Rust Store API.",
+      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ generic ThreadPool completes a stress batch of one thousand tasks without loss.",
+      "boundary": ["cpp-only", "thread-pool"],
+      "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.StressTest"},
+      "reason": "Rust Store does not use the C++ ThreadPool class; workload and fault tests cover its Tokio/component worker behavior at product boundaries.",
+      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1
