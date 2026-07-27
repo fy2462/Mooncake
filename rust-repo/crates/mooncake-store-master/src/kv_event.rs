@@ -477,6 +477,24 @@ mod tests {
     }
 
     #[test]
+    fn disabled_publisher_is_noop_and_keeps_counters_zero() {
+        let publisher = KvEventPublisher::new(KvEventConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let tenant_id = TenantId::default();
+
+        assert!(!publisher.enabled());
+        publisher.publish_stored("42", "cpu", &tenant_id, "");
+        publisher.publish_removed("42", "cpu", &tenant_id, "");
+
+        let stats = publisher.status().stats;
+        assert_eq!(stats.published_events, 0);
+        assert_eq!(stats.published_batches, 0);
+        assert_eq!(stats.dropped_events, 0);
+    }
+
+    #[test]
     fn test_encode_event_batch_matches_rfc_shape() {
         let config = KvEventConfig {
             enabled: true,

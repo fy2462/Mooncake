@@ -1,0 +1,186 @@
+{
+  "entries": [
+    {
+      "behavior": "Across two clients under sustained large-object delete, put, get, and eviction pressure, every successful read returns the exact bytes most recently written for its key.",
+      "boundary": [
+        "client",
+        "master",
+        "multi-node",
+        "eviction"
+      ],
+      "cpp": {
+        "file": "e2e/e2e_rand_test.cpp",
+        "test": "E2ERandTest.RandomSequentialDeletePutGet"
+      },
+      "reason": "No discoverable Rust crate test currently sustains randomized cross-client delete/put/get operations with large values and eviction pressure.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/e2e_rand_test.cpp and its ClientTestWrapper/MasterProcessHandler calls",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "During repeated random crashes and restarts of a three-Master HA group, successful small-object puts remain readable with exact values, and service resumes for all keys after a surviving leader stabilizes.",
+      "boundary": [
+        "client",
+        "master",
+        "ha",
+        "multi-node",
+        "fault-recovery"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_rand_test.cpp",
+        "test": "ChaosRandTest.RandomMasterCrashWithSmallValue"
+      },
+      "reason": "No discoverable Rust crate test currently performs repeated randomized three-Master process crashes/restarts while asserting cross-client small-object availability and integrity.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_rand_test.cpp, LeaderCoordinator, MasterProcessHandler, and ClientTestWrapper paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "During repeated random crashes and restarts of a three-Master HA group under eviction-prone large-object pressure, every successful read preserves exact object bytes and stable surviving leaders resume service.",
+      "boundary": [
+        "client",
+        "master",
+        "ha",
+        "multi-node",
+        "fault-recovery",
+        "eviction"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_rand_test.cpp",
+        "test": "ChaosRandTest.RandomMasterCrashWithLargeValue"
+      },
+      "reason": "No discoverable Rust crate test currently combines randomized three-Master crash/restart cycles with large-object eviction pressure and cross-client byte-integrity assertions.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_rand_test.cpp, LeaderCoordinator, MasterProcessHandler, and ClientTestWrapper paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An RPC bind host already expressed as a bare IPv4 address passes through unchanged and can start the RPC server.",
+      "boundary": ["client", "rpc", "configuration"],
+      "cpp": {"file": "host_port_fix_test.cpp", "test": "HostPortFixTest.BareHostPassesThrough"},
+      "reason": "Rust has segment-name routing normalization tests but no equivalent test that derives and binds the Client RPC host from a bare configured address.",
+      "review": {"oracle": "mooncake-store/tests/host_port_fix_test.cpp and getHostNameWithoutPort", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A configured IPv4 host with a data-plane port is stripped to the bare host before RPC server binding, allowing the server to start.",
+      "boundary": ["client", "rpc", "configuration"],
+      "cpp": {"file": "host_port_fix_test.cpp", "test": "HostPortFixTest.StripsPortForRpcServer"},
+      "reason": "Rust has segment-name routing normalization tests but no equivalent assertion on Client RPC bind-host derivation and successful binding.",
+      "review": {"oracle": "mooncake-store/tests/host_port_fix_test.cpp, getHostNameWithoutPort, and coro_rpc_server startup", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Decimal and 0x/0X hexadecimal object keys parse as complete unsigned sequence hashes, while empty, malformed, and trailing-garbage keys are rejected.",
+      "boundary": ["master", "kv-event"],
+      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventKeyUtilTest.ParseSeqHashFromObjectKey"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and kv_event/key_util.h", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "test_parse_seq_hash_from_object_key_matches_cpp"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A disabled KV-event publisher is a no-op for stored and removed notifications and leaves published and dropped counters at zero.",
+      "boundary": ["master", "kv-event"],
+      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventPublisherTest.DisabledPublisherIsNoop"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher disabled path", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "disabled_publisher_is_noop_and_keeps_counters_zero"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "When the KV-event queue reaches capacity, the publisher drops the oldest event, retains newer events, and increments its dropped-event accounting.",
+      "boundary": ["master", "kv-event", "backpressure"],
+      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventPublisherTest.DropsOldestWhenQueueFull"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher queue path", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "test_queue_capacity_drops_oldest_and_reserves_sequence_gap"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Publishing an SGLang object key over ZMQ emits a three-frame message with sequence, stored event type, backend, tenant, group, object key, empty sequence hashes, and successful publish statistics.",
+      "boundary": ["master", "kv-event", "zmq"],
+      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventPublisherTest.PublishesSglangObjectKeyOverZmq"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher ZMQ encoding/publish paths", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "test_publish_sglang_object_key_over_zmq"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Pinned-memory registration rejects duplicate and overlapping ranges while accepting an adjacent range, and each accepted range unregisters exactly once when released.",
+      "boundary": ["transfer-engine-ffi", "memory-registration", "ownership"],
+      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.OverlapAndDuplicateAreRejected"},
+      "reason": "Rust implements overlap checks for owner-backed registrations but has no discoverable fake-native test proving duplicate/overlap rejection, adjacent acceptance, and exact unregister calls.",
+      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Pinned-memory quota rejects capacity beyond the configured limit, releasing a region refunds capacity, and a later full-size registration succeeds and unregisters once.",
+      "boundary": ["transfer-engine-ffi", "memory-registration", "quota"],
+      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.QuotaRejectsAndReleaseRefunds"},
+      "reason": "Rust owner-backed registration has no equivalent configured pinned-byte quota test with release/refund accounting.",
+      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager quota accounting", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A failed native pin operation refunds its reservation so retrying the same range after native recovery succeeds and later unregisters exactly once.",
+      "boundary": ["transfer-engine-ffi", "memory-registration", "error-recovery"],
+      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.RegisterFailureRefundsReservation"},
+      "reason": "Rust has no discoverable fake-native regression test proving failed registration leaves no live or blocked reservation and permits an exact retry.",
+      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager registration rollback", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A failed native unregister retains the address and quota reservation, preventing overlapping or capacity-consuming replacement registrations from reusing unsafe memory.",
+      "boundary": ["transfer-engine-ffi", "memory-registration", "failure-safety"],
+      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.UnregisterFailureRetainsReservation"},
+      "reason": "Rust records blocked ranges after Drop-time unregister failure, but no discoverable fake-native test proves the range remains unavailable after the failure.",
+      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager unregister failure path", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Copying host bytes to an accelerator pointer selects the matching device, switches to its device ordinal, performs a host-to-device copy, and preserves the bytes.",
+      "boundary": ["transfer-engine", "accelerator", "copy"],
+      "cpp": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.CopyFromHostUsesHostToDeviceCopy"},
+      "reason": "Rust FFI exposes copy_from_host but has no discoverable fake-device test for device selection, context switching, copy direction, and byte preservation.",
+      "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::CopyFromHost", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Copying from an accelerator pointer to host selects the matching device, switches to its device ordinal, performs a device-to-host copy, and preserves the bytes.",
+      "boundary": ["transfer-engine", "accelerator", "copy"],
+      "cpp": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.CopyToHostUsesDeviceToHostCopy"},
+      "reason": "Rust FFI exposes copy_to_host but has no discoverable fake-device test for device selection, context switching, copy direction, and byte preservation.",
+      "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::CopyToHost", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Pointer classification returns the accelerator device whose query reports device memory and preserves the reported device ordinal.",
+      "boundary": ["transfer-engine", "accelerator", "pointer-classification"],
+      "cpp": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.FindDeviceForPointerReturnsMatchingDevice"},
+      "reason": "Rust tests raw pointer-kind enum decoding but not runtime device selection or preservation of a matching device ordinal.",
+      "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::FindDeviceForPointer", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A null pointer is rejected before querying any accelerator device.",
+      "boundary": ["transfer-engine", "accelerator", "pointer-classification"],
+      "cpp": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.FindDeviceForPointerSkipsNullPointerQueries"},
+      "reason": "Rust classify_pointer delegates directly to native code and has no discoverable test proving null is rejected without a native device query.",
+      "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::FindDeviceForPointer", "reviewed": true},
+      "rust": [], "status": "missing"
+    }
+  ],
+  "schema_version": 1
+}
