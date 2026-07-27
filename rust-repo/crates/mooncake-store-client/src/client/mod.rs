@@ -49,7 +49,7 @@ pub use http::ClientHttpConfig;
 pub use replica_selection::{ReplicaScorer, ReplicaSelectionPolicy, builtin_remote_replica_score};
 pub use storage::{OffloadTaskItem, PromotionTaskItem, SegmentDetail};
 pub use transfer_local::BufferRegistrationId;
-pub use types::{BufferHandle, CachedQueryResultResponse};
+pub use types::{BufferHandle, CachedQueryResultResponse, ClientHealthStatus};
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};

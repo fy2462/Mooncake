@@ -1,6 +1,6 @@
 #![cfg(feature = "link-native")]
 
-use mooncake_store_client::MooncakeClient;
+use mooncake_store_client::{ClientBackgroundConfig, ClientHealthStatus, MooncakeClient};
 use mooncake_store_core::ReplicateConfig;
 use mooncake_store_master::MasterRuntimeConfig;
 use mooncake_store_master::MasterServiceImpl;
@@ -28,6 +28,78 @@ async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, onesh
             .unwrap();
     });
     (address.to_string(), shutdown_tx)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_lifecycle_and_real_transfer_metrics_match_cpp_codes() {
+    assert_eq!(
+        MooncakeClient::health_status_for(None),
+        ClientHealthStatus::NotInitialized
+    );
+    let (master, shutdown) = start_master().await;
+    let mut client = create_tcp_client(&master).await;
+
+    let payload = vec![b'A'; 1024];
+    client
+        .put(
+            "health-metrics",
+            &payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: client.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(client.get("health-metrics").await.unwrap(), payload);
+    client.health_check().await.unwrap();
+    assert_eq!(client.health_status(), ClientHealthStatus::Healthy);
+    let metrics = client.serialize_metrics().unwrap();
+    for metric in [
+        "mooncake_transfer_write_bytes",
+        "mooncake_transfer_read_bytes",
+        "mooncake_transfer_put_latency_count",
+        "mooncake_transfer_get_latency_count",
+    ] {
+        assert!(metrics.contains(metric), "missing {metric} in {metrics}");
+    }
+    let summary = client.summary_metrics().unwrap();
+    assert!(summary.contains("Put:"), "{summary}");
+    assert!(summary.contains("Get:"), "{summary}");
+
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        ClientBackgroundConfig {
+            health_interval: std::time::Duration::from_millis(20),
+            enable_offloading: false,
+            enable_promotion: false,
+            enable_task_poll: false,
+            report_ssd_capacity: false,
+            enable_disk_watermark_eviction: false,
+            ..Default::default()
+        },
+    );
+    let _ = shutdown.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let unreachable = slot.lock().await.as_ref().is_some_and(|client| {
+                client.health_status() == ClientHealthStatus::MasterUnreachable
+            });
+            if unreachable {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background health worker did not observe stopped master");
+    background.shutdown().await;
+
+    let mut client = slot.lock().await.take().unwrap();
+    let _ = client.tear_down_all().await;
+    assert_eq!(client.health_status(), ClientHealthStatus::NotInitialized);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

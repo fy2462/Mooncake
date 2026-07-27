@@ -3,6 +3,15 @@
 // 拥有所有权的读取结果句柄，包含 key、data 和 size 三元组
 // ---------------------------------------------------------------------------
 
+/// C++-compatible non-blocking client health disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ClientHealthStatus {
+    Healthy = 0,
+    NotInitialized = 1,
+    MasterUnreachable = 2,
+}
+
 /// Owned buffer returned by [`get_buffer`](MooncakeClient::get_buffer).
 ///
 /// Unlike the low-level `get()` which returns a raw `Vec<u8>`, this struct

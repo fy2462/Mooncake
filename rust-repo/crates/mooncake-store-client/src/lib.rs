@@ -64,8 +64,9 @@ pub mod utils;
 
 pub use client::{
     BufferHandle, BufferRegistrationId, CachedQueryResultResponse, ClientBackgroundConfig,
-    ClientBackgroundHandle, ClientHttpConfig, MooncakeClient, OffloadTaskItem, PromotionTaskItem,
-    ReplicaScorer, ReplicaSelectionPolicy, SegmentDetail, builtin_remote_replica_score,
+    ClientBackgroundHandle, ClientHealthStatus, ClientHttpConfig, MooncakeClient, OffloadTaskItem,
+    PromotionTaskItem, ReplicaScorer, ReplicaSelectionPolicy, SegmentDetail,
+    builtin_remote_replica_score,
 };
 pub use dummy::{
     DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST,

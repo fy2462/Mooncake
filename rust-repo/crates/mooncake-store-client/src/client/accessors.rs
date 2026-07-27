@@ -153,6 +153,25 @@ impl MooncakeClient {
         self.shutdown_state.is_closed()
     }
 
+    /// Return the C++ public health code without performing network I/O.
+    pub fn health_status(&self) -> super::ClientHealthStatus {
+        if self.shutdown_state.is_closed() {
+            super::ClientHealthStatus::NotInitialized
+        } else if self.health_state.is_healthy() {
+            super::ClientHealthStatus::Healthy
+        } else {
+            super::ClientHealthStatus::MasterUnreachable
+        }
+    }
+
+    /// Resolve the health of an optional client slot used by language bindings.
+    pub fn health_status_for(client: Option<&Self>) -> super::ClientHealthStatus {
+        client.map_or(
+            super::ClientHealthStatus::NotInitialized,
+            Self::health_status,
+        )
+    }
+
     /// Return this client's UUID. / 返回当前客户端 UUID。
     pub fn client_id(&self) -> Uuid {
         self.client_id
