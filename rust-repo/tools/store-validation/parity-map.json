@@ -1481,6 +1481,46 @@
       "reason": "Rust implements ping-triggered remount logic, but no test restarts a non-HA Master at the same address and proves the background client reconnects and republishes its mounted segment.",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ClientAutoReconnectAndRemount and Rust health_check/remount_all", "reviewed": true},
       "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "With P2P handshake and no memcpy override, reading a complete replica mounted by the same client automatically uses the LOCAL_MEMCPY strategy and returns exact bytes.",
+      "boundary": ["client", "tcp", "p2p", "local-memcpy", "read-strategy"],
+      "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.P2PLocalReplicaUsesLocalMemcpy"},
+      "reason": "Rust implements local endpoint registration and a direct-copy branch, but no test drives a P2P client Get through strategy selection and proves both exact data and local-memcpy dispatch.",
+      "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp P2PLocalReplicaUsesLocalMemcpy and Rust transfer_read/transfer_local", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "With metadata discovery, a replica advertised under the client's local host alias is recognized as local even when it differs from the transport endpoint and is read with LOCAL_MEMCPY.",
+      "boundary": ["client", "tcp", "metadata", "local-alias", "local-memcpy"],
+      "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.MetadataLocalReplicaUsesLocalMemcpy"},
+      "reason": "Rust registers local segment aliases, but has no metadata-mode Get test proving alias locality, differing transport endpoint, direct-copy strategy, and payload integrity together.",
+      "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp MetadataLocalReplicaUsesLocalMemcpy and Rust local endpoint registration", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Two P2P clients on the same TCP host but with different endpoints treat each other's replicas as remote and use TransferEngine rather than local memcpy.",
+      "boundary": ["client", "tcp", "p2p", "remote-replica", "transfer-engine"],
+      "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.P2PRemoteReplicaOnSameTcpHostUsesTransferEngine"},
+      "reason": "Rust locality is keyed by exact segment name, but no two-client P2P test proves that same-host/different-port endpoints are not collapsed into local memcpy and that the remote transfer succeeds.",
+      "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp P2PRemoteReplicaOnSameTcpHostUsesTransferEngine and Rust replica locality", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Two metadata-discovered clients on the same TCP host but with different host aliases treat each other's replicas as remote and use TransferEngine.",
+      "boundary": ["client", "tcp", "metadata", "remote-replica", "transfer-engine"],
+      "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.MetadataRemoteReplicaOnSameTcpHostUsesTransferEngine"},
+      "reason": "Rust has no metadata-mode two-client test proving distinct aliases remain remote through Get strategy dispatch and return the exact payload via TransferEngine.",
+      "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp MetadataRemoteReplicaOnSameTcpHostUsesTransferEngine and Rust transfer strategy selection", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "For both P2P and metadata handshakes, a hot-cache hit redirects a nominally remote memory replica to LOCAL_MEMCPY and returns the cached bytes.",
+      "boundary": ["client", "hot-cache", "p2p", "metadata", "local-memcpy"],
+      "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "HotCacheRedirectStrategyTest.CacheHitUsesLocalMemcpy"},
+      "reason": "Rust hot-cache unit tests cover cache operations, but no client Get test supplies a remote replica and proves cache-hit redirection, strategy choice, and payload integrity in both handshake modes.",
+      "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp CacheHitUsesLocalMemcpy and Rust hot_cache/read path", "reviewed": true},
+      "rust": [], "status": "missing"
     }
   ],
   "schema_version": 1
