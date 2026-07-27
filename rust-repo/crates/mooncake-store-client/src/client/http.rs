@@ -199,7 +199,7 @@ mod tests {
     async fn health_and_prometheus_metrics_reflect_shared_state() {
         let healthy = Arc::new(AtomicBool::new(true));
         let closed = Arc::new(AtomicBool::new(false));
-        let metrics = super::ClientMetrics::new(None, true).unwrap();
+        let metrics = super::ClientMetrics::new(None, true, true).unwrap();
         let snapshot =
             ClientHttpSnapshot::new(healthy.clone(), closed.clone(), Some(Arc::new(metrics)));
         let state = ClientHttpServerState::default();

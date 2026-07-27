@@ -1284,9 +1284,10 @@
       "behavior": "Client metrics can omit all master RPC summary and serialized series while retaining transfer metrics.",
       "boundary": ["client", "metrics", "rpc", "configuration"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.SummaryCanOmitMasterRpcMetrics"},
-      "reason": "Rust constructor supports the RPC metrics flag but no test asserts both summary and Prometheus omission.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp SummaryCanOmitMasterRpcMetrics and Rust ClientMetrics constructor", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "disabled_master_rpc_metrics_are_omitted_from_summary_and_prometheus"}],
+      "status": "covered"
     },
     {
       "behavior": "Prometheus serialization applies instance, cluster, replica, and mount-segment labels to every metric family.",

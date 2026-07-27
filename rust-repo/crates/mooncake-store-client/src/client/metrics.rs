@@ -201,6 +201,7 @@ pub(crate) struct ClientMetrics {
     observed_write_operations: Mutex<BTreeSet<String>>,
     started_at: Instant,
     bandwidth_summary_enabled: bool,
+    master_rpc_metrics_enabled: bool,
     reporting_interval: Duration,
     last_report_snapshot: Mutex<TransferSnapshot>,
 }
@@ -219,20 +220,32 @@ impl ClientMetrics {
         let cluster_id = std::env::var("MC_STORE_CLUSTER_ID")
             .ok()
             .filter(|value| !value.is_empty());
-        Self::new_with_reporting_interval(cluster_id, bandwidth_summary_enabled, reporting_interval)
-            .map(|metrics| Some(Arc::new(metrics)))
+        Self::new_with_reporting_interval(
+            cluster_id,
+            bandwidth_summary_enabled,
+            true,
+            reporting_interval,
+        )
+        .map(|metrics| Some(Arc::new(metrics)))
     }
 
     pub(super) fn new(
         cluster_id: Option<String>,
         bandwidth_summary_enabled: bool,
+        master_rpc_metrics_enabled: bool,
     ) -> StoreResult<Self> {
-        Self::new_with_reporting_interval(cluster_id, bandwidth_summary_enabled, Duration::ZERO)
+        Self::new_with_reporting_interval(
+            cluster_id,
+            bandwidth_summary_enabled,
+            master_rpc_metrics_enabled,
+            Duration::ZERO,
+        )
     }
 
     fn new_with_reporting_interval(
         cluster_id: Option<String>,
         bandwidth_summary_enabled: bool,
+        master_rpc_metrics_enabled: bool,
         reporting_interval: Duration,
     ) -> StoreResult<Self> {
         let labels = cluster_id
@@ -411,8 +424,6 @@ impl ClientMetrics {
             Box::new(put_latency_us.clone()),
             Box::new(batch_get_latency_us.clone()),
             Box::new(batch_put_latency_us.clone()),
-            Box::new(rpc_count.clone()),
-            Box::new(rpc_latency_us.clone()),
             Box::new(read_operation_count.clone()),
             Box::new(read_operation_bytes.clone()),
             Box::new(read_operation_latency_us.clone()),
@@ -430,6 +441,14 @@ impl ClientMetrics {
             Box::new(ssd_total_latency_us.clone()),
         ] {
             registry.register(collector).map_err(metric_error)?;
+        }
+        if master_rpc_metrics_enabled {
+            registry
+                .register(Box::new(rpc_count.clone()))
+                .map_err(metric_error)?;
+            registry
+                .register(Box::new(rpc_latency_us.clone()))
+                .map_err(metric_error)?;
         }
 
         let started_at = Instant::now();
@@ -465,6 +484,7 @@ impl ClientMetrics {
             observed_write_operations: Mutex::new(BTreeSet::new()),
             started_at,
             bandwidth_summary_enabled,
+            master_rpc_metrics_enabled,
             reporting_interval,
             last_report_snapshot: Mutex::new(TransferSnapshot {
                 read_bytes: 0,
@@ -562,6 +582,9 @@ impl ClientMetrics {
     }
 
     pub(crate) fn observe_rpc(&self, rpc_name: &str, elapsed: Duration) {
+        if !self.master_rpc_metrics_enabled {
+            return;
+        }
         self.observed_rpc_names.lock().insert(rpc_name.to_string());
         self.rpc_count.with_label_values(&[rpc_name]).inc();
         self.rpc_latency_us
@@ -620,20 +643,23 @@ impl ClientMetrics {
             histogram_summary(&self.batch_get_latency_us)
         ));
         output.push_str(&format!(
-            "Batch Put: {}\n\n=== RPC Metrics Summary ===\n",
+            "Batch Put: {}\n",
             histogram_summary(&self.batch_put_latency_us)
         ));
-        let rpc_names = self.observed_rpc_names.lock().clone();
-        if rpc_names.is_empty() {
-            output.push_str("No RPC calls recorded\n");
-        } else {
-            for name in rpc_names {
-                let count = self.rpc_count.with_label_values(&[&name]).get();
-                let latency = self.rpc_latency_us.with_label_values(&[&name]);
-                output.push_str(&format!(
-                    "{name}: count={count}, {}\n",
-                    histogram_summary(&latency)
-                ));
+        if self.master_rpc_metrics_enabled {
+            output.push_str("\n=== RPC Metrics Summary ===\n");
+            let rpc_names = self.observed_rpc_names.lock().clone();
+            if rpc_names.is_empty() {
+                output.push_str("No RPC calls recorded\n");
+            } else {
+                for name in rpc_names {
+                    let count = self.rpc_count.with_label_values(&[&name]).get();
+                    let latency = self.rpc_latency_us.with_label_values(&[&name]);
+                    output.push_str(&format!(
+                        "{name}: count={count}, {}\n",
+                        histogram_summary(&latency)
+                    ));
+                }
             }
         }
         output.push_str("\n=== Interface Operation Metrics Summary ===\n");
@@ -848,7 +874,7 @@ mod tests {
 
     #[test]
     fn persistent_registry_exports_cpp_metric_names_and_summary() {
-        let metrics = ClientMetrics::new(Some("test-cluster".to_string()), true).unwrap();
+        let metrics = ClientMetrics::new(Some("test-cluster".to_string()), true, true).unwrap();
         metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
         metrics.observe_get(1024, Duration::from_micros(125));
         metrics.observe_rpc("GetReplicaList", Duration::from_micros(75));
@@ -868,6 +894,21 @@ mod tests {
         let report = metrics.periodic_report();
         assert!(report.contains("=== Interval Throughput Summary ==="));
         assert!(report.contains("1.00 KB over"));
+    }
+
+    #[test]
+    fn disabled_master_rpc_metrics_are_omitted_from_summary_and_prometheus() {
+        let metrics = ClientMetrics::new(None, true, false).unwrap();
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
+        metrics.observe_rpc("GetReplicaList", Duration::from_micros(75));
+
+        let summary = metrics.summary();
+        assert!(!summary.contains("RPC Metrics Summary"), "{summary}");
+
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        assert!(!text.contains("mooncake_client_rpc_count"), "{text}");
+        assert!(!text.contains("mooncake_client_rpc_latency"), "{text}");
+        assert!(text.contains("mooncake_transfer_read_bytes"), "{text}");
     }
 
     #[test]
