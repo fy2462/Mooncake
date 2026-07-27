@@ -1922,6 +1922,50 @@
       "reason": "Rust has no live-Redis regression test for release followed by reacquire and renewed keepalive state; redis-server and an external Redis endpoint are unavailable in this validation environment.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisCanRestartRenewAfterExplicitRelease and Rust coordinator lifecycle", "reviewed": true},
       "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "An unknown HA backend is rejected as invalid configuration.",
+      "boundary": ["master", "ha", "configuration", "unknown-backend"],
+      "cpp": {"file": "ha/leadership/ha_backend_availability_test.cpp", "test": "HABackendAvailabilityTest.UnknownBackendIsInvalid"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/ha_backend_availability_test.cpp UnknownBackendIsInvalid and Rust parse_ha_backend_type", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_parse_ha_backend_type"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Etcd HA availability reflects whether the coordinator capability is compiled into the runtime.",
+      "boundary": ["master", "ha", "configuration", "etcd", "capability"],
+      "cpp": {"file": "ha/leadership/ha_backend_availability_test.cpp", "test": "HABackendAvailabilityTest.EtcdAvailabilityMatchesBuildFlag"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/ha_backend_availability_test.cpp EtcdAvailabilityMatchesBuildFlag; Rust compiles Etcd unconditionally", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_ha_backend_capability_matrix_requires_shared_oplog_for_full_ha"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Redis HA availability reflects whether the coordinator capability is compiled into the runtime.",
+      "boundary": ["master", "ha", "configuration", "redis", "capability"],
+      "cpp": {"file": "ha/leadership/ha_backend_availability_test.cpp", "test": "HABackendAvailabilityTest.RedisAvailabilityMatchesBuildFlag"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/ha_backend_availability_test.cpp RedisAvailabilityMatchesBuildFlag; Rust compiles Redis election/discovery unconditionally", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_ha_backend_capability_matrix_requires_shared_oplog_for_full_ha"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Kubernetes Lease HA availability reflects whether the coordinator capability is compiled into the runtime.",
+      "boundary": ["master", "ha", "configuration", "k8s", "capability"],
+      "cpp": {"file": "ha/leadership/ha_backend_availability_test.cpp", "test": "HABackendAvailabilityTest.K8sAvailabilityMatchesBuildFlag"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/ha_backend_availability_test.cpp K8sAvailabilityMatchesBuildFlag; Rust compiles Kubernetes election/discovery unconditionally", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_ha_backend_capability_matrix_requires_shared_oplog_for_full_ha"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A client master entry using k8s:// parses into the Kubernetes backend and preserves its namespace/name connection string when that backend is available.",
+      "boundary": ["client", "ha", "configuration", "k8s", "uri-parsing"],
+      "cpp": {"file": "ha/leadership/ha_backend_availability_test.cpp", "test": "HABackendAvailabilityTest.ClientSpecParsingMatchesK8sBuildFlag"},
+      "reason": "Rust Store client configuration has no parser for etcd://, redis://, or k8s:// master entries, so it cannot currently discover a leader from the C++-compatible Kubernetes URI.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/ha_backend_availability_test.cpp ClientSpecParsingMatchesK8sBuildFlag and Rust client lifecycle/configuration", "reviewed": true},
+      "rust": [], "status": "missing"
     }
   ],
   "schema_version": 1
