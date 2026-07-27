@@ -12,6 +12,87 @@ fn uuid_proto(id: Uuid) -> proto::Uuid {
     }
 }
 
+async fn mount_local_disk(service: &MasterServiceImpl, client_id: Uuid) -> Uuid {
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    assert_ne!(storage_id, client_id);
+    assert_ne!(recovery_session_id, client_id);
+    assert_ne!(recovery_session_id, storage_id);
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(uuid_proto(client_id)),
+            enable_offloading: false,
+            storage_id: Some(uuid_proto(storage_id)),
+            recovery_complete: false,
+            recovery_session_id: Some(uuid_proto(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(uuid_proto(client_id)),
+            enable_offloading: true,
+            storage_id: Some(uuid_proto(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(uuid_proto(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    storage_id
+}
+
+async fn take_offload_tasks(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+) -> Vec<proto::OffloadTaskItem> {
+    MasterService::offload_object_heartbeat(
+        service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(uuid_proto(client_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks
+}
+
+async fn notify_offload_tasks(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    tasks: Vec<proto::OffloadTaskItem>,
+    endpoint: &str,
+) -> proto::NotifyOffloadSuccessResponse {
+    let metadatas = tasks
+        .iter()
+        .map(|task| proto::StorageObjectMetadata {
+            bucket_id: 0,
+            offset: 0,
+            key_size: task.key.len() as i64,
+            data_size: task.size,
+            transport_endpoint: endpoint.to_owned(),
+        })
+        .collect();
+    MasterService::notify_offload_success(
+        service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(uuid_proto(client_id)),
+            keys: tasks.iter().map(|task| task.key.clone()).collect(),
+            metadatas,
+            tasks,
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+}
+
 #[tokio::test]
 async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_work() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
@@ -33,20 +114,13 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
         .unwrap();
     }
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(uuid_proto(client_id)),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
+    let _storage_id = mount_local_disk(&service, client_id).await;
 
     let put = MasterService::put_start(
         &service,
@@ -65,6 +139,7 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
             tenant_id: tenant_id.into(),
         }),
@@ -100,13 +175,15 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     .unwrap()
     .into_inner();
     assert_eq!(offload.objects.get("evict-offload"), Some(&256));
-    assert_eq!(
-        offload.tasks,
-        vec![proto::OffloadTaskItem {
-            tenant_id: "default".into(),
-            key: "evict-offload".into(),
-            size: 256,
-        }]
+    assert_eq!(offload.tasks.len(), 1);
+    assert_eq!(offload.tasks[0].tenant_id, "default");
+    assert_eq!(offload.tasks[0].key, "evict-offload");
+    assert_eq!(offload.tasks[0].size, 256);
+    assert!(
+        offload.tasks[0]
+            .generation_id
+            .as_ref()
+            .is_some_and(|generation_id| generation_id.high != 0 || generation_id.low != 0)
     );
 
     let replicas = MasterService::get_replica_list(
@@ -149,19 +226,12 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
     .unwrap();
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(uuid_proto(client_id)),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
+    let storage_id = mount_local_disk(&service, client_id).await;
 
     MasterService::put_start(
         &service,
@@ -180,6 +250,7 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
             tenant_id: String::new(),
         }),
@@ -197,25 +268,22 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
     )
     .await
     .unwrap();
-    MasterService::notify_offload_success(
-        &service,
-        Request::new(proto::NotifyOffloadSuccessRequest {
-            client_id: Some(uuid_proto(client_id)),
-            keys: vec!["already-offloaded".into()],
-            metadatas: vec![proto::StorageObjectMetadata {
-                bucket_id: 0,
-                offset: 0,
-                key_size: 17,
-                data_size: 128,
-                transport_endpoint: "holder-existing".into(),
-            }],
-            tasks: vec![],
-        }),
-    )
-    .await
-    .unwrap();
 
     tokio::time::sleep(Duration::from_millis(5)).await;
+    // The first cycle admits the authoritative offload task but preserves the
+    // only Memory replica until LocalDisk completion is reported.
+    assert!(service.run_eviction_cycle_for_test(1).is_empty());
+    let tasks = take_offload_tasks(&service, client_id).await;
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].key, "already-offloaded");
+    let generation_id = tasks[0]
+        .generation_id
+        .clone()
+        .filter(|generation_id| generation_id.high != 0 || generation_id.low != 0)
+        .expect("Master must issue a non-nil LocalDisk generation");
+    let response = notify_offload_tasks(&service, client_id, tasks, "holder-existing").await;
+    assert!(response.stale_recovery_tasks.is_empty());
+
     let evicted = service.run_eviction_cycle_for_test(1);
     assert_eq!(evicted, vec!["already-offloaded".to_string()]);
 
@@ -247,6 +315,19 @@ async fn test_offload_on_evict_drops_memory_when_local_disk_already_exists() {
             .count(),
         1
     );
+    let local_disk = replicas
+        .replicas
+        .iter()
+        .find(|replica| {
+            replica.replica_type == proto::replica_descriptor::ReplicaType::LocalDisk as i32
+        })
+        .unwrap();
+    assert_eq!(
+        local_disk.local_disk_storage_id,
+        Some(uuid_proto(storage_id))
+    );
+    assert_eq!(local_disk.local_disk_generation_id, Some(generation_id));
+    assert_eq!(local_disk.holder_client_id, Some(uuid_proto(client_id)));
 }
 
 #[tokio::test]
@@ -272,20 +353,13 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
         .unwrap();
     }
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(uuid_proto(client_id)),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
+    let _storage_id = mount_local_disk(&service, client_id).await;
 
     MasterService::put_start(
         &service,
@@ -304,6 +378,7 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
             tenant_id: String::new(),
         }),
@@ -335,6 +410,15 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     .unwrap()
     .into_inner();
     assert_eq!(offload.objects.get("bg-evict-offload"), Some(&512));
+    assert_eq!(offload.tasks.len(), 1);
+    assert_eq!(offload.tasks[0].key, "bg-evict-offload");
+    assert_eq!(offload.tasks[0].size, 512);
+    assert!(
+        offload.tasks[0]
+            .generation_id
+            .as_ref()
+            .is_some_and(|generation_id| generation_id.high != 0 || generation_id.low != 0)
+    );
 
     let replicas = MasterService::get_replica_list(
         &service,
@@ -376,6 +460,7 @@ async fn test_processing_keys_excluded_from_eviction() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -399,6 +484,7 @@ async fn test_processing_keys_excluded_from_eviction() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
             tenant_id: String::new(),
         }),
@@ -437,6 +523,7 @@ async fn test_processing_keys_excluded_from_eviction() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
             tenant_id: String::new(),
         }),

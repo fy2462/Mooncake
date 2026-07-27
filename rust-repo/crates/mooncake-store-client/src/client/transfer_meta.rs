@@ -139,7 +139,15 @@ impl MooncakeClient {
                 Some(ReplicaDescriptor {
                     refcnt: 0,
                     segment_id: Uuid::from_u64_pair(sid.high, sid.low),
-                    segment_name: r.segment_name.clone(),
+                    segment_name: if mooncake_store_core::ReplicaType::from_replica_wire(
+                        r.replica_type,
+                    ) == mooncake_store_core::ReplicaType::Disk
+                        && !r.file_path.is_empty()
+                    {
+                        r.file_path.clone()
+                    } else {
+                        r.segment_name.clone()
+                    },
                     offset: r.offset,
                     size: r.size,
                     base_addr: r.base_addr,
@@ -150,6 +158,14 @@ impl MooncakeClient {
                     ),
                     holder_client_id: r
                         .holder_client_id
+                        .as_ref()
+                        .map(|id| Uuid::from_u64_pair(id.high, id.low)),
+                    local_disk_storage_id: r
+                        .local_disk_storage_id
+                        .as_ref()
+                        .map(|id| Uuid::from_u64_pair(id.high, id.low)),
+                    local_disk_generation_id: r
+                        .local_disk_generation_id
                         .as_ref()
                         .map(|id| Uuid::from_u64_pair(id.high, id.low)),
                     handle_valid: true,

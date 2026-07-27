@@ -5,20 +5,26 @@ pub(crate) mod batch_types;
 pub(crate) mod batches;
 pub(crate) mod buffer;
 mod config;
+mod endpoint;
+mod engine;
 pub(crate) mod finalize;
+pub(crate) mod global_disk;
 pub(crate) mod ha;
 mod http;
 pub(crate) mod lifecycle;
 mod lifecycle_state;
+mod metrics;
 pub(crate) mod nof_register;
 pub(crate) mod offload_read;
 pub(crate) mod read;
 pub(crate) mod read_batch;
 pub(crate) mod read_meta;
 pub(crate) mod read_ranges;
+pub(crate) mod reaper;
 pub(crate) mod remove;
 mod replica_selection;
 pub(crate) mod replication;
+pub(crate) mod staging;
 pub(crate) mod storage;
 pub(crate) mod storage_local;
 pub(crate) mod storage_offload;
@@ -42,23 +48,24 @@ pub use batch_types::{BatchPutStartResult, BatchUpsertEntry};
 pub use http::ClientHttpConfig;
 pub use replica_selection::{ReplicaScorer, ReplicaSelectionPolicy, builtin_remote_replica_score};
 pub use storage::{OffloadTaskItem, PromotionTaskItem, SegmentDetail};
+pub use transfer_local::BufferRegistrationId;
 pub use types::{BufferHandle, CachedQueryResultResponse};
 
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tonic::transport::Channel;
-use transfer_engine_ffi::TransferEngine;
 use uuid::Uuid;
 
 use crate::data_plane_ffi::AcceleratorBackend;
+use crate::hot_cache::HotCacheAdmission;
 use crate::proto;
 use crate::{LocalHotCache, MissHandler, RemoteSource};
 
-use self::buffer::OwnedBuffer;
 use self::http::ClientHttpServerState;
-use self::lifecycle_state::{HealthState, OffloadServerState, RemountState, ShutdownState};
+use self::lifecycle_state::{
+    HealthState, LocalDiskMountState, OffloadServerState, RemountState, ShutdownState,
+};
 
 // ---------------------------------------------------------------------------
 // MooncakeClient — primary client for the Mooncake distributed store
@@ -67,6 +74,30 @@ use self::lifecycle_state::{HealthState, OffloadServerState, RemountState, Shutd
 // C++ equivalent: `class Client` in real_client.h / real_client.cpp
 // C++ 等价类：`real_client.h / real_client.cpp` 中的 `class Client`
 // ---------------------------------------------------------------------------
+
+pub(crate) struct OwnedStoreSegment {
+    pub(crate) segment_id: Uuid,
+    pub(crate) segment_name: String,
+    pub(crate) size: u64,
+    pub(crate) buffer: crate::memory_ffi::OwnedSegmentBuffer,
+}
+
+impl OwnedStoreSegment {
+    pub(crate) fn base_addr(&self) -> u64 {
+        self.buffer.as_ptr() as u64
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct MountedExternalSegment {
+    pub(crate) segment_id: Uuid,
+    pub(crate) segment_name: String,
+    pub(crate) size: u64,
+    pub(crate) base_addr: u64,
+    pub(crate) te_endpoint: String,
+    pub(crate) protocol: String,
+    pub(crate) host_id: String,
+}
 
 /// The main client for interacting with the Mooncake distributed K/V store.
 ///
@@ -94,14 +125,17 @@ pub struct MooncakeClient {
     ///
     /// 连接到 Mooncake master 服务的 gRPC 客户端存根。
     /// 用于所有元数据操作：副本查找、put_start/put_end、segment 挂载、任务管理等。
-    pub(crate) master: proto::master_service_client::MasterServiceClient<Channel>,
+    pub(crate) master: proto::master_service_client::MasterServiceClient<metrics::MetricsChannel>,
 
     /// The TransferEngine instance that performs RDMA / TCP data-plane transfers.
     /// Wrapped in `Arc` so it can be shared across async tasks.
     ///
     /// 执行 RDMA / TCP 数据面传输的 TransferEngine 实例。
     /// 使用 Arc 包装，可在多个异步任务间共享。C++ 等价：`std::shared_ptr<TransferEngine>`。
-    pub(crate) engine: Arc<TransferEngine>,
+    pub(crate) engine: engine::ClientTransferEngine,
+    /// Keeps an automatically selected client port reserved for this
+    /// process, matching C++ RealClient's AutoPortBinder lifetime.
+    pub(crate) _auto_port_reservation: Option<endpoint::PortReservation>,
 
     /// Safe strategy interface; its native unsafe implementation lives only
     /// in `data_plane_ffi`, outside the client business layer.
@@ -120,11 +154,20 @@ pub struct MooncakeClient {
     /// 本节点的主机名（可含端口），如 "node01:12345"。
     /// 用作 segment 解析的传输端点名称。
     pub(crate) local_hostname: String,
+    /// Stable physical-host identity attached to placement requests.
+    pub(crate) host_id: String,
 
     /// Transport protocol used for data-plane transfers ("tcp", "rdma", etc.).
     /// Stored so MountSegment / ReMountSegment can include it in gRPC requests.
     /// 数据面传输使用的协议（"tcp"、"rdma" 等）。存储以供 MountSegment/ReMountSegment 在 gRPC 请求中包含。
     pub(crate) protocol: String,
+
+    /// Master-advertised base/size alignment for owned Memory segments.
+    pub(crate) memory_segment_alignment: usize,
+
+    /// Whether tenant IDs participate in object identity on the connected
+    /// Master. When disabled, every request is normalized to `default`.
+    pub(crate) enable_tenant_scope: bool,
 
     /// Scratch buffer for staging data before/after TransferEngine operations.
     /// In `write_to_replica`: data is first memcpy'd here, then TE transfers it.
@@ -135,25 +178,32 @@ pub struct MooncakeClient {
     /// write_to_replica: 先 memcpy 数据至此，再通过 TE 传输。
     /// read_from_replica: TE 读取到此缓冲区，再拷贝出去。
     /// 大小由 create() 中的 local_buffer_size 控制。
-    pub(crate) local_buffer: OwnedBuffer,
+    pub(crate) local_buffer: staging::StagingBuffer,
 
-    /// Segment memory buffer (only for storage nodes with global_segment_size > 0).
-    /// Must be kept alive for the lifetime of the client so the TE can access it.
+    /// Client-owned Store segments. A total capacity larger than
+    /// `MC_MAX_MR_SIZE` is represented by multiple entries with the same
+    /// transport endpoint/name but distinct UUIDs and base addresses.
     ///
-    /// Segment 内存缓冲区（仅当 global_segment_size > 0 时分配，用于存储节点）。
-    /// 必须在客户端整个生命周期内保持存活，以便 TE 能够访问。
-    pub(crate) segment_buffer: Option<crate::memory_ffi::OwnedSegmentBuffer>,
+    /// Every entry owns its allocation until the exact Master segment has
+    /// been unmounted and Transfer Engine registration has been removed.
+    pub(crate) owned_store_segments: Vec<OwnedStoreSegment>,
 
-    /// Map of externally-registered user buffers: `ptr_addr → (size, location)`.
-    /// Populated via [`register_buffer`](MooncakeClient::register_buffer) for
-    /// zero-copy read/write paths. The TE must be told about these buffers so it
-    /// can DMA directly into/from them.
+    /// Native CXL mapping registration. Unlike `segment_buffer`, the backing
+    /// mapping is owned by the installed Transfer Engine transport.
+    pub(crate) cxl_segment_registration: Option<crate::memory_ffi::CxlSegmentRegistration>,
+    pub(crate) cxl_segment_id: Option<Uuid>,
+
+    /// Exact generations of externally registered user buffers.
+    /// Populated via
+    /// [`register_owned_buffer`](MooncakeClient::register_owned_buffer) for
+    /// zero-copy read/write paths. The TE must be told about these buffers so
+    /// it can DMA directly into/from them.
     ///
-    /// 外部注册的用户缓冲区映射表：指针地址 → (大小, 位置)。
-    /// 通过 register_buffer() 填充，用于零拷贝读写路径。
+    /// 每个 in-flight region 持有 generation lease；注销会拒绝 busy generation。
+    /// 通过 register_owned_buffer() 填充，用于零拷贝读写路径。
     /// TE 必须被告知这些缓冲区，以便直接进行 DMA 操作。
     /// C++ 等价：`registered_buffers_` map。
-    pub(crate) registered_buffers: RwLock<HashMap<usize, (usize, String)>>,
+    pub(crate) registered_buffers: RwLock<HashMap<usize, transfer_engine_ffi::RegisteredMemory>>,
 
     /// Shutdown flag. When set to `true`, operations should stop and the client
     /// is considered closed. Checked via [`is_closed`](Self::is_closed).
@@ -174,10 +224,16 @@ pub struct MooncakeClient {
     /// C++ 等价：Client::GetLocalEndpoints() → segment.te_endpoint。
     pub(crate) local_endpoints: RwLock<HashSet<String>>,
 
-    /// Map mounted segment names to master-assigned segment IDs.
-    /// Used by UnmountSegment/GracefulUnmountSegment, whose protocol identifies
-    /// segments by UUID just like the C++ MasterClient layer.
-    pub(crate) mounted_segment_ids: RwLock<HashMap<String, Uuid>>,
+    /// Master-assigned segment IDs and their logical names. Names are not
+    /// unique: C++ mounts every `max_mr_size` chunk under the same local
+    /// hostname, so UUID is the authoritative identity.
+    pub(crate) mounted_segment_ids: RwLock<HashMap<Uuid, String>>,
+    pub(crate) mounted_external_segments: RwLock<HashMap<Uuid, MountedExternalSegment>>,
+
+    /// Exact NoF descriptors owned by this client process. A Master failover
+    /// invalidates snapshot-era device addresses, so heartbeat remount must
+    /// resubmit the current base and transfer endpoint.
+    pub(crate) mounted_nof_segments: RwLock<HashMap<Uuid, mooncake_store_core::NoFSegment>>,
 
     /// Optional remote source miss handler for cache-miss fallback.
     /// When a key is not found in the distributed store, and this handler is
@@ -199,6 +255,7 @@ pub struct MooncakeClient {
     /// 挂载后，get() 在任何网络调用之前首先检查此缓存。
     /// 成功的获取（来自副本或远程数据源）会填充此缓存。
     pub(crate) hot_cache: Option<Arc<LocalHotCache>>,
+    pub(crate) hot_cache_admission: Option<HotCacheAdmission>,
 
     /// Local storage backend for persisting offloaded data to local disk.
     /// When set, the full offload cycle (heartbeat → read memory → write disk
@@ -209,19 +266,14 @@ pub struct MooncakeClient {
     /// 设置后，完整的 offload 循环和 promotion 循环将启用。
     pub(crate) local_storage: Option<crate::local_storage_backend::AttachedLocalStorage>,
 
-    /// Segment name registered with the master (equals `local_hostname` when a
-    /// storage segment is mounted). Used by ReMountSegment on NeedRemount.
-    /// 向 master 注册的 segment 名称（挂载存储 segment 时等于 local_hostname）。
-    /// NeedRemount 时用于 ReMountSegment。
-    pub(crate) segment_name: String,
-
-    /// Size of the storage segment buffer (0 if this is not a storage node).
-    /// 存储 segment 缓冲区的大小（非存储节点时为 0）。
-    pub(crate) segment_size: u64,
+    /// Shared-filesystem data plane for Master-issued global `Disk` replicas.
+    pub(crate) global_disk: Option<Arc<global_disk::GlobalDiskStorage>>,
 
     /// Guard to ensure at most one remount is in progress at any time.
     /// 确保同一时间最多只有一个 remount 在进行中。C++ equivalent: remount_segment_future.valid()
     remount_state: RemountState,
+    /// Desired LocalDisk mount mode for HA remount after leader failover.
+    local_disk_mount_state: LocalDiskMountState,
 
     /// Whether the last ping to the master succeeded.
     /// 最后一次 ping master 是否成功。C++ equivalent: Client::is_ping_healthy()
@@ -232,6 +284,11 @@ pub struct MooncakeClient {
 
     /// Optional health and Prometheus HTTP endpoint task owned by this client.
     client_http_server_state: ClientHttpServerState,
+
+    /// Persistent per-client metrics registry. Disabled only when
+    /// `MC_STORE_CLIENT_METRIC` explicitly selects a false value.
+    pub(crate) metrics: Option<Arc<metrics::ClientMetrics>>,
+    metrics_reporter_state: metrics::MetricsReporterState,
 
     /// Currently connected master address (`host:port`).
     /// C++ equivalent: `Client::current_master_view_.leader_address`.
@@ -249,6 +306,10 @@ pub struct MooncakeClient {
     /// Default tenant used by convenience APIs that do not take an explicit
     /// tenant parameter. Empty string preserves the legacy/default namespace.
     pub(crate) tenant_id: String,
+
+    /// Generation-bearing tasks retained only for the legacy key-only offload
+    /// API. The task-native API and built-in offload loop do not use this map.
+    pub(crate) pending_legacy_offload_tasks: HashMap<String, storage::OffloadTaskItem>,
 
     replica_selection_policy: ReplicaSelectionPolicy,
 }

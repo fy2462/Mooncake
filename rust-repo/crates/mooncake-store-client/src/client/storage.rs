@@ -47,6 +47,7 @@ pub struct SegmentDetail {
     pub allocator_used_bytes: u64,
     pub allocator_capacity_bytes: u64,
     pub nof: bool,
+    pub host_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,9 @@ pub struct StorageConfig {
     pub fs_dir: String,
     pub enable_disk_eviction: bool,
     pub quota_bytes: u64,
+    pub enable_tenant_scope: bool,
+    pub memory_allocator: String,
+    pub memory_segment_alignment: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +65,7 @@ pub struct OffloadTaskItem {
     pub tenant_id: String,
     pub key: String,
     pub size: i64,
+    pub generation_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +81,11 @@ impl From<proto::OffloadTaskItem> for OffloadTaskItem {
             tenant_id: task.tenant_id,
             key: task.key,
             size: task.size,
+            generation_id: task
+                .generation_id
+                .as_ref()
+                .map(|id| Uuid::from_u64_pair(id.high, id.low))
+                .unwrap_or_else(Uuid::nil),
         }
     }
 }
@@ -167,13 +177,47 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::MountLocalDiskSegment(enable_offloading)`
     pub async fn mount_local_disk_segment(&mut self, enable_offloading: bool) -> StoreResult<()> {
+        let storage_id = self
+            .local_storage
+            .as_ref()
+            .ok_or_else(|| {
+                StoreError::InvalidParams(
+                    "local storage backend must be attached before mounting LocalDisk".to_string(),
+                )
+            })?
+            .storage_id()?;
+        let storage_id = Self::uuid_to_proto_uuid(storage_id);
+        let recovery_session_id = Uuid::new_v4();
+        let recovery_session_id_proto = Self::uuid_to_proto_uuid(recovery_session_id);
+        // Mount disabled first. Persistent records are scanned, made
+        // reachable, and re-published before this client can receive new
+        // offload work. A failed recovery therefore leaves a retryable,
+        // non-offloading segment instead of accepting tasks with incomplete
+        // local metadata.
+        self.master
+            .mount_local_disk_segment(self.rpc_request(proto::MountLocalDiskSegmentRequest {
+                client_id: Some(self.client_id_proto()),
+                enable_offloading: false,
+                storage_id: Some(storage_id.clone()),
+                recovery_complete: false,
+                recovery_session_id: Some(recovery_session_id_proto.clone()),
+            }))
+            .await
+            .map_err(Self::rpc_status_to_error)?;
+        self.recover_local_disk_replicas(recovery_session_id)
+            .await?;
         self.master
             .mount_local_disk_segment(self.rpc_request(proto::MountLocalDiskSegmentRequest {
                 client_id: Some(self.client_id_proto()),
                 enable_offloading,
+                storage_id: Some(storage_id),
+                recovery_complete: true,
+                recovery_session_id: Some(recovery_session_id_proto),
             }))
             .await
             .map_err(Self::rpc_status_to_error)?;
+        self.local_disk_mount_state
+            .record_mounted(enable_offloading);
         Ok(())
     }
 
@@ -188,6 +232,9 @@ impl MooncakeClient {
             }))
             .await
             .map_err(Self::rpc_status_to_error)?;
+        self.mounted_nof_segments
+            .write()
+            .insert(segment.id, segment.clone());
         Ok(())
     }
 
@@ -202,6 +249,10 @@ impl MooncakeClient {
             }))
             .await
             .map_err(Self::rpc_status_to_error)?;
+        let mut mounted = self.mounted_nof_segments.write();
+        for segment in segments {
+            mounted.insert(segment.id, segment.clone());
+        }
         Ok(())
     }
 
@@ -216,6 +267,7 @@ impl MooncakeClient {
             }))
             .await
             .map_err(Self::rpc_status_to_error)?;
+        self.mounted_nof_segments.write().remove(&segment_id);
         Ok(())
     }
 
@@ -309,6 +361,7 @@ impl MooncakeClient {
                 allocator_used_bytes: segment.allocator_used_bytes,
                 allocator_capacity_bytes: segment.allocator_capacity_bytes,
                 nof: segment.nof,
+                host_id: segment.host_id,
             })
             .collect())
     }
@@ -327,6 +380,9 @@ impl MooncakeClient {
             fs_dir: response.fs_dir,
             enable_disk_eviction: response.enable_disk_eviction,
             quota_bytes: response.quota_bytes,
+            enable_tenant_scope: response.enable_tenant_scope,
+            memory_allocator: response.memory_allocator,
+            memory_segment_alignment: response.memory_segment_alignment,
         })
     }
 

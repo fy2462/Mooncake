@@ -42,7 +42,7 @@ class StoreService:
                 client = await self._create_client()
                 await asyncio.sleep(0)
                 if shutdown_event.is_set():
-                    client.close()
+                    await client.close()
                     return False
                 self.client = client
                 return True
@@ -64,7 +64,7 @@ class StoreService:
     async def stop(self):
         client, self.client = self.client, None
         if client is not None:
-            client.close()
+            await client.close()
 
 
 async def run_service(
@@ -174,6 +174,7 @@ async def main(argv=None):
             config.get("device_name", ""),
             config.get("global_segment_size", -1),
             config.get("local_buffer_size", -1),
+            tenant_id=config.get("tenant_id", "default"),
             enable_client_http_server=config.get("enable_client_http_server", False),
             client_http_port=config.get("client_http_port", 9300),
         )

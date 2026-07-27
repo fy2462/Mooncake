@@ -13,32 +13,38 @@ use tracing::{info, warn};
 
 pub fn parse_snapshot_config(
     args: &Args,
-) -> (
-    Option<crate::storage_backend::StorageBackendType>,
-    Option<std::path::PathBuf>,
-) {
-    let backend = args.snapshot_backend_type.as_deref().and_then(|s| {
-        if s == "local-disk" {
-            Some(crate::storage_backend::StorageBackendType::LocalDisk)
-        } else if s == "hf3fs" {
-            Some(crate::storage_backend::StorageBackendType::Hf3fs)
-        } else if s == "file-per-key" {
-            Some(crate::storage_backend::StorageBackendType::FilePerKey)
-        } else if s == "bucket" {
-            Some(crate::storage_backend::StorageBackendType::Bucket)
-        } else if s == "offset-allocator" {
-            Some(crate::storage_backend::StorageBackendType::OffsetAllocator)
-        } else if s == "distributed" {
-            Some(crate::storage_backend::StorageBackendType::Distributed)
-        } else {
-            None
-        }
-    });
+) -> Result<
+    (
+        Option<crate::storage_backend::StorageBackendType>,
+        Option<std::path::PathBuf>,
+    ),
+    HaError,
+> {
+    let backend = args
+        .snapshot_backend_type
+        .as_deref()
+        .map(|value| match value {
+            "local-disk" => Ok(crate::storage_backend::StorageBackendType::LocalDisk),
+            "hf3fs" => Ok(crate::storage_backend::StorageBackendType::Hf3fs),
+            "file-per-key" => Ok(crate::storage_backend::StorageBackendType::FilePerKey),
+            "bucket" => Ok(crate::storage_backend::StorageBackendType::Bucket),
+            "offset-allocator" => Ok(crate::storage_backend::StorageBackendType::OffsetAllocator),
+            "distributed" => Ok(crate::storage_backend::StorageBackendType::Distributed),
+            other => Err(HaError::InvalidParams(format!(
+                "unknown snapshot backend type: {other}"
+            ))),
+        })
+        .transpose()?;
     let dir = args
         .snapshot_backup_dir
         .clone()
         .map(std::path::PathBuf::from);
-    (backend, dir)
+    if backend.is_some() != dir.is_some() {
+        return Err(HaError::InvalidParams(
+            "--snapshot-backend-type and --snapshot-backup-dir must be configured together".into(),
+        ));
+    }
+    Ok((backend, dir))
 }
 
 pub fn build_catalog_snapshot_publisher(
@@ -63,13 +69,50 @@ pub fn build_catalog_snapshot_publisher(
     )?))
 }
 
+pub fn preflight_snapshot_pipeline(
+    args: &Args,
+    cluster_id: &str,
+    service: &MasterServiceImpl,
+) -> Result<Option<CatalogBackedSnapshotProvider>, Box<dyn std::error::Error>> {
+    let native_writer_available = service.preflight_snapshot_writer()?;
+    let catalog_publisher = build_catalog_snapshot_publisher(args, cluster_id)?;
+    if let Some(publisher) = &catalog_publisher {
+        publisher.preflight()?;
+    }
+    if args.enable_snapshot && !native_writer_available && catalog_publisher.is_none() {
+        return Err(HaError::InvalidParams(
+            "--enable-snapshot requires a native snapshot backend or snapshot object store".into(),
+        )
+        .into());
+    }
+    Ok(catalog_publisher)
+}
+
 pub fn publish_catalog_snapshot(
     service: &MasterServiceImpl,
     publisher: &CatalogBackedSnapshotProvider,
     producer_view_version: u64,
     retention_count: usize,
 ) {
+    if !service.is_service_available() {
+        warn!("Catalog snapshot publish skipped because the master is not serving");
+        return;
+    }
+    if service.is_service_fenced() {
+        warn!("Catalog snapshot publish skipped because the master is durability-fenced");
+        return;
+    }
     let snapshot = service.capture_loaded_snapshot(String::new());
+    if !service.is_service_available() {
+        warn!("Catalog snapshot publish skipped because the master stopped serving during capture");
+        return;
+    }
+    if service.is_service_fenced() {
+        warn!(
+            "Catalog snapshot publish skipped because the master became durability-fenced during capture"
+        );
+        return;
+    }
     match publisher.publish_loaded_snapshot(&snapshot, producer_view_version) {
         Ok(descriptor) => {
             if let Err(error) = publisher.prune_snapshots(retention_count) {
@@ -99,11 +142,13 @@ pub fn build_master_service(
     snapshot_backend_type: Option<crate::storage_backend::StorageBackendType>,
     snapshot_dir: Option<std::path::PathBuf>,
     runtime_config: MasterRuntimeConfig,
-) -> Arc<MasterServiceImpl> {
-    Arc::new(MasterServiceImpl::new_with_runtime_config(
-        snapshot_backend_type,
-        snapshot_dir,
-        runtime_config,
+) -> Result<Arc<MasterServiceImpl>, HaError> {
+    Ok(Arc::new(
+        MasterServiceImpl::try_new_standby_with_runtime_config(
+            snapshot_backend_type,
+            snapshot_dir,
+            runtime_config,
+        )?,
     ))
 }
 
@@ -124,8 +169,27 @@ pub fn snapshot_dir_for_cluster(
 pub fn build_runtime_config(
     args: &Args,
 ) -> Result<MasterRuntimeConfig, Box<dyn std::error::Error>> {
-    if args.allocation_strategy == "cxl" {
-        return Err("allocation_strategy 'cxl' is not supported by the Rust master yet".into());
+    if !args.enable_cxl && args.allocation_strategy == "cxl" {
+        return Err("allocation_strategy 'cxl' requires --enable-cxl".into());
+    }
+    if args.enable_cxl {
+        if args.cxl_path.trim().is_empty() {
+            return Err("cxl_path must not be empty when CXL is enabled".into());
+        }
+        if args.cxl_size == 0 || args.cxl_size % crate::allocator::CACHELIB_SLAB_SIZE != 0 {
+            return Err(format!(
+                "cxl_size must be positive and aligned to {}",
+                crate::allocator::CACHELIB_SLAB_SIZE
+            )
+            .into());
+        }
+        if args.cxl_size > crate::allocator::CACHELIB_MAX_SEGMENT_SIZE {
+            return Err(format!(
+                "cxl_size exceeds the Cachelib u32 slab index capacity {}",
+                crate::allocator::CACHELIB_MAX_SEGMENT_SIZE
+            )
+            .into());
+        }
     }
     if args.offloading_queue_limit == 0 || args.offloading_queue_limit > 100_000_000 {
         return Err("offloading_queue_limit must be between 1 and 100000000".into());
@@ -133,14 +197,34 @@ pub fn build_runtime_config(
     if args.offload_cap_ratio < 0.0 || args.offload_cap_ratio > 1.0 {
         return Err("offload_cap_ratio must be between 0.0 and 1.0".into());
     }
+    if !(0.0..=1.0).contains(&args.nof_eviction_high_watermark_ratio) {
+        return Err("nof_eviction_high_watermark_ratio must be between 0.0 and 1.0".into());
+    }
+    if !(0.0..=1.0).contains(&args.nof_eviction_ratio) {
+        return Err("nof_eviction_ratio must be between 0.0 and 1.0".into());
+    }
+    if args.promotion_queue_limit == 0 {
+        return Err("promotion_queue_limit must be positive".into());
+    }
     Ok(MasterRuntimeConfig {
         // ── 分配策略 / allocation strategy ──
         // 段选择：random、free_ratio_first、ssd_free_ratio_first 或 local_first
-        allocation_strategy: AllocationStrategy::parse(&args.allocation_strategy)
-            .ok_or("allocation_strategy must be 'random', 'free_ratio_first', 'ssd_free_ratio_first', or 'local_first'")?,
+        allocation_strategy: if args.enable_cxl {
+            AllocationStrategy::Cxl
+        } else {
+            AllocationStrategy::parse(&args.allocation_strategy)
+                .ok_or("allocation_strategy must be 'random', 'free_ratio_first', 'ssd_free_ratio_first', or 'local_first'")?
+        },
         // 段内分配器：offset（连续分配）或 cachelib（slab + class）
-        memory_allocator_kind: MemoryAllocatorKind::parse(&args.memory_allocator)
-            .ok_or("memory_allocator must be 'offset' or 'cachelib'")?,
+        memory_allocator_kind: if args.enable_cxl {
+            MemoryAllocatorKind::CachelibLike
+        } else {
+            MemoryAllocatorKind::parse(&args.memory_allocator)
+                .ok_or("memory_allocator must be 'offset' or 'cachelib'")?
+        },
+        enable_cxl: args.enable_cxl,
+        cxl_path: args.cxl_path.clone(),
+        cxl_size: args.cxl_size,
 
         // ── 租约 & 超时 / lease & timeout ──
         // KV 对象默认 lease TTL：PutEnd/GetReplicaList 加时，超时后允许驱逐
@@ -157,9 +241,14 @@ pub fn build_runtime_config(
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
         // 每次驱逐释放的内存比例（0.05 = 5%）
         eviction_ratio: args.eviction_ratio,
+        // NoF 使用率和驱逐比例独立于 Memory。
+        nof_eviction_high_watermark_ratio: args.nof_eviction_high_watermark_ratio,
+        nof_eviction_ratio: args.nof_eviction_ratio,
         // 淘汰时先把数据下沉到本地磁盘再驱逐内存
         offload_on_evict: args.offload_on_evict,
-        // 强制驱逐（即使 offload 还没写完）
+        // 与 C++ 一致：第一轮保护 soft pin，可配置第二轮允许驱逐。
+        allow_evict_soft_pinned_objects: args.allow_evict_soft_pinned_objects,
+        // offload 无法入队或达到强制阈值时直接驱逐。
         offload_force_evict: args.offload_force_evict,
         // 每个本地磁盘 segment 的 offload 队列上限
         offloading_queue_limit: args.offloading_queue_limit,
@@ -195,6 +284,10 @@ pub fn build_runtime_config(
         cluster_id: resolve_cluster_id(args),
 
         // ── Promotion / 热数据升温 ──
+        // 与 C++ 默认一致：关闭；启用后命中次数达到阈值才进入有界队列
+        promotion_on_hit: args.promotion_on_hit,
+        promotion_admission_threshold: args.promotion_admission_threshold,
+        promotion_queue_limit: args.promotion_queue_limit,
         // 单次心跳最多返回给一个客户端的 promotion 任务数
         promotion_max_per_heartbeat: args.promotion_max_per_heartbeat,
 
@@ -305,6 +398,27 @@ pub fn build_ha_spec(args: &Args) -> Result<HABackendSpec, HaError> {
     })
 }
 
+/// Validate the complete production HA capability set before connecting to a
+/// coordinator. Accepting election alone would let Redis/Kubernetes repeatedly
+/// acquire and release leadership because no shared oplog can be installed.
+pub fn validate_ha_backend_for_serving(spec: &HABackendSpec) -> Result<(), HaError> {
+    let capabilities = spec.backend_type.capabilities();
+    if !capabilities.discovery || !capabilities.leader_election {
+        return Err(HaError::InvalidParams(format!(
+            "HA backend {} does not implement discovery and leader election",
+            spec.backend_type.as_str()
+        )));
+    }
+    if !capabilities.shared_oplog {
+        return Err(HaError::UnavailableInCurrentMode(format!(
+            "HA backend {} supports discovery/election but has no shared ordered oplog; \
+             production HA currently requires etcd",
+            spec.backend_type.as_str()
+        )));
+    }
+    Ok(())
+}
+
 fn build_k8s_pod_identity(args: &Args, backend_type: HABackendType) -> Option<K8sPodIdentity> {
     if backend_type != HABackendType::K8s {
         return None;
@@ -350,7 +464,7 @@ pub fn ensure_supported_rpc_protocol() -> Result<(), Box<dyn std::error::Error>>
 pub fn validate_rpc_protocol(protocol: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     match protocol {
         Some("rdma") => Err(Box::new(HaError::UnavailableInCurrentMode(
-            "Rust tonic master server does not support coro_rpc RDMA init_ibv".into(),
+            "Rust master control-plane RPC does not support RDMA transport".into(),
         ))),
         _ => Ok(()),
     }

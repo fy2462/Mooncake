@@ -18,30 +18,40 @@ impl MasterServiceImpl {
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
         let key = tenant_id.make_scoped_key(&req.key);
-        let target = replica_type_from_i32(req.replica_type);
+        let target = request_replica_type_from_i32(req.replica_type)?;
         if target != ReplicaType::Disk && target != ReplicaType::LocalDisk {
             return Err(Status::invalid_argument(
                 "evict_disk_replica only supports Disk or LocalDisk",
             ));
         }
+        let storage_id = if target == ReplicaType::LocalDisk {
+            Some(ready_local_disk_storage_for_client(&self.state, client_id)?)
+        } else {
+            None
+        };
+        let _mutation_guard = self.state.key_mutations.lock(&key);
         match self.state.objects.get_mut(&key) {
             Some(mut entry) => {
                 entry.replicas.retain(|r| match target {
                     ReplicaType::Disk => r.replica_type != ReplicaType::Disk,
                     ReplicaType::LocalDisk => {
                         !(r.replica_type == ReplicaType::LocalDisk
-                            && r.holder_client_id == Some(client_id))
+                            && r.local_disk_storage_id == storage_id)
                     }
                     _ => true,
                 });
                 sync_cache_total_accounting(&mut entry);
                 let remove_object = entry.replicas.is_empty();
                 drop(entry);
-                if remove_object {
-                    if let Some((_, object)) = self.state.objects.remove(&key) {
-                        self.publish_kv_removed_with_medium(&key, &object, "disk");
-                        account_removed_object_quota(&self.state, &object);
-                    }
+                let removed_object = remove_object
+                    .then(|| self.state.objects.remove(&key).map(|(_, object)| object))
+                    .flatten();
+                if let Some(object) = &removed_object {
+                    self.account_removed_object_quota(object)?;
+                }
+                self.persist_object_image_or_remove(&key, "evict_disk_replica")?;
+                if let Some(object) = &removed_object {
+                    self.publish_kv_removed_with_medium(&key, object, "disk");
                 }
             }
             _ => {
@@ -67,34 +77,52 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        let target = replica_type_from_i32(req.replica_type);
+        let target = request_replica_type_from_i32(req.replica_type)?;
         if target != ReplicaType::Disk && target != ReplicaType::LocalDisk {
             return Err(Status::invalid_argument(
                 "batch_evict_disk_replica only supports Disk or LocalDisk",
             ));
         }
+        let storage_id = if target == ReplicaType::LocalDisk {
+            Some(ready_local_disk_storage_for_client(&self.state, client_id)?)
+        } else {
+            None
+        };
+        let mut statuses = Vec::with_capacity(req.keys.len());
         for raw_key in &req.keys {
             let key = tenant_id.make_scoped_key(raw_key);
+            let _mutation_guard = self.state.key_mutations.lock(&key);
             if let Some(mut entry) = self.state.objects.get_mut(&key) {
                 entry.replicas.retain(|r| match target {
                     ReplicaType::Disk => r.replica_type != ReplicaType::Disk,
                     ReplicaType::LocalDisk => {
                         !(r.replica_type == ReplicaType::LocalDisk
-                            && r.holder_client_id == Some(client_id))
+                            && r.local_disk_storage_id == storage_id)
                     }
                     _ => true,
                 });
                 sync_cache_total_accounting(&mut entry);
                 let remove_object = entry.replicas.is_empty();
                 drop(entry);
-                if remove_object {
-                    if let Some((_, object)) = self.state.objects.remove(&key) {
-                        self.publish_kv_removed_with_medium(&key, &object, "disk");
-                        account_removed_object_quota(&self.state, &object);
-                    }
+                let removed_object = remove_object
+                    .then(|| self.state.objects.remove(&key).map(|(_, object)| object))
+                    .flatten();
+                if let Some(object) = &removed_object {
+                    self.account_removed_object_quota(object)?;
                 }
+                self.persist_object_image_or_remove(&key, "batch_evict_disk_replica")?;
+                if let Some(object) = &removed_object {
+                    self.publish_kv_removed_with_medium(&key, object, "disk");
+                }
+                statuses.push(BatchStatus::Success.into());
+            } else {
+                // No mutation occurred, so do not manufacture a durable remove
+                // marker for a missing key.
+                statuses.push(BatchStatus::KeyNotFound.into());
             }
         }
-        Ok(Response::new(proto::BatchEvictDiskReplicaResponse {}))
+        Ok(Response::new(proto::BatchEvictDiskReplicaResponse {
+            statuses,
+        }))
     }
 }

@@ -22,6 +22,7 @@ struct CoordinationState {
     pending: Mutex<HashSet<(String, String)>>,
     acquired: Mutex<Vec<(String, String)>>,
     completed: Mutex<Vec<(String, String)>>,
+    events: Mutex<Vec<&'static str>>,
 }
 
 #[derive(Clone)]
@@ -65,6 +66,7 @@ impl tonic::server::UnaryService<proto::CompleteRemotePullRequest> for CompleteR
         Box::pin(async move {
             let request = request.into_inner();
             let identity = (request.tenant_id, request.key);
+            state.events.lock().unwrap().push("complete");
             state.completed.lock().unwrap().push(identity.clone());
             state.pending.lock().unwrap().remove(&identity);
             Ok(Response::new(proto::CompleteRemotePullResponse {}))
@@ -188,6 +190,28 @@ fn handler_for_tenant(
     )
     .with_wait_policy(1, Duration::from_secs(5));
     (Arc::new(handler), calls, release)
+}
+
+#[tokio::test]
+async fn fetched_data_is_published_before_remote_pull_completion() {
+    let (master, state, server) = strict_remote_pull_master().await;
+    let (handler, _calls, release) = handler_for_tenant(master, "tenant-a");
+    release.add_permits(1);
+    let callback_state = Arc::clone(&state);
+
+    let data = handler
+        .handle_miss("shared-key", move |_| {
+            callback_state.events.lock().unwrap().push("callback");
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(data, b"tenant-a");
+    assert_eq!(
+        state.events.lock().unwrap().as_slice(),
+        ["callback", "complete"]
+    );
+    server.abort();
 }
 
 #[tokio::test]

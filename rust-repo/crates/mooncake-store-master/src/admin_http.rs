@@ -450,6 +450,7 @@ fn segment_status_json_string(status: i32) -> &'static str {
         Ok(proto::SegmentStatus::Active) => "ACTIVE",
         Ok(proto::SegmentStatus::Draining) => "DRAINING",
         Ok(proto::SegmentStatus::Unavailable) => "UNAVAILABLE",
+        Ok(proto::SegmentStatus::GracefullyUnmounting) => "GRACEFULLY_UNMOUNTING",
         _ => "UNDEFINED",
     }
 }
@@ -548,6 +549,8 @@ mod tests {
                         local_disk_client_id: Some(client_id),
                         base_addr: 0,
                         protocol: String::new(),
+                        local_disk_storage_id: None,
+                        local_disk_generation_id: None,
                     }],
                     lease_ttl_ms: 5000,
                 }),
@@ -580,6 +583,7 @@ mod tests {
             allocator_used_bytes: 256 * 1024 * 1024,
             allocator_capacity_bytes: 1024 * 1024 * 1024,
             nof: false,
+            host_id: String::new(),
         }]);
 
         assert_eq!(payload["total_segments"], 1);

@@ -10,7 +10,7 @@ pub const TEST_CPP_OP_PUT_REVOKE: u8 = CPP_OP_PUT_REVOKE;
 pub const TEST_CPP_OP_REMOVE: u8 = CPP_OP_REMOVE;
 pub const TEST_MAX_OBJECT_KEY_SIZE: usize = MAX_OBJECT_KEY_SIZE;
 pub const TEST_MAX_PAYLOAD_SIZE: usize = MAX_PAYLOAD_SIZE;
-pub const TEST_PUT_END_MSGPACK_MAGIC: &[u8] = PUT_END_MSGPACK_MAGIC;
+pub const TEST_PUT_END_MSGPACK_MAGIC: &[u8] = PUT_END_MSGPACK_MAGIC_V2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CppWireTestEntry {
@@ -87,11 +87,4 @@ pub fn encode_put_end_msgpack_from_json_for_test(
 
 pub fn format_etcd_entry_key_for_test(key_prefix: &str, seq: u64) -> String {
     EtcdOpLogStore::format_entry_key(key_prefix, seq)
-}
-
-pub fn replace_local_fs_flush_sender_for_test(
-    store: &mut LocalFsOpLogStore,
-    sender: mpsc::Sender<Vec<OpLogRecord>>,
-) -> mpsc::Sender<Vec<OpLogRecord>> {
-    std::mem::replace(&mut store.flush_tx, sender)
 }

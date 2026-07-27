@@ -184,8 +184,14 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                 // Step 2a: 本节点负责获取 (this node fetches from remote source)
                 let result = self.inner.handle_miss(key).await;
 
-                // 通知 Master 获取完成（成功或失败）
-                // Notify master of completion
+                // 通过回调让调用者将数据写入 store (PutStart/PutEnd)
+                // Call the data callback so the caller can PutStart/PutEnd into the store
+                if let Ok(ref data) = result {
+                    data_callback(data);
+                }
+
+                // Publish completion only after the caller has had the chance
+                // to make the fetched bytes visible through PutEnd.
                 let _ = self
                     .complete_pull(
                         key,
@@ -193,12 +199,6 @@ impl<S: RemoteSource + 'static> DistributedMissHandler<S> {
                         result.as_ref().map_or(0, |d| d.len() as u64),
                     )
                     .await;
-
-                // 通过回调让调用者将数据写入 store (PutStart/PutEnd)
-                // Call the data callback so the caller can PutStart/PutEnd into the store
-                if let Ok(ref data) = result {
-                    data_callback(data);
-                }
 
                 result
             }

@@ -1,6 +1,10 @@
 use super::types::HaError;
+use crate::allocator::AllocatorSnapshotConfig;
+use crate::service::DelayedReplicaReleaseEntry;
+use crate::service::GracefulUnmountSnapshotEntry;
 use crate::service::NoFSegmentEntry;
 use crate::service::ObjectEntry;
+use crate::service::ReplicationTaskSnapshotEntry;
 use crate::service::SegmentEntry;
 use crate::service::TaskEntry;
 use crate::storage_backend::LocalDiskSnapshotEntry;
@@ -9,7 +13,8 @@ use aws_sdk_s3::config::{
     Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation,
     timeout::TimeoutConfig,
 };
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +22,10 @@ const SNAPSHOT_CATALOG_ROOT: &str = "mooncake_master_snapshot";
 const SNAPSHOT_LATEST_FILE: &str = "latest.txt";
 const SNAPSHOT_DESCRIPTOR_FILE: &str = "descriptor.txt";
 const SNAPSHOT_MANIFEST_FILE: &str = "manifest.txt";
+/// C++ catalog descriptor v1 is exactly three pipe-delimited numeric fields.
+/// Keep writing this format until both implementations negotiate a successor.
+#[cfg(test)]
+const SNAPSHOT_DESCRIPTOR_V1_FIELD_COUNT: usize = 3;
 const DEFAULT_S3_CONNECT_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_S3_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
@@ -34,6 +43,9 @@ pub struct LoadedSnapshot {
     pub snapshot_id: String,
     /// Sequence ID at the time the snapshot was taken. / 快照拍摄时的序列 ID。
     pub snapshot_sequence_id: u64,
+    /// Allocator layout and placement semantics used by the producer.
+    /// Missing on legacy snapshots, which remain readable.
+    pub allocator_config: Option<AllocatorSnapshotConfig>,
     /// Memory segments at snapshot time. / 快照时的内存 segment。
     pub segments: Vec<SegmentEntry>,
     /// NVMe-oF segments at snapshot time. / 快照时的 NVMe-oF segment。
@@ -42,6 +54,12 @@ pub struct LoadedSnapshot {
     pub objects: Vec<(String, ObjectEntry)>,
     /// Pending tasks at snapshot time. / 快照时的待处理任务。
     pub tasks: Vec<TaskEntry>,
+    /// Native Copy/Move reservations and source pins at snapshot time.
+    pub replication_tasks: Vec<ReplicationTaskSnapshotEntry>,
+    /// Delayed segment-unmount intents with portable epoch deadlines.
+    pub graceful_unmounts: Vec<GracefulUnmountSnapshotEntry>,
+    /// Removed replica ranges retained until their transfer grace deadline.
+    pub delayed_replica_releases: Vec<DelayedReplicaReleaseEntry>,
     /// Persisted per-client local-disk state; promotion queues are runtime-only.
     pub local_disk_segments: Vec<LocalDiskSnapshotEntry>,
 }
@@ -157,15 +175,53 @@ impl LocalFileSnapshotObjectStore {
         }
         Ok(self.base_path.join(path))
     }
+
+    fn sync_directory_chain(&self, directory: &Path) -> Result<(), HaError> {
+        let mut current = Some(directory);
+        while let Some(path) = current {
+            std::fs::File::open(path)
+                .and_then(|file| file.sync_all())
+                .map_err(|e| HaError::Snapshot(format!("sync snapshot directory: {e}")))?;
+            if path == self.base_path {
+                break;
+            }
+            current = path.parent();
+        }
+        Ok(())
+    }
 }
 
 impl SnapshotObjectStore for LocalFileSnapshotObjectStore {
     fn upload_buffer(&self, key: &str, buffer: &[u8]) -> Result<(), HaError> {
         let path = self.key_path(key)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| HaError::Snapshot(e.to_string()))?;
+        let parent = path.parent().ok_or_else(|| {
+            HaError::Snapshot(format!("snapshot object has no parent directory: {key}"))
+        })?;
+        std::fs::create_dir_all(parent).map_err(|e| HaError::Snapshot(e.to_string()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| HaError::Snapshot(format!("snapshot object has no file name: {key}")))?;
+        let tmp_path = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            file_name.to_string_lossy(),
+            uuid::Uuid::new_v4()
+        ));
+        let result = (|| {
+            let mut file = std::fs::File::create(&tmp_path)
+                .map_err(|e| HaError::Snapshot(format!("create snapshot object: {e}")))?;
+            file.write_all(buffer)
+                .map_err(|e| HaError::Snapshot(format!("write snapshot object: {e}")))?;
+            file.sync_all()
+                .map_err(|e| HaError::Snapshot(format!("sync snapshot object: {e}")))?;
+            drop(file);
+            std::fs::rename(&tmp_path, &path)
+                .map_err(|e| HaError::Snapshot(format!("publish snapshot object: {e}")))?;
+            self.sync_directory_chain(parent)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
         }
-        std::fs::write(path, buffer).map_err(|e| HaError::Snapshot(e.to_string()))
+        result
     }
 
     fn download_buffer(&self, key: &str) -> Result<Vec<u8>, HaError> {
@@ -175,9 +231,17 @@ impl SnapshotObjectStore for LocalFileSnapshotObjectStore {
     fn delete_objects_with_prefix(&self, prefix: &str) -> Result<(), HaError> {
         let path = self.key_path(prefix.trim_end_matches('/'))?;
         if path.is_dir() {
-            std::fs::remove_dir_all(path).map_err(|e| HaError::Snapshot(e.to_string()))?;
+            let parent = path.parent().map(Path::to_path_buf);
+            std::fs::remove_dir_all(&path).map_err(|e| HaError::Snapshot(e.to_string()))?;
+            if let Some(parent) = parent {
+                self.sync_directory_chain(&parent)?;
+            }
         } else if path.exists() {
-            std::fs::remove_file(path).map_err(|e| HaError::Snapshot(e.to_string()))?;
+            let parent = path.parent().map(Path::to_path_buf);
+            std::fs::remove_file(&path).map_err(|e| HaError::Snapshot(e.to_string()))?;
+            if let Some(parent) = parent {
+                self.sync_directory_chain(&parent)?;
+            }
         }
         Ok(())
     }
@@ -464,7 +528,9 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
             Err(error) => return Err(error),
         };
         if snapshot_id.is_empty() {
-            return Ok(None);
+            return Err(HaError::Snapshot(
+                "embedded snapshot latest marker is empty".into(),
+            ));
         }
         validate_snapshot_id(&snapshot_id)?;
         let payload = self
@@ -493,14 +559,21 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
 
         let mut snapshots = Vec::new();
         for id in ids {
-            if let Ok(payload) = self
+            let payload = match self
                 .object_store
                 .download_string(&build_descriptor_key(&self.snapshot_root, &id))
             {
-                if let Ok(descriptor) =
-                    deserialize_snapshot_descriptor(&self.snapshot_root, &id, &payload)
-                {
-                    snapshots.push(descriptor);
+                Ok(payload) => payload,
+                Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
+                    tracing::warn!(snapshot_id = id, %error, "snapshot descriptor disappeared from embedded listing");
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match deserialize_snapshot_descriptor(&self.snapshot_root, &id, &payload) {
+                Ok(descriptor) => snapshots.push(descriptor),
+                Err(error) => {
+                    tracing::warn!(snapshot_id = id, %error, "skipping corrupt embedded snapshot descriptor");
                 }
             }
         }
@@ -514,13 +587,17 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
             .as_ref()
             .map(|latest| latest.snapshot_id.as_str() == snapshot_id)
             .unwrap_or(false);
+        // Remove catalog visibility before payloads. If payload cleanup then
+        // fails, recovery ignores an unreachable orphan instead of following
+        // a descriptor whose data has already disappeared.
+        if deletes_latest {
+            self.object_store
+                .delete_objects_with_prefix(&build_latest_key(&self.snapshot_root))?;
+        }
+        self.object_store
+            .delete_objects_with_prefix(&build_descriptor_key(&self.snapshot_root, snapshot_id))?;
         self.object_store
             .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
-        if deletes_latest {
-            let _ = self
-                .object_store
-                .delete_objects_with_prefix(&build_latest_key(&self.snapshot_root));
-        }
         Ok(())
     }
 
@@ -638,16 +715,24 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
         let mut snapshots = Vec::new();
         for snapshot_id in ids {
             if !is_valid_snapshot_id(&snapshot_id) {
+                tracing::warn!(snapshot_id, "skipping invalid redis snapshot catalog id");
                 continue;
             }
-            if let Ok(payload) = self
+            let payload = match self
                 .object_store
                 .download_string(&build_descriptor_key(&self.snapshot_root, &snapshot_id))
             {
-                if let Ok(descriptor) =
-                    deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload)
-                {
-                    snapshots.push(descriptor);
+                Ok(payload) => payload,
+                Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
+                    tracing::warn!(snapshot_id, %error, "snapshot descriptor disappeared from redis catalog listing");
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            match deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload) {
+                Ok(descriptor) => snapshots.push(descriptor),
+                Err(error) => {
+                    tracing::warn!(snapshot_id, %error, "skipping corrupt redis snapshot descriptor");
                 }
             }
         }
@@ -656,24 +741,29 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
 
     fn delete(&self, snapshot_id: &str) -> Result<(), HaError> {
         validate_snapshot_id(snapshot_id)?;
-        self.object_store
-            .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
         let mut connection = self.connection()?;
         let latest: Option<String> = redis::cmd("GET")
             .arg(self.latest_key())
             .query(&mut connection)
             .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog get latest: {e}")))?;
-        redis::cmd("ZREM")
+        let mut pipeline = redis::pipe();
+        pipeline
+            .atomic()
+            .cmd("ZREM")
             .arg(self.index_key())
             .arg(snapshot_id)
+            .ignore();
+        if latest.as_deref() == Some(snapshot_id) {
+            pipeline.cmd("DEL").arg(self.latest_key()).ignore();
+        }
+        // Commit catalog invisibility atomically before deleting payloads.
+        // A later object-store failure leaves only unreachable garbage and
+        // never a published descriptor pointing at missing data.
+        pipeline
             .query::<()>(&mut connection)
             .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog delete: {e}")))?;
-        if latest.as_deref() == Some(snapshot_id) {
-            redis::cmd("DEL")
-                .arg(self.latest_key())
-                .query::<()>(&mut connection)
-                .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog delete: {e}")))?;
-        }
+        self.object_store
+            .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
         Ok(())
     }
 
@@ -771,6 +861,86 @@ fn parse_response_checksum_validation(value: Option<&str>) -> Option<ResponseChe
 mod tests {
     use super::*;
 
+    struct PayloadDeleteFailureStore {
+        inner: LocalFileSnapshotObjectStore,
+        failed_prefix: String,
+    }
+
+    impl SnapshotObjectStore for PayloadDeleteFailureStore {
+        fn upload_buffer(&self, key: &str, buffer: &[u8]) -> Result<(), HaError> {
+            self.inner.upload_buffer(key, buffer)
+        }
+
+        fn download_buffer(&self, key: &str) -> Result<Vec<u8>, HaError> {
+            self.inner.download_buffer(key)
+        }
+
+        fn delete_objects_with_prefix(&self, prefix: &str) -> Result<(), HaError> {
+            if prefix == self.failed_prefix {
+                return Err(HaError::Snapshot(
+                    "injected snapshot payload delete failure".into(),
+                ));
+            }
+            self.inner.delete_objects_with_prefix(prefix)
+        }
+
+        fn list_objects_with_prefix(&self, prefix: &str) -> Result<Vec<String>, HaError> {
+            self.inner.list_objects_with_prefix(prefix)
+        }
+
+        fn is_not_found_error(&self, error: &str) -> bool {
+            self.inner.is_not_found_error(error)
+        }
+
+        fn connection_info(&self) -> String {
+            self.inner.connection_info()
+        }
+    }
+
+    #[test]
+    fn embedded_delete_hides_descriptor_before_payload_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let snapshot_root = build_snapshot_root("");
+        let old_id = "20260610_120000_001";
+        let old_prefix = build_snapshot_prefix(&snapshot_root, old_id);
+        let object_store = Arc::new(PayloadDeleteFailureStore {
+            inner: LocalFileSnapshotObjectStore::new(root.path().to_path_buf()),
+            failed_prefix: old_prefix.clone(),
+        });
+        let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+
+        let old = SnapshotDescriptor::new_with_snapshot_root(&snapshot_root, old_id);
+        catalog.publish(&old).unwrap();
+        object_store
+            .upload_string(&format!("{old_prefix}payload"), "old")
+            .unwrap();
+        let latest =
+            SnapshotDescriptor::new_with_snapshot_root(&snapshot_root, "20260610_120001_002");
+        catalog.publish(&latest).unwrap();
+
+        let error = catalog.delete(old_id).unwrap_err();
+        assert!(error.to_string().contains("injected"));
+        assert_eq!(
+            catalog.get_latest().unwrap().unwrap().snapshot_id,
+            latest.snapshot_id
+        );
+        assert!(
+            catalog
+                .list(0)
+                .unwrap()
+                .into_iter()
+                .all(|descriptor| descriptor.snapshot_id != old_id),
+            "failed payload cleanup must not leave a visible descriptor"
+        );
+        assert_eq!(
+            object_store
+                .download_string(&format!("{old_prefix}payload"))
+                .unwrap(),
+            "old",
+            "payload failure may leave unreachable garbage for later cleanup"
+        );
+    }
+
     #[test]
     fn test_s3_checksum_mode_parsing_matches_cpp_values() {
         assert_eq!(
@@ -849,6 +1019,25 @@ mod tests {
         let empty_error = next_s3_list_token(true, Some("")).unwrap_err().to_string();
         assert!(empty_error.contains("truncated response missing next continuation token"));
     }
+
+    #[test]
+    fn snapshot_descriptor_v1_preserves_cpp_wire_shape() {
+        let mut descriptor = SnapshotDescriptor::new_with_snapshot_root("root/", "snapshot-id");
+        descriptor.last_included_seq = 42;
+        descriptor.producer_view_version = 7;
+        descriptor.created_at_ms = 1234;
+
+        let encoded = serialize_snapshot_descriptor(&descriptor);
+        assert_eq!(encoded, "42|7|1234");
+        assert_eq!(
+            encoded.split('|').count(),
+            SNAPSHOT_DESCRIPTOR_V1_FIELD_COUNT
+        );
+
+        let decoded = deserialize_snapshot_descriptor("root/", "snapshot-id", &encoded).unwrap();
+        assert_eq!(decoded, descriptor);
+        assert!(deserialize_snapshot_descriptor("root/", "snapshot-id", "v2|42|7|1234").is_err());
+    }
 }
 
 fn sanitize_redis_hash_tag(value: &str) -> String {
@@ -882,6 +1071,8 @@ fn build_latest_key(snapshot_root: &str) -> String {
 }
 
 fn serialize_snapshot_descriptor(descriptor: &SnapshotDescriptor) -> String {
+    // Descriptor v1 intentionally has no textual version prefix. C++ readers
+    // consume this exact three-number layout.
     format!(
         "{}|{}|{}",
         descriptor.last_included_seq, descriptor.producer_view_version, descriptor.created_at_ms
@@ -972,6 +1163,16 @@ pub trait SnapshotProvider: Send + Sync {
     /// Load the latest snapshot for the given cluster.
     /// 加载给定集群的最新快照。
     fn load_latest_snapshot(&self, cluster_id: &str) -> Result<Option<LoadedSnapshot>, HaError>;
+
+    /// Return restore candidates in newest-first order.
+    ///
+    /// Providers without a durable catalog expose at most their latest
+    /// snapshot. Catalog-backed providers override this to preserve the C++
+    /// fallback contract: a corrupt or semantically invalid latest snapshot
+    /// must not hide an older usable baseline.
+    fn load_snapshot_candidates(&self, cluster_id: &str) -> Result<Vec<LoadedSnapshot>, HaError> {
+        Ok(self.load_latest_snapshot(cluster_id)?.into_iter().collect())
+    }
 }
 
 /// No-op snapshot provider: always returns None.
@@ -1016,8 +1217,19 @@ impl SnapshotProvider for LocalSnapshotProvider {
             // Load segments, NOF segments, objects, and tasks from the backend.
             // 从后端加载 segments、NOF segments、objects 和 tasks。
             let backend = StorageBackend::new(self.backend_type, &dir);
-            let Some((segments, nof_segments, objects, tasks, local_disk_segments)) = backend
-                .load_with_local_disk()
+            let Some((
+                snapshot_sequence_id,
+                segments,
+                nof_segments,
+                objects,
+                tasks,
+                replication_tasks,
+                graceful_unmounts,
+                delayed_replica_releases,
+                local_disk_segments,
+                allocator_config,
+            )) = backend
+                .load_with_runtime_state_and_sequence()
                 .map_err(|error| HaError::Snapshot(error.to_string()))?
             else {
                 continue;
@@ -1036,25 +1248,17 @@ impl SnapshotProvider for LocalSnapshotProvider {
                 .and_then(|mtime| mtime.duration_since(UNIX_EPOCH).ok())
                 .map(|ts| format!("snapshot-{}", ts.as_millis()))
                 .unwrap_or_else(|| "snapshot-latest".to_string());
-            let descriptor = EmbeddedSnapshotCatalogStore::new(dir.clone())
-                .get_latest()
-                .ok()
-                .flatten();
-            let snapshot_sequence_id = descriptor
-                .as_ref()
-                .map(|descriptor| descriptor.last_included_seq)
-                .unwrap_or(0);
-            let snapshot_id = descriptor
-                .map(|descriptor| descriptor.snapshot_id)
-                .unwrap_or(snapshot_id);
-
             return Ok(Some(LoadedSnapshot {
                 snapshot_id,
                 snapshot_sequence_id,
+                allocator_config,
                 segments,
                 nof_segments,
                 objects,
                 tasks,
+                replication_tasks,
+                graceful_unmounts,
+                delayed_replica_releases,
                 local_disk_segments,
             }));
         }

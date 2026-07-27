@@ -48,6 +48,26 @@ pub(super) struct RemountState {
     in_progress: Arc<AtomicBool>,
 }
 
+#[derive(Default)]
+pub(super) struct LocalDiskMountState {
+    mounted: AtomicBool,
+    enable_offloading: AtomicBool,
+}
+
+impl LocalDiskMountState {
+    pub(super) fn record_mounted(&self, enable_offloading: bool) {
+        self.enable_offloading
+            .store(enable_offloading, Ordering::SeqCst);
+        self.mounted.store(true, Ordering::SeqCst);
+    }
+
+    pub(super) fn desired_enable_offloading(&self) -> Option<bool> {
+        self.mounted
+            .load(Ordering::SeqCst)
+            .then(|| self.enable_offloading.load(Ordering::SeqCst))
+    }
+}
+
 impl RemountState {
     pub(super) fn try_start(&self) -> bool {
         !self.in_progress.swap(true, Ordering::SeqCst)
@@ -87,6 +107,13 @@ impl OffloadServerState {
         self.address.read().clone()
     }
 
+    pub(super) fn is_running(&self) -> bool {
+        self.handle
+            .read()
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+    }
+
     #[cfg(test)]
     fn port(&self) -> u16 {
         self.port.load(Ordering::SeqCst)
@@ -100,7 +127,9 @@ impl OffloadServerState {
 
 #[cfg(test)]
 mod tests {
-    use super::{HealthState, OffloadServerState, RemountState, ShutdownState};
+    use super::{
+        HealthState, LocalDiskMountState, OffloadServerState, RemountState, ShutdownState,
+    };
 
     #[test]
     fn shutdown_state_is_open_until_closed() {
@@ -132,6 +161,16 @@ mod tests {
         assert!(state.try_start());
     }
 
+    #[test]
+    fn local_disk_mount_state_remembers_the_requested_mode() {
+        let state = LocalDiskMountState::default();
+        assert_eq!(state.desired_enable_offloading(), None);
+        state.record_mounted(false);
+        assert_eq!(state.desired_enable_offloading(), Some(false));
+        state.record_mounted(true);
+        assert_eq!(state.desired_enable_offloading(), Some(true));
+    }
+
     #[tokio::test]
     async fn offload_server_state_records_and_stops_a_server() {
         let state = OffloadServerState::default();
@@ -141,7 +180,24 @@ mod tests {
 
         assert_eq!(state.port(), 12_345);
         assert_eq!(state.address(), "127.0.0.1:12345");
+        assert!(state.is_running());
         state.stop();
         assert!(!state.has_handle());
+        assert!(!state.is_running());
+    }
+
+    #[tokio::test]
+    async fn offload_server_state_does_not_advertise_a_finished_server_as_running() {
+        let state = OffloadServerState::default();
+        let handle = tokio::spawn(async {});
+        state.record_started(handle, 12_345, "127.0.0.1:12345".to_string());
+
+        for _ in 0..10 {
+            if !state.is_running() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!state.is_running());
     }
 }

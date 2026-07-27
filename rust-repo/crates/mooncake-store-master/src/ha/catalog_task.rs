@@ -1,9 +1,12 @@
 use super::snapshot::SnapshotObjectStore;
 use super::types::HaError;
+use crate::TenantId;
 use crate::service::TaskEntry;
 use chrono::{TimeZone, Utc};
 use mooncake_store_core::{TaskInfo, TaskStatus, TaskType};
 use rmpv::Value;
+use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use std::io::{Cursor, Read};
 use uuid::Uuid;
 
@@ -32,20 +35,33 @@ pub(super) fn decode_task_manager(data: &[u8]) -> Result<Vec<TaskEntry>, HaError
     if decoded.len() as u64 > MAX_TASK_PAYLOAD_SIZE {
         return Err(snapshot_error("task manager payload exceeds 1 GiB"));
     }
-    let root = rmpv::decode::read_value(&mut Cursor::new(decoded))
-        .map_err(|error| snapshot_error(error.to_string()))?;
+    let mut cursor = Cursor::new(decoded.as_slice());
+    let root =
+        rmpv::decode::read_value(&mut cursor).map_err(|error| snapshot_error(error.to_string()))?;
+    if cursor.position() != decoded.len() as u64 {
+        return Err(snapshot_error(
+            "task manager payload contains trailing bytes",
+        ));
+    }
     let tasks = root
         .as_array()
         .ok_or_else(|| snapshot_error("task manager payload is not an array"))?;
     let mut result = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        let fields = match task.as_array() {
-            Some(fields) if fields.len() == TASK_SERIALIZED_FIELDS => fields,
-            _ => continue,
-        };
-        if let Some(entry) = decode_task(fields)? {
-            result.push(entry);
+    let mut task_ids = HashSet::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let fields = task
+            .as_array()
+            .ok_or_else(|| snapshot_error(format!("task manager entry {index} is not an array")))?;
+        if fields.len() != TASK_SERIALIZED_FIELDS {
+            return Err(snapshot_error(format!(
+                "task manager entry {index} has invalid shape"
+            )));
         }
+        let entry = decode_task(fields)?;
+        if !task_ids.insert(entry.info.id) {
+            return Err(snapshot_error("task manager contains duplicate task UUID"));
+        }
+        result.push(entry);
     }
     Ok(result)
 }
@@ -77,18 +93,16 @@ pub(super) fn encode_task_manager(tasks: &[TaskEntry]) -> Result<Vec<u8>, HaErro
         .map_err(|error| snapshot_error(error.to_string()))
 }
 
-fn decode_task(fields: &[Value]) -> Result<Option<TaskEntry>, HaError> {
-    let task_id = match fields[0]
+fn decode_task(fields: &[Value]) -> Result<TaskEntry, HaError> {
+    let task_id = fields[0]
         .as_str()
         .and_then(|value| Uuid::parse_str(value).ok())
-    {
-        Some(value) => value,
-        None => return Ok(None),
-    };
+        .filter(|value| !value.is_nil())
+        .ok_or_else(|| snapshot_error("task has invalid UUID"))?;
     let task_type = match fields[1].as_i64() {
         Some(0) => TaskType::ReplicaCopy,
         Some(1) => TaskType::ReplicaMove,
-        _ => return Ok(None),
+        _ => return Err(snapshot_error("task has invalid type")),
     };
     // C++ TaskStatus order is PENDING, PROCESSING, FAILED, SUCCESS.
     let status = match fields[2].as_i64() {
@@ -96,39 +110,36 @@ fn decode_task(fields: &[Value]) -> Result<Option<TaskEntry>, HaError> {
         Some(1) => TaskStatus::Processing,
         Some(2) => TaskStatus::Failed,
         Some(3) => TaskStatus::Success,
-        _ => return Ok(None),
+        _ => return Err(snapshot_error("task has invalid status")),
     };
-    let payload = match fields[3].as_str() {
-        Some(value) => value.to_string(),
-        None => return Ok(None),
-    };
-    let created_at = match fields[4]
+    let payload = fields[3]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| snapshot_error("task payload is not a string"))?;
+    let created_at = fields[4]
         .as_i64()
         .and_then(|value| Utc.timestamp_millis_opt(value).single())
-    {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    let last_updated_at = match fields[5]
+        .ok_or_else(|| snapshot_error("task created timestamp is invalid"))?;
+    let last_updated_at = fields[5]
         .as_i64()
         .and_then(|value| Utc.timestamp_millis_opt(value).single())
-    {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    let message = match fields[6].as_str() {
-        Some(value) => value.to_string(),
-        None => return Ok(None),
-    };
-    let assigned_client = match fields[7]
+        .ok_or_else(|| snapshot_error("task update timestamp is invalid"))?;
+    if last_updated_at < created_at {
+        return Err(snapshot_error(
+            "task update timestamp precedes creation timestamp",
+        ));
+    }
+    let message = fields[6]
+        .as_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| snapshot_error("task message is not a string"))?;
+    let assigned_client = fields[7]
         .as_str()
         .and_then(|value| Uuid::parse_str(value).ok())
-    {
-        Some(value) => value,
-        None => return Ok(None),
-    };
-    let key = extract_task_key(&payload);
-    Ok(Some(TaskEntry {
+        .filter(|value| !value.is_nil())
+        .ok_or_else(|| snapshot_error("task assigned client UUID is invalid"))?;
+    let key = extract_task_key(&payload, task_type)?;
+    Ok(TaskEntry {
         info: TaskInfo {
             id: task_id,
             task_type,
@@ -142,14 +153,66 @@ fn decode_task(fields: &[Value]) -> Result<Option<TaskEntry>, HaError> {
         payload,
         // C++ task snapshots do not serialize this field.
         max_retry_attempts: 0,
-    }))
+    })
 }
 
-fn extract_task_key(payload: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|value| value.get("key")?.as_str().map(ToString::to_string))
-        .unwrap_or_default()
+fn extract_task_key(payload: &str, task_type: TaskType) -> Result<String, HaError> {
+    let value = serde_json::from_str::<JsonValue>(payload)
+        .map_err(|error| snapshot_error(format!("task payload is invalid JSON: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| snapshot_error("task payload is not an object"))?;
+    let key = object
+        .get("key")
+        .and_then(JsonValue::as_str)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| snapshot_error("task payload has no key"))?;
+    object
+        .get("source")
+        .and_then(JsonValue::as_str)
+        .filter(|source| !source.is_empty())
+        .ok_or_else(|| snapshot_error("task payload has no source"))?;
+    match task_type {
+        TaskType::ReplicaCopy => {
+            let targets = object
+                .get("targets")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| snapshot_error("copy task payload has no targets"))?;
+            if targets.is_empty()
+                || targets
+                    .iter()
+                    .any(|target| target.as_str().map(str::is_empty) != Some(false))
+            {
+                return Err(snapshot_error("copy task payload has invalid targets"));
+            }
+        }
+        TaskType::ReplicaMove => {
+            object
+                .get("target")
+                .and_then(JsonValue::as_str)
+                .filter(|target| !target.is_empty())
+                .ok_or_else(|| snapshot_error("move task payload has no target"))?;
+        }
+    }
+
+    match object.get("tenant_id") {
+        Some(value) => {
+            let tenant = value
+                .as_str()
+                .ok_or_else(|| snapshot_error("task tenant id is not a string"))?;
+            let tenant = TenantId::new(tenant.to_string())
+                .map_err(|error| snapshot_error(format!("invalid task tenant id: {error}")))?;
+            Ok(tenant.make_scoped_key(key))
+        }
+        None => {
+            let (tenant, user_key) = TenantId::parse_scoped_key(key)
+                .map_err(|error| snapshot_error(format!("invalid legacy task key: {error}")))?;
+            if user_key.is_empty() {
+                return Err(snapshot_error("legacy task payload has an empty key"));
+            }
+            Ok(tenant.make_scoped_key(&user_key))
+        }
+    }
 }
 
 fn task_type_to_cxx(task_type: TaskType) -> i64 {
@@ -170,4 +233,51 @@ fn task_status_to_cxx(status: TaskStatus) -> i64 {
 
 fn snapshot_error(message: impl Into<String>) -> HaError {
     HaError::Snapshot(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_task_manager;
+    use rmpv::Value;
+    use std::io::Cursor;
+    use uuid::Uuid;
+
+    fn encoded_tasks(tasks: Vec<Value>) -> Vec<u8> {
+        let mut payload = Vec::new();
+        rmpv::encode::write_value(&mut payload, &Value::Array(tasks)).unwrap();
+        zstd::stream::encode_all(Cursor::new(payload), 3).unwrap()
+    }
+
+    fn task(task_id: Uuid, payload: &str) -> Value {
+        Value::Array(vec![
+            task_id.to_string().into(),
+            1.into(),
+            0.into(),
+            payload.into(),
+            1_000_i64.into(),
+            2_000_i64.into(),
+            "".into(),
+            Uuid::new_v4().to_string().into(),
+        ])
+    }
+
+    #[test]
+    fn current_task_payload_restores_scoped_identity() {
+        let payload = r#"{"tenant_id":"tenant-a","key":"key-a","source":"a","target":"b"}"#;
+        let tasks =
+            decode_task_manager(&encoded_tasks(vec![task(Uuid::new_v4(), payload)])).unwrap();
+
+        assert_eq!(tasks[0].key, "tenant-a\0key-a");
+    }
+
+    #[test]
+    fn malformed_or_duplicate_tasks_fail_closed() {
+        let payload = r#"{"tenant_id":"tenant-a","key":"key-a","source":"a","target":"b"}"#;
+        let id = Uuid::new_v4();
+        assert!(decode_task_manager(&encoded_tasks(vec![Value::Array(vec![1.into()])])).is_err());
+        assert!(
+            decode_task_manager(&encoded_tasks(vec![task(id, payload), task(id, payload)]))
+                .is_err()
+        );
+    }
 }

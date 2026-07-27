@@ -33,6 +33,7 @@ impl MooncakeClient {
         values: &[&[u8]],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<i32>> {
+        let started_at = std::time::Instant::now();
         if keys.len() != values.len() {
             return Err(StoreError::InvalidParams(
                 "keys and values length mismatch".to_string(),
@@ -44,6 +45,7 @@ impl MooncakeClient {
 
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
+        self.invalidate_hot_cache_keys_for_tenant(keys, &tenant_id);
         // Phase 1: BatchPutStart — allocate replicas for all keys in one RPC.
         let slice_lengths: Vec<u64> = values.iter().map(|v| v.len() as u64).collect();
         let start_results = match self
@@ -79,6 +81,16 @@ impl MooncakeClient {
             let mut transfer_summary =
                 ReplicaTransferSummary::from_replicas(&start_result.replicas);
             for replica in &start_result.replicas {
+                if replica.replica_type == ReplicaType::Disk {
+                    match self
+                        .write_global_disk_replica(&keys[ki], &tenant_id, replica, values[ki])
+                        .await
+                    {
+                        Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                        Err(_) => transfer_summary.record_failure(ReplicaType::Disk),
+                    }
+                    continue;
+                }
                 if !matches!(
                     replica.replica_type,
                     ReplicaType::Memory | ReplicaType::NoFSsd
@@ -92,7 +104,11 @@ impl MooncakeClient {
             }
 
             let decision = determine_finalize_decision(&cfg, &transfer_summary);
-            if decision.success {
+            let disk_finalized = self
+                .finalize_global_disk_for_key(&keys[ki], &transfer_summary, &tenant_id)
+                .await
+                .is_ok();
+            if decision.success && disk_finalized {
                 statuses[ki] = 0;
             }
             decisions.push((ki, decision));
@@ -102,6 +118,15 @@ impl MooncakeClient {
         self.finalize_batch_put_groups(keys, &decisions, &mut statuses, &tenant_id)
             .await;
 
+        if statuses.iter().all(|status| *status == 0)
+            && let Some(metrics) = &self.metrics
+        {
+            let bytes = values
+                .iter()
+                .try_fold(0_u64, |total, value| total.checked_add(value.len() as u64))
+                .unwrap_or(u64::MAX);
+            metrics.observe_batch_put(bytes, started_at.elapsed());
+        }
         Ok(statuses)
     }
 
@@ -109,18 +134,16 @@ impl MooncakeClient {
     ///
     /// 从预注册缓冲区进行零拷贝批量写入。
     ///
-    /// # Safety
-    /// All `buffers[i]` must be pre-registered with the TE and contain at least
-    /// `sizes[i]` bytes of valid data.
-    ///
-    /// 所有 buffers[i] 必须预先向 TE 注册，且包含至少 sizes[i] 字节的有效数据。
-    pub async unsafe fn batch_put_from(
+    /// Every source range is resolved to a live owner-bearing readable
+    /// registration before use.
+    pub async fn batch_put_from(
         &mut self,
         keys: &[String],
         buffers: &[*mut c_void],
         sizes: &[usize],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<i32>> {
+        let started_at = std::time::Instant::now();
         if keys.len() != buffers.len() || keys.len() != sizes.len() {
             return Err(StoreError::InvalidParams(
                 "keys, buffers, and sizes length mismatch".to_string(),
@@ -130,10 +153,25 @@ impl MooncakeClient {
         let all_buffers: Vec<Vec<*mut c_void>> =
             buffers.iter().map(|&buffer| vec![buffer]).collect();
         let all_sizes: Vec<Vec<usize>> = sizes.iter().map(|&size| vec![size]).collect();
-        unsafe {
-            self.batch_put_from_multi_buffers(keys, &all_buffers, &all_sizes, config)
-                .await
+        let result = self
+            .batch_put_from_multi_buffers_internal(keys, &all_buffers, &all_sizes, config)
+            .await;
+        if let Ok(statuses) = &result
+            && let Some(metrics) = &self.metrics
+        {
+            let bytes = statuses
+                .iter()
+                .zip(sizes)
+                .filter(|(status, _)| **status == 0)
+                .fold(0_u64, |total, (_, size)| total.saturating_add(*size as u64));
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "batch_put_from",
+                bytes,
+                started_at.elapsed(),
+            );
         }
+        result
     }
 
     /// Zero-copy put from a data buffer plus a metadata buffer.
@@ -142,10 +180,8 @@ impl MooncakeClient {
     /// metadata bytes are written first, followed by data bytes. Metadata-only
     /// zero-sized tensors are stored when `metadata_size > 0`.
     ///
-    /// # Safety
-    /// `buffer` and `metadata_buffer` must be valid and pre-registered with the
-    /// TransferEngine for their respective sizes.
-    pub async unsafe fn put_from_with_metadata(
+    /// Both ranges must resolve to live owner-bearing readable registrations.
+    pub async fn put_from_with_metadata(
         &mut self,
         key: &str,
         buffer: *mut c_void,
@@ -154,6 +190,7 @@ impl MooncakeClient {
         metadata_size: usize,
         config: Option<ReplicateConfig>,
     ) -> StoreResult<i32> {
+        let started_at = std::time::Instant::now();
         let cfg = config.unwrap_or_default();
         if cfg.prefer_alloc_in_same_node {
             return Ok(-1);
@@ -165,11 +202,21 @@ impl MooncakeClient {
         };
 
         let keys = vec![key.to_string()];
-        let statuses = unsafe {
-            self.batch_put_from_multi_buffers(&keys, &[buffers], &[sizes], Some(cfg))
-                .await?
-        };
-        Ok(statuses.first().copied().unwrap_or(-1))
+        let statuses = self
+            .batch_put_from_multi_buffers_internal(&keys, &[buffers], &[sizes], Some(cfg))
+            .await?;
+        let status = statuses.first().copied().unwrap_or(-1);
+        if status == 0
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "put_from_with_metadata",
+                size.saturating_add(metadata_size) as u64,
+                started_at.elapsed(),
+            );
+        }
+        Ok(status)
     }
 
     /// Zero-copy batch put from multiple buffers per key.
@@ -185,9 +232,39 @@ impl MooncakeClient {
     /// all_buffers[i] 和 all_sizes[i] 对应第 i 个 key。
     /// 所有缓冲区必须预先向 TE 注册。
     ///
-    /// # Safety
-    /// All buffers in `all_buffers` must be pre-registered with the TE.
-    pub async unsafe fn batch_put_from_multi_buffers(
+    /// All source ranges are validated against live owner-bearing readable
+    /// registrations before the control-plane mutation begins.
+    pub async fn batch_put_from_multi_buffers(
+        &mut self,
+        keys: &[String],
+        all_buffers: &[Vec<*mut c_void>],
+        all_sizes: &[Vec<usize>],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<i32>> {
+        let started_at = std::time::Instant::now();
+        let result = self
+            .batch_put_from_multi_buffers_internal(keys, all_buffers, all_sizes, config)
+            .await;
+        if let Ok(statuses) = &result
+            && let Some(metrics) = &self.metrics
+        {
+            let bytes = statuses
+                .iter()
+                .zip(all_sizes)
+                .filter(|(status, _)| **status == 0)
+                .flat_map(|(_, sizes)| sizes)
+                .fold(0_u64, |total, size| total.saturating_add(*size as u64));
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "batch_put_from_multi_buffers",
+                bytes,
+                started_at.elapsed(),
+            );
+        }
+        result
+    }
+
+    async fn batch_put_from_multi_buffers_internal(
         &mut self,
         keys: &[String],
         all_buffers: &[Vec<*mut c_void>],
@@ -202,21 +279,40 @@ impl MooncakeClient {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        for (idx, (buffers, sizes)) in all_buffers.iter().zip(all_sizes.iter()).enumerate() {
-            if buffers.len() != sizes.len() {
-                return Err(StoreError::InvalidParams(format!(
-                    "buffers and sizes length mismatch for key index {idx}"
-                )));
-            }
-            if buffers.is_empty() {
-                return Err(StoreError::InvalidParams(format!(
-                    "key index {idx} has no buffers"
-                )));
-            }
-        }
+        let all_regions = all_buffers
+            .iter()
+            .zip(all_sizes.iter())
+            .enumerate()
+            .map(|(idx, (buffers, sizes))| {
+                if buffers.len() != sizes.len() {
+                    return Err(StoreError::InvalidParams(format!(
+                        "buffers and sizes length mismatch for key index {idx}"
+                    )));
+                }
+                if buffers.is_empty() {
+                    return Err(StoreError::InvalidParams(format!(
+                        "key index {idx} has no buffers"
+                    )));
+                }
+                buffers
+                    .iter()
+                    .zip(sizes.iter())
+                    .enumerate()
+                    .map(|(buffer_idx, (&buffer, &size))| {
+                        self.resolve_readable_buffer_region(buffer, size)
+                            .map_err(|error| {
+                                StoreError::InvalidParams(format!(
+                                    "invalid readable buffer for key index {idx}, buffer index {buffer_idx}: {error}"
+                                ))
+                            })
+                    })
+                    .collect::<StoreResult<Vec<_>>>()
+            })
+            .collect::<StoreResult<Vec<_>>>()?;
 
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
+        self.invalidate_hot_cache_keys_for_tenant(keys, &tenant_id);
         let slice_lengths: Vec<u64> = all_sizes
             .iter()
             .map(|sizes| sizes.iter().map(|&size| size as u64).sum())
@@ -249,17 +345,32 @@ impl MooncakeClient {
             let mut transfer_summary =
                 ReplicaTransferSummary::from_replicas(&start_result.replicas);
             for replica in &start_result.replicas {
+                if replica.replica_type == ReplicaType::Disk {
+                    match self
+                        .write_global_disk_parts(
+                            &keys[idx],
+                            &tenant_id,
+                            replica,
+                            &all_regions[idx],
+                            &all_sizes[idx],
+                        )
+                        .await
+                    {
+                        Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                        Err(_) => transfer_summary.record_failure(ReplicaType::Disk),
+                    }
+                    continue;
+                }
                 if !matches!(
                     replica.replica_type,
                     ReplicaType::Memory | ReplicaType::NoFSsd
                 ) {
                     continue;
                 }
-                if unsafe {
-                    self.write_parts_from_to_replica(replica, &all_buffers[idx], &all_sizes[idx])
-                        .await
-                }
-                .is_err()
+                if self
+                    .write_parts_from_to_replica(replica, &all_regions[idx], &all_sizes[idx])
+                    .await
+                    .is_err()
                 {
                     transfer_summary.record_failure(replica.replica_type);
                 } else {
@@ -268,7 +379,11 @@ impl MooncakeClient {
             }
 
             let decision = determine_finalize_decision(&cfg, &transfer_summary);
-            if decision.success {
+            let disk_finalized = self
+                .finalize_global_disk_for_key(&keys[idx], &transfer_summary, &tenant_id)
+                .await
+                .is_ok();
+            if decision.success && disk_finalized {
                 statuses[idx] = 0;
             }
             decisions.push((idx, decision));

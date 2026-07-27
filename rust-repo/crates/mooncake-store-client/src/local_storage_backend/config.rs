@@ -1,5 +1,194 @@
 use std::path::PathBuf;
 
+/// Configuration for the client-side distributed filesystem backend.
+///
+/// The environment names and defaults match the C++
+/// `DistributedStorageConfig`. The production backend deliberately accepts
+/// only `hf3fs`; POSIX is available only as an injected test adapter and must
+/// never silently stand in for USRBIO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedStorageConfig {
+    pub fsdir: PathBuf,
+    pub fs_adapter_type: String,
+    pub enable_health_check: bool,
+    pub hash_bucket_count: usize,
+}
+
+impl Default for DistributedStorageConfig {
+    fn default() -> Self {
+        Self {
+            fsdir: PathBuf::from("distributed_dir"),
+            fs_adapter_type: "hf3fs".to_string(),
+            enable_health_check: false,
+            hash_bucket_count: 256,
+        }
+    }
+}
+
+impl DistributedStorageConfig {
+    pub fn from_environment() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let mut config = Self::default();
+        if let Some(value) = lookup("MOONCAKE_DISTRIBUTED_ROOT_DIR") {
+            config.fsdir = PathBuf::from(value);
+        }
+        if !config.fsdir.is_absolute() {
+            config.fsdir = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&config.fsdir);
+        }
+        if let Some(value) = lookup("MOONCAKE_DISTRIBUTED_FS_TYPE") {
+            config.fs_adapter_type = value;
+        }
+        if let Some(value) = lookup("MOONCAKE_DISTRIBUTED_HEALTH_CHECK") {
+            config.enable_health_check = parse_bool_env(&value);
+        }
+        if let Some(value) =
+            parse_env::<usize>(&mut lookup, "MOONCAKE_DISTRIBUTED_HASH_BUCKET_COUNT")
+        {
+            config.hash_bucket_count = value;
+        }
+        config
+    }
+
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.fsdir = root.into();
+        if !self.fsdir.is_absolute() {
+            self.fsdir = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(&self.fsdir);
+        }
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.fsdir.as_os_str().is_empty() {
+            return Err("distributed fsdir must not be empty".to_string());
+        }
+        if !self.fsdir.is_absolute() {
+            return Err(format!(
+                "distributed fsdir must be absolute: {}",
+                self.fsdir.display()
+            ));
+        }
+        if self.fs_adapter_type != "hf3fs" {
+            return Err(format!(
+                "unsupported distributed fs_adapter_type: {}",
+                self.fs_adapter_type
+            ));
+        }
+        if self.hash_bucket_count == 0 {
+            return Err("distributed hash_bucket_count must be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn parse_bool_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketEvictionPolicy {
+    None,
+    Fifo,
+    Lru,
+}
+
+/// Client-side bucket backend configuration.
+///
+/// C++ equivalent: `FileStorageConfig` + `BucketBackendConfig`. Bucket is the
+/// default C++ offload backend, so these defaults intentionally follow the C++
+/// values instead of the FilePerKey defaults below.
+#[derive(Debug, Clone)]
+pub struct BucketStorageConfig {
+    pub root_dir: PathBuf,
+    pub fsdir: String,
+    pub bucket_size_limit: u64,
+    pub bucket_keys_limit: usize,
+    pub eviction_policy: BucketEvictionPolicy,
+    pub quota_bytes: u64,
+    pub total_keys_limit: usize,
+}
+
+impl Default for BucketStorageConfig {
+    fn default() -> Self {
+        Self {
+            root_dir: PathBuf::from("/data/file_storage"),
+            fsdir: "moon_bucket_storage_backend".to_string(),
+            bucket_size_limit: 256 * 1024 * 1024,
+            bucket_keys_limit: 500,
+            // C++ FromEnvironment uses "fifo" when no policy env is set.
+            eviction_policy: BucketEvictionPolicy::Fifo,
+            // Zero means 90% of physical filesystem capacity.
+            quota_bytes: 0,
+            total_keys_limit: 10_000_000,
+        }
+    }
+}
+
+impl BucketStorageConfig {
+    pub fn from_environment() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let mut config = Self::default();
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_FILE_STORAGE_PATH") {
+            config.root_dir = PathBuf::from(value);
+        }
+        if let Some(value) =
+            parse_positive_u64(&mut lookup, "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES")
+        {
+            config.bucket_size_limit = value;
+        }
+        if let Some(value) = parse_positive_usize(&mut lookup, "MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT")
+        {
+            config.bucket_keys_limit = value;
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY") {
+            config.eviction_policy = match value.to_ascii_lowercase().as_str() {
+                "fifo" => BucketEvictionPolicy::Fifo,
+                "lru" => BucketEvictionPolicy::Lru,
+                _ => BucketEvictionPolicy::None,
+            };
+        }
+        let max_total_size =
+            parse_positive_u64(&mut lookup, "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE")
+                .or_else(|| parse_positive_u64(&mut lookup, "MOONCAKE_BUCKET_MAX_TOTAL_SIZE"))
+                .or_else(|| {
+                    parse_positive_u64(&mut lookup, "MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES")
+                });
+        if let Some(value) = max_total_size {
+            config.quota_bytes = value;
+        }
+        if let Some(value) = parse_positive_usize(&mut lookup, "MOONCAKE_OFFLOAD_TOTAL_KEYS_LIMIT")
+        {
+            config.total_keys_limit = value;
+        }
+        config
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.fsdir.is_empty() {
+            return Err("bucket fsdir must not be empty".to_string());
+        }
+        if self.bucket_size_limit == 0 || self.bucket_keys_limit == 0 {
+            return Err("bucket size/key limits must be positive".to_string());
+        }
+        if self.total_keys_limit == 0 {
+            return Err("bucket total_keys_limit must be positive".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OffsetEvictionPolicy {
     None,
@@ -194,9 +383,77 @@ fn parse_positive_u64(lookup: &mut impl FnMut(&str) -> Option<String>, name: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
+        BucketEvictionPolicy, BucketStorageConfig, DistributedStorageConfig, OffsetAllocatorConfig,
+        OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
     };
     use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn bucket_defaults_match_cpp_file_storage_defaults() {
+        let config = BucketStorageConfig::default();
+        assert_eq!(config.bucket_size_limit, 256 * 1024 * 1024);
+        assert_eq!(config.bucket_keys_limit, 500);
+        assert_eq!(config.eviction_policy, BucketEvictionPolicy::Fifo);
+        assert_eq!(config.quota_bytes, 0);
+        assert_eq!(config.total_keys_limit, 10_000_000);
+    }
+
+    #[test]
+    fn bucket_config_reads_cpp_environment_names() {
+        let environment = HashMap::from([
+            ("MOONCAKE_OFFLOAD_FILE_STORAGE_PATH", "/var/lib/mooncake"),
+            ("MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES", "4096"),
+            ("MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT", "8"),
+            ("MOONCAKE_OFFLOAD_BUCKET_EVICTION_POLICY", "LRU"),
+            ("MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE", "32768"),
+            ("MOONCAKE_OFFLOAD_TOTAL_KEYS_LIMIT", "64"),
+        ]);
+        let config = BucketStorageConfig::from_lookup(|name| {
+            environment.get(name).map(|value| value.to_string())
+        });
+        assert_eq!(config.root_dir, PathBuf::from("/var/lib/mooncake"));
+        assert_eq!(config.bucket_size_limit, 4096);
+        assert_eq!(config.bucket_keys_limit, 8);
+        assert_eq!(config.eviction_policy, BucketEvictionPolicy::Lru);
+        assert_eq!(config.quota_bytes, 32768);
+        assert_eq!(config.total_keys_limit, 64);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn distributed_defaults_and_environment_match_cpp() {
+        let defaults = DistributedStorageConfig::default();
+        assert_eq!(defaults.fsdir, PathBuf::from("distributed_dir"));
+        assert_eq!(defaults.fs_adapter_type, "hf3fs");
+        assert!(!defaults.enable_health_check);
+        assert_eq!(defaults.hash_bucket_count, 256);
+
+        let environment = HashMap::from([
+            ("MOONCAKE_DISTRIBUTED_ROOT_DIR", "/mnt/3fs/mooncake"),
+            ("MOONCAKE_DISTRIBUTED_FS_TYPE", "hf3fs"),
+            ("MOONCAKE_DISTRIBUTED_HEALTH_CHECK", "true"),
+            ("MOONCAKE_DISTRIBUTED_HASH_BUCKET_COUNT", "64"),
+        ]);
+        let config = DistributedStorageConfig::from_lookup(|name| {
+            environment.get(name).map(|value| value.to_string())
+        });
+        assert_eq!(config.fsdir, PathBuf::from("/mnt/3fs/mooncake"));
+        assert!(config.enable_health_check);
+        assert_eq!(config.hash_bucket_count, 64);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn distributed_config_rejects_non_hf3fs_and_zero_buckets() {
+        let mut config = DistributedStorageConfig::default().with_root("/mnt/3fs/mooncake");
+        config.fs_adapter_type = "posix".to_string();
+        assert!(config.validate().is_err());
+
+        config.fs_adapter_type = "hf3fs".to_string();
+        config.hash_bucket_count = 0;
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn offset_config_reads_supported_environment_values() {

@@ -3,8 +3,10 @@ use mooncake_store_master::ha::{HABackendSpec, HABackendType, HaError};
 use mooncake_store_master::main_args::Args;
 use mooncake_store_master::main_config::{
     build_ha_spec, build_master_service, build_runtime_config, create_coordinator,
-    snapshot_dir_for_cluster, validate_rpc_protocol,
+    parse_snapshot_config, preflight_snapshot_pipeline, snapshot_dir_for_cluster,
+    validate_ha_backend_for_serving, validate_rpc_protocol,
 };
+use mooncake_store_master::storage_backend::StorageBackendType;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,12 +22,18 @@ fn base_args() -> Args {
         enable_nof: true,
         allocation_strategy: "random".to_string(),
         memory_allocator: "offset".to_string(),
+        enable_cxl: false,
+        cxl_path: "/dev/dax0.0".to_string(),
+        cxl_size: 8 * 1024 * 1024 * 1024,
         default_kv_lease_ttl_ms: 5000,
         client_ttl_secs: 10,
         root_fs_dir: String::new(),
         eviction_high_watermark_ratio: 0.95,
         eviction_ratio: 0.05,
+        nof_eviction_high_watermark_ratio: 0.90,
+        nof_eviction_ratio: 0.05,
         offload_on_evict: false,
+        allow_evict_soft_pinned_objects: true,
         offload_force_evict: false,
         offloading_queue_limit: 50_000,
         offload_cap_ratio: 0.5,
@@ -42,6 +50,9 @@ fn base_args() -> Args {
         nof_heartbeat_failures_threshold: 3,
         put_start_discard_timeout_sec: 30,
         put_start_release_timeout_sec: 600,
+        promotion_on_hit: false,
+        promotion_admission_threshold: 2,
+        promotion_queue_limit: 50_000,
         promotion_max_per_heartbeat: 1,
         max_total_finished_tasks: 10_000,
         max_total_pending_tasks: 10_000,
@@ -88,6 +99,51 @@ fn test_master_cli_defaults_match_rpc_scaling_tuning() {
     assert_eq!(args.rpc_thread_num, 16);
     assert_eq!(args.default_kv_lease_ttl_ms, 10_000);
     assert_eq!(args.eviction_high_watermark_ratio, 0.90);
+    assert_eq!(args.nof_eviction_high_watermark_ratio, 0.90);
+    assert_eq!(args.nof_eviction_ratio, 0.05);
+    assert!(!args.promotion_on_hit);
+    assert_eq!(args.promotion_admission_threshold, 2);
+    assert_eq!(args.promotion_queue_limit, 50_000);
+    assert_eq!(args.promotion_max_per_heartbeat, 1);
+    assert!(!args.enable_cxl);
+    assert_eq!(args.cxl_path, "/dev/dax0.0");
+    assert_eq!(args.cxl_size, 8 * 1024 * 1024 * 1024);
+}
+
+#[test]
+fn test_master_cli_rejects_non_positive_ha_lease_ttl() {
+    assert!(Args::try_parse_from(["mooncake-master", "--ha-lease-ttl-secs", "0"]).is_err());
+    assert!(Args::try_parse_from(["mooncake-master", "--ha-lease-ttl-secs", "-1"]).is_err());
+}
+
+#[test]
+fn test_build_runtime_config_enables_cpp_equivalent_cxl_mode() {
+    let mut args = base_args();
+    args.enable_cxl = true;
+    args.allocation_strategy = "random".to_string();
+    args.memory_allocator = "offset".to_string();
+
+    let config = build_runtime_config(&args).unwrap();
+
+    assert!(config.enable_cxl);
+    assert_eq!(
+        config.allocation_strategy,
+        mooncake_store_master::allocator::AllocationStrategy::Cxl
+    );
+    assert_eq!(
+        config.memory_allocator_kind,
+        mooncake_store_master::allocator::MemoryAllocatorKind::CachelibLike
+    );
+    assert_eq!(config.cxl_path, "/dev/dax0.0");
+    assert_eq!(config.cxl_size, 8 * 1024 * 1024 * 1024);
+}
+
+#[test]
+fn test_build_runtime_config_rejects_cxl_strategy_without_enable_flag() {
+    let mut args = base_args();
+    args.allocation_strategy = "cxl".to_string();
+
+    assert!(build_runtime_config(&args).is_err());
 }
 
 #[test]
@@ -144,6 +200,36 @@ fn test_build_ha_spec_redis_uses_explicit_connstring() {
 
     assert_eq!(spec.backend_type, HABackendType::Redis);
     assert_eq!(spec.connstring, "redis://127.0.0.1:6379");
+}
+
+#[test]
+fn test_validate_ha_backend_for_serving_rejects_election_only_backends() {
+    for (backend_type, connstring) in [
+        (HABackendType::Redis, "redis://127.0.0.1:6379"),
+        (HABackendType::K8s, "ns-a/lease-a"),
+    ] {
+        let spec = HABackendSpec {
+            backend_type,
+            connstring: connstring.into(),
+            cluster_namespace: "cluster-a".into(),
+            pod_identity: None,
+        };
+        let error = validate_ha_backend_for_serving(&spec).unwrap_err();
+        assert!(matches!(error, HaError::UnavailableInCurrentMode(_)));
+        assert!(error.to_string().contains("shared ordered oplog"));
+    }
+}
+
+#[test]
+fn test_validate_ha_backend_for_serving_accepts_etcd() {
+    let spec = HABackendSpec {
+        backend_type: HABackendType::Etcd,
+        connstring: "http://127.0.0.1:2379".into(),
+        cluster_namespace: "cluster-a".into(),
+        pod_identity: None,
+    };
+
+    validate_ha_backend_for_serving(&spec).unwrap();
 }
 
 #[test]
@@ -204,20 +290,96 @@ async fn test_create_coordinator_k8s_builds_lazy_coordinator() {
 fn test_build_master_service_returns_fresh_instance_per_call() {
     let runtime_config = build_runtime_config(&base_args()).unwrap();
 
-    let first = build_master_service(None, None, runtime_config.clone());
-    let second = build_master_service(None, None, runtime_config);
+    let first = build_master_service(None, None, runtime_config.clone()).unwrap();
+    let second = build_master_service(None, None, runtime_config).unwrap();
 
     assert!(!Arc::ptr_eq(&first, &second));
 }
 
 #[test]
-fn test_build_runtime_config_rejects_cxl_strategy_explicitly() {
+fn test_snapshot_config_rejects_unknown_or_incomplete_native_backend() {
     let mut args = base_args();
-    args.allocation_strategy = "cxl".to_string();
+    args.snapshot_backend_type = Some("unknown".to_string());
+    assert!(
+        parse_snapshot_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown snapshot backend type")
+    );
+
+    let mut args = base_args();
+    args.snapshot_backend_type = Some("local-disk".to_string());
+    assert!(
+        parse_snapshot_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("must be configured together")
+    );
+}
+
+#[test]
+fn test_snapshot_pipeline_requires_a_writer_when_enabled() {
+    let mut args = base_args();
+    args.enable_snapshot = true;
+    let service = build_master_service(None, None, build_runtime_config(&args).unwrap()).unwrap();
+
+    let error = match preflight_snapshot_pipeline(&args, "cluster-a", &service) {
+        Ok(_) => panic!("enabled snapshots without a writer must fail preflight"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("requires a native snapshot backend")
+    );
+}
+
+#[test]
+fn test_snapshot_pipeline_preflights_native_writer_before_serving() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut args = base_args();
+    args.enable_snapshot = true;
+    args.snapshot_backend_type = Some("local-disk".to_string());
+    args.snapshot_backup_dir = Some(dir.path().display().to_string());
+    let service = build_master_service(
+        Some(StorageBackendType::LocalDisk),
+        Some(dir.path().to_path_buf()),
+        build_runtime_config(&args).unwrap(),
+    )
+    .unwrap();
+
+    let publisher = preflight_snapshot_pipeline(&args, "cluster-a", &service).unwrap();
+    assert!(publisher.is_none());
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".mooncake_snapshot_preflight_")
+    }));
+}
+
+#[test]
+fn test_build_runtime_config_rejects_unaligned_cxl_capacity() {
+    let mut args = base_args();
+    args.enable_cxl = true;
+    args.cxl_size = mooncake_store_master::allocator::CACHELIB_SLAB_SIZE + 1;
 
     let err = build_runtime_config(&args).unwrap_err();
 
-    assert!(err.to_string().contains("not supported"));
+    assert!(err.to_string().contains("aligned"));
+}
+
+#[test]
+fn test_build_runtime_config_rejects_cxl_capacity_outside_slab_index_space() {
+    let mut args = base_args();
+    args.enable_cxl = true;
+    args.cxl_size = mooncake_store_master::allocator::CACHELIB_MAX_SEGMENT_SIZE
+        + mooncake_store_master::allocator::CACHELIB_SLAB_SIZE;
+
+    let err = build_runtime_config(&args).unwrap_err();
+
+    assert!(err.to_string().contains("u32 slab index capacity"));
 }
 
 #[test]
@@ -306,11 +468,21 @@ fn test_build_runtime_config_applies_offload_tuning() {
     let mut args = base_args();
     args.offloading_queue_limit = 123;
     args.offload_cap_ratio = 0.75;
+    args.allow_evict_soft_pinned_objects = false;
+    args.promotion_on_hit = true;
+    args.promotion_admission_threshold = 7;
+    args.promotion_queue_limit = 321;
+    args.promotion_max_per_heartbeat = 9;
 
     let config = build_runtime_config(&args).unwrap();
 
     assert_eq!(config.offloading_queue_limit, 123);
     assert_eq!(config.offload_cap_ratio, 0.75);
+    assert!(!config.allow_evict_soft_pinned_objects);
+    assert!(config.promotion_on_hit);
+    assert_eq!(config.promotion_admission_threshold, 7);
+    assert_eq!(config.promotion_queue_limit, 321);
+    assert_eq!(config.promotion_max_per_heartbeat, 9);
 }
 
 #[test]
@@ -349,6 +521,33 @@ fn test_build_runtime_config_rejects_invalid_offload_tuning() {
             .unwrap_err()
             .to_string()
             .contains("offload_cap_ratio")
+    );
+
+    let mut args = base_args();
+    args.promotion_queue_limit = 0;
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("promotion_queue_limit")
+    );
+
+    let mut args = base_args();
+    args.nof_eviction_high_watermark_ratio = 1.1;
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("nof_eviction_high_watermark_ratio")
+    );
+
+    let mut args = base_args();
+    args.nof_eviction_ratio = -0.1;
+    assert!(
+        build_runtime_config(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("nof_eviction_ratio")
     );
 }
 

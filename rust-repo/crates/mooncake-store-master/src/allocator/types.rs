@@ -13,6 +13,7 @@
 // - AllocationStrategy: 分配时如何对候选 segment 进行排序
 
 use super::cachelib::{cachelib_class_size, generate_cachelib_class_sizes};
+use serde::{Deserialize, Serialize};
 
 // --- Constants / 常量 ---
 
@@ -143,7 +144,8 @@ pub struct CachelibAllocationVisit {
 ///   优先选择所属 client 本地 SSD 空闲比例更高的 segment，再回退到内存空闲率。
 /// - LocalFirst: Prefer writer-local host for single-replica writes, then ordered remote fallback.
 ///   LocalFirst：单副本写入优先 writer 本机 host，再按 host 顺序回退。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AllocationStrategy {
     /// Randomize candidates with affinity boosting (same node / preferred segment).
     /// 随机化候选并提升亲和性（同节点 / 首选 segment）。
@@ -157,19 +159,27 @@ pub enum AllocationStrategy {
     /// Writer-local host first, then ordered remote fallback.
     /// writer 本机 host 优先，然后有序远端回退。
     LocalFirst,
+    /// Allocate from one master-owned CXL address space and expose the
+    /// resulting offset through the writer's preferred CXL segment alias.
+    ///
+    /// 从 Master 持有的单一 CXL 地址空间分配，再通过 writer 首选的 CXL
+    /// segment 别名暴露同一个设备偏移。
+    Cxl,
 }
 
 impl AllocationStrategy {
     /// Parse allocation strategy from a string value.
     /// 从字符串解析分配策略。
     /// "random" -> Random, "free_ratio_first" -> FreeRatioFirst,
-    /// "ssd_free_ratio_first" -> SsdFreeRatioFirst, "local_first" -> LocalFirst.
+    /// "ssd_free_ratio_first" -> SsdFreeRatioFirst, "local_first" -> LocalFirst,
+    /// "cxl" -> Cxl.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "random" => Some(Self::Random),
             "free_ratio_first" => Some(Self::FreeRatioFirst),
             "ssd_free_ratio_first" => Some(Self::SsdFreeRatioFirst),
             "local_first" => Some(Self::LocalFirst),
+            "cxl" => Some(Self::Cxl),
             _ => None,
         }
     }
@@ -190,7 +200,8 @@ pub struct SsdUsageMetrics {
 ///   基于偏移量的简单分配器，带空闲区间合并。
 /// - CachelibLike: Slab-based allocator with size classes and pool management.
 ///   基于 slab 的分配器，具有 size class 和池管理功能。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemoryAllocatorKind {
     /// Simple offset-based allocation for large contiguous blocks.
     /// 基于偏移的简单分配，适合大块连续内存。
@@ -198,6 +209,18 @@ pub enum MemoryAllocatorKind {
     /// Slab-based allocation with size classes, inspired by Facebook CacheLib.
     /// 基于 slab 的分配，具有 size class 机制（灵感来自 Facebook CacheLib）。
     CachelibLike,
+}
+
+/// Allocator choices that determine how snapshot replica ranges are rebuilt.
+///
+/// A snapshot captured under one allocator kind must not be restored under
+/// another kind: the same occupied ranges can represent different reusable
+/// capacity and alignment constraints. The allocation strategy is persisted
+/// with it so placement semantics cannot silently drift across HA promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllocatorSnapshotConfig {
+    pub allocation_strategy: AllocationStrategy,
+    pub memory_allocator_kind: MemoryAllocatorKind,
 }
 
 impl MemoryAllocatorKind {

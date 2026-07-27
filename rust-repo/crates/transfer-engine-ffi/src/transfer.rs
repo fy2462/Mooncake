@@ -5,7 +5,8 @@
 //!
 //! | Type | Purpose / 用途 |
 //! |------|---------------|
-//! | `BatchId` | Groups transfer requests into an atomic batch / 将传输请求分组为原子批次 |
+//! | `BatchId` | Legacy copyable batch token / 旧版可复制批次令牌 |
+//! | `OwnedBatchId` | Engine-bound owned batch allocation / 绑定引擎的批次所有权 |
 //! | `Opcode` | Read from remote or Write to remote / 从远程读取或写入远程 |
 //! | `TransferRequest` | A single read/write operation descriptor / 单个读/写操作描述符 |
 //! | `TransferStatusEnum` | Current state of a transfer task / 传输任务的当前状态 |
@@ -31,12 +32,22 @@
 //! 必须单独轮询每个任务。直到所有任务完成才能释放批次。
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ffi;
 use crate::segment::SegmentId;
+use crate::{TransferEngineError, TransferEngineResult};
 
-/// Wrapper for a Transfer Engine batch ID.
-/// Transfer Engine 批次 ID 的封装。
+/// Legacy copyable Transfer Engine batch token.
+///
+/// This type remains for source compatibility with callers outside the Rust
+/// Store replacement. New Store code must use [`OwnedBatchId`], which binds the
+/// native allocation to one engine and prevents safe duplication/double-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BatchId(pub u64);
+
+/// Owned wrapper for a Transfer Engine batch allocation.
+/// Transfer Engine 批次分配的所有权封装。
 ///
 /// A batch groups multiple transfer requests that are submitted together.
 /// The C++ engine allocates internal resources for each batch. You must
@@ -44,11 +55,62 @@ use crate::segment::SegmentId;
 /// 批次将多个传输请求分组并一起提交。
 /// C++ 引擎为每个批次分配内部资源。必须等批次中所有传输完成后调用 `free_batch_id`。
 ///
-/// This is a newtype over `u64`. The value `u64::MAX` is reserved as
-/// `INVALID_BATCH` sentinel.
-/// 这是对 `u64` 的新类型封装。`u64::MAX` 值被保留为 `INVALID_BATCH` 哨兵值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BatchId(pub u64);
+/// The native value is deliberately private and this handle is neither
+/// `Copy` nor `Clone`: in the classic engine it is an encoded native pointer.
+/// Safe Rust therefore cannot forge a batch or duplicate ownership and free
+/// the same native allocation twice.
+///
+/// 原生值刻意保持私有，且此句柄既不是 `Copy` 也不是 `Clone`：在 classic
+/// engine 中它实际编码了原生指针。因此 safe Rust 无法伪造批次，也无法复制
+/// 所有权后重复释放同一原生对象。
+#[derive(Debug)]
+pub struct OwnedBatchId {
+    raw: u64,
+    owner_id: u64,
+    released: bool,
+}
+
+static NEXT_ENGINE_INSTANCE_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_engine_instance_id() -> u64 {
+    NEXT_ENGINE_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+impl OwnedBatchId {
+    pub(crate) fn allocated(raw: u64, owner_id: u64) -> Self {
+        Self {
+            raw,
+            owner_id,
+            released: false,
+        }
+    }
+
+    /// Return the opaque native value for diagnostics or foreign-language
+    /// tokenization. It cannot be converted back into an `OwnedBatchId` by safe
+    /// Rust.
+    pub fn as_raw(&self) -> u64 {
+        self.raw
+    }
+
+    /// Whether the native batch allocation has already been released.
+    pub fn is_released(&self) -> bool {
+        self.released
+    }
+
+    pub(crate) fn validate_for(&self, owner_id: u64) -> TransferEngineResult<u64> {
+        if self.owner_id != owner_id {
+            return Err(TransferEngineError::BatchOwnershipMismatch);
+        }
+        if self.released {
+            return Err(TransferEngineError::BatchAlreadyReleased);
+        }
+        Ok(self.raw)
+    }
+
+    pub(crate) fn mark_released(&mut self) {
+        self.released = true;
+    }
+}
 
 /// Transfer operation type: read from remote or write to remote.
 /// 传输操作类型：从远程读取或写入远程。
@@ -301,33 +363,49 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_batch_id_creation() {
-        assert_eq!(BatchId(0).0, 0);
-        assert_eq!(BatchId(42).0, 42);
-        assert_eq!(BatchId(u64::MAX).0, u64::MAX);
+    fn test_legacy_batch_id_remains_copyable_for_external_callers() {
+        let id = BatchId(42);
+        let copied = id;
+        assert_eq!(id, copied);
     }
 
     #[test]
-    fn test_batch_id_clone_eq() {
-        let id = BatchId(99);
-        assert_eq!(id, id.clone());
-        assert_eq!(id, BatchId(99));
-        assert_ne!(id, BatchId(100));
+    fn test_legacy_and_owned_batch_api_shapes_remain_distinct() {
+        let _: fn(&crate::TransferEngine, usize) -> TransferEngineResult<BatchId> =
+            crate::TransferEngine::allocate_batch_id;
+        let _: fn(&crate::TransferEngine, usize) -> TransferEngineResult<OwnedBatchId> =
+            crate::TransferEngine::allocate_owned_batch_id;
+        let _: unsafe fn(
+            &crate::TransferEngine,
+            &OwnedBatchId,
+            &[TransferRequest],
+        ) -> TransferEngineResult<()> = crate::TransferEngine::submit_owned_transfer;
     }
 
     #[test]
-    fn test_batch_id_debug() {
-        assert_eq!(format!("{:?}", BatchId(5)), "BatchId(5)");
+    fn test_batch_id_exposes_only_opaque_raw_value() {
+        let id = OwnedBatchId::allocated(42, 7);
+        assert_eq!(id.as_raw(), 42);
+        assert_eq!(id.validate_for(7).unwrap(), 42);
     }
 
     #[test]
-    fn test_batch_id_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(BatchId(1));
-        set.insert(BatchId(2));
-        set.insert(BatchId(1));
-        assert_eq!(set.len(), 2);
+    fn test_batch_id_rejects_another_engine() {
+        let id = OwnedBatchId::allocated(99, 7);
+        assert!(matches!(
+            id.validate_for(8),
+            Err(TransferEngineError::BatchOwnershipMismatch)
+        ));
+    }
+
+    #[test]
+    fn test_batch_id_cannot_be_reused_after_release() {
+        let mut id = OwnedBatchId::allocated(5, 7);
+        id.mark_released();
+        assert!(matches!(
+            id.validate_for(7),
+            Err(TransferEngineError::BatchAlreadyReleased)
+        ));
     }
 
     // =========================================================================

@@ -25,9 +25,10 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        if config.replica_num == 0 && config.nof_replica_num == 0 {
+        let disk_enabled = !storage_fs_dir_for_client(&self.state.runtime_config).is_empty();
+        if config.replica_num == 0 && config.nof_replica_num == 0 && !disk_enabled {
             return Err(Status::invalid_argument(
-                "replica_num and nof_replica_num cannot both be zero",
+                "replica_num and nof_replica_num cannot both be zero when global DISK is disabled",
             ));
         }
         if config.prefer_alloc_in_same_node && config.nof_replica_num > 0 {
@@ -41,6 +42,11 @@ impl MasterServiceImpl {
         let memory_replica_count = config.replica_num as usize;
         let nof_replica_count = config.nof_replica_num as usize;
         let tenant_id_wire = tenant_id.as_str().to_owned();
+        let scoped_keys = req
+            .keys
+            .iter()
+            .map(|key| tenant_id.make_scoped_key(key))
+            .collect::<Vec<_>>();
         let mut all_replicas = Vec::new();
         let mut results = Vec::with_capacity(req.keys.len());
         let invalid_group_ids =
@@ -65,7 +71,25 @@ impl MasterServiceImpl {
                 });
                 continue;
             }
-            let key = tenant_id.make_scoped_key(raw_key);
+            if raw_key.is_empty() || validate_user_key(raw_key).is_err() {
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: tenant_id_wire.clone(),
+                });
+                continue;
+            }
+            let key = scoped_keys[idx].clone();
+            // C++ BatchPutStart delegates to PutStart per key. Mirror that
+            // boundary so each key keeps its operation stripe across quota
+            // eviction retries without holding unrelated batch stripes.
+            let _operation_guard = self.state.key_mutations.lock_operation(&key);
+            let mutation_guard = self.state.key_mutations.lock(&key);
+            let alive_clients = get_alive_clients_snapshot(&self.state);
+            clear_invalid_handles_for_key_locked(&self.state, &alive_clients, &key).map_err(
+                |error| Status::unavailable(format!("stale handle cleanup failed: {error}")),
+            )?;
             let group_id = Self::group_id_for_key(&config, req.keys.len(), idx)
                 .map_err(|_| Status::invalid_argument("invalid group_ids"))?;
             if self.state.objects.contains_key(&key) {
@@ -77,11 +101,43 @@ impl MasterServiceImpl {
                 });
                 continue;
             }
-            if self.reserve_tenant_quota(&tenant_id, *slice_len).is_err() {
+            let Ok(requested_quota_charge) =
+                checked_requested_memory_quota_charge(*slice_len, memory_replica_count)
+            else {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
                     status: BatchStatus::InvalidState.into(),
+                    tenant_id: tenant_id_wire.clone(),
+                });
+                continue;
+            };
+            // Quota admission may evict arbitrary keys and therefore cannot
+            // run while this key owns its mutation stripe. The operation
+            // stripe remains held, then the key is revalidated after quota
+            // admission.
+            drop(mutation_guard);
+            let quota_result = self.reserve_tenant_quota_with_eviction(
+                &tenant_id,
+                requested_quota_charge,
+                Some(&key),
+            );
+            let _mutation_guard = self.state.key_mutations.lock(&key);
+            if quota_result.is_err() {
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::InvalidState.into(),
+                    tenant_id: tenant_id_wire.clone(),
+                });
+                continue;
+            }
+            if self.state.objects.contains_key(&key) {
+                self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
+                results.push(proto::BatchStartEntryResult {
+                    key: raw_key.clone(),
+                    replicas: vec![],
+                    status: BatchStatus::ObjectAlreadyExists.into(),
                     tenant_id: tenant_id_wire.clone(),
                 });
                 continue;
@@ -95,8 +151,8 @@ impl MasterServiceImpl {
                 &config,
             );
             if replicas.len() != memory_replica_count {
-                release_replicas(&self.state, &replicas);
-                self.abort_tenant_quota(&tenant_id, *slice_len);
+                release_replicas(&self.state, &replicas)?;
+                self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
@@ -115,8 +171,8 @@ impl MasterServiceImpl {
                 ) {
                     Ok(nof_replicas) => replicas.extend(nof_replicas),
                     Err(_) => {
-                        release_replicas(&self.state, &replicas);
-                        self.abort_tenant_quota(&tenant_id, *slice_len);
+                        release_replicas(&self.state, &replicas)?;
+                        self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
                         results.push(proto::BatchStartEntryResult {
                             key: raw_key.clone(),
                             replicas: vec![],
@@ -127,7 +183,12 @@ impl MasterServiceImpl {
                     }
                 }
             }
-            if replicas.len() == memory_replica_count + nof_replica_count {
+            if let Some(disk_replica) = global_disk_replica(&self.state, &key, *slice_len) {
+                replicas.push(disk_replica);
+            }
+            let expected_replica_count =
+                memory_replica_count + nof_replica_count + usize::from(disk_enabled);
+            if replicas.len() == expected_replica_count {
                 let proto_r: Vec<_> = replicas.iter().map(replica_to_proto).collect();
                 sync_segment_usage(
                     &self.state,
@@ -164,12 +225,19 @@ impl MasterServiceImpl {
                         tenant_id: tenant_id.clone(),
                         group_id,
                         quota_committed: false,
+                        reserved_quota_charge_bytes: requested_quota_charge,
+                        committed_quota_charge_bytes: 0,
+                        pending_replaced_quota_charge_bytes: 0,
                         memory_cache_total_accounted: false,
                         disk_cache_total_accounted: false,
                         user_key: raw_key.clone(),
                     },
                 );
+                self.register_tenant_metadata_object(&tenant_id);
                 self.state.processing_keys.insert(key.clone(), ());
+                // Each successful entry exposes writable addresses and must be
+                // durable independently before its success result is returned.
+                self.persist_object_image_or_remove(&key, "batch_put_start")?;
                 all_replicas.extend(proto_r.iter().cloned());
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
@@ -178,8 +246,8 @@ impl MasterServiceImpl {
                     tenant_id: tenant_id_wire.clone(),
                 });
             } else {
-                release_replicas(&self.state, &replicas);
-                self.abort_tenant_quota(&tenant_id, *slice_len);
+                release_replicas(&self.state, &replicas)?;
+                self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],

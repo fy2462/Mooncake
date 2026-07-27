@@ -1,7 +1,7 @@
 use super::MooncakeClient;
 use super::storage::OffloadTaskItem;
 use crate::proto;
-use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::error::{StoreError, StoreResult};
 use std::collections::HashMap;
 
 impl MooncakeClient {
@@ -21,10 +21,19 @@ impl MooncakeClient {
         let tasks = self
             .offload_object_heartbeat_tasks(enable_offloading)
             .await?;
-        Ok(tasks
-            .into_iter()
-            .map(|task| (task.key, task.size))
-            .collect())
+        let mut objects = HashMap::with_capacity(tasks.len());
+        for task in tasks {
+            if objects.insert(task.key.clone(), task.size).is_some() {
+                return Err(StoreError::InvalidParams(format!(
+                    "key-only offload API cannot represent duplicate tenant-scoped key {:?}; \
+                     use offload_object_heartbeat_tasks",
+                    task.key
+                )));
+            }
+            self.pending_legacy_offload_tasks
+                .insert(task.key.clone(), task);
+        }
+        Ok(objects)
     }
 
     /// Heartbeat to poll tenant-scoped offloading tasks from the master.
@@ -45,17 +54,29 @@ impl MooncakeClient {
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
         if !response.tasks.is_empty() {
-            return Ok(response.tasks.into_iter().map(Into::into).collect());
+            let tasks = response
+                .tasks
+                .into_iter()
+                .map(OffloadTaskItem::from)
+                .collect::<Vec<_>>();
+            if let Some(task) = tasks
+                .iter()
+                .find(|task| task.generation_id.is_nil() || task.size < 0)
+            {
+                return Err(StoreError::Internal(format!(
+                    "master returned invalid offload task for key {:?}",
+                    task.key
+                )));
+            }
+            return Ok(tasks);
         }
-        Ok(response
-            .objects
-            .into_iter()
-            .map(|(key, size)| OffloadTaskItem {
-                tenant_id: String::new(),
-                key,
-                size,
-            })
-            .collect())
+        if !response.objects.is_empty() {
+            return Err(StoreError::Internal(
+                "master returned legacy offload objects without generation-bearing tasks"
+                    .to_string(),
+            ));
+        }
+        Ok(Vec::new())
     }
 
     /// Report the local SSD capacity to the master.
@@ -89,15 +110,38 @@ impl MooncakeClient {
         keys: Vec<String>,
         metadatas: Vec<proto::StorageObjectMetadata>,
     ) -> StoreResult<()> {
+        if keys.len() != metadatas.len() {
+            return Err(StoreError::InvalidParams(
+                "keys and metadatas must have the same length".to_string(),
+            ));
+        }
         let tasks = keys
-            .into_iter()
-            .map(|key| OffloadTaskItem {
-                tenant_id: self.tenant_id.clone(),
-                key,
-                size: 0,
+            .iter()
+            .map(|key| {
+                self.pending_legacy_offload_tasks
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| {
+                        StoreError::InvalidParams(format!(
+                            "no generation-bearing offload task retained for key {key:?}; \
+                             use offload_object_heartbeat before the key-only notify API, or use \
+                             notify_offload_success_tasks"
+                        ))
+                    })
             })
-            .collect();
-        self.notify_offload_success_tasks(tasks, metadatas).await
+            .collect::<StoreResult<Vec<_>>>()?;
+        self.notify_offload_success_tasks(tasks.clone(), metadatas)
+            .await?;
+        for task in tasks {
+            if self
+                .pending_legacy_offload_tasks
+                .get(&task.key)
+                .is_some_and(|pending| pending.generation_id == task.generation_id)
+            {
+                self.pending_legacy_offload_tasks.remove(&task.key);
+            }
+        }
+        Ok(())
     }
 
     /// Notify the master of tenant-scoped offload completion.
@@ -108,7 +152,35 @@ impl MooncakeClient {
         tasks: Vec<OffloadTaskItem>,
         metadatas: Vec<proto::StorageObjectMetadata>,
     ) -> StoreResult<()> {
-        self.master
+        let stale = self
+            .notify_offload_success_tasks_inner(tasks, metadatas, None)
+            .await?;
+        if !stale.is_empty() {
+            return Err(StoreError::Internal(
+                "master returned recovery-only stale results for a normal offload".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn notify_offload_success_tasks_for_recovery(
+        &mut self,
+        tasks: Vec<OffloadTaskItem>,
+        metadatas: Vec<proto::StorageObjectMetadata>,
+        recovery_session_id: uuid::Uuid,
+    ) -> StoreResult<Vec<OffloadTaskItem>> {
+        self.notify_offload_success_tasks_inner(tasks, metadatas, Some(recovery_session_id))
+            .await
+    }
+
+    async fn notify_offload_success_tasks_inner(
+        &mut self,
+        tasks: Vec<OffloadTaskItem>,
+        metadatas: Vec<proto::StorageObjectMetadata>,
+        recovery_session_id: Option<uuid::Uuid>,
+    ) -> StoreResult<Vec<OffloadTaskItem>> {
+        let response = self
+            .master
             .notify_offload_success(
                 self.rpc_request(proto::NotifyOffloadSuccessRequest {
                     client_id: Some(self.client_id_proto()),
@@ -120,13 +192,21 @@ impl MooncakeClient {
                             tenant_id: task.tenant_id,
                             key: task.key,
                             size: task.size,
+                            generation_id: (!task.generation_id.is_nil())
+                                .then(|| Self::uuid_to_proto_uuid(task.generation_id)),
                         })
                         .collect(),
+                    recovery_session_id: recovery_session_id.map(Self::uuid_to_proto_uuid),
                 }),
             )
             .await
-            .map_err(Self::rpc_status_to_error)?;
-        Ok(())
+            .map_err(Self::rpc_status_to_error)?
+            .into_inner();
+        Ok(response
+            .stale_recovery_tasks
+            .into_iter()
+            .map(OffloadTaskItem::from)
+            .collect())
     }
 
     // -----------------------------------------------------------------------

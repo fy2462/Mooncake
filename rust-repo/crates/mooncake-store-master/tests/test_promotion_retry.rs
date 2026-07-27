@@ -7,20 +7,105 @@ use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use tonic::Request;
 use uuid::Uuid;
 
-async fn mount_local_disk_and_notify_success(
-    service: &MasterServiceImpl,
-    holder_id: Uuid,
-    key: &str,
-) {
+async fn mount_local_disk(service: &MasterServiceImpl, holder_id: Uuid) {
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            enable_offloading: false,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: false,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
     MasterService::mount_local_disk_segment(
         service,
         Request::new(proto::MountLocalDiskSegmentRequest {
             client_id: Some(proto_uuid(holder_id)),
             enable_offloading: true,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
         }),
     )
     .await
     .unwrap();
+}
+
+async fn seed_local_disk_object(service: &MasterServiceImpl, holder_id: Uuid, key: &str) {
+    let segment_name = format!("promotion-retry-source-{key}");
+    let segment_id = MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            segment_name: segment_name.clone(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .segment_id
+    .unwrap();
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            key: key.into(),
+            slice_length: 128,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: segment_name,
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
+                host_id: String::new(),
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let heartbeat = MasterService::offload_object_heartbeat(
+        service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let task = heartbeat
+        .tasks
+        .into_iter()
+        .find(|task| task.key == key)
+        .expect("Master must issue the promotion fixture offload task");
+    assert!(task.generation_id.is_some());
     MasterService::notify_offload_success(
         service,
         Request::new(proto::NotifyOffloadSuccessRequest {
@@ -33,7 +118,17 @@ async fn mount_local_disk_and_notify_success(
                 data_size: 128,
                 transport_endpoint: "holder".into(),
             }],
-            tasks: vec![],
+            tasks: vec![task],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::unmount_segment(
+        service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(segment_id),
+            client_id: Some(proto_uuid(holder_id)),
         }),
     )
     .await
@@ -89,7 +184,8 @@ async fn promotion_rejection_records_candidate_at_watermark() {
         ..Default::default()
     });
     let holder_id = Uuid::new_v4();
-    mount_local_disk_and_notify_success(&service, holder_id, "watermark-hot").await;
+    mount_local_disk(&service, holder_id).await;
+    seed_local_disk_object(&service, holder_id, "watermark-hot").await;
 
     trigger_promotion_lookup(&service, "watermark-hot").await;
     trigger_promotion_lookup(&service, "watermark-hot").await;
@@ -107,7 +203,8 @@ async fn promotion_rejection_records_candidate_at_queue_cap() {
         ..Default::default()
     });
     let holder_id = Uuid::new_v4();
-    mount_local_disk_and_notify_success(&service, holder_id, "queue-hot").await;
+    mount_local_disk(&service, holder_id).await;
+    seed_local_disk_object(&service, holder_id, "queue-hot").await;
 
     trigger_promotion_lookup(&service, "queue-hot").await;
     trigger_promotion_lookup(&service, "queue-hot").await;
@@ -125,8 +222,9 @@ async fn due_candidate_is_queued_after_queue_capacity_recovers() {
         ..Default::default()
     });
     let holder_id = Uuid::new_v4();
-    mount_local_disk_and_notify_success(&service, holder_id, "queue-first").await;
-    mount_local_disk_and_notify_success(&service, holder_id, "queue-retry").await;
+    mount_local_disk(&service, holder_id).await;
+    seed_local_disk_object(&service, holder_id, "queue-first").await;
+    seed_local_disk_object(&service, holder_id, "queue-retry").await;
 
     for key in ["queue-first", "queue-retry"] {
         trigger_promotion_lookup(&service, key).await;
@@ -167,7 +265,8 @@ async fn retry_candidates_expire_by_age_or_retry_budget() {
         ..Default::default()
     });
     let holder_id = Uuid::new_v4();
-    mount_local_disk_and_notify_success(&service, holder_id, "expired").await;
+    mount_local_disk(&service, holder_id).await;
+    seed_local_disk_object(&service, holder_id, "expired").await;
     for _ in 0..2 {
         trigger_promotion_lookup(&service, "expired").await;
     }
@@ -175,7 +274,7 @@ async fn retry_candidates_expire_by_age_or_retry_budget() {
     service.run_promotion_candidate_retry_for_test();
     assert_eq!(service.promotion_candidate_count_for_test(), 0);
 
-    mount_local_disk_and_notify_success(&service, holder_id, "exhausted").await;
+    seed_local_disk_object(&service, holder_id, "exhausted").await;
     for _ in 0..2 {
         trigger_promotion_lookup(&service, "exhausted").await;
     }

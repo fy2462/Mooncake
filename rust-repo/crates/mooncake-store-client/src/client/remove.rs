@@ -15,7 +15,6 @@
 use mooncake_store_core::error::StoreResult;
 
 use super::MooncakeClient;
-use super::read::scoped_cache_key;
 use crate::local_storage_backend::AttachedLocalStorage;
 use crate::proto;
 
@@ -31,12 +30,6 @@ fn cleanup_local_storage_after_remove_all(local_storage: Option<&AttachedLocalSt
 }
 
 impl MooncakeClient {
-    fn invalidate_hot_cache_key_for_tenant(&self, key: &str, tenant_id: &str) {
-        if let Some(ref cache) = self.hot_cache {
-            cache.remove(scoped_cache_key(tenant_id, key).as_ref());
-        }
-    }
-
     fn invalidate_hot_cache_regex_for_tenant(&self, pattern: &str, tenant_id: &str) {
         if let Some(ref cache) = self.hot_cache {
             if cache
@@ -128,6 +121,13 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
+        if response.statuses.len() != keys.len() {
+            return Err(StoreError::Internal(format!(
+                "BatchRemove response size mismatch: expected {}, got {}",
+                keys.len(),
+                response.statuses.len()
+            )));
+        }
         for (key, status) in keys.iter().zip(response.statuses.iter()) {
             if *status == 0 {
                 self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
@@ -155,6 +155,13 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
+        if response.results.len() != keys.len() {
+            return Err(StoreError::Internal(format!(
+                "BatchExistKey response size mismatch: expected {}, got {}",
+                keys.len(),
+                response.results.len()
+            )));
+        }
         Ok(response.results)
     }
 
@@ -205,7 +212,10 @@ impl MooncakeClient {
     /// C++ equivalent: `Client::RemoveAll(force)`
     pub async fn remove_all(&mut self, force: bool) -> StoreResult<i64> {
         let tenant_id = self.tenant_id.clone();
-        let request = proto::RemoveAllRequest { force, tenant_id };
+        let request = proto::RemoveAllRequest {
+            force,
+            tenant_id: tenant_id.clone(),
+        };
         let response = self
             .master
             .remove_all(self.rpc_request(request))
@@ -216,6 +226,14 @@ impl MooncakeClient {
             cache.clear();
         }
         cleanup_local_storage_after_remove_all(self.local_storage.as_ref());
+        if let Some(storage) = self.global_disk.as_ref().cloned() {
+            if let Err(error) = storage.remove_all_for_tenant(tenant_id).await {
+                tracing::warn!(
+                    %error,
+                    "remove_all succeeded on master but global DISK tenant cleanup failed"
+                );
+            }
+        }
         Ok(response.removed_count)
     }
 }

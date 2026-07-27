@@ -27,6 +27,7 @@ fn replicate_config() -> proto::ReplicateConfig {
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
         group_ids: vec![],
+        host_id: String::new(),
     }
 }
 
@@ -40,6 +41,7 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -144,6 +146,35 @@ async fn test_batch_put_start_supports_nof_replicas() {
 }
 
 #[tokio::test]
+async fn test_batch_put_start_rejects_empty_and_tenant_delimiter_keys_per_entry() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "batch-invalid-key:1").await;
+
+    let response = MasterService::batch_put_start(
+        &service,
+        Request::new(proto::BatchPutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec![String::new(), "forged\0scope".into(), "valid".into()],
+            slice_lengths: vec![128, 128, 128],
+            config: Some(proto::ReplicateConfig {
+                preferred_segment: "batch-invalid-key:1".into(),
+                ..replicate_config()
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.results.len(), 3);
+    assert_ne!(response.results[0].status, 0);
+    assert_ne!(response.results[1].status, 0);
+    assert_eq!(response.results[2].status, 0);
+}
+
+#[tokio::test]
 async fn test_batch_put_start_marks_existing_object_separately() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();
@@ -229,6 +260,8 @@ fn test_batch_put_end_status_transition() {
                 status: ReplicaStatus::Allocating,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
                 protocol: "rdma".into(),
             }],
         },

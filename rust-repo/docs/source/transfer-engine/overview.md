@@ -46,9 +46,11 @@ native 入口为 `mooncake-transfer-engine/src/transfer_engine.cpp` 与
 
 ## TENT 的位置
 
-启用 `MC_USE_TENT` 或构建配置后，同一顶层 TransferEngine API 可委托给 TENT。
-TENT 增加 priority、transport hint、policy、deadline 与 intent 等调度语义；它仍属于
-TE native 边界，不是 C++ Store 回归依赖。
+原生 TransferEngine 可以在设置 `MC_USE_TENT` 或 `MC_USE_TEV1` 后委托给
+TENT，但当前 Rust Store 只打平 classic C ABI，并会显式拒绝该模式。现有顶层
+`transfer_request_t` 没有贯通 priority、transport hint、policy、deadline 与
+intent；这些能力只有在版本化 capability/request/status ABI 落地后才能计为
+Rust Store 支持。它们仍属于 TE native 边界，不是 C++ Store 回归依赖。
 
 ## 自检问题
 

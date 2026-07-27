@@ -1,10 +1,12 @@
 use crate::to_py_err;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::{Mutex, MutexGuard};
 use transfer_engine_ffi::{
-    BatchId, Opcode, TentEngine, TentIntent, TentPriority, TentRequestOptions, TentTransferRequest,
-    TentTransport,
+    Opcode, OwnedBatchId as BatchId, TentEngine, TentIntent, TentPriority, TentRequestOptions,
+    TentTransferRequest, TentTransport,
 };
 
 #[pyclass(name = "TransferIntent", eq, eq_int, from_py_object)]
@@ -91,20 +93,25 @@ impl PyTransferRequest {
             ));
         }
         Ok(Self {
-            request: TentTransferRequest::from_raw_parts(
-                opcode,
-                source as *mut c_void,
-                target_id,
-                target_offset,
-                length,
-                TentRequestOptions {
-                    priority: priority.into(),
-                    transport,
-                    policy_name,
-                    deadline_ns,
-                    intent: intent_type.into(),
-                },
-            ),
+            // SAFETY: construction only records the foreign address. The
+            // expert Python caller must keep it registered and alive through
+            // the terminal transfer state before submitting this request.
+            request: unsafe {
+                TentTransferRequest::from_raw_parts(
+                    opcode,
+                    source as *mut c_void,
+                    target_id,
+                    target_offset,
+                    length,
+                    TentRequestOptions {
+                        priority: priority.into(),
+                        transport,
+                        policy_name,
+                        deadline_ns,
+                        intent: intent_type.into(),
+                    },
+                )
+            },
         })
     }
 
@@ -150,6 +157,19 @@ pub struct PyTransferStatus {
 #[pyclass(name = "TransferEngine")]
 pub struct PyTransferEngine {
     inner: TentEngine,
+    batches: Mutex<HashMap<u64, BatchId>>,
+}
+
+impl PyTransferEngine {
+    fn lock_batches(&self) -> PyResult<MutexGuard<'_, HashMap<u64, BatchId>>> {
+        self.batches
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("transfer batch registry is poisoned"))
+    }
+
+    fn unknown_batch(batch_id: u64) -> PyErr {
+        PyValueError::new_err(format!("unknown or released transfer batch {batch_id}"))
+    }
 }
 
 #[pymethods]
@@ -167,6 +187,7 @@ impl PyTransferEngine {
             .collect::<Vec<_>>();
         Ok(Self {
             inner: TentEngine::create(config_path, &overrides).map_err(to_py_err)?,
+            batches: Mutex::new(HashMap::new()),
         })
     }
 
@@ -183,22 +204,30 @@ impl PyTransferEngine {
     }
 
     fn register_memory(&self, address: usize, size: usize) -> PyResult<()> {
-        self.inner
-            .register_foreign_memory(address, size)
-            .map_err(to_py_err)
+        // SAFETY: this expert Python API accepts a foreign allocation address;
+        // the Python caller owns its lifetime through explicit unregister.
+        unsafe { self.inner.register_foreign_memory(address, size) }.map_err(to_py_err)
     }
 
     fn unregister_memory(&self, address: usize, size: usize) -> PyResult<()> {
-        self.inner
-            .unregister_foreign_memory(address, size)
-            .map_err(to_py_err)
+        // SAFETY: the Python caller must pass the same live, idle registration
+        // previously supplied to `register_memory`.
+        unsafe { self.inner.unregister_foreign_memory(address, size) }.map_err(to_py_err)
     }
 
     fn allocate_batch_id(&self, batch_size: usize) -> PyResult<u64> {
-        self.inner
-            .allocate_batch(batch_size)
-            .map(|batch| batch.0)
-            .map_err(to_py_err)
+        let mut batch = self.inner.allocate_batch(batch_size).map_err(to_py_err)?;
+        let batch_id = batch.as_raw();
+        let mut batches = self.lock_batches()?;
+        if batches.contains_key(&batch_id) {
+            drop(batches);
+            let _ = self.inner.free_batch(&mut batch);
+            return Err(PyRuntimeError::new_err(format!(
+                "native transfer engine reused active batch id {batch_id}"
+            )));
+        }
+        batches.insert(batch_id, batch);
+        Ok(batch_id)
     }
 
     fn submit_transfer(
@@ -212,24 +241,36 @@ impl PyTransferEngine {
             .map(|request| request.borrow(py).to_native())
             .collect::<Vec<_>>();
         py.detach(|| {
-            self.inner
-                .submit_transfer(BatchId(batch_id), &requests)
-                .map_err(to_py_err)
+            let batches = self.lock_batches()?;
+            let batch = batches
+                .get(&batch_id)
+                .ok_or_else(|| Self::unknown_batch(batch_id))?;
+            // SAFETY: this expert Python API deals in foreign addresses. The
+            // caller must keep every registered owner alive until terminal.
+            unsafe { self.inner.submit_transfer(batch, &requests) }.map_err(to_py_err)
         })
     }
 
     fn cancel_transfer(&self, py: Python<'_>, batch_id: u64, task_id: usize) -> PyResult<()> {
         py.detach(|| {
+            let batches = self.lock_batches()?;
+            let batch = batches
+                .get(&batch_id)
+                .ok_or_else(|| Self::unknown_batch(batch_id))?;
             self.inner
-                .cancel_transfer(BatchId(batch_id), task_id)
+                .cancel_transfer(batch, task_id)
                 .map_err(to_py_err)
         })
     }
 
     fn get_transfer_status(&self, batch_id: u64, task_id: usize) -> PyResult<PyTransferStatus> {
+        let batches = self.lock_batches()?;
+        let batch = batches
+            .get(&batch_id)
+            .ok_or_else(|| Self::unknown_batch(batch_id))?;
         let status = self
             .inner
-            .transfer_status(BatchId(batch_id), task_id)
+            .transfer_status(batch, task_id)
             .map_err(to_py_err)?;
         Ok(PyTransferStatus {
             status: status.status as i32,
@@ -249,7 +290,13 @@ impl PyTransferEngine {
     }
 
     fn free_batch_id(&self, batch_id: u64) -> PyResult<()> {
-        self.inner.free_batch(BatchId(batch_id)).map_err(to_py_err)
+        let mut batches = self.lock_batches()?;
+        let batch = batches
+            .get_mut(&batch_id)
+            .ok_or_else(|| Self::unknown_batch(batch_id))?;
+        self.inner.free_batch(batch).map_err(to_py_err)?;
+        batches.remove(&batch_id);
+        Ok(())
     }
 }
 

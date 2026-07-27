@@ -20,21 +20,20 @@
 //               Python 有 GIL 是单线程的，但 tokio future 可能在不同线程上
 //               恢复执行。Mutex 序列化所有对 client 的访问，防止竞态。
 //
-//    Option:    Represents the client lifecycle state.  Some = connected
-//               and usable; None = closed/consumed.  The take_client() helper
-//               moves the client OUT of the Option temporarily during async
-//               operations, then places it back.  This prevents any other
-//               thread from using the client concurrently during an operation.
+//    Option:    Represents the client lifecycle state. Some = connected and
+//               usable; None = closed. take_client() holds an async owned
+//               mutex guard and borrows the value in place. Concurrent calls
+//               wait, and cancellation cannot lose the client value.
 //               Option 代表客户端的生命周期状态。Some = 已连接可用；
-//               None = 已关闭/已消费。take_client() 在异步操作期间临时将
-//               client 移出，操作完成后再放回，防止并发使用。
+//               None = 已关闭。take_client() 在异步操作期间原位借用 client；
+//               并发调用等待同一 async mutex，取消 future 不会丢失 client。
 //
 // 2. Client lifecycle (客户端生命周期):
 //
 //    create() -> use (put/get/...) -> close()
 //
-//    After close(), all methods return StoreError("client already closed").
-//    close() 设置 inner 为 None 并清空 registered_py_buffers。
+//    After a successful close, all methods return StoreError("client already closed").
+//    close() 先释放 client/TE registration，再清空 registered_py_buffers。
 //
 // 3. Async execution patterns (异步执行模式):
 //
@@ -87,21 +86,32 @@
 //    - 不在 async 块内部使用 Python::assume_attached()
 // =============================================================================
 
+use crate::dlpack::DLPackMemoryOwner;
 use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
-use mooncake_store_client::MooncakeClient;
+use crate::tensor_parallelism::{
+    ParallelAxisPy, ReadTargetPy, ShardManifest, TensorParallelismPy, WriterPartitionPy,
+    parallelism_key, parallelism_manifest_key, writer_manifest_key, writer_shard_key,
+};
 use mooncake_store_client::proto::StorageObjectMetadata;
-use mooncake_store_client::{LocalStorageBackend, LocalStorageConfig};
-use mooncake_store_core::NoFSegment;
+use mooncake_store_client::{
+    BufferRegistrationId, ClientBackgroundConfig, ClientBackgroundHandle, LocalStorageBackend,
+    LocalStorageConfig, MooncakeClient,
+};
+use mooncake_store_core::{NoFSegment, ReplicateConfig};
 use parking_lot::Mutex;
-use pyo3::buffer::PyBuffer;
+use pyo3::buffer::PyUntypedBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::Arc;
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, OwnedMutexGuard};
 use tracing::warn;
+use transfer_engine_ffi::StableMemoryOwner;
 use uuid::Uuid;
 
 use super::to_py_err;
@@ -114,15 +124,89 @@ use super::to_py_err;
 /// - `inner`: The actual Rust client, guarded by Arc<Mutex<Option<T>>>.
 ///   Arc 提供多所有者共享，Mutex 序列化访问，Option 表示生命周期状态。
 /// - `registered_py_buffers`: Tracks Python buffer objects registered for
-///   zero-copy RDMA transfers.  Each entry is (pointer_address, PyObject).
-///   Keeps the Python objects alive so the underlying memory is not freed
-///   while the client holds RDMA registrations on it.
-///   跟踪为零拷贝 RDMA 传输注册的 Python buffer 对象。保持 Python 对象
-///   存活，防止底层内存在客户端持有 RDMA 注册期间被释放。
+///   zero-copy RDMA transfers. Each entry retains the exact registration
+///   identity needed by the Python unregister API. The allocation owner itself
+///   lives inside the FFI `RegisteredMemory` held by `MooncakeClient`.
+///   跟踪 Python 注销 API 所需的精确 registration identity；allocation owner
+///   由 MooncakeClient 内的 FFI RegisteredMemory 直接持有。
 #[pyclass(name = "MooncakeClient")]
 pub(crate) struct PythonMooncakeClient {
-    pub(crate) inner: Arc<Mutex<Option<MooncakeClient>>>,
-    pub(crate) registered_py_buffers: Arc<Mutex<Vec<(usize, Py<PyAny>)>>>,
+    pub(crate) inner: SharedClient,
+    pub(crate) background: Arc<AsyncMutex<Option<ClientBackgroundHandle>>>,
+    pub(crate) registered_py_buffers: Arc<Mutex<Vec<PythonBufferRegistration>>>,
+}
+
+pub(crate) type SharedClient = Arc<AsyncMutex<Option<MooncakeClient>>>;
+
+pub(crate) struct PythonBufferRegistration {
+    registration_id: BufferRegistrationId,
+    python_object_identity: usize,
+    registered_size: usize,
+}
+
+#[derive(Debug)]
+struct PythonBufferMemoryOwner {
+    base: usize,
+    len: usize,
+    // Retaining the exported Python buffer, rather than only its PyObject, prevents
+    // resizable exporters such as bytearray from moving the registered memory.
+    _buffer_export: PyUntypedBuffer,
+}
+
+unsafe impl StableMemoryOwner for PythonBufferMemoryOwner {
+    // PyUntypedBuffer owns a live Py_buffer export whose base, capacity,
+    // writability, and contiguity were validated before construction. CPython
+    // requires the exporter to keep that allocation stable until release.
+    fn base_address(&self) -> NonNull<c_void> {
+        NonNull::new(self.base as *mut c_void).expect("validated Python memory address")
+    }
+
+    fn length(&self) -> usize {
+        self.len
+    }
+}
+
+#[derive(Debug)]
+enum PythonMemoryOwner {
+    Buffer(PythonBufferMemoryOwner),
+    DLPack(DLPackMemoryOwner),
+}
+
+unsafe impl StableMemoryOwner for PythonMemoryOwner {
+    fn base_address(&self) -> NonNull<c_void> {
+        match self {
+            Self::Buffer(owner) => owner.base_address(),
+            Self::DLPack(owner) => owner.base_address(),
+        }
+    }
+
+    fn length(&self) -> usize {
+        match self {
+            Self::Buffer(owner) => owner.length(),
+            Self::DLPack(owner) => owner.length(),
+        }
+    }
+}
+
+impl PythonBufferRegistration {
+    fn registration_id(&self) -> BufferRegistrationId {
+        self.registration_id
+    }
+
+    fn matches_python_object(&self, identity: usize) -> bool {
+        self.python_object_identity == identity
+    }
+
+    fn contains_range(&self, base: usize, size: usize) -> bool {
+        let registration_base = self.registration_id.base_address();
+        let Some(registration_end) = registration_base.checked_add(self.registered_size) else {
+            return false;
+        };
+        let Some(range_end) = base.checked_add(size) else {
+            return false;
+        };
+        base >= registration_base && range_end <= registration_end
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -219,9 +303,75 @@ fn normalize_client_http_config(
 ///
 /// Supports any Python object that implements the buffer protocol:
 /// bytearray, memoryview, array.array, numpy arrays, etc.
+fn export_c_contiguous_buffer(
+    obj: &Bound<'_, PyAny>,
+    require_writable: bool,
+) -> PyResult<PyUntypedBuffer> {
+    let buffer = PyUntypedBuffer::get(obj)?;
+    if !buffer.is_c_contiguous() {
+        return Err(to_py_err("Python buffer must be C-contiguous"));
+    }
+    if require_writable && buffer.readonly() {
+        return Err(to_py_err("Python destination buffer must be writable"));
+    }
+    Ok(buffer)
+}
+
+fn host_registration_location(requested: Option<&str>) -> PyResult<String> {
+    let location = requested.unwrap_or("cpu:0").trim();
+    if location.is_empty() {
+        return Err(to_py_err("registration location must not be empty"));
+    }
+    if location != "*" && !location.starts_with("cpu:") {
+        return Err(to_py_err(format!(
+            "Python buffer-protocol memory is host memory and cannot be registered as {location:?}"
+        )));
+    }
+    Ok(location.to_string())
+}
+
+fn checked_python_buffer_owner(
+    buffer_export: PyUntypedBuffer,
+    expected_base: Option<usize>,
+    size: usize,
+) -> PyResult<PythonMemoryOwner> {
+    if buffer_export.readonly() {
+        return Err(to_py_err("registered Python buffer owner must be writable"));
+    }
+    if !buffer_export.is_c_contiguous() {
+        return Err(to_py_err(
+            "registered Python buffer owner must be C-contiguous",
+        ));
+    }
+    let base = buffer_export.buf_ptr() as usize;
+    if let Some(expected) = expected_base
+        && expected != base
+    {
+        return Err(to_py_err(format!(
+            "raw address {expected:#x} does not match its Python buffer owner's base address {base:#x}"
+        )));
+    }
+    if size > buffer_export.len_bytes() {
+        return Err(to_py_err(format!(
+            "registered size {size} exceeds Python buffer owner capacity {}",
+            buffer_export.len_bytes()
+        )));
+    }
+    Ok(PythonMemoryOwner::Buffer(PythonBufferMemoryOwner {
+        base,
+        len: size,
+        _buffer_export: buffer_export,
+    }))
+}
+
 pub(crate) fn get_buffer_ptr(obj: &Bound<'_, PyAny>) -> PyResult<(*mut c_void, usize)> {
-    let buf = PyBuffer::<u8>::get(obj)?;
-    Ok((buf.buf_ptr() as *mut c_void, buf.item_count()))
+    let buffer = export_c_contiguous_buffer(obj, false)?;
+    Ok((buffer.buf_ptr(), buffer.len_bytes()))
+}
+
+fn get_dlpack_ptr(obj: &Bound<'_, PyAny>) -> PyResult<(*mut c_void, usize)> {
+    let owner = DLPackMemoryOwner::from_python(obj, None, None, None)?;
+    Ok((owner.base() as *mut c_void, owner.len()))
 }
 
 pub(crate) fn get_pointer(obj: &Bound<'_, PyAny>) -> PyResult<*mut c_void> {
@@ -231,7 +381,35 @@ pub(crate) fn get_pointer(obj: &Bound<'_, PyAny>) -> PyResult<*mut c_void> {
         }
         return Ok(address as *mut c_void);
     }
-    get_buffer_ptr(obj).map(|(pointer, _)| pointer)
+    match get_buffer_ptr(obj) {
+        Ok((pointer, _)) => Ok(pointer),
+        Err(buffer_error) => {
+            if obj.hasattr("__dlpack__")? {
+                get_dlpack_ptr(obj).map(|(pointer, _)| pointer)
+            } else {
+                Err(buffer_error)
+            }
+        }
+    }
+}
+
+pub(crate) fn get_writable_pointer(obj: &Bound<'_, PyAny>) -> PyResult<*mut c_void> {
+    if let Ok(address) = obj.extract::<usize>() {
+        if address == 0 {
+            return Err(to_py_err("buffer address must not be zero"));
+        }
+        return Ok(address as *mut c_void);
+    }
+    match export_c_contiguous_buffer(obj, true) {
+        Ok(buffer) => Ok(buffer.buf_ptr()),
+        Err(buffer_error) => {
+            if obj.hasattr("__dlpack__")? {
+                get_dlpack_ptr(obj).map(|(pointer, _)| pointer)
+            } else {
+                Err(buffer_error)
+            }
+        }
+    }
 }
 
 fn get_pointer_and_size(
@@ -246,7 +424,16 @@ fn get_pointer_and_size(
         }
         return Ok((address as *mut c_void, size));
     }
-    let (pointer, capacity) = get_buffer_ptr(obj)?;
+    let (pointer, capacity) = match export_c_contiguous_buffer(obj, true) {
+        Ok(buffer) => (buffer.buf_ptr(), buffer.len_bytes()),
+        Err(buffer_error) => {
+            if obj.hasattr("__dlpack__")? {
+                get_dlpack_ptr(obj)?
+            } else {
+                return Err(buffer_error);
+            }
+        }
+    };
     let size = requested_size.unwrap_or(capacity);
     if size > capacity {
         return Err(to_py_err("requested size exceeds Python buffer capacity"));
@@ -254,33 +441,78 @@ fn get_pointer_and_size(
     Ok((pointer, size))
 }
 
-/// Take temporary ownership of the MooncakeClient from its Mutex.
-///
-/// 从 Mutex 中临时取出 MooncakeClient 的所有权。
-///
-/// This is the core concurrency primitive for every method:
-/// 1. Lock the Mutex
-/// 2. Extract the client via Option::take() — leaves None behind
-/// 3. Perform the async operation with exclusive ownership
-/// 4. Place the client back via *inner.lock() = Some(client)
-///
-/// If the client has already been taken (Option is None), returns an error.
-/// This prevents concurrent access: only one operation can hold the client
-/// at any given time.
-///
-/// 这是每个方法使用的核心并发原语：
-/// 1. 锁定 Mutex
-/// 2. 通过 Option::take() 提取客户端 —— 原位留下 None
-/// 3. 以独占所有权执行异步操作
-/// 4. 通过 *inner.lock() = Some(client) 将客户端放回
-///
-/// 如果客户端已被取出（Option 为 None），返回错误。这样可以防止并发访问：
-/// 同一时间只有一个操作可以持有客户端。
-pub(crate) fn take_client(inner: &Arc<Mutex<Option<MooncakeClient>>>) -> PyResult<MooncakeClient> {
-    inner
+fn validate_registered_tensor_destination(
+    slf: &Bound<'_, PythonMooncakeClient>,
+    buffer: &Bound<'_, PyAny>,
+    size: usize,
+) -> PyResult<()> {
+    if buffer.extract::<usize>().is_ok() {
+        return Err(to_py_err(
+            "tensor destination requires an owner-bearing Python buffer",
+        ));
+    }
+    let export = export_c_contiguous_buffer(buffer, true)?;
+    if size > export.len_bytes() {
+        return Err(to_py_err(
+            "tensor destination size exceeds Python buffer capacity",
+        ));
+    }
+    let base = export.buf_ptr() as usize;
+    let registered = slf
+        .borrow()
+        .registered_py_buffers
         .lock()
-        .take()
-        .ok_or_else(|| to_py_err("client already closed"))
+        .iter()
+        .any(|registration| registration.contains_range(base, size));
+    if !registered {
+        return Err(to_py_err(
+            "tensor destination buffer range is not registered with this client",
+        ));
+    }
+    Ok(())
+}
+
+/// Exclusive, cancellation-safe borrow of the shared Rust client.
+///
+/// The client remains inside its lifecycle slot for the entire operation.
+/// Concurrent calls wait on the async mutex; cancelling a future only drops
+/// this guard and can never lose the client value.
+pub(crate) struct ClientOperationGuard {
+    slot: OwnedMutexGuard<Option<MooncakeClient>>,
+}
+
+impl Deref for ClientOperationGuard {
+    type Target = MooncakeClient;
+
+    fn deref(&self) -> &Self::Target {
+        self.slot
+            .as_ref()
+            .expect("operation guard is only created for a live client")
+    }
+}
+
+impl DerefMut for ClientOperationGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.slot
+            .as_mut()
+            .expect("operation guard is only created for a live client")
+    }
+}
+
+pub(crate) async fn take_client(inner: &SharedClient) -> PyResult<ClientOperationGuard> {
+    let slot = Arc::clone(inner).lock_owned().await;
+    if slot.is_none() {
+        return Err(to_py_err("client already closed"));
+    }
+    Ok(ClientOperationGuard { slot })
+}
+
+pub(crate) fn try_client_slot(
+    inner: &SharedClient,
+) -> PyResult<AsyncMutexGuard<'_, Option<MooncakeClient>>> {
+    inner
+        .try_lock()
+        .map_err(|_| to_py_err("client is busy with another operation"))
 }
 
 /// Convert a Vec of ReplicaDescriptor into a Python list of dicts.
@@ -324,6 +556,740 @@ pub(crate) fn replicas_to_py(replicas: Vec<mooncake_store_core::ReplicaDescripto
 
 pub(crate) fn parse_uuid(id: &str) -> PyResult<Uuid> {
     Uuid::parse_str(id).map_err(|e| to_py_err(format!("invalid UUID: {e}")))
+}
+
+fn parse_uuid_list(ids: &[String]) -> PyResult<Vec<Uuid>> {
+    ids.iter().map(|id| parse_uuid(id)).collect()
+}
+
+fn normalize_client_tenant_id(tenant_id: String) -> String {
+    if tenant_id.is_empty() {
+        "default".to_string()
+    } else {
+        tenant_id
+    }
+}
+
+const TENSOR_INVALID_PARAMS_STATUS: i32 = -600;
+const TENSOR_FILE_NOT_FOUND_STATUS: i32 = -1100;
+
+struct ParallelTensorWritePlan {
+    object_key: String,
+    payload: Vec<u8>,
+    manifest: Option<(String, Vec<u8>)>,
+}
+
+struct ParallelTensorFullWritePlan {
+    objects: Vec<(String, Vec<u8>)>,
+    manifest: Option<(String, Vec<u8>)>,
+}
+
+fn indexed_batch_config(
+    mut config: Option<ReplicateConfig>,
+    key_count: usize,
+    original_indices: &[usize],
+) -> PyResult<Option<ReplicateConfig>> {
+    let Some(config) = config.as_mut() else {
+        return Ok(None);
+    };
+    if config.group_ids.is_empty() {
+        return Ok(Some(config.clone()));
+    }
+    if config.group_ids.len() != key_count {
+        return Err(to_py_err("group_ids length must match keys length"));
+    }
+    config.group_ids = original_indices
+        .iter()
+        .map(|&index| config.group_ids[index].clone())
+        .collect();
+    Ok(Some(config.clone()))
+}
+
+fn repeated_indexed_batch_config(
+    mut config: Option<ReplicateConfig>,
+    key_count: usize,
+    original_indices: &[usize],
+    repeat_count: usize,
+) -> PyResult<Option<ReplicateConfig>> {
+    let Some(config) = config.as_mut() else {
+        return Ok(None);
+    };
+    if config.group_ids.is_empty() {
+        return Ok(Some(config.clone()));
+    }
+    if config.group_ids.len() != key_count {
+        return Err(to_py_err("group_ids length must match base keys length"));
+    }
+    config.group_ids = original_indices
+        .iter()
+        .flat_map(|&index| std::iter::repeat(config.group_ids[index].clone()).take(repeat_count))
+        .collect();
+    Ok(Some(config.clone()))
+}
+
+fn tp_parameters(tp_rank: i32, tp_size: i32, split_dim: i32) -> PyResult<(usize, usize, usize)> {
+    let tp_size = usize::try_from(tp_size).map_err(|_| to_py_err("tp_size must be positive"))?;
+    if tp_size == 0 {
+        return Err(to_py_err("tp_size must be positive"));
+    }
+    let tp_rank =
+        usize::try_from(tp_rank).map_err(|_| to_py_err("tp_rank must be non-negative"))?;
+    if tp_rank >= tp_size {
+        return Err(to_py_err("tp_rank must be smaller than tp_size"));
+    }
+    let split_dim =
+        usize::try_from(split_dim).map_err(|_| to_py_err("split_dim must be non-negative"))?;
+    Ok((tp_rank, tp_size, split_dim))
+}
+
+fn tp_shard_key(base_key: &str, rank: usize) -> String {
+    format!("{base_key}_tp_{rank}")
+}
+
+fn tensor_publish_config_is_valid(config: &ReplicateConfig) -> bool {
+    config.preferred_segments.is_empty()
+        || config.preferred_segments.len() == config.replica_num as usize
+}
+
+fn parallel_tensor_write_plan(
+    key: &str,
+    tensor: &Bound<'_, PyAny>,
+    parallelism: Option<&TensorParallelismPy>,
+    writer_partition: Option<&WriterPartitionPy>,
+) -> PyResult<ParallelTensorWritePlan> {
+    match (parallelism, writer_partition) {
+        (Some(_), Some(_)) => Err(to_py_err(
+            "writer_partition cannot be combined with parallelism",
+        )),
+        (None, None) => Ok(ParallelTensorWritePlan {
+            object_key: key.to_string(),
+            payload: crate::tensor_codec::serialize_tensor_payload(tensor)?,
+            manifest: None,
+        }),
+        (Some(parallelism), None) => {
+            let mut payloads =
+                crate::tensor_codec::serialize_parallel_tensor_payloads(tensor, parallelism)?;
+            let (resolved_parallelism, payload, manifest) = payloads
+                .pop()
+                .ok_or_else(|| to_py_err("parallel tensor write produced no payload"))?;
+            if !payloads.is_empty() {
+                return Err(to_py_err(
+                    "parallel tensor write unexpectedly produced multiple payloads",
+                ));
+            }
+            let manifest = manifest
+                .map(|manifest| Ok((parallelism_manifest_key(key), manifest.encode()?.to_vec())))
+                .transpose()?;
+            Ok(ParallelTensorWritePlan {
+                object_key: parallelism_key(key, &resolved_parallelism)?,
+                payload,
+                manifest,
+            })
+        }
+        (None, Some(writer)) => {
+            let (payload, manifest) =
+                crate::tensor_codec::serialize_writer_partition_payload(tensor, writer)?;
+            Ok(ParallelTensorWritePlan {
+                object_key: writer_shard_key(key, writer),
+                payload,
+                manifest: Some((writer_manifest_key(key), manifest.encode()?.to_vec())),
+            })
+        }
+    }
+}
+
+fn parallel_tensor_full_write_plan(
+    key: &str,
+    tensor: &Bound<'_, PyAny>,
+    parallelism: Option<&TensorParallelismPy>,
+    writer_partition: Option<&WriterPartitionPy>,
+) -> PyResult<ParallelTensorFullWritePlan> {
+    match (parallelism, writer_partition) {
+        (Some(_), Some(_)) => Err(to_py_err(
+            "writer_partition cannot be combined with parallelism",
+        )),
+        (None, None) => Ok(ParallelTensorFullWritePlan {
+            objects: vec![(
+                key.to_string(),
+                crate::tensor_codec::serialize_tensor_payload(tensor)?,
+            )],
+            manifest: None,
+        }),
+        (Some(parallelism), None) => {
+            let (payloads, manifest) =
+                crate::tensor_codec::serialize_parallel_full_tensor_payloads(tensor, parallelism)?;
+            let objects = payloads
+                .into_iter()
+                .map(|(parallelism, payload)| Ok((parallelism_key(key, &parallelism)?, payload)))
+                .collect::<PyResult<Vec<_>>>()?;
+            let manifest = manifest
+                .map(|manifest| Ok((parallelism_manifest_key(key), manifest.encode()?.to_vec())))
+                .transpose()?;
+            Ok(ParallelTensorFullWritePlan { objects, manifest })
+        }
+        (None, Some(writer)) => {
+            let (payload, manifest) =
+                crate::tensor_codec::serialize_writer_partition_payload(tensor, writer)?;
+            Ok(ParallelTensorFullWritePlan {
+                objects: vec![(writer_shard_key(key, writer), payload)],
+                manifest: Some((writer_manifest_key(key), manifest.encode()?.to_vec())),
+            })
+        }
+    }
+}
+
+fn expanded_single_key_config(
+    mut config: Option<ReplicateConfig>,
+    object_count: usize,
+) -> PyResult<Option<ReplicateConfig>> {
+    let Some(config) = config.as_mut() else {
+        return Ok(None);
+    };
+    if config.group_ids.is_empty() {
+        return Ok(Some(config.clone()));
+    }
+    if config.group_ids.len() != 1 {
+        return Err(to_py_err(
+            "single tensor parallel request accepts exactly one group_id",
+        ));
+    }
+    config.group_ids = std::iter::repeat(config.group_ids[0].clone())
+        .take(object_count)
+        .collect();
+    Ok(Some(config.clone()))
+}
+
+fn optional_parallelism(value: &Bound<'_, PyAny>) -> PyResult<Option<TensorParallelismPy>> {
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract().map(Some)
+    }
+}
+
+fn optional_writer_partition(value: &Bound<'_, PyAny>) -> PyResult<Option<WriterPartitionPy>> {
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract().map(Some)
+    }
+}
+
+#[derive(Clone)]
+struct ParallelTensorReadCandidate {
+    key: String,
+    expected_parallelism: Option<TensorParallelismPy>,
+}
+
+#[derive(Clone)]
+enum ParallelTensorReadPlan {
+    Direct {
+        base_key: String,
+        candidates: Vec<ParallelTensorReadCandidate>,
+        reconstruct_shard: Option<TensorParallelismPy>,
+    },
+    Full {
+        base_key: String,
+        manifest_key: String,
+        parallelism: Option<TensorParallelismPy>,
+    },
+}
+
+enum ParallelTensorReadMaterialization {
+    Single(Vec<u8>),
+    Concat {
+        payloads: Vec<Vec<u8>>,
+        split_dim: usize,
+    },
+}
+
+struct ParallelFullReadSources {
+    payloads: Vec<Vec<u8>>,
+    split_dim: usize,
+    global_shape: Vec<i64>,
+}
+
+fn tp_compatible_parallelism(
+    requested: &TensorParallelismPy,
+    stored: &TensorParallelismPy,
+    expected_tp_rank: Option<i32>,
+    expected_tp_size: Option<i32>,
+) -> PyResult<bool> {
+    let requested = requested.validated_canonical(false)?;
+    let stored = stored.validated_canonical(false)?;
+    if requested.axes.len() != stored.axes.len() {
+        return Ok(false);
+    }
+    for (requested_axis, stored_axis) in requested.axes.iter().zip(&stored.axes) {
+        let requested_kind = requested_axis.parsed_kind()?;
+        if requested_kind != stored_axis.parsed_kind()? {
+            return Ok(false);
+        }
+        if requested_kind == AxisKind::Tp {
+            if requested_axis.split_dim != stored_axis.split_dim
+                || requested_axis.expert_id != stored_axis.expert_id
+                || requested_axis.stage_id != stored_axis.stage_id
+                || expected_tp_rank.is_some_and(|rank| stored_axis.rank != rank)
+                || expected_tp_size.is_some_and(|size| stored_axis.size != size)
+            {
+                return Ok(false);
+            }
+        } else if requested_axis != stored_axis {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn load_parallel_full_sources_without_manifest(
+    client: &mut MooncakeClient,
+    base_key: &str,
+    parallelism: &TensorParallelismPy,
+) -> PyResult<Option<ParallelFullReadSources>> {
+    let parallelism = parallelism.validated_canonical(false)?;
+    let Some(tp_axis_index) = parallelism.tp_axis_index()? else {
+        return Ok(None);
+    };
+    let requested_tp = &parallelism.axes[tp_axis_index];
+    let mut first_parallelism = parallelism.clone();
+    first_parallelism.axes[tp_axis_index].rank = 0;
+    let first_key = parallelism_key(base_key, &first_parallelism)?;
+    let first_payload = client
+        .batch_get(&[first_key])
+        .await
+        .map_err(to_py_err)?
+        .into_iter()
+        .next()
+        .flatten();
+    let Some(first_payload) = first_payload else {
+        return Ok(None);
+    };
+    let first_stored = match crate::tensor_codec::tensor_payload_parallelism(&first_payload) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    if !tp_compatible_parallelism(&parallelism, &first_stored, Some(0), None)? {
+        return Ok(None);
+    }
+    let Some(stored_tp_index) = first_stored.tp_axis_index()? else {
+        return Ok(None);
+    };
+    let stored_tp = &first_stored.axes[stored_tp_index];
+    let legacy_single_tp = parallelism.axes.len() == 1;
+    let shard_count = if legacy_single_tp {
+        stored_tp.size
+    } else {
+        requested_tp.size
+    };
+    if shard_count <= 0
+        || (!legacy_single_tp && stored_tp.size != shard_count)
+        || requested_tp.split_dim != stored_tp.split_dim
+    {
+        return Ok(None);
+    }
+    let split_dim = usize::try_from(
+        stored_tp
+            .split_dim
+            .ok_or_else(|| to_py_err("stored TP shard is missing split_dim"))?,
+    )
+    .map_err(to_py_err)?;
+    let global_shape = crate::tensor_codec::tensor_payload_global_shape(&first_payload)?;
+    if split_dim >= global_shape.len()
+        || global_shape[split_dim] < 0
+        || global_shape[split_dim] % i64::from(requested_tp.size) != 0
+        || global_shape[split_dim] % i64::from(shard_count) != 0
+    {
+        return Ok(None);
+    }
+
+    let mut shard_keys = Vec::with_capacity(usize::try_from(shard_count).map_err(to_py_err)?);
+    for rank in 0..shard_count {
+        let mut shard_parallelism = parallelism.clone();
+        shard_parallelism.axes[tp_axis_index].rank = rank;
+        shard_parallelism.axes[tp_axis_index].size = shard_count;
+        shard_keys.push(parallelism_key(base_key, &shard_parallelism)?);
+    }
+    let payloads = client.batch_get(&shard_keys).await.map_err(to_py_err)?;
+    let Some(payloads) = payloads.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    for (rank, payload) in payloads.iter().enumerate() {
+        if crate::tensor_codec::tensor_payload_global_shape(payload)? != global_shape {
+            return Ok(None);
+        }
+        let stored = match crate::tensor_codec::tensor_payload_parallelism(payload) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        if !tp_compatible_parallelism(
+            &parallelism,
+            &stored,
+            Some(i32::try_from(rank).map_err(to_py_err)?),
+            Some(shard_count),
+        )? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(ParallelFullReadSources {
+        payloads,
+        split_dim,
+        global_shape,
+    }))
+}
+
+fn reconstruct_requested_parallel_shard(
+    py: Python<'_>,
+    sources: ParallelFullReadSources,
+    parallelism: &TensorParallelismPy,
+) -> PyResult<ParallelTensorReadMaterialization> {
+    let parallelism = parallelism.validated_canonical(false)?;
+    let tp_axis_index = parallelism
+        .tp_axis_index()?
+        .ok_or_else(|| to_py_err("requested shard reconstruction requires a TP axis"))?;
+    let tp_axis = &parallelism.axes[tp_axis_index];
+    let global_extent = usize::try_from(sources.global_shape[sources.split_dim])
+        .map_err(|_| to_py_err("parallel tensor global extent is negative"))?;
+    let shard_count = usize::try_from(tp_axis.size).map_err(to_py_err)?;
+    let rank = usize::try_from(tp_axis.rank).map_err(to_py_err)?;
+    if shard_count == 0 || global_extent % shard_count != 0 {
+        return Err(to_py_err(
+            "requested TP layout does not uniformly divide the stored tensor",
+        ));
+    }
+    let local_extent = global_extent / shard_count;
+    let start = rank
+        .checked_mul(local_extent)
+        .ok_or_else(|| to_py_err("requested TP shard offset overflows usize"))?;
+    let full = crate::tensor_codec::deserialize_tensor_payloads_concat(
+        py,
+        &sources.payloads,
+        sources.split_dim,
+    )?;
+    let shard = full
+        .bind(py)
+        .call_method1("narrow", (sources.split_dim, start, local_extent))?
+        .call_method0("contiguous")?;
+    let mut payloads =
+        crate::tensor_codec::serialize_parallel_tensor_payloads(&shard, &parallelism)?;
+    let (_, payload, _) = payloads
+        .pop()
+        .ok_or_else(|| to_py_err("requested TP shard serialization produced no payload"))?;
+    Ok(ParallelTensorReadMaterialization::Single(payload))
+}
+
+async fn load_parallel_full_sources_from_manifest(
+    client: &mut MooncakeClient,
+    base_key: &str,
+    manifest_payload: &[u8],
+    parallelism: Option<&TensorParallelismPy>,
+) -> PyResult<Option<ParallelFullReadSources>> {
+    let Ok(manifest) = ShardManifest::decode(manifest_payload) else {
+        return Ok(None);
+    };
+    let (shard_keys, expected_parallelisms) = if let Some(parallelism) = parallelism {
+        let parallelism = parallelism.validated_canonical(false)?;
+        let Some(tp_axis_index) = parallelism.tp_axis_index()? else {
+            return Ok(None);
+        };
+        let requested_tp = &parallelism.axes[tp_axis_index];
+        if requested_tp
+            .split_dim
+            .is_some_and(|split_dim| usize::try_from(split_dim).ok() != Some(manifest.split_dim))
+            || manifest.split_dim >= manifest.global_shape.len()
+            || manifest.global_shape[manifest.split_dim] < 0
+            || manifest.global_shape[manifest.split_dim] % i64::from(requested_tp.size) != 0
+            || manifest.global_shape[manifest.split_dim]
+                % i64::try_from(manifest.shard_count).map_err(to_py_err)?
+                != 0
+        {
+            return Ok(None);
+        }
+        let manifest_size = i32::try_from(manifest.shard_count).map_err(to_py_err)?;
+        let mut keys = Vec::with_capacity(manifest.shard_count);
+        let mut expected = Vec::with_capacity(manifest.shard_count);
+        for rank in 0..manifest.shard_count {
+            let mut shard_parallelism = parallelism.clone();
+            shard_parallelism.axes[tp_axis_index].rank = i32::try_from(rank).map_err(to_py_err)?;
+            shard_parallelism.axes[tp_axis_index].size = manifest_size;
+            keys.push(parallelism_key(base_key, &shard_parallelism)?);
+            expected.push(shard_parallelism);
+        }
+        (keys, expected)
+    } else {
+        let size = i32::try_from(manifest.shard_count).map_err(to_py_err)?;
+        let split_dim = i32::try_from(manifest.split_dim).map_err(to_py_err)?;
+        let mut keys = Vec::with_capacity(manifest.shard_count);
+        let mut expected = Vec::with_capacity(manifest.shard_count);
+        for rank in 0..manifest.shard_count {
+            let rank = i32::try_from(rank).map_err(to_py_err)?;
+            keys.push(writer_shard_key(
+                base_key,
+                &WriterPartitionPy {
+                    rank,
+                    size,
+                    split_dim,
+                },
+            ));
+            expected.push(TensorParallelismPy {
+                axes: vec![ParallelAxisPy {
+                    kind: "tp".to_string(),
+                    rank,
+                    size,
+                    split_dim: Some(split_dim),
+                    expert_id: None,
+                    stage_id: None,
+                }],
+            });
+        }
+        (keys, expected)
+    };
+    let payloads = client.batch_get(&shard_keys).await.map_err(to_py_err)?;
+    let Some(payloads) = payloads.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    if payloads
+        .iter()
+        .zip(&expected_parallelisms)
+        .any(|(payload, expected)| {
+            if !crate::tensor_codec::tensor_payload_matches_parallelism(payload, expected) {
+                return true;
+            }
+            match crate::tensor_codec::tensor_payload_global_shape(payload) {
+                Ok(shape) => shape != manifest.global_shape,
+                Err(_) => true,
+            }
+        })
+    {
+        return Ok(None);
+    }
+    Ok(Some(ParallelFullReadSources {
+        payloads,
+        split_dim: manifest.split_dim,
+        global_shape: manifest.global_shape,
+    }))
+}
+
+fn parallel_tensor_read_plan(
+    key: &str,
+    target: Option<&ReadTargetPy>,
+) -> PyResult<Option<ParallelTensorReadPlan>> {
+    let Some(target) = target else {
+        return Ok(Some(ParallelTensorReadPlan::Direct {
+            base_key: key.to_string(),
+            candidates: vec![ParallelTensorReadCandidate {
+                key: key.to_string(),
+                expected_parallelism: None,
+            }],
+            reconstruct_shard: None,
+        }));
+    };
+    match target.mode_name() {
+        "as_stored" if target.parallelism.is_none() => Ok(Some(ParallelTensorReadPlan::Direct {
+            base_key: key.to_string(),
+            candidates: vec![ParallelTensorReadCandidate {
+                key: key.to_string(),
+                expected_parallelism: None,
+            }],
+            reconstruct_shard: None,
+        })),
+        "as_stored" => Ok(None),
+        "shard" => {
+            let Some(parallelism) = target.parallelism.as_ref() else {
+                return Ok(None);
+            };
+            let parallelism = parallelism.validated(false)?;
+            let mut candidates = vec![ParallelTensorReadCandidate {
+                key: parallelism_key(key, &parallelism)?,
+                expected_parallelism: Some(parallelism.clone()),
+            }];
+            if parallelism.axes.len() == 1 && parallelism.tp_axis_index()?.is_some() {
+                let axis = &parallelism.axes[0];
+                candidates.push(ParallelTensorReadCandidate {
+                    key: writer_shard_key(
+                        key,
+                        &WriterPartitionPy {
+                            rank: axis.rank,
+                            size: axis.size,
+                            split_dim: axis.split_dim.unwrap_or(0),
+                        },
+                    ),
+                    expected_parallelism: Some(parallelism),
+                });
+            }
+            candidates.dedup_by(|left, right| left.key == right.key);
+            Ok(Some(ParallelTensorReadPlan::Direct {
+                base_key: key.to_string(),
+                candidates,
+                reconstruct_shard: parallelism
+                    .tp_axis_index()?
+                    .is_some()
+                    .then_some(parallelism),
+            }))
+        }
+        "full" => {
+            let parallelism = match target.parallelism.as_ref() {
+                Some(parallelism) => {
+                    let parallelism = parallelism.validated(false)?;
+                    if parallelism.tp_axis_index()?.is_none() {
+                        return Ok(None);
+                    }
+                    Some(parallelism)
+                }
+                None => None,
+            };
+            Ok(Some(ParallelTensorReadPlan::Full {
+                base_key: key.to_string(),
+                manifest_key: if parallelism.is_some() {
+                    parallelism_manifest_key(key)
+                } else {
+                    writer_manifest_key(key)
+                },
+                parallelism,
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+async fn execute_parallel_tensor_read(
+    client: &mut MooncakeClient,
+    plan: ParallelTensorReadPlan,
+) -> PyResult<Option<ParallelTensorReadMaterialization>> {
+    match plan {
+        ParallelTensorReadPlan::Direct {
+            base_key,
+            candidates,
+            reconstruct_shard,
+        } => {
+            let keys = candidates
+                .iter()
+                .map(|candidate| candidate.key.clone())
+                .collect::<Vec<_>>();
+            let payloads = client.batch_get(&keys).await.map_err(to_py_err)?;
+            for (candidate, payload) in candidates.into_iter().zip(payloads) {
+                let Some(payload) = payload else {
+                    continue;
+                };
+                if candidate
+                    .expected_parallelism
+                    .as_ref()
+                    .is_none_or(|expected| {
+                        crate::tensor_codec::tensor_payload_matches_parallelism(&payload, expected)
+                    })
+                {
+                    return Ok(Some(ParallelTensorReadMaterialization::Single(payload)));
+                }
+            }
+            if let Some(parallelism) = reconstruct_shard {
+                let manifest_payload = client
+                    .batch_get(&[parallelism_manifest_key(&base_key)])
+                    .await
+                    .map_err(to_py_err)?
+                    .into_iter()
+                    .next()
+                    .flatten();
+                let mut sources = match manifest_payload {
+                    Some(payload) => {
+                        load_parallel_full_sources_from_manifest(
+                            client,
+                            &base_key,
+                            &payload,
+                            Some(&parallelism),
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                if sources.is_none() {
+                    sources = load_parallel_full_sources_without_manifest(
+                        client,
+                        &base_key,
+                        &parallelism,
+                    )
+                    .await?;
+                }
+                let Some(sources) = sources else {
+                    return Ok(None);
+                };
+                return Python::attach(|py| {
+                    reconstruct_requested_parallel_shard(py, sources, &parallelism).map(Some)
+                });
+            }
+            Ok(None)
+        }
+        ParallelTensorReadPlan::Full {
+            base_key,
+            manifest_key,
+            parallelism,
+        } => {
+            let manifest_payload = client
+                .batch_get(&[manifest_key])
+                .await
+                .map_err(to_py_err)?
+                .into_iter()
+                .next()
+                .flatten();
+            let mut sources = match manifest_payload {
+                Some(payload) => {
+                    load_parallel_full_sources_from_manifest(
+                        client,
+                        &base_key,
+                        &payload,
+                        parallelism.as_ref(),
+                    )
+                    .await?
+                }
+                None => None,
+            };
+            if sources.is_none()
+                && let Some(parallelism) = parallelism.as_ref()
+            {
+                sources =
+                    load_parallel_full_sources_without_manifest(client, &base_key, parallelism)
+                        .await?;
+            }
+            Ok(
+                sources.map(|sources| ParallelTensorReadMaterialization::Concat {
+                    payloads: sources.payloads,
+                    split_dim: sources.split_dim,
+                }),
+            )
+        }
+    }
+}
+
+fn materialize_parallel_tensor_read(
+    py: Python<'_>,
+    materialization: Option<ParallelTensorReadMaterialization>,
+) -> Py<PyAny> {
+    let result = match materialization {
+        Some(ParallelTensorReadMaterialization::Single(payload)) => {
+            crate::tensor_codec::deserialize_tensor_bytes(py, &payload)
+        }
+        Some(ParallelTensorReadMaterialization::Concat {
+            payloads,
+            split_dim,
+        }) => crate::tensor_codec::deserialize_tensor_payloads_concat(py, &payloads, split_dim),
+        None => return py.None(),
+    };
+    result.unwrap_or_else(|_| py.None())
+}
+
+fn parallel_tensor_read_payload(
+    py: Python<'_>,
+    materialization: ParallelTensorReadMaterialization,
+) -> PyResult<Vec<u8>> {
+    match materialization {
+        ParallelTensorReadMaterialization::Single(payload) => Ok(payload),
+        ParallelTensorReadMaterialization::Concat {
+            payloads,
+            split_dim,
+        } => {
+            let tensor =
+                crate::tensor_codec::deserialize_tensor_payloads_concat(py, &payloads, split_dim)?;
+            crate::tensor_codec::serialize_tensor_payload(tensor.bind(py))
+        }
+    }
 }
 
 fn nof_segment_from_dict(d: &Bound<'_, PyDict>) -> PyResult<NoFSegment> {
@@ -371,18 +1337,16 @@ fn nof_segment_from_dict(d: &Bound<'_, PyDict>) -> PyResult<NoFSegment> {
 //   2. Clone the Arc<Mutex<...>> so the future owns its own reference
 //      (克隆 Arc<Mutex<...>> 让 future 拥有自己的引用)
 //   3. Call future_into_py(py, async move { ... })
-//   4. Inside the async block: take_client(), call the Rust method,
-//      put the client back, return a Rust type (not PyObject)
-//      (在 async 块内: take_client(), 调用 Rust 方法, 放回 client,
-//       返回 Rust 类型而非 PyObject)
+//   4. Inside the async block: await take_client(), call the Rust method,
+//      then return a Rust type (not PyObject). Dropping the guard releases
+//      the client for the next waiter.
 //
 // Convention for every sync/block_on method (每个 sync/block_on 方法的约定):
 //   1. Extract buffer pointers while GIL is held
 //      (在持有 GIL 时提取 buffer 指针)
 //   2. Clone the Arc<Mutex<...>>
 //   3. Call tokio::runtime::Handle::current().block_on(async { ... })
-//   4. Same take_client / put-back pattern inside the async block
-//      (在 async 块内部使用相同的 take_client / 放回模式)
+//   4. Use the same cancellation-safe async client guard.
 
 #[pymethods]
 impl PythonMooncakeClient {
@@ -407,6 +1371,8 @@ impl PythonMooncakeClient {
     ///   local_buffer_size:   Size of local buffer pool. 默认 256 MiB。
     ///   remote_config:    Optional S3 / LocalFS remote source for prefetch.
     ///                     可选的 S3 / LocalFS 远程源配置，用于预取。
+    ///   tenant_id:       Default tenant for all convenience KV operations.
+    ///                    Empty input is normalized to the canonical default tenant.
     ///   enable_client_http_server: Enable /health and /metrics endpoints.
     ///   client_http_port: Port for the optional client HTTP server. 默认 9300。
     #[staticmethod]
@@ -421,6 +1387,7 @@ impl PythonMooncakeClient {
         remote_config = None::<PyRemoteSourceConfig>,
         enable_client_http_server = false,
         client_http_port = 9300,
+        tenant_id = String::from("default"),
     ))]
     fn create<'py>(
         py: Python<'py>,
@@ -434,6 +1401,7 @@ impl PythonMooncakeClient {
         remote_config: Option<PyRemoteSourceConfig>,
         enable_client_http_server: bool,
         client_http_port: u16,
+        tenant_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         use mooncake_store_client::LocalFsSource;
 
@@ -455,6 +1423,7 @@ impl PythonMooncakeClient {
         };
         let http_config =
             normalize_client_http_config(enable_client_http_server, client_http_port)?;
+        let tenant_id = normalize_client_tenant_id(tenant_id);
 
         // future_into_py: the async block runs on the tokio runtime, then
         // the returned PythonMooncakeClient is converted into a Python object
@@ -462,7 +1431,7 @@ impl PythonMooncakeClient {
         // future_into_py: async 块在 tokio runtime 上执行，返回的
         // PythonMooncakeClient 在 GIL 持有下转换为 Python 对象。
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = MooncakeClient::create_with_http_config(
+            let mut client = MooncakeClient::create_with_http_config_for_tenant(
                 &normalized.master_server_addr,
                 &normalized.metadata_server,
                 &normalized.local_hostname,
@@ -470,6 +1439,7 @@ impl PythonMooncakeClient {
                 &device,
                 gss,
                 lbs,
+                &tenant_id,
                 http_config,
             )
             .await
@@ -511,8 +1481,14 @@ impl PythonMooncakeClient {
             // MooncakeClient object via IntoPy.
             // 返回 Rust 结构体 —— future_into_py 通过 IntoPy 将其转换为
             // Python MooncakeClient 对象。
+            let inner = Arc::new(AsyncMutex::new(Some(client)));
+            let background_handle = MooncakeClient::start_background_workers(
+                Arc::clone(&inner),
+                ClientBackgroundConfig::default(),
+            );
             Ok(PythonMooncakeClient {
-                inner: Arc::new(Mutex::new(Some(client))),
+                inner,
+                background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
             })
         })
@@ -539,10 +1515,201 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.put(&key, &data, cfg).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
+        })
+    }
+
+    /// Store a CPU PyTorch tensor using the audited TensorMetadata v1
+    /// payload. Accelerator tensors fail closed in the codec.
+    #[pyo3(signature = (key, tensor, config = None))]
+    fn put_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let payload = crate::tensor_codec::serialize_tensor_payload(&tensor)?;
+        let cfg = config.map(|c| c.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.put(&key, &payload, cfg).await;
+            result.map(|()| 0).map_err(to_py_err)
+        })
+    }
+
+    /// C++ `pub_tensor`: tensor put with an explicit replication config.
+    #[pyo3(signature = (key, tensor, config = None))]
+    fn pub_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(&value.borrow().to_core()))
+        {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+            });
+        }
+        Self::put_tensor(slf, py, key, tensor, config)
+    }
+
+    /// Write one full tensor, requested parallel shard, or writer partition
+    /// using the C++ integration key and manifest conventions.
+    #[pyo3(signature = (key, tensor, parallelism = None, config = None, writer_partition = None))]
+    fn put_tensor_with_parallelism<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        parallelism: Option<Bound<'py, TensorParallelismPy>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+        writer_partition: Option<Bound<'py, WriterPartitionPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parallelism = parallelism.map(|value| value.borrow().clone());
+        let writer_partition = writer_partition.map(|value| value.borrow().clone());
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(value))
+        {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+            });
+        }
+        let plan = match parallel_tensor_write_plan(
+            &key,
+            &tensor,
+            parallelism.as_ref(),
+            writer_partition.as_ref(),
+        ) {
+            Ok(plan) => plan,
+            Err(_) => {
+                return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+                });
+            }
+        };
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                client
+                    .put(&plan.object_key, &plan.payload, config.clone())
+                    .await?;
+                if let Some((manifest_key, manifest)) = plan.manifest {
+                    client.put(&manifest_key, &manifest, config).await?;
+                }
+                Ok::<_, mooncake_store_core::StoreError>(0)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Split a CPU tensor uniformly and store every TP shard under the C++
+    /// legacy `{key}_tp_{rank}` naming convention.
+    #[pyo3(signature = (key, tensor, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn put_tensor_with_tp<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (_tp_rank, tp_size, split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        let payloads =
+            match crate::tensor_codec::serialize_tp_tensor_payloads(&tensor, tp_size, split_dim) {
+                Ok(payloads) => payloads,
+                Err(_) => {
+                    return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                        Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+                    });
+                }
+            };
+        let keys = if tp_size == 1 {
+            vec![key]
+        } else {
+            (0..tp_size).map(|rank| tp_shard_key(&key, rank)).collect()
+        };
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let slices = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&keys, &slices, None).await;
+            let statuses = result.map_err(to_py_err)?;
+            Ok(statuses
+                .into_iter()
+                .find(|status| *status != 0)
+                .unwrap_or(0))
+        })
+    }
+
+    /// C++ `pub_tensor_with_tp`: configurable legacy-TP tensor publish.
+    #[pyo3(signature = (key, tensor, config = None, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn pub_tensor_with_tp<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (_tp_rank, tp_size, split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(value))
+        {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+            });
+        }
+        let payloads =
+            match crate::tensor_codec::serialize_tp_tensor_payloads(&tensor, tp_size, split_dim) {
+                Ok(payloads) => payloads,
+                Err(_) => {
+                    return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                        Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+                    });
+                }
+            };
+        let keys = if tp_size == 1 {
+            vec![key]
+        } else {
+            (0..tp_size).map(|rank| tp_shard_key(&key, rank)).collect()
+        };
+        if config
+            .as_ref()
+            .is_some_and(|value| !value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+            });
+        }
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let slices = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&keys, &slices, config).await;
+            let statuses = result.map_err(to_py_err)?;
+            Ok(statuses
+                .into_iter()
+                .find(|status| *status != 0)
+                .unwrap_or(0))
         })
     }
 
@@ -565,10 +1732,9 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.put_parts(&key, &slices, cfg).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -586,12 +1752,81 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.get(&key).await;
-            *inner.lock() = Some(client);
             // Return Rust type — future_into_py handles IntoPy conversion with GIL
             // 返回 Rust 类型 —— future_into_py 在持有 GIL 时处理 IntoPy 转换
             result.map_err(to_py_err)
+        })
+    }
+
+    /// Read and materialize a TensorMetadata v1 payload as a CPU PyTorch
+    /// tensor. Metadata validation happens after the Store read completes.
+    fn get_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.get(&key).await;
+            let payload = result.map_err(to_py_err)?;
+            Python::attach(|py| crate::tensor_codec::deserialize_tensor_bytes(py, &payload))
+        })
+    }
+
+    /// Read the current rank's legacy TP shard.
+    #[pyo3(signature = (key, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn get_tensor_with_tp<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (tp_rank, tp_size, _split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        let read_key = if tp_size == 1 {
+            key
+        } else {
+            tp_shard_key(&key, tp_rank)
+        };
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.get(&read_key).await;
+            let payload = result.map_err(to_py_err)?;
+            Python::attach(|py| crate::tensor_codec::deserialize_tensor_bytes(py, &payload))
+        })
+    }
+
+    /// Read an as-stored tensor, one requested shard, or reconstruct a full
+    /// tensor from writer/parallelism shards.
+    #[pyo3(signature = (key, target = None))]
+    fn get_tensor_with_parallelism<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        target: Option<Bound<'py, ReadTargetPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let target = target.map(|value| value.borrow().clone());
+        let plan = parallel_tensor_read_plan(&key, target.as_ref())
+            .ok()
+            .flatten();
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let Some(plan) = plan else {
+                return Ok(Python::attach(|py| py.None()));
+            };
+            let mut client = take_client(&inner).await?;
+            let result = execute_parallel_tensor_read(&mut client, plan).await;
+            let materialization = result?;
+            Ok(Python::attach(|py| {
+                materialize_parallel_tensor_read(py, materialization)
+            }))
         })
     }
 
@@ -609,9 +1844,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.remove(&key, force).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -626,9 +1860,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.exists(&key).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -652,11 +1885,356 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.batch_put(&keys, &slices, cfg).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
+        })
+    }
+
+    /// Store multiple CPU PyTorch tensors with one batch Store lifecycle.
+    ///
+    /// Invalid tensors receive the C++ `INVALID_PARAMS` status while valid
+    /// entries continue through the existing Client batch state machine.
+    #[pyo3(signature = (keys, tensors, config = None))]
+    fn batch_put_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if keys.len() != tensors.len() {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let mut statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+        let mut valid_keys = Vec::new();
+        let mut valid_payloads = Vec::new();
+        let mut original_indices = Vec::new();
+        for (index, tensor) in tensors.iter().enumerate() {
+            if let Ok(payload) = crate::tensor_codec::serialize_tensor_payload(tensor) {
+                valid_keys.push(keys[index].clone());
+                valid_payloads.push(payload);
+                original_indices.push(index);
+            }
+        }
+        let indexed_config = indexed_batch_config(config, keys.len(), &original_indices)?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if valid_keys.is_empty() {
+                return Ok(statuses);
+            }
+            let mut client = take_client(&inner).await?;
+            let slices = valid_payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&valid_keys, &slices, indexed_config).await;
+            let valid_statuses = result.map_err(to_py_err)?;
+            for (original_index, status) in original_indices.into_iter().zip(valid_statuses) {
+                statuses[original_index] = status;
+            }
+            Ok(statuses)
+        })
+    }
+
+    /// C++ `batch_pub_tensor`: batch tensor put with replication config.
+    #[pyo3(signature = (keys, tensors, config = None))]
+    fn batch_pub_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(&value.borrow().to_core()))
+        {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+        Self::batch_put_tensor(slf, py, keys, tensors, config)
+    }
+
+    /// Batch variant of `put_tensor_with_parallelism`. C++ executes requested
+    /// parallelism/writer entries independently, so each key retains its own
+    /// status and group id.
+    #[pyo3(signature = (
+        keys,
+        tensors,
+        parallelisms = None,
+        config = None,
+        writer_partitions = None
+    ))]
+    fn batch_put_tensor_with_parallelism<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        parallelisms: Option<Vec<Bound<'py, PyAny>>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+        writer_partitions: Option<Vec<Bound<'py, PyAny>>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if parallelisms.is_none() && writer_partitions.is_none() {
+            return Self::batch_put_tensor(slf, py, keys, tensors, config);
+        }
+        if keys.len() != tensors.len()
+            || parallelisms
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || writer_partitions
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || (parallelisms.is_some() && writer_partitions.is_some())
+        {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+        let config = config.map(|value| value.borrow().to_core());
+        if config.as_ref().is_some_and(|value| {
+            !tensor_publish_config_is_valid(value)
+                || (!value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        }) {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let mut statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+        let mut plans = Vec::with_capacity(keys.len());
+        for index in 0..keys.len() {
+            let parallelism = match parallelisms.as_ref() {
+                Some(values) => match optional_parallelism(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let writer = match writer_partitions.as_ref() {
+                Some(values) => match optional_writer_partition(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let plan = parallel_tensor_write_plan(
+                &keys[index],
+                &tensors[index],
+                parallelism.as_ref(),
+                writer.as_ref(),
+            )
+            .ok();
+            plans.push(plan);
+        }
+        let per_key_configs = (0..keys.len())
+            .map(|index| indexed_batch_config(config.clone(), keys.len(), &[index]))
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                for (index, plan) in plans.into_iter().enumerate() {
+                    let Some(plan) = plan else {
+                        continue;
+                    };
+                    let object_keys = [plan.object_key];
+                    let object_payloads = [plan.payload];
+                    let object_slices = [object_payloads[0].as_slice()];
+                    let mut result = client
+                        .batch_put(&object_keys, &object_slices, per_key_configs[index].clone())
+                        .await?;
+                    let mut status = result.pop().unwrap_or(TENSOR_INVALID_PARAMS_STATUS);
+                    if status == 0 {
+                        if let Some((manifest_key, manifest)) = plan.manifest {
+                            let manifest_keys = [manifest_key];
+                            let manifests = [manifest];
+                            let manifest_slices = [manifests[0].as_slice()];
+                            status = client
+                                .batch_put(
+                                    &manifest_keys,
+                                    &manifest_slices,
+                                    per_key_configs[index].clone(),
+                                )
+                                .await?
+                                .into_iter()
+                                .next()
+                                .unwrap_or(TENSOR_INVALID_PARAMS_STATUS);
+                        }
+                    }
+                    statuses[index] = status;
+                }
+                Ok::<_, mooncake_store_core::StoreError>(statuses)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Batch legacy-TP tensor write. Each base-key status is successful only
+    /// when every generated shard commits.
+    #[pyo3(signature = (base_keys, tensors, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn batch_put_tensor_with_tp<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        base_keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (_tp_rank, tp_size, split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        if base_keys.len() != tensors.len() {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let mut final_statuses = vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()];
+        let mut shard_keys = Vec::new();
+        let mut shard_payloads = Vec::new();
+        let mut processed_indices = Vec::new();
+        for (index, tensor) in tensors.iter().enumerate() {
+            let Ok(payloads) =
+                crate::tensor_codec::serialize_tp_tensor_payloads(tensor, tp_size, split_dim)
+            else {
+                continue;
+            };
+            processed_indices.push(index);
+            for (rank, payload) in payloads.into_iter().enumerate() {
+                shard_keys.push(if tp_size == 1 {
+                    base_keys[index].clone()
+                } else {
+                    tp_shard_key(&base_keys[index], rank)
+                });
+                shard_payloads.push(payload);
+            }
+        }
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if shard_keys.is_empty() {
+                return Ok(final_statuses);
+            }
+            let mut client = take_client(&inner).await?;
+            let slices = shard_payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&shard_keys, &slices, None).await;
+            let shard_statuses = result.map_err(to_py_err)?;
+            for (processed_offset, original_index) in processed_indices.into_iter().enumerate() {
+                let start = processed_offset * tp_size;
+                let end = start + tp_size;
+                if end > shard_statuses.len() {
+                    break;
+                }
+                final_statuses[original_index] = shard_statuses[start..end]
+                    .iter()
+                    .copied()
+                    .find(|status| *status != 0)
+                    .unwrap_or(0);
+            }
+            Ok(final_statuses)
+        })
+    }
+
+    /// C++ `batch_pub_tensor_with_tp`: configurable batch legacy-TP publish.
+    #[pyo3(signature = (base_keys, tensors, config = None, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn batch_pub_tensor_with_tp<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        base_keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (_tp_rank, tp_size, split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        if base_keys.len() != tensors.len() {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+        let config = config.map(|value| value.borrow().to_core());
+        if config.as_ref().is_some_and(|value| {
+            !tensor_publish_config_is_valid(value)
+                || (!value.group_ids.is_empty() && value.group_ids.len() != base_keys.len())
+        }) {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let mut final_statuses = vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()];
+        let mut shard_keys = Vec::new();
+        let mut shard_payloads = Vec::new();
+        let mut processed_indices = Vec::new();
+        for (index, tensor) in tensors.iter().enumerate() {
+            let Ok(payloads) =
+                crate::tensor_codec::serialize_tp_tensor_payloads(tensor, tp_size, split_dim)
+            else {
+                continue;
+            };
+            processed_indices.push(index);
+            for (rank, payload) in payloads.into_iter().enumerate() {
+                shard_keys.push(if tp_size == 1 {
+                    base_keys[index].clone()
+                } else {
+                    tp_shard_key(&base_keys[index], rank)
+                });
+                shard_payloads.push(payload);
+            }
+        }
+        let indexed_config =
+            repeated_indexed_batch_config(config, base_keys.len(), &processed_indices, tp_size)?;
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if shard_keys.is_empty() {
+                return Ok(final_statuses);
+            }
+            let mut client = take_client(&inner).await?;
+            let slices = shard_payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&shard_keys, &slices, indexed_config).await;
+            let shard_statuses = result.map_err(to_py_err)?;
+            for (processed_offset, original_index) in processed_indices.into_iter().enumerate() {
+                let start = processed_offset * tp_size;
+                let end = start + tp_size;
+                if end > shard_statuses.len() {
+                    break;
+                }
+                final_statuses[original_index] = shard_statuses[start..end]
+                    .iter()
+                    .copied()
+                    .find(|status| *status != 0)
+                    .unwrap_or(0);
+            }
+            Ok(final_statuses)
         })
     }
 
@@ -674,10 +2252,9 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.batch_put(&keys, &slices, cfg).await;
-            *inner.lock() = Some(client);
             let statuses = result.map_err(to_py_err)?;
             Ok(statuses.into_iter().find(|status| *status < 0).unwrap_or(0))
         })
@@ -693,13 +2270,245 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_get(&keys).await;
-            *inner.lock() = Some(client);
             // Return Rust type — future_into_py handles IntoPy conversion with GIL
             // 返回 Rust 类型 —— future_into_py 在持有 GIL 时处理 IntoPy 转换
             result.map_err(to_py_err)
         })
+    }
+
+    /// Batch-read TensorMetadata payloads and materialize CPU PyTorch tensors.
+    ///
+    /// Missing or malformed entries produce `None` at the corresponding
+    /// position, matching the C++ batch tensor surface.
+    fn batch_get_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_get(&keys).await;
+            let payloads = result.map_err(to_py_err)?;
+            Python::attach(|py| {
+                let mut tensors = Vec::with_capacity(payloads.len());
+                for (index, payload) in payloads.into_iter().enumerate() {
+                    let tensor = match payload {
+                        Some(payload) => {
+                            match crate::tensor_codec::deserialize_tensor_bytes(py, &payload) {
+                                Ok(tensor) => tensor,
+                                Err(error) => {
+                                    warn!(
+                                        index,
+                                        error = %error,
+                                        "batch_get_tensor rejected malformed TensorMetadata payload"
+                                    );
+                                    py.None()
+                                }
+                            }
+                        }
+                        None => py.None(),
+                    };
+                    tensors.push(tensor);
+                }
+                Ok(tensors)
+            })
+        })
+    }
+
+    /// Batch ReadTarget variant. Request planning and Store reads remain in
+    /// one Rust future; this does not loop through Python-visible single APIs.
+    #[pyo3(signature = (keys, targets = None))]
+    fn batch_get_tensor_with_parallelism<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        targets: Option<Vec<Bound<'py, PyAny>>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(targets) = targets else {
+            return Self::batch_get_tensor(slf, py, keys);
+        };
+        if targets.len() != keys.len() {
+            let count = keys.len();
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(Python::attach(|py| {
+                    (0..count).map(|_| py.None()).collect::<Vec<_>>()
+                }))
+            });
+        }
+        let plans = keys
+            .iter()
+            .zip(&targets)
+            .map(|(key, target)| {
+                let target = if target.is_none() {
+                    None
+                } else {
+                    match target.extract::<ReadTargetPy>() {
+                        Ok(target) => Some(target),
+                        Err(_) => return None,
+                    }
+                };
+                parallel_tensor_read_plan(key, target.as_ref())
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                let mut materializations = Vec::with_capacity(plans.len());
+                for plan in plans {
+                    materializations.push(match plan {
+                        Some(plan) => execute_parallel_tensor_read(&mut client, plan).await?,
+                        None => None,
+                    });
+                }
+                Ok::<_, PyErr>(materializations)
+            }
+            .await;
+            let materializations = result?;
+            Ok(Python::attach(|py| {
+                materializations
+                    .into_iter()
+                    .map(|materialization| materialize_parallel_tensor_read(py, materialization))
+                    .collect::<Vec<_>>()
+            }))
+        })
+    }
+
+    /// Batch-read the current rank's legacy TP shards.
+    #[pyo3(signature = (base_keys, tp_rank = 0, tp_size = 1))]
+    fn batch_get_tensor_with_tp<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        base_keys: Vec<String>,
+        tp_rank: i32,
+        tp_size: i32,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (tp_rank, tp_size, _split_dim) = tp_parameters(tp_rank, tp_size, 0)?;
+        let keys = if tp_size == 1 {
+            base_keys
+        } else {
+            base_keys
+                .iter()
+                .map(|key| tp_shard_key(key, tp_rank))
+                .collect()
+        };
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_get(&keys).await;
+            let payloads = result.map_err(to_py_err)?;
+            Python::attach(|py| {
+                let tensors = payloads
+                    .into_iter()
+                    .map(|payload| match payload {
+                        Some(payload) => {
+                            crate::tensor_codec::deserialize_tensor_bytes(py, &payload)
+                                .unwrap_or_else(|_| py.None())
+                        }
+                        None => py.None(),
+                    })
+                    .collect::<Vec<_>>();
+                Ok(tensors)
+            })
+        })
+    }
+
+    /// Export a stored tensor to a safetensors file.
+    #[pyo3(signature = (key, file_name = None))]
+    fn save_tensor_to_safetensor(
+        slf: &Bound<'_, Self>,
+        key: String,
+        file_name: Option<String>,
+    ) -> PyResult<i32> {
+        let inner = slf.borrow().inner.clone();
+        let payload = match pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.get(&key).await;
+            result.map_err(to_py_err)
+        }) {
+            Ok(payload) => payload,
+            Err(_) => return Ok(TENSOR_FILE_NOT_FOUND_STATUS),
+        };
+        let py = slf.py();
+        let tensor = match crate::tensor_codec::deserialize_tensor_bytes(py, &payload) {
+            Ok(tensor) => tensor,
+            Err(_) => return Ok(TENSOR_INVALID_PARAMS_STATUS),
+        };
+        let resolved_file_name = file_name.unwrap_or_else(|| key.clone());
+        let result = (|| -> PyResult<()> {
+            let safetensors = py.import("safetensors.torch")?;
+            let tensors = PyDict::new(py);
+            tensors.set_item(&key, tensor.bind(py))?;
+            safetensors.call_method1("save_file", (tensors, resolved_file_name))?;
+            Ok(())
+        })();
+        Ok(if result.is_ok() {
+            0
+        } else {
+            TENSOR_INVALID_PARAMS_STATUS
+        })
+    }
+
+    /// Load one tensor from a safetensors file, store it, and return it.
+    #[pyo3(signature = (key = None, *, file_name))]
+    fn load_tensor_from_safetensor(
+        slf: &Bound<'_, Self>,
+        key: Option<String>,
+        file_name: String,
+    ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let loaded = match py
+            .import("safetensors.torch")
+            .and_then(|module| module.call_method1("load_file", (&file_name,)))
+        {
+            Ok(loaded) => loaded,
+            Err(_) => return Ok(py.None()),
+        };
+        let loaded = match loaded.cast::<PyDict>() {
+            Ok(loaded) => loaded,
+            Err(_) => return Ok(py.None()),
+        };
+        let loaded_keys: Vec<String> = match loaded.keys().extract() {
+            Ok(keys) => keys,
+            Err(_) => return Ok(py.None()),
+        };
+        let Some(first_key) = loaded_keys.first() else {
+            return Ok(py.None());
+        };
+        let target_store_key = key.clone().unwrap_or_else(|| file_name.clone());
+        let selected_key = if key
+            .as_ref()
+            .is_some_and(|desired| loaded.contains(desired).unwrap_or(false))
+        {
+            target_store_key.clone()
+        } else {
+            first_key.clone()
+        };
+        let tensor = match loaded.get_item(&selected_key) {
+            Ok(Some(tensor)) => tensor,
+            Ok(None) | Err(_) => return Ok(py.None()),
+        };
+        let payload = match crate::tensor_codec::serialize_tensor_payload(&tensor) {
+            Ok(payload) => payload,
+            Err(_) => return Ok(py.None()),
+        };
+        let inner = slf.borrow().inner.clone();
+        let result = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.put(&target_store_key, &payload, None).await;
+            result.map_err(to_py_err)
+        });
+        if result.is_err() {
+            return Ok(py.None());
+        }
+        Ok(tensor.unbind())
     }
 
     /// Remove multiple keys. force=true removes hard-pinned objects too.
@@ -714,9 +2523,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_remove(&keys, force).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -731,9 +2539,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_is_exist(&keys).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -759,9 +2566,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.prefetch(&keys).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -782,9 +2588,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let removed = client.remove_by_regex(&pattern, force).await;
-            *inner.lock() = Some(client);
             removed.map_err(to_py_err)
         })
     }
@@ -800,9 +2605,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let removed = client.remove_all(force).await;
-            *inner.lock() = Some(client);
             removed.map_err(to_py_err)
         })
     }
@@ -817,9 +2621,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let size = client.get_size(&key).await;
-            *inner.lock() = Some(client);
             size.map_err(to_py_err)
         })
     }
@@ -831,7 +2634,7 @@ impl PythonMooncakeClient {
     /// Return the hostname this client registered with.
     /// 返回此客户端注册时使用的主机名。
     fn get_hostname(&self) -> PyResult<String> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => Ok(client.get_hostname()),
             None => Err(to_py_err("client already closed")),
         }
@@ -843,16 +2646,15 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.health_check().await;
-            *inner.lock() = Some(client);
-            result.map_err(to_py_err)
+            result.map(|()| true).map_err(to_py_err)
         })
     }
 
     /// Return the currently connected master address.
     fn current_master_addr(&self) -> PyResult<String> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => Ok(client.current_master_addr()),
             None => Err(to_py_err("client already closed")),
         }
@@ -860,7 +2662,7 @@ impl PythonMooncakeClient {
 
     /// Replace the client-side master failover candidate list.
     fn set_master_candidates(&self, candidates: Vec<String>) -> PyResult<()> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => client.set_master_candidates(candidates).map_err(to_py_err),
             None => Err(to_py_err("client already closed")),
         }
@@ -868,7 +2670,7 @@ impl PythonMooncakeClient {
 
     /// Return the configured master failover candidate list.
     fn master_candidates(&self) -> PyResult<Vec<String>> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => Ok(client.master_candidates()),
             None => Err(to_py_err("client already closed")),
         }
@@ -883,9 +2685,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.switch_master(&master_addr).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -898,9 +2699,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.failover_master().await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -909,11 +2709,14 @@ impl PythonMooncakeClient {
     /// 销毁所有资源：缓冲区、段、元数据条目。用于整个集群的清理。
     fn tear_down_all<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = slf.borrow().inner.clone();
+        let background = slf.borrow().background.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            if let Some(handle) = background.lock().await.take() {
+                handle.shutdown().await;
+            }
+            let mut client = take_client(&inner).await?;
             let result = client.tear_down_all().await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -921,30 +2724,42 @@ impl PythonMooncakeClient {
     /// Check whether this client has been closed.
     /// 检查此客户端是否已关闭。
     fn is_closed(&self) -> bool {
-        match self.inner.lock().as_ref() {
-            Some(client) => client.is_closed(),
-            None => true,
+        match self.inner.try_lock() {
+            Ok(slot) => slot.as_ref().is_none_or(MooncakeClient::is_closed),
+            // A contended slot still contains the live client.
+            Err(_) => false,
         }
     }
 
-    /// Close the client: drop the underlying connection and clear all
-    /// registered Python buffer references.
-    ///
-    /// 关闭客户端：释放底层连接并清除所有已注册的 Python buffer 引用。
-    /// After close(), all further operations will return StoreError.
-    /// 关闭后，所有后续操作将返回 StoreError。
-    fn close(&self) {
-        *self.inner.lock() = None;
-        self.registered_py_buffers.lock().clear();
+    /// Close the client after completing Store teardown. The returned
+    /// awaitable is cancellation-safe with respect to Rust ownership.
+    fn close<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+        let background = slf.borrow().background.clone();
+        let registered_py_buffers = slf.borrow().registered_py_buffers.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(handle) = background.lock().await.take() {
+                handle.shutdown().await;
+            }
+            let mut slot = inner.lock().await;
+            let Some(client) = slot.as_mut() else {
+                registered_py_buffers.lock().clear();
+                return Ok(());
+            };
+            client.tear_down_all().await.map_err(to_py_err)?;
+            drop(slot.take());
+            drop(slot);
+            registered_py_buffers.lock().clear();
+            Ok(())
+        })
     }
 
     /// String representation: "MooncakeClient(connected)" or
     /// "MooncakeClient(closed)".
     fn __repr__(&self) -> String {
-        if self.inner.lock().is_some() {
-            "MooncakeClient(connected)".to_string()
-        } else {
-            "MooncakeClient(closed)".to_string()
+        match self.inner.try_lock() {
+            Ok(slot) if slot.is_none() => "MooncakeClient(closed)".to_string(),
+            Ok(_) | Err(_) => "MooncakeClient(connected)".to_string(),
         }
     }
 
@@ -973,15 +2788,315 @@ impl PythonMooncakeClient {
         // Return Rust tuple list — future_into_py handles IntoPy conversion
         // 返回 Rust 元组列表 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.upsert(&key, &data, cfg).await;
-            *inner.lock() = Some(client);
             let replicas = result.map_err(to_py_err)?;
             let out: Vec<(String, u64, String)> = replicas
                 .iter()
                 .map(|r| (r.segment_name.clone(), r.offset, r.segment_id.to_string()))
                 .collect();
             Ok(out)
+        })
+    }
+
+    /// Upsert a CPU PyTorch tensor using the same strict TensorMetadata payload
+    /// as `put_tensor`.
+    #[pyo3(signature = (key, tensor, config = None))]
+    fn upsert_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let payload = crate::tensor_codec::serialize_tensor_payload(&tensor)?;
+        let cfg = config.map(|c| c.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.upsert(&key, &payload, cfg).await;
+            result.map(|_| 0).map_err(to_py_err)
+        })
+    }
+
+    /// C++ `upsert_pub_tensor`: tensor upsert with replication config.
+    #[pyo3(signature = (key, tensor, config = None))]
+    fn upsert_pub_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(&value.borrow().to_core()))
+        {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+            });
+        }
+        Self::upsert_tensor(slf, py, key, tensor, config)
+    }
+
+    /// Upsert one full tensor, requested parallel shard, or writer partition
+    /// using the C++ integration key and manifest conventions.
+    #[pyo3(signature = (key, tensor, parallelism = None, config = None, writer_partition = None))]
+    fn upsert_tensor_with_parallelism<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+        tensor: Bound<'py, PyAny>,
+        parallelism: Option<Bound<'py, TensorParallelismPy>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+        writer_partition: Option<Bound<'py, WriterPartitionPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parallelism = parallelism.map(|value| value.borrow().clone());
+        let writer_partition = writer_partition.map(|value| value.borrow().clone());
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(value))
+        {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+            });
+        }
+        let plan = match parallel_tensor_write_plan(
+            &key,
+            &tensor,
+            parallelism.as_ref(),
+            writer_partition.as_ref(),
+        ) {
+            Ok(plan) => plan,
+            Err(_) => {
+                return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                    Ok::<_, PyErr>(TENSOR_INVALID_PARAMS_STATUS)
+                });
+            }
+        };
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                client
+                    .upsert(&plan.object_key, &plan.payload, config.clone())
+                    .await?;
+                if let Some((manifest_key, manifest)) = plan.manifest {
+                    client.upsert(&manifest_key, &manifest, config).await?;
+                }
+                Ok::<_, mooncake_store_core::StoreError>(0)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Batch-upsert CPU PyTorch tensors with one status per input key.
+    ///
+    /// Tensor adaptation remains in Python/Rust binding code; the actual
+    /// multi-key mutation and finalize lifecycle is owned by the Client and
+    /// Master.
+    #[pyo3(signature = (keys, tensors, config = None))]
+    fn batch_upsert_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if keys.len() != tensors.len() {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let mut statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+        let mut valid_keys = Vec::new();
+        let mut valid_payloads = Vec::new();
+        let mut original_indices = Vec::new();
+        for (index, tensor) in tensors.iter().enumerate() {
+            if let Ok(payload) = crate::tensor_codec::serialize_tensor_payload(tensor) {
+                valid_keys.push(keys[index].clone());
+                valid_payloads.push(payload);
+                original_indices.push(index);
+            }
+        }
+        let indexed_config = indexed_batch_config(config, keys.len(), &original_indices)?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if valid_keys.is_empty() {
+                return Ok(statuses);
+            }
+            let mut client = take_client(&inner).await?;
+            let slices = valid_payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client
+                .batch_upsert(&valid_keys, &slices, indexed_config)
+                .await;
+            let valid_statuses = result.map_err(to_py_err)?;
+            for (original_index, status) in original_indices.into_iter().zip(valid_statuses) {
+                statuses[original_index] = status;
+            }
+            Ok(statuses)
+        })
+    }
+
+    /// C++ `batch_upsert_pub_tensor`: batch tensor upsert with replication
+    /// config.
+    #[pyo3(signature = (keys, tensors, config = None))]
+    fn batch_upsert_pub_tensor<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(&value.borrow().to_core()))
+        {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+        Self::batch_upsert_tensor(slf, py, keys, tensors, config)
+    }
+
+    /// Batch variant of `upsert_tensor_with_parallelism`, preserving one
+    /// result per base key and the C++ per-key routing behavior.
+    #[pyo3(signature = (
+        keys,
+        tensors,
+        parallelisms = None,
+        config = None,
+        writer_partitions = None
+    ))]
+    fn batch_upsert_tensor_with_parallelism<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        keys: Vec<String>,
+        tensors: Vec<Bound<'py, PyAny>>,
+        parallelisms: Option<Vec<Bound<'py, PyAny>>>,
+        config: Option<Bound<'py, ReplicateConfigPy>>,
+        writer_partitions: Option<Vec<Bound<'py, PyAny>>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if parallelisms.is_none() && writer_partitions.is_none() {
+            return Self::batch_upsert_tensor(slf, py, keys, tensors, config);
+        }
+        if keys.len() != tensors.len()
+            || parallelisms
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || writer_partitions
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || (parallelisms.is_some() && writer_partitions.is_some())
+        {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+        let config = config.map(|value| value.borrow().to_core());
+        if config.as_ref().is_some_and(|value| {
+            !tensor_publish_config_is_valid(value)
+                || (!value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        }) {
+            let statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok::<_, PyErr>(statuses)
+            });
+        }
+
+        let mut statuses = vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()];
+        let mut plans = Vec::with_capacity(keys.len());
+        for index in 0..keys.len() {
+            let parallelism = match parallelisms.as_ref() {
+                Some(values) => match optional_parallelism(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let writer = match writer_partitions.as_ref() {
+                Some(values) => match optional_writer_partition(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            plans.push(
+                parallel_tensor_write_plan(
+                    &keys[index],
+                    &tensors[index],
+                    parallelism.as_ref(),
+                    writer.as_ref(),
+                )
+                .ok(),
+            );
+        }
+        let per_key_configs = (0..keys.len())
+            .map(|index| indexed_batch_config(config.clone(), keys.len(), &[index]))
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                for (index, plan) in plans.into_iter().enumerate() {
+                    let Some(plan) = plan else {
+                        continue;
+                    };
+                    let object_keys = [plan.object_key];
+                    let object_payloads = [plan.payload];
+                    let object_slices = [object_payloads[0].as_slice()];
+                    let mut result = client
+                        .batch_upsert(&object_keys, &object_slices, per_key_configs[index].clone())
+                        .await?;
+                    let mut status = result.pop().unwrap_or(TENSOR_INVALID_PARAMS_STATUS);
+                    if status == 0 {
+                        if let Some((manifest_key, manifest)) = plan.manifest {
+                            let manifest_keys = [manifest_key];
+                            let manifests = [manifest];
+                            let manifest_slices = [manifests[0].as_slice()];
+                            status = client
+                                .batch_upsert(
+                                    &manifest_keys,
+                                    &manifest_slices,
+                                    per_key_configs[index].clone(),
+                                )
+                                .await?
+                                .into_iter()
+                                .next()
+                                .unwrap_or(TENSOR_INVALID_PARAMS_STATUS);
+                        }
+                    }
+                    statuses[index] = status;
+                }
+                Ok::<_, mooncake_store_core::StoreError>(statuses)
+            }
+            .await;
+            result.map_err(to_py_err)
         })
     }
 
@@ -1002,10 +3117,9 @@ impl PythonMooncakeClient {
         // Return Rust tuple list — future_into_py handles IntoPy conversion
         // 返回 Rust 元组列表 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.upsert_parts(&key, &slices, cfg).await;
-            *inner.lock() = Some(client);
             let replicas = result.map_err(to_py_err)?;
             let out: Vec<(String, u64, String)> = replicas
                 .iter()
@@ -1032,7 +3146,7 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let mut status = 0;
             for (key, value) in keys.iter().zip(data.iter()) {
                 if client.upsert(key, value, cfg.clone()).await.is_err() {
@@ -1040,7 +3154,6 @@ impl PythonMooncakeClient {
                     break;
                 }
             }
-            *inner.lock() = Some(client);
             Ok(status)
         })
     }
@@ -1060,9 +3173,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.create_copy_task(&key, &targets).await;
-            *inner.lock() = Some(client);
             let task_id = result.map_err(to_py_err)?;
             Ok(task_id.to_string())
         })
@@ -1080,9 +3192,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.create_move_task(&key, &source, &target).await;
-            *inner.lock() = Some(client);
             let task_id = result.map_err(to_py_err)?;
             Ok(task_id.to_string())
         })
@@ -1102,9 +3213,8 @@ impl PythonMooncakeClient {
         // Return Rust tuple — future_into_py handles IntoPy conversion
         // 返回 Rust 元组 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.query_task(task_id).await;
-            *inner.lock() = Some(client);
             let resp = result.map_err(to_py_err)?;
             let task_id_str = resp
                 .id
@@ -1126,9 +3236,8 @@ impl PythonMooncakeClient {
         // Return Rust data — future_into_py handles IntoPy conversion
         // 返回 Rust 数据 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let tasks = client.fetch_tasks(batch_size).await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             let out: Vec<(Option<String>, i32, String, i64, u32)> = tasks
                 .iter()
                 .map(|t| {
@@ -1167,11 +3276,10 @@ impl PythonMooncakeClient {
             .map_err(|_| to_py_err(format!("invalid task status: {status}")))?;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client
                 .mark_task_to_complete(task_id, proto_status, &message)
                 .await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -1185,7 +3293,7 @@ impl PythonMooncakeClient {
     /// This is a synchronous method — no async needed.
     /// 这是同步方法 —— 无需异步。
     fn register_local_endpoint(&self, endpoint: String) -> PyResult<()> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => {
                 client.register_local_endpoint(&endpoint);
                 Ok(())
@@ -1197,7 +3305,7 @@ impl PythonMooncakeClient {
     /// Unregister a previously registered local endpoint.
     /// 注销之前注册的本地传输端点。
     fn unregister_local_endpoint(&self, endpoint: String) -> PyResult<()> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => {
                 client.unregister_local_endpoint(&endpoint);
                 Ok(())
@@ -1234,11 +3342,103 @@ impl PythonMooncakeClient {
         // block_on: future captures raw ptr, not Send-safe
         // block_on: future 捕获了裸指针，不是 Send 的
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.get_into(&key, ptr, size) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.get_into(&key, ptr, size).await;
             result.map_err(to_py_err)
         })
+    }
+
+    /// Read a TensorMetadata payload directly into a registered writable
+    /// Python buffer and return a PyTorch tensor view over that owner.
+    #[pyo3(signature = (key, buffer, size))]
+    fn get_tensor_into(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+    ) -> PyResult<Py<PyAny>> {
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "get_tensor_into requires an owner-bearing Python buffer, not a raw address",
+            ));
+        }
+        let (ptr, capacity) = get_pointer_and_size(&buffer, Some(size))?;
+        let inner = slf.borrow().inner.clone();
+        let total_length = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.get_into(&key, ptr, capacity).await;
+            result.map_err(to_py_err)
+        })?;
+        crate::tensor_codec::deserialize_tensor_buffer_object(buffer.py(), &buffer, total_length)
+    }
+
+    /// TP-key variant of `get_tensor_into`.
+    #[pyo3(signature = (key, buffer, size, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn get_tensor_with_tp_into(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Py<PyAny>> {
+        let (tp_rank, tp_size, _split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "get_tensor_with_tp_into requires an owner-bearing Python buffer",
+            ));
+        }
+        let read_key = if tp_size == 1 {
+            key
+        } else {
+            tp_shard_key(&key, tp_rank)
+        };
+        let (ptr, capacity) = get_pointer_and_size(&buffer, Some(size))?;
+        let inner = slf.borrow().inner.clone();
+        let total_length = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.get_into(&read_key, ptr, capacity).await;
+            result.map_err(to_py_err)
+        })?;
+        crate::tensor_codec::deserialize_tensor_buffer_object(buffer.py(), &buffer, total_length)
+    }
+
+    /// Read an as-stored tensor, requested shard, or reconstructed full tensor
+    /// into an owner-bearing buffer registered with this Client.
+    #[pyo3(signature = (key, buffer, size, target = None))]
+    fn get_tensor_with_parallelism_into(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        target: Option<Bound<'_, ReadTargetPy>>,
+    ) -> PyResult<Py<PyAny>> {
+        validate_registered_tensor_destination(slf, &buffer, size)?;
+        let target = target.map(|value| value.borrow().clone());
+        let Some(plan) = parallel_tensor_read_plan(&key, target.as_ref())
+            .ok()
+            .flatten()
+        else {
+            return Ok(buffer.py().None());
+        };
+        let inner = slf.borrow().inner.clone();
+        let materialization = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = execute_parallel_tensor_read(&mut client, plan).await;
+            result
+        })?;
+        let Some(materialization) = materialization else {
+            return Ok(buffer.py().None());
+        };
+        let py = buffer.py();
+        let Ok(payload) = parallel_tensor_read_payload(py, materialization) else {
+            return Ok(py.None());
+        };
+        Ok(
+            crate::tensor_codec::copy_tensor_payload_into_buffer(py, &buffer, size, &payload)
+                .unwrap_or_else(|_| py.None()),
+        )
     }
 
     /// Batch zero-copy read into per-key buffers.
@@ -1255,14 +3455,205 @@ impl PythonMooncakeClient {
         if keys.len() != buffers.len() || keys.len() != sizes.len() {
             return Err(to_py_err("keys, buffers, sizes must have same length"));
         }
-        let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
+        let ptrs: Vec<*mut c_void> = buffers
+            .iter()
+            .map(get_writable_pointer)
+            .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.batch_get_into(&keys, &ptrs, &sizes) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
             result.map_err(to_py_err)
         })
+    }
+
+    /// Batch variant of `get_tensor_into`.
+    ///
+    /// Each successful slot is a PyTorch tensor view over the corresponding
+    /// registered owner; failed slots preserve the Client's negative status.
+    fn batch_get_tensor_into(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            let py = slf.py();
+            return (0..keys.len())
+                .map(|_| TENSOR_INVALID_PARAMS_STATUS.into_py_any(py))
+                .collect();
+        }
+        for (buffer, size) in buffers.iter().zip(&sizes) {
+            if buffer.extract::<usize>().is_ok() {
+                return Err(to_py_err(
+                    "batch_get_tensor_into requires owner-bearing Python buffers, not raw addresses",
+                ));
+            }
+            let export = export_c_contiguous_buffer(buffer, true)?;
+            if *size > export.len_bytes() {
+                return Err(to_py_err(
+                    "tensor destination size exceeds Python buffer capacity",
+                ));
+            }
+        }
+        let ptrs = buffers
+            .iter()
+            .map(get_writable_pointer)
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = slf.borrow().inner.clone();
+        let lengths = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
+            result.map_err(to_py_err)
+        })?;
+
+        let py = slf.py();
+        lengths
+            .into_iter()
+            .zip(buffers)
+            .map(|(length, buffer)| {
+                if length < 0 {
+                    return length.into_py_any(py);
+                }
+                let length = usize::try_from(length)
+                    .map_err(|_| to_py_err("tensor payload length exceeds usize"))?;
+                crate::tensor_codec::deserialize_tensor_buffer_object(py, &buffer, length)
+            })
+            .collect()
+    }
+
+    /// Batch TP-key variant of `batch_get_tensor_into`.
+    #[pyo3(signature = (base_keys, buffers, sizes, tp_rank = 0, tp_size = 1))]
+    fn batch_get_tensor_with_tp_into(
+        slf: &Bound<'_, Self>,
+        base_keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        tp_rank: i32,
+        tp_size: i32,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let (tp_rank, tp_size, _split_dim) = tp_parameters(tp_rank, tp_size, 0)?;
+        let keys = if tp_size == 1 {
+            base_keys
+        } else {
+            base_keys
+                .iter()
+                .map(|key| tp_shard_key(key, tp_rank))
+                .collect()
+        };
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            let py = slf.py();
+            return Ok((0..keys.len()).map(|_| py.None()).collect());
+        }
+        for (buffer, size) in buffers.iter().zip(&sizes) {
+            if buffer.extract::<usize>().is_ok() {
+                return Err(to_py_err(
+                    "batch_get_tensor_with_tp_into requires owner-bearing Python buffers",
+                ));
+            }
+            let export = export_c_contiguous_buffer(buffer, true)?;
+            if *size > export.len_bytes() {
+                return Err(to_py_err(
+                    "TP tensor destination size exceeds Python buffer capacity",
+                ));
+            }
+        }
+        let ptrs = buffers
+            .iter()
+            .map(get_writable_pointer)
+            .collect::<PyResult<Vec<_>>>()?;
+        let inner = slf.borrow().inner.clone();
+        let lengths = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
+            result.map_err(to_py_err)
+        })?;
+        let py = slf.py();
+        lengths
+            .into_iter()
+            .zip(buffers)
+            .map(|(length, buffer)| {
+                if length < 0 {
+                    return Ok(py.None());
+                }
+                let length = usize::try_from(length)
+                    .map_err(|_| to_py_err("TP tensor payload length exceeds usize"))?;
+                crate::tensor_codec::deserialize_tensor_buffer_object(py, &buffer, length)
+            })
+            .collect()
+    }
+
+    /// Batch ReadTarget variant of `get_tensor_with_parallelism_into`.
+    #[pyo3(signature = (keys, buffers, sizes, targets = None))]
+    fn batch_get_tensor_with_parallelism_into(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        targets: Option<Vec<Bound<'_, PyAny>>>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
+        let py = slf.py();
+        if keys.len() != buffers.len()
+            || keys.len() != sizes.len()
+            || targets
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+        {
+            return Ok((0..keys.len()).map(|_| py.None()).collect());
+        }
+        for (buffer, size) in buffers.iter().zip(&sizes) {
+            validate_registered_tensor_destination(slf, buffer, *size)?;
+        }
+        let plans = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let target = match targets.as_ref() {
+                    Some(values) if values[index].is_none() => None,
+                    Some(values) => match values[index].extract::<ReadTargetPy>() {
+                        Ok(target) => Some(target),
+                        Err(_) => return None,
+                    },
+                    None => None,
+                };
+                parallel_tensor_read_plan(key, target.as_ref())
+                    .ok()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let inner = slf.borrow().inner.clone();
+        let materializations = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                let mut materializations = Vec::with_capacity(plans.len());
+                for plan in plans {
+                    materializations.push(match plan {
+                        Some(plan) => execute_parallel_tensor_read(&mut client, plan).await?,
+                        None => None,
+                    });
+                }
+                Ok::<_, PyErr>(materializations)
+            }
+            .await;
+            result
+        })?;
+        materializations
+            .into_iter()
+            .zip(buffers)
+            .zip(sizes)
+            .map(|((materialization, buffer), size)| {
+                let Some(materialization) = materialization else {
+                    return Ok(py.None());
+                };
+                let Ok(payload) = parallel_tensor_read_payload(py, materialization) else {
+                    return Ok(py.None());
+                };
+                Ok(crate::tensor_codec::copy_tensor_payload_into_buffer(
+                    py, &buffer, size, &payload,
+                )
+                .unwrap_or_else(|_| py.None()))
+            })
+            .collect()
     }
 
     /// Batch zero-copy read with multiple candidate buffers per key.
@@ -1282,16 +3673,18 @@ impl PythonMooncakeClient {
     ) -> PyResult<Vec<i64>> {
         let ptrs: Vec<Vec<*mut c_void>> = all_buffers
             .iter()
-            .map(|bufs| bufs.iter().map(get_pointer).collect::<PyResult<Vec<_>>>())
+            .map(|bufs| {
+                bufs.iter()
+                    .map(get_writable_pointer)
+                    .collect::<PyResult<Vec<_>>>()
+            })
             .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe {
-                client.batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
-            }
-            .await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -1305,22 +3698,22 @@ impl PythonMooncakeClient {
         all_src_offsets: Vec<Vec<Vec<usize>>>,
         all_sizes: Vec<Vec<Vec<usize>>>,
     ) -> PyResult<Vec<Vec<Vec<i64>>>> {
-        let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
+        let ptrs: Vec<*mut c_void> = buffers
+            .iter()
+            .map(get_writable_pointer)
+            .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe {
-                client
-                    .get_into_ranges(
-                        &ptrs,
-                        &all_keys,
-                        &all_dst_offsets,
-                        &all_src_offsets,
-                        &all_sizes,
-                    )
-                    .await
-            };
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .get_into_ranges(
+                    &ptrs,
+                    &all_keys,
+                    &all_dst_offsets,
+                    &all_src_offsets,
+                    &all_sizes,
+                )
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -1351,10 +3744,162 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.put_from(&key, ptr, size, cfg) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.put_from(&key, ptr, size, cfg).await;
             result.map_err(to_py_err)
+        })
+    }
+
+    /// Zero-copy TensorMetadata write from an owner-bearing registered buffer.
+    #[pyo3(signature = (key, buffer, size, config = None))]
+    fn put_tensor_from(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+    ) -> PyResult<i32> {
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "put_tensor_from requires an owner-bearing Python buffer, not a raw address",
+            ));
+        }
+        crate::tensor_codec::validate_tensor_buffer_object(&buffer, size)?;
+        let ptr = get_pointer(&buffer)?;
+        let config = config.map(|value| value.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.put_from(&key, ptr, size, config).await;
+            result.map(|()| 0).map_err(to_py_err)
+        })
+    }
+
+    /// Owner-bearing general-parallelism write from a full TensorMetadata
+    /// buffer. TP requests split the full tensor into every requested rank,
+    /// matching the C++ `*_with_parallelism_from` contract.
+    #[pyo3(signature = (
+        key,
+        buffer,
+        size,
+        parallelism = None,
+        config = None,
+        writer_partition = None
+    ))]
+    fn put_tensor_with_parallelism_from(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        parallelism: Option<Bound<'_, TensorParallelismPy>>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+        writer_partition: Option<Bound<'_, WriterPartitionPy>>,
+    ) -> PyResult<i32> {
+        if parallelism.is_none() && writer_partition.is_none() {
+            return Self::put_tensor_from(slf, key, buffer, size, config);
+        }
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "put_tensor_with_parallelism_from requires an owner-bearing Python buffer",
+            ));
+        }
+        let parallelism = parallelism.map(|value| value.borrow().clone());
+        let writer_partition = writer_partition.map(|value| value.borrow().clone());
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(value))
+        {
+            return Ok(TENSOR_INVALID_PARAMS_STATUS);
+        }
+        let py = buffer.py();
+        let tensor = crate::tensor_codec::deserialize_tensor_buffer_copy(py, &buffer, size)?;
+        let plan = match parallel_tensor_full_write_plan(
+            &key,
+            tensor.bind(py),
+            parallelism.as_ref(),
+            writer_partition.as_ref(),
+        ) {
+            Ok(plan) => plan,
+            Err(_) => return Ok(TENSOR_INVALID_PARAMS_STATUS),
+        };
+        let object_config = expanded_single_key_config(config.clone(), plan.objects.len())?;
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                let object_keys = plan
+                    .objects
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                let object_slices = plan
+                    .objects
+                    .iter()
+                    .map(|(_, payload)| payload.as_slice())
+                    .collect::<Vec<_>>();
+                let statuses = client
+                    .batch_put(&object_keys, &object_slices, object_config)
+                    .await?;
+                let status = statuses
+                    .into_iter()
+                    .find(|status| *status != 0)
+                    .unwrap_or(0);
+                if status != 0 {
+                    return Ok(status);
+                }
+                if let Some((manifest_key, manifest)) = plan.manifest {
+                    return Ok(client
+                        .batch_put(&[manifest_key], &[manifest.as_slice()], config)
+                        .await?
+                        .into_iter()
+                        .next()
+                        .unwrap_or(TENSOR_INVALID_PARAMS_STATUS));
+                }
+                Ok::<_, mooncake_store_core::StoreError>(0)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Decode a full TensorMetadata buffer, split it uniformly, and store all
+    /// legacy TP shards.
+    #[pyo3(signature = (key, buffer, size, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn put_tensor_with_tp_from(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<i32> {
+        let (_tp_rank, tp_size, split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "put_tensor_with_tp_from requires an owner-bearing Python buffer",
+            ));
+        }
+        let py = buffer.py();
+        let tensor = crate::tensor_codec::deserialize_tensor_buffer_copy(py, &buffer, size)?;
+        let payloads =
+            crate::tensor_codec::serialize_tp_tensor_payloads(tensor.bind(py), tp_size, split_dim)?;
+        let keys = if tp_size == 1 {
+            vec![key]
+        } else {
+            (0..tp_size).map(|rank| tp_shard_key(&key, rank)).collect()
+        };
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let slices = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&keys, &slices, None).await;
+            let statuses = result.map_err(to_py_err)?;
+            Ok(statuses
+                .into_iter()
+                .find(|status| *status != 0)
+                .unwrap_or(0))
         })
     }
 
@@ -1372,11 +3917,246 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.batch_put_from(&keys, &ptrs, &sizes, cfg) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_put_from(&keys, &ptrs, &sizes, cfg).await;
             result.map_err(to_py_err)
         })
+    }
+
+    /// Batch zero-copy TensorMetadata write from registered Python buffers.
+    #[pyo3(signature = (keys, buffers, sizes, config = None))]
+    fn batch_put_tensor_from(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+    ) -> PyResult<Vec<i32>> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+        }
+        for (buffer, size) in buffers.iter().zip(&sizes) {
+            if buffer.extract::<usize>().is_ok()
+                || crate::tensor_codec::validate_tensor_buffer_object(buffer, *size).is_err()
+            {
+                return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+            }
+        }
+        let ptrs = buffers
+            .iter()
+            .map(get_pointer)
+            .collect::<PyResult<Vec<_>>>()?;
+        let config = config.map(|value| value.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_put_from(&keys, &ptrs, &sizes, config).await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Batch owner-bearing general-parallelism writes from full
+    /// TensorMetadata buffers.
+    #[pyo3(signature = (
+        keys,
+        buffers,
+        sizes,
+        parallelisms = None,
+        config = None,
+        writer_partitions = None
+    ))]
+    fn batch_put_tensor_with_parallelism_from(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        parallelisms: Option<Vec<Bound<'_, PyAny>>>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+        writer_partitions: Option<Vec<Bound<'_, PyAny>>>,
+    ) -> PyResult<Vec<i32>> {
+        if parallelisms.is_none() && writer_partitions.is_none() {
+            return Self::batch_put_tensor_from(slf, keys, buffers, sizes, config);
+        }
+        if keys.len() != buffers.len()
+            || keys.len() != sizes.len()
+            || parallelisms
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || writer_partitions
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || (parallelisms.is_some() && writer_partitions.is_some())
+        {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+        }
+        let config = config.map(|value| value.borrow().to_core());
+        if config.as_ref().is_some_and(|value| {
+            !tensor_publish_config_is_valid(value)
+                || (!value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        }) {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+        }
+        let py = slf.py();
+        let mut plans = Vec::with_capacity(keys.len());
+        for index in 0..keys.len() {
+            if buffers[index].extract::<usize>().is_ok() {
+                plans.push(None);
+                continue;
+            }
+            let Ok(tensor) = crate::tensor_codec::deserialize_tensor_buffer_copy(
+                py,
+                &buffers[index],
+                sizes[index],
+            ) else {
+                plans.push(None);
+                continue;
+            };
+            let parallelism = match parallelisms.as_ref() {
+                Some(values) => match optional_parallelism(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let writer = match writer_partitions.as_ref() {
+                Some(values) => match optional_writer_partition(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let Ok(plan) = parallel_tensor_full_write_plan(
+                &keys[index],
+                tensor.bind(py),
+                parallelism.as_ref(),
+                writer.as_ref(),
+            ) else {
+                plans.push(None);
+                continue;
+            };
+            let base_config = indexed_batch_config(config.clone(), keys.len(), &[index])?;
+            let object_config =
+                expanded_single_key_config(base_config.clone(), plan.objects.len())?;
+            plans.push(Some((plan, base_config, object_config)));
+        }
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                let mut statuses = vec![TENSOR_INVALID_PARAMS_STATUS; plans.len()];
+                for (index, plan) in plans.into_iter().enumerate() {
+                    let Some((plan, base_config, object_config)) = plan else {
+                        continue;
+                    };
+                    let object_keys = plan
+                        .objects
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>();
+                    let object_slices = plan
+                        .objects
+                        .iter()
+                        .map(|(_, payload)| payload.as_slice())
+                        .collect::<Vec<_>>();
+                    let mut status = client
+                        .batch_put(&object_keys, &object_slices, object_config)
+                        .await?
+                        .into_iter()
+                        .find(|status| *status != 0)
+                        .unwrap_or(0);
+                    if status == 0 {
+                        if let Some((manifest_key, manifest)) = plan.manifest {
+                            status = client
+                                .batch_put(&[manifest_key], &[manifest.as_slice()], base_config)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .unwrap_or(TENSOR_INVALID_PARAMS_STATUS);
+                        }
+                    }
+                    statuses[index] = status;
+                }
+                Ok::<_, mooncake_store_core::StoreError>(statuses)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Batch owner-bearing TP buffer write.
+    #[pyo3(signature = (base_keys, buffers, sizes, tp_rank = 0, tp_size = 1, split_dim = 0))]
+    fn batch_put_tensor_with_tp_from(
+        slf: &Bound<'_, Self>,
+        base_keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        tp_rank: i32,
+        tp_size: i32,
+        split_dim: i32,
+    ) -> PyResult<Vec<i32>> {
+        let (_tp_rank, tp_size, split_dim) = tp_parameters(tp_rank, tp_size, split_dim)?;
+        if base_keys.len() != buffers.len() || base_keys.len() != sizes.len() {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()]);
+        }
+        let py = slf.py();
+        let mut final_statuses = vec![TENSOR_INVALID_PARAMS_STATUS; base_keys.len()];
+        let mut shard_keys = Vec::new();
+        let mut shard_payloads = Vec::new();
+        let mut processed_indices = Vec::new();
+        for (index, (buffer, size)) in buffers.iter().zip(&sizes).enumerate() {
+            if buffer.extract::<usize>().is_ok() {
+                continue;
+            }
+            let Ok(tensor) = crate::tensor_codec::deserialize_tensor_buffer_copy(py, buffer, *size)
+            else {
+                continue;
+            };
+            let Ok(payloads) = crate::tensor_codec::serialize_tp_tensor_payloads(
+                tensor.bind(py),
+                tp_size,
+                split_dim,
+            ) else {
+                continue;
+            };
+            processed_indices.push(index);
+            for (rank, payload) in payloads.into_iter().enumerate() {
+                shard_keys.push(if tp_size == 1 {
+                    base_keys[index].clone()
+                } else {
+                    tp_shard_key(&base_keys[index], rank)
+                });
+                shard_payloads.push(payload);
+            }
+        }
+        if shard_keys.is_empty() {
+            return Ok(final_statuses);
+        }
+        let inner = slf.borrow().inner.clone();
+        let shard_statuses = tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let slices = shard_payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let result = client.batch_put(&shard_keys, &slices, None).await;
+            result.map_err(to_py_err)
+        })?;
+        for (processed_offset, original_index) in processed_indices.into_iter().enumerate() {
+            let start = processed_offset * tp_size;
+            let end = start + tp_size;
+            if end > shard_statuses.len() {
+                break;
+            }
+            final_statuses[original_index] = shard_statuses[start..end]
+                .iter()
+                .copied()
+                .find(|status| *status != 0)
+                .unwrap_or(0);
+        }
+        Ok(final_statuses)
     }
 
     /// Write an object from metadata and data buffers.
@@ -1395,13 +4175,10 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe {
-                client
-                    .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
-                    .await
-            };
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -1422,13 +4199,10 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe {
-                client
-                    .batch_put_from_multi_buffers(&keys, &ptrs, &all_sizes, cfg)
-                    .await
-            };
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .batch_put_from_multi_buffers(&keys, &ptrs, &all_sizes, cfg)
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -1456,9 +4230,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.get_buffer(&key).await;
-            *inner.lock() = Some(client);
             let bh = result.map_err(to_py_err)?;
             // Return owned data — future_into_py handles IntoPy conversion with GIL
             // 返回 owned 数据 —— future_into_py 在持有 GIL 时处理 IntoPy 转换
@@ -1476,9 +4249,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_get_buffer(&keys).await;
-            *inner.lock() = Some(client);
             let results = result.map_err(to_py_err)?;
             // Return owned data — future_into_py handles IntoPy conversion
             // 返回 owned 数据 —— future_into_py 处理 IntoPy 转换
@@ -1494,9 +4266,8 @@ impl PythonMooncakeClient {
     fn get_replica_desc(slf: &Bound<'_, Self>, key: String) -> PyResult<Py<PyAny>> {
         let inner = slf.borrow().inner.clone();
         let replicas = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.get_replica_list(&key).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })?;
         Ok(replicas_to_py(replicas))
@@ -1506,9 +4277,8 @@ impl PythonMooncakeClient {
     fn batch_get_replica_desc(slf: &Bound<'_, Self>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
         let inner = slf.borrow().inner.clone();
         let results = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_get_replica_list(&keys).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })?;
 
@@ -1530,12 +4300,11 @@ impl PythonMooncakeClient {
     ) -> PyResult<Vec<String>> {
         let inner = slf.borrow().inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let client_id = client.client_id();
             let result = client
                 .batch_replica_clear(&keys, client_id, &segment_name, &tenant_id)
                 .await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -1564,50 +4333,158 @@ impl PythonMooncakeClient {
 
     /// Register a Python buffer for RDMA zero-copy access.
     /// 为 RDMA 零拷贝访问注册 Python buffer。
-    /// location: device identifier (e.g., "cpu:0", "cuda:0").
+    /// location: optional device identifier. Host buffers default to "cpu:0";
+    /// DLPack device buffers derive and verify their canonical location.
+    #[pyo3(signature = (buffer, size, location = None, owner = None))]
     fn register_buffer(
         slf: &Bound<'_, Self>,
         buffer: Bound<'_, PyAny>,
         size: usize,
-        location: String,
-    ) -> PyResult<()> {
-        let ptr = get_pointer(&buffer)?;
+        location: Option<String>,
+        owner: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<i32> {
+        if size == 0 {
+            return Err(to_py_err("registered buffer size must be non-zero"));
+        }
+        let (memory_owner, effective_location, python_object_identity) = if let Ok(address) =
+            buffer.extract::<usize>()
+        {
+            if address == 0 {
+                return Err(to_py_err("buffer address must not be zero"));
+            }
+            let owner = owner.ok_or_else(|| {
+                to_py_err(
+                    "an allocation-owning Python object is required when registering a raw integer address",
+                )
+            })?;
+            let python_object_identity = owner.as_ptr() as usize;
+            match PyUntypedBuffer::get(&owner) {
+                Ok(buffer_export) => {
+                    let memory_owner =
+                        checked_python_buffer_owner(buffer_export, Some(address), size)?;
+                    (
+                        memory_owner,
+                        host_registration_location(location.as_deref())?,
+                        python_object_identity,
+                    )
+                }
+                Err(buffer_error) => {
+                    if !owner.hasattr("__dlpack__")? {
+                        return Err(to_py_err(format!(
+                            "raw registration owner exposes neither a Python buffer nor DLPack: {buffer_error}"
+                        )));
+                    }
+                    let device_owner = DLPackMemoryOwner::from_python(
+                        &owner,
+                        Some(address),
+                        Some(size),
+                        location.as_deref(),
+                    )?;
+                    let effective_location = device_owner.location().to_string();
+                    (
+                        PythonMemoryOwner::DLPack(device_owner),
+                        effective_location,
+                        python_object_identity,
+                    )
+                }
+            }
+        } else {
+            let python_object_identity = buffer.as_ptr() as usize;
+            match PyUntypedBuffer::get(&buffer) {
+                Ok(buffer_export) => {
+                    let memory_owner = checked_python_buffer_owner(buffer_export, None, size)?;
+                    (
+                        memory_owner,
+                        host_registration_location(location.as_deref())?,
+                        python_object_identity,
+                    )
+                }
+                Err(buffer_error) => {
+                    if !buffer.hasattr("__dlpack__")? {
+                        return Err(to_py_err(format!(
+                            "registration object exposes neither a Python buffer nor DLPack: {buffer_error}"
+                        )));
+                    }
+                    let device_owner = DLPackMemoryOwner::from_python(
+                        &buffer,
+                        None,
+                        Some(size),
+                        location.as_deref(),
+                    )?;
+                    let effective_location = device_owner.location().to_string();
+                    (
+                        PythonMemoryOwner::DLPack(device_owner),
+                        effective_location,
+                        python_object_identity,
+                    )
+                }
+            }
+        };
         {
             let slf_ref = slf.borrow();
-            let guard = slf_ref.inner.lock();
+            let guard = try_client_slot(&slf_ref.inner)?;
             let client = guard
                 .as_ref()
                 .ok_or_else(|| to_py_err("client already closed"))?;
-            unsafe { client.register_buffer(ptr, size, &location) }.map_err(to_py_err)?;
+            let registration_id = client
+                .register_owned_buffer(memory_owner, &effective_location)
+                .map_err(to_py_err)?;
+            // Publish the Python lookup identity before releasing the client
+            // lock. The actual allocation owner already moved into the FFI
+            // registration capability.
+            slf_ref
+                .registered_py_buffers
+                .lock()
+                .push(PythonBufferRegistration {
+                    registration_id,
+                    python_object_identity,
+                    registered_size: size,
+                });
         }
-        // Keep the Python object alive to prevent GC from freeing the memory
-        // 保持 Python 对象存活，防止 GC 释放内存
-        slf.borrow()
-            .registered_py_buffers
-            .lock()
-            .push((ptr as usize, buffer.into_any().unbind()));
-        Ok(())
+        Ok(0)
     }
 
     /// Unregister a previously registered Python buffer.
     /// 注销之前注册的 Python buffer。
-    fn unregister_buffer(slf: &Bound<'_, Self>, buffer: Bound<'_, PyAny>) -> PyResult<()> {
-        let ptr = get_pointer(&buffer)?;
+    fn unregister_buffer(slf: &Bound<'_, Self>, buffer: Bound<'_, PyAny>) -> PyResult<i32> {
+        let raw_address = buffer.extract::<usize>().ok();
+        if raw_address == Some(0) {
+            return Err(to_py_err("buffer address must not be zero"));
+        }
+        let python_object_identity = buffer.as_ptr() as usize;
+        // DLPack capsules are ownership transfers, not pointer-query handles.
+        // Prefer the stable Python identity retained by the registration and
+        // never consume a second capsule merely to unregister. For ordinary
+        // buffer-protocol aliases, preserve the historical base-address lookup.
+        let fallback_base = if raw_address.is_none() && !buffer.hasattr("__dlpack__")? {
+            Some(get_pointer(&buffer)? as usize)
+        } else {
+            raw_address
+        };
         {
             let slf_ref = slf.borrow();
-            let guard = slf_ref.inner.lock();
+            let guard = try_client_slot(&slf_ref.inner)?;
             let client = guard
                 .as_ref()
                 .ok_or_else(|| to_py_err("client already closed"))?;
-            unsafe { client.unregister_buffer(ptr) }.map_err(to_py_err)?;
+            let mut registered_py_buffers = slf_ref.registered_py_buffers.lock();
+            let registration_id = registered_py_buffers
+                .iter()
+                .find(|registration| {
+                    registration.matches_python_object(python_object_identity)
+                        || fallback_base.is_some_and(|base| {
+                            registration.registration_id().base_address() == base
+                        })
+                })
+                .map(PythonBufferRegistration::registration_id)
+                .ok_or_else(|| to_py_err("Python buffer object or address is not registered"))?;
+            client
+                .unregister_buffer_handle(registration_id)
+                .map_err(to_py_err)?;
+            registered_py_buffers
+                .retain(|registration| registration.registration_id() != registration_id);
         }
-        // Remove the tracking entry so the Python buffer can be GC'd
-        // 移除跟踪条目，允许 Python buffer 被 GC
-        slf.borrow()
-            .registered_py_buffers
-            .lock()
-            .retain(|(addr, _)| *addr != ptr as usize);
-        Ok(())
+        Ok(0)
     }
 
     // ===================================================================
@@ -1633,12 +4510,124 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         let replicas = tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.upsert_from(&key, ptr, size, cfg) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.upsert_from(&key, ptr, size, cfg).await;
             result.map_err(to_py_err)
         })?;
         Ok(replicas_to_py(replicas))
+    }
+
+    /// Zero-copy TensorMetadata upsert from an owner-bearing registered
+    /// Python buffer.
+    #[pyo3(signature = (key, buffer, size, config = None))]
+    fn upsert_tensor_from(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+    ) -> PyResult<i32> {
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "upsert_tensor_from requires an owner-bearing Python buffer, not a raw address",
+            ));
+        }
+        crate::tensor_codec::validate_tensor_buffer_object(&buffer, size)?;
+        let ptr = get_pointer(&buffer)?;
+        let config = config.map(|value| value.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client.upsert_from(&key, ptr, size, config).await;
+            result.map(|_| 0).map_err(to_py_err)
+        })
+    }
+
+    /// Owner-bearing general-parallelism upsert from a full TensorMetadata
+    /// buffer.
+    #[pyo3(signature = (
+        key,
+        buffer,
+        size,
+        parallelism = None,
+        config = None,
+        writer_partition = None
+    ))]
+    fn upsert_tensor_with_parallelism_from(
+        slf: &Bound<'_, Self>,
+        key: String,
+        buffer: Bound<'_, PyAny>,
+        size: usize,
+        parallelism: Option<Bound<'_, TensorParallelismPy>>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+        writer_partition: Option<Bound<'_, WriterPartitionPy>>,
+    ) -> PyResult<i32> {
+        if parallelism.is_none() && writer_partition.is_none() {
+            return Self::upsert_tensor_from(slf, key, buffer, size, config);
+        }
+        if buffer.extract::<usize>().is_ok() {
+            return Err(to_py_err(
+                "upsert_tensor_with_parallelism_from requires an owner-bearing Python buffer",
+            ));
+        }
+        let parallelism = parallelism.map(|value| value.borrow().clone());
+        let writer_partition = writer_partition.map(|value| value.borrow().clone());
+        let config = config.map(|value| value.borrow().to_core());
+        if config
+            .as_ref()
+            .is_some_and(|value| !tensor_publish_config_is_valid(value))
+        {
+            return Ok(TENSOR_INVALID_PARAMS_STATUS);
+        }
+        let py = buffer.py();
+        let tensor = crate::tensor_codec::deserialize_tensor_buffer_copy(py, &buffer, size)?;
+        let plan = match parallel_tensor_full_write_plan(
+            &key,
+            tensor.bind(py),
+            parallelism.as_ref(),
+            writer_partition.as_ref(),
+        ) {
+            Ok(plan) => plan,
+            Err(_) => return Ok(TENSOR_INVALID_PARAMS_STATUS),
+        };
+        let object_config = expanded_single_key_config(config.clone(), plan.objects.len())?;
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                let object_keys = plan
+                    .objects
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                let object_slices = plan
+                    .objects
+                    .iter()
+                    .map(|(_, payload)| payload.as_slice())
+                    .collect::<Vec<_>>();
+                let statuses = client
+                    .batch_upsert(&object_keys, &object_slices, object_config)
+                    .await?;
+                let status = statuses
+                    .into_iter()
+                    .find(|status| *status != 0)
+                    .unwrap_or(0);
+                if status != 0 {
+                    return Ok(status);
+                }
+                if let Some((manifest_key, manifest)) = plan.manifest {
+                    return Ok(client
+                        .batch_upsert(&[manifest_key], &[manifest.as_slice()], config)
+                        .await?
+                        .into_iter()
+                        .next()
+                        .unwrap_or(TENSOR_INVALID_PARAMS_STATUS));
+                }
+                Ok::<_, mooncake_store_core::StoreError>(0)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
     }
 
     /// Batch zero-copy upsert from multiple Python buffers.
@@ -1655,9 +4644,8 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
         let results = tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.batch_upsert_from(&keys, &ptrs, &sizes, cfg) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_upsert_from(&keys, &ptrs, &sizes, cfg).await;
             result.map_err(to_py_err)
         })?;
         // GIL is held throughout block_on, so assume_attached() is safe here
@@ -1668,6 +4656,175 @@ impl PythonMooncakeClient {
             .map(|replicas| replicas_to_py(replicas.clone()))
             .collect();
         Ok(out.into_pyobject(py)?.unbind())
+    }
+
+    /// Batch zero-copy TensorMetadata upsert with one C++-compatible status
+    /// per key.
+    #[pyo3(signature = (keys, buffers, sizes, config = None))]
+    fn batch_upsert_tensor_from(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+    ) -> PyResult<Vec<i32>> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+        }
+        for (buffer, size) in buffers.iter().zip(&sizes) {
+            if buffer.extract::<usize>().is_ok()
+                || crate::tensor_codec::validate_tensor_buffer_object(buffer, *size).is_err()
+            {
+                return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+            }
+        }
+        let ptrs = buffers
+            .iter()
+            .map(get_pointer)
+            .collect::<PyResult<Vec<_>>>()?;
+        let config = config.map(|value| value.borrow().to_core());
+        let inner = slf.borrow().inner.clone();
+        tokio::runtime::Handle::current().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .batch_upsert_from_statuses(&keys, &ptrs, &sizes, config)
+                .await;
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Batch owner-bearing general-parallelism upserts from full
+    /// TensorMetadata buffers.
+    #[pyo3(signature = (
+        keys,
+        buffers,
+        sizes,
+        parallelisms = None,
+        config = None,
+        writer_partitions = None
+    ))]
+    fn batch_upsert_tensor_with_parallelism_from(
+        slf: &Bound<'_, Self>,
+        keys: Vec<String>,
+        buffers: Vec<Bound<'_, PyAny>>,
+        sizes: Vec<usize>,
+        parallelisms: Option<Vec<Bound<'_, PyAny>>>,
+        config: Option<Bound<'_, ReplicateConfigPy>>,
+        writer_partitions: Option<Vec<Bound<'_, PyAny>>>,
+    ) -> PyResult<Vec<i32>> {
+        if parallelisms.is_none() && writer_partitions.is_none() {
+            return Self::batch_upsert_tensor_from(slf, keys, buffers, sizes, config);
+        }
+        if keys.len() != buffers.len()
+            || keys.len() != sizes.len()
+            || parallelisms
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || writer_partitions
+                .as_ref()
+                .is_some_and(|values| values.len() != keys.len())
+            || (parallelisms.is_some() && writer_partitions.is_some())
+        {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+        }
+        let config = config.map(|value| value.borrow().to_core());
+        if config.as_ref().is_some_and(|value| {
+            !tensor_publish_config_is_valid(value)
+                || (!value.group_ids.is_empty() && value.group_ids.len() != keys.len())
+        }) {
+            return Ok(vec![TENSOR_INVALID_PARAMS_STATUS; keys.len()]);
+        }
+        let py = slf.py();
+        let mut plans = Vec::with_capacity(keys.len());
+        for index in 0..keys.len() {
+            if buffers[index].extract::<usize>().is_ok() {
+                plans.push(None);
+                continue;
+            }
+            let Ok(tensor) = crate::tensor_codec::deserialize_tensor_buffer_copy(
+                py,
+                &buffers[index],
+                sizes[index],
+            ) else {
+                plans.push(None);
+                continue;
+            };
+            let parallelism = match parallelisms.as_ref() {
+                Some(values) => match optional_parallelism(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let writer = match writer_partitions.as_ref() {
+                Some(values) => match optional_writer_partition(&values[index]) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        plans.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            let Ok(plan) = parallel_tensor_full_write_plan(
+                &keys[index],
+                tensor.bind(py),
+                parallelism.as_ref(),
+                writer.as_ref(),
+            ) else {
+                plans.push(None);
+                continue;
+            };
+            let base_config = indexed_batch_config(config.clone(), keys.len(), &[index])?;
+            let object_config =
+                expanded_single_key_config(base_config.clone(), plan.objects.len())?;
+            plans.push(Some((plan, base_config, object_config)));
+        }
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = async {
+                let mut statuses = vec![TENSOR_INVALID_PARAMS_STATUS; plans.len()];
+                for (index, plan) in plans.into_iter().enumerate() {
+                    let Some((plan, base_config, object_config)) = plan else {
+                        continue;
+                    };
+                    let object_keys = plan
+                        .objects
+                        .iter()
+                        .map(|(key, _)| key.clone())
+                        .collect::<Vec<_>>();
+                    let object_slices = plan
+                        .objects
+                        .iter()
+                        .map(|(_, payload)| payload.as_slice())
+                        .collect::<Vec<_>>();
+                    let mut status = client
+                        .batch_upsert(&object_keys, &object_slices, object_config)
+                        .await?
+                        .into_iter()
+                        .find(|status| *status != 0)
+                        .unwrap_or(0);
+                    if status == 0 {
+                        if let Some((manifest_key, manifest)) = plan.manifest {
+                            status = client
+                                .batch_upsert(&[manifest_key], &[manifest.as_slice()], base_config)
+                                .await?
+                                .into_iter()
+                                .next()
+                                .unwrap_or(TENSOR_INVALID_PARAMS_STATUS);
+                        }
+                    }
+                    statuses[index] = status;
+                }
+                Ok::<_, mooncake_store_core::StoreError>(statuses)
+            }
+            .await;
+            result.map_err(to_py_err)
+        })
     }
 
     // ===================================================================
@@ -1685,9 +4842,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.mount_segment(&segment_name, size, base_addr).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -1703,9 +4859,59 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.unmount_segment(&segment_name, grace_period_ms).await;
-            *inner.lock() = Some(client);
+            result.map_err(to_py_err)
+        })
+    }
+
+    /// Allocate client-owned memory, register it with the Transfer Engine, and
+    /// mount every `MC_MAX_MR_SIZE` chunk in Master.
+    ///
+    /// Returns `(segment_ids, allocated_size)`. The IDs are the authoritative
+    /// UUIDs required by `unmount_and_free_segments`; Python never owns or
+    /// manipulates the native allocation directly.
+    fn allocate_and_mount_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        size: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client.allocate_and_mount_segments_with_size(size).await;
+            result
+                .map(|(segment_ids, allocated_size)| {
+                    (
+                        segment_ids
+                            .into_iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>(),
+                        allocated_size,
+                    )
+                })
+                .map_err(to_py_err)
+        })
+    }
+
+    /// Unmount exact client-owned segment UUIDs and release their registrations
+    /// and owners only after Master confirms the requested lifecycle boundary.
+    #[pyo3(signature = (segment_ids, grace_period_ms = 0))]
+    fn unmount_and_free_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_ids: Vec<String>,
+        grace_period_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let segment_ids = parse_uuid_list(&segment_ids)?;
+        let inner = slf.borrow().inner.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .unmount_and_free_segments(&segment_ids, grace_period_ms)
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -1721,9 +4927,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.mount_nof_segment(&segment).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -1742,9 +4947,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.remount_nof_segments(&segments).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -1759,9 +4963,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.unmount_nof_segment(segment_id).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -1775,9 +4978,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let segments = client.get_all_nof_segments().await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             let out: Vec<(String, String, u64, u64, String, String)> = segments
                 .iter()
                 .map(|s| {
@@ -1805,12 +5007,11 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let owners = client
                 .get_nof_segments_by_name(&segment_name)
                 .await
                 .map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             let out: Vec<(String, String)> = owners
                 .iter()
                 .map(|o| (o.segment_id.to_string(), o.client_id.to_string()))
@@ -1828,12 +5029,11 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let usage = client
                 .query_segments(&segment_name)
                 .await
                 .map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok((usage.total_size, usage.used_size))
         })
     }
@@ -1846,9 +5046,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let config = client.get_storage_config().await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok((
                 config.fs_dir,
                 config.enable_disk_eviction,
@@ -1866,12 +5065,11 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let status = client
                 .query_segment_status(&segment_name)
                 .await
                 .map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(status)
         })
     }
@@ -1886,12 +5084,11 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let status = client
                 .query_segment_status_by_id(segment_id)
                 .await
                 .map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(status)
         })
     }
@@ -1901,9 +5098,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let fsdir = client.get_fsdir().await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(fsdir)
         })
     }
@@ -1913,9 +5109,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let version = client.service_ready().await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(version)
         })
     }
@@ -1928,9 +5123,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let keys = client.get_all_keys_for_admin().await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(keys)
         })
     }
@@ -1943,12 +5137,11 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let segments = client
                 .get_all_segments_for_admin()
                 .await
                 .map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(segments)
         })
     }
@@ -1962,12 +5155,11 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let usage = client
                 .query_segment_for_admin(&segment_name)
                 .await
                 .map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok((usage.total_size, usage.used_size))
         })
     }
@@ -1980,9 +5172,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let stats: HashMap<String, f64> = client.calc_cache_stats().await.map_err(to_py_err)?;
-            *inner.lock() = Some(client);
             Ok(stats)
         })
     }
@@ -2000,9 +5191,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_query_ip(&ids).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2029,7 +5219,7 @@ impl PythonMooncakeClient {
         }));
         backend.init().map_err(to_py_err)?;
 
-        let mut guard = self.inner.lock();
+        let mut guard = try_client_slot(&self.inner)?;
         let client = guard
             .take()
             .ok_or_else(|| to_py_err("client already closed"))?;
@@ -2045,16 +5235,15 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = take_client(&inner)?;
+            let client = take_client(&inner).await?;
             let result = client.start_offload_server().await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
 
     /// Return the local P2P offload RPC address if the server is running.
     fn offload_rpc_address(&self) -> PyResult<String> {
-        match self.inner.lock().as_ref() {
+        match try_client_slot(&self.inner)?.as_ref() {
             Some(client) => Ok(client.offload_rpc_address()),
             None => Err(to_py_err("client already closed")),
         }
@@ -2069,9 +5258,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.offload_objects(enable_offloading).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2084,9 +5272,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.promote_objects().await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2101,11 +5288,10 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client
                 .run_disk_watermark_eviction(high_watermark_ratio, low_watermark_ratio)
                 .await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2172,9 +5358,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.mount_local_disk_segment(enable_offloading).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2189,9 +5374,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.offload_object_heartbeat(enable_offloading).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2206,9 +5390,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.report_ssd_capacity(bytes).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2263,9 +5446,8 @@ impl PythonMooncakeClient {
             .collect();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.notify_offload_success(keys, proto_metas).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2298,9 +5480,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.promotion_object_heartbeat().await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2320,11 +5501,10 @@ impl PythonMooncakeClient {
         // Return Rust tuple — future_into_py handles IntoPy conversion
         // 返回 Rust 元组 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client
                 .promotion_alloc_start(&key, size as u64, preferred_segments)
                 .await;
-            *inner.lock() = Some(client);
             let replica = result.map_err(to_py_err)?;
             Ok((
                 replica.segment_name,
@@ -2345,9 +5525,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.notify_promotion_success(&key).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2362,9 +5541,8 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.notify_promotion_failure(&key).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -2462,6 +5640,98 @@ mod tests {
             }
         );
         assert!(normalize_client_http_config(true, 0).is_err());
+    }
+
+    #[test]
+    fn python_tenant_defaults_match_cpp_tenant_identity() {
+        assert_eq!(normalize_client_tenant_id(String::new()), "default");
+        assert_eq!(
+            normalize_client_tenant_id("tenant-a".to_string()),
+            "tenant-a"
+        );
+    }
+
+    #[test]
+    fn dynamic_segment_ids_are_parsed_before_client_mutation() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        let parsed =
+            parse_uuid_list(&[first.to_string(), second.to_string()]).expect("valid UUIDs");
+        assert_eq!(parsed, vec![first, second]);
+        assert!(parse_uuid_list(&["not-a-uuid".to_string()]).is_err());
+    }
+
+    #[test]
+    fn tensor_batch_config_preserves_group_id_indexing_after_filtering() {
+        let config = ReplicateConfig {
+            group_ids: vec![
+                "group-a".to_string(),
+                "group-b".to_string(),
+                "group-c".to_string(),
+            ],
+            ..ReplicateConfig::default()
+        };
+        let indexed = indexed_batch_config(Some(config), 3, &[0, 2])
+            .unwrap()
+            .unwrap();
+        assert_eq!(indexed.group_ids, vec!["group-a", "group-c"]);
+
+        let invalid = ReplicateConfig {
+            group_ids: vec!["only-one".to_string()],
+            ..ReplicateConfig::default()
+        };
+        assert!(indexed_batch_config(Some(invalid), 2, &[0]).is_err());
+
+        let repeated = repeated_indexed_batch_config(
+            Some(ReplicateConfig {
+                group_ids: vec!["group-a".to_string(), "group-b".to_string()],
+                ..ReplicateConfig::default()
+            }),
+            2,
+            &[1, 0],
+            2,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            repeated.group_ids,
+            vec!["group-b", "group-b", "group-a", "group-a"]
+        );
+    }
+
+    #[test]
+    fn parallel_reconstruction_accepts_only_tp_rank_size_remapping() {
+        let requested = TensorParallelismPy {
+            axes: vec![
+                ParallelAxisPy {
+                    kind: "dp".to_string(),
+                    rank: 1,
+                    size: 2,
+                    split_dim: None,
+                    expert_id: None,
+                    stage_id: None,
+                },
+                ParallelAxisPy {
+                    kind: "tp".to_string(),
+                    rank: 3,
+                    size: 8,
+                    split_dim: Some(1),
+                    expert_id: None,
+                    stage_id: None,
+                },
+            ],
+        };
+        let mut stored = requested.clone();
+        stored.axes[1].rank = 0;
+        stored.axes[1].size = 4;
+        assert!(tp_compatible_parallelism(&requested, &stored, Some(0), Some(4)).unwrap());
+        assert!(!tp_compatible_parallelism(&requested, &stored, Some(1), Some(4)).unwrap());
+
+        stored.axes[1].split_dim = Some(0);
+        assert!(!tp_compatible_parallelism(&requested, &stored, Some(0), Some(4)).unwrap());
+        stored.axes[1].split_dim = Some(1);
+        stored.axes[0].rank = 0;
+        assert!(!tp_compatible_parallelism(&requested, &stored, Some(0), Some(4)).unwrap());
     }
 
     fn normalize(protocol: &str) -> PyResult<NormalizedCreateArgs> {

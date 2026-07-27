@@ -15,4 +15,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
+sha2 = "0.10"
 transfer-engine-ffi = { path = "../transfer-engine-ffi", optional = true }

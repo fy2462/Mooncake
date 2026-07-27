@@ -4,13 +4,21 @@ use super::*;
 /// 记录 segment drain 过程中单个 key 的迁移单元任务。
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveDrainTask {
+    /// Exact source segment identity captured when the task was scheduled.
+    pub(crate) source_segment_id: Uuid,
+    /// Source storage class; UUIDs are only unique within their segment table.
+    pub(crate) source_replica_type: ReplicaType,
     /// 源 segment 名称 / Source segment name.
     pub(crate) source_segment: String,
     /// 目标 segment 名称 / Target segment name.
     pub(crate) target_segment: String,
+    /// Exact target identity captured when the task was scheduled.
+    pub(crate) target_segment_id: Uuid,
+    /// Target storage class. Drain currently schedules Memory targets only.
+    pub(crate) target_replica_type: ReplicaType,
     /// 迁移的字节数 / Bytes to migrate.
     pub(crate) bytes: u64,
-    /// unit_key = "{key}@{source_segment}", used for dedup and retry tracking.
+    /// Stable key used for deduplication and retry tracking.
     /// C++ equivalent: ActiveDrainTask::unit_key
     pub(crate) unit_key: String,
 }
@@ -18,10 +26,32 @@ pub(crate) struct ActiveDrainTask {
 impl ActiveDrainTask {
     /// Build the unit_key used for deduplication and retry tracking.
     /// 构建用于去重和重试跟踪的 unit_key。
-    /// C++ equivalent: ActiveDrainTask::unit_key = "{key}@{source_segment}"
-    pub(crate) fn unit_key_for(key: &str, source_segment: &str) -> String {
-        format!("{key}@{source_segment}")
+    ///
+    /// C++ can use a segment name because names are unique there. Rust permits
+    /// same-name segments, so the durable UUID and storage class are required
+    /// to keep a running job bound to the source it originally claimed.
+    pub(crate) fn unit_key_for(
+        key: &str,
+        source_segment_id: Uuid,
+        source_replica_type: ReplicaType,
+    ) -> String {
+        let source_kind = match source_replica_type {
+            ReplicaType::Memory => "memory",
+            ReplicaType::NoFSsd => "nof",
+            ReplicaType::Disk => "disk",
+            ReplicaType::LocalDisk => "local-disk",
+            ReplicaType::All => "all",
+        };
+        format!("{key}@{source_kind}:{source_segment_id}")
     }
+}
+
+/// Exact source identity captured atomically with the transition to Draining.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DrainSourceSegment {
+    pub(crate) id: Uuid,
+    pub(crate) replica_type: ReplicaType,
+    pub(crate) name: String,
 }
 
 /// A drain job that moves objects from draining segments to target segments.
@@ -34,6 +64,9 @@ pub(crate) struct DrainJobEntry {
     pub(crate) status: crate::proto::JobStatus,
     /// 待 drain 的源 segment 名称列表 / Source segment names to drain.
     pub(crate) segments: Vec<String>,
+    /// Exact source identities. `segments` is retained only for the public
+    /// name-based query response.
+    pub(crate) source_segments: Vec<DrainSourceSegment>,
     /// 目标 segment 名称列表 / Target segment names.
     pub(crate) target_segments: Vec<String>,
     /// 最大并发 drain 单元数 / Max concurrent drain units.

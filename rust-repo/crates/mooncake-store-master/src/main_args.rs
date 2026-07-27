@@ -33,8 +33,8 @@ pub struct Args {
     #[arg(long, default_value_t = 16)]
     pub rpc_thread_num: usize,
 
-    /// Segment 分配策略: "random", "free_ratio_first", "ssd_free_ratio_first" 或 "local_first"；"cxl" 当前会明确拒绝
-    /// Segment allocation strategy: "random", "free_ratio_first", "ssd_free_ratio_first", or "local_first"; "cxl" is explicitly unsupported
+    /// Segment 分配策略: "random", "free_ratio_first", "ssd_free_ratio_first", "local_first" 或 "cxl"
+    /// Segment allocation strategy: "random", "free_ratio_first", "ssd_free_ratio_first", "local_first", or "cxl"
     #[arg(long, default_value = "random")]
     pub allocation_strategy: String,
 
@@ -42,6 +42,19 @@ pub struct Args {
     /// Memory allocator within segment: "offset" or "cachelib"
     #[arg(long, default_value = "offset")]
     pub memory_allocator: String,
+
+    /// Enable the shared CXL address space. This forces CXL placement and the
+    /// cachelib-like allocator, matching the C++ Store.
+    #[arg(long)]
+    pub enable_cxl: bool,
+
+    /// DAX device path represented by the shared CXL address space.
+    #[arg(long, default_value = "/dev/dax0.0")]
+    pub cxl_path: String,
+
+    /// Shared CXL address-space capacity in bytes.
+    #[arg(long, default_value_t = 8 * 1024 * 1024 * 1024_u64)]
+    pub cxl_size: u64,
 
     /// KV 对象默认租约 TTL（毫秒）/ Default KV lease TTL in milliseconds
     #[arg(long, default_value_t = 10_000)]
@@ -69,6 +82,14 @@ pub struct Args {
     #[arg(long, default_value_t = 0.05)]
     pub eviction_ratio: f64,
 
+    /// NoF usage high watermark; independent from Memory eviction pressure.
+    #[arg(long, default_value_t = 0.90)]
+    pub nof_eviction_high_watermark_ratio: f64,
+
+    /// Fraction of objects targeted by each NoF eviction cycle.
+    #[arg(long, default_value_t = 0.05)]
+    pub nof_eviction_ratio: f64,
+
     /// 是否启用全局 offload/promotion 功能
     /// Whether to enable global offload/promotion workflows
     #[arg(long)]
@@ -84,8 +105,12 @@ pub struct Args {
     #[arg(long)]
     pub offload_on_evict: bool,
 
-    /// 是否强制驱逐（即使对象被 soft_pin 也驱逐）
-    /// Force eviction even for soft-pinned objects
+    /// Whether a second eviction pass may select objects with an active soft pin.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub allow_evict_soft_pinned_objects: bool,
+
+    /// 是否在 offload 无法入队时强制驱逐
+    /// Force eviction when offload cannot be queued
     #[arg(long)]
     pub offload_force_evict: bool,
 
@@ -161,9 +186,29 @@ pub struct Args {
     #[arg(long, default_value_t = 600)]
     pub put_start_release_timeout_sec: u64,
 
+    /// Enable promotion-on-hit for LocalDisk replicas.
+    #[arg(long, default_value_t = false)]
+    pub promotion_on_hit: bool,
+
+    /// Number of hits required before a LocalDisk object enters promotion.
+    #[arg(
+        long,
+        default_value_t = 2,
+        value_parser = clap::value_parser!(u8).range(1..)
+    )]
+    pub promotion_admission_threshold: u8,
+
+    /// Maximum number of objects retained in the promotion queue.
+    #[arg(long, default_value_t = 50_000)]
+    pub promotion_queue_limit: usize,
+
     /// 每次 promotion heartbeat 返回给单个客户端的最大任务数
     /// Max promotion tasks returned to one client per heartbeat
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(usize).range(1..)
+    )]
     pub promotion_max_per_heartbeat: usize,
 
     /// Maximum number of completed client tasks retained by the master.
@@ -314,7 +359,11 @@ pub struct Args {
 
     /// HA lease TTL in seconds
     /// HA 租约 TTL，单位秒
-    #[arg(long, default_value_t = 30)]
+    #[arg(
+        long,
+        default_value_t = 30,
+        value_parser = clap::value_parser!(i64).range(1..)
+    )]
     pub ha_lease_ttl_secs: i64,
 
     /// Pod name for K8s label-based leader routing. Defaults to POD_NAME.

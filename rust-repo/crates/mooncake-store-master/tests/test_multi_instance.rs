@@ -34,6 +34,7 @@ async fn mount_segment(service: &MasterServiceImpl, name: &str, cid: Uuid) {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -58,6 +59,7 @@ async fn put_object(service: &MasterServiceImpl, key: &str, tenant: &str, cid: U
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
             tenant_id: tenant.into(),
         }),

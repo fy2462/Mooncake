@@ -11,6 +11,7 @@
 
 use std::ffi::NulError;
 use std::str::Utf8Error;
+use uuid::Uuid;
 
 /// Unified error enum for all store-layer operations.
 ///
@@ -75,6 +76,12 @@ pub enum StoreError {
     /// 指定的 segment ID 或名称不存在。
     #[error("segment not found: {0}")]
     SegmentNotFound(String),
+
+    /// A Memory segment mount may have reached the Master, but rollback could
+    /// not confirm that the segment was removed. The caller must retain the
+    /// backing owner identified by `segment_id`.
+    #[error("segment mount outcome is ambiguous for {segment_id}: {reason}")]
+    SegmentMountOutcomeAmbiguous { segment_id: Uuid, reason: String },
 
     /// The master / metadata service is temporarily unreachable.
     /// master 或元数据服务暂时不可达。

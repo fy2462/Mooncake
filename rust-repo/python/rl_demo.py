@@ -140,9 +140,9 @@ class TrainGroup:
             actor.save_model(rollout_id)
         print(f"[TrainGroup] Checkpoint saved at rollout {rollout_id}")
 
-    def close(self):
+    async def close(self):
         if self._client:
-            self._client.close()
+            await self._client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +239,9 @@ class RolloutController:
             print(f"  [Controller] fetch failed for {key}: {e}")
             return None
 
-    def close(self):
+    async def close(self):
         if self._client:
-            self._client.close()
+            await self._client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +272,8 @@ class RolloutManager:
             engine.eval(rollout_id, samples)
         print(f"[RolloutManager] Evaluation at rollout {rollout_id}")
 
-    def close(self):
-        self.controller.close()
+    async def close(self):
+        await self.controller.close()
 
 
 # ---------------------------------------------------------------------------
@@ -328,8 +328,8 @@ async def train(args):
             await rollout_manager.eval(rollout_id)
 
     # -- cleanup --
-    train_group.close()
-    rollout_manager.close()
+    await train_group.close()
+    await rollout_manager.close()
     print("✓ RL demo finished")
 
 

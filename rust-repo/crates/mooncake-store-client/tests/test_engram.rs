@@ -1,6 +1,5 @@
 use mooncake_store_client::engram::{EngramClient, EngramStore, EngramStoreConfig};
-use mooncake_store_core::{ReplicateConfig, StoreError};
-use std::collections::VecDeque;
+use mooncake_store_core::ReplicateConfig;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -11,13 +10,10 @@ struct MockState {
     batch_put_statuses: Vec<i32>,
     get_into_ranges_result: Option<Vec<Vec<Vec<i64>>>>,
     removed_keys: Vec<String>,
-    registrations: Vec<usize>,
-    unregistrations: Vec<usize>,
     get_keys: Vec<Vec<String>>,
     get_dst_offsets: Vec<Vec<Vec<usize>>>,
     get_src_offsets: Vec<Vec<Vec<usize>>>,
     get_sizes: Vec<Vec<Vec<usize>>>,
-    unregister_failures: VecDeque<StoreError>,
 }
 
 #[derive(Default)]
@@ -34,28 +30,6 @@ impl MockClient {
 }
 
 impl EngramClient for MockClient {
-    fn register_buffer(
-        &self,
-        buffer: &[u8],
-        _location: &str,
-    ) -> mooncake_store_core::error::StoreResult<()> {
-        self.state
-            .lock()
-            .unwrap()
-            .registrations
-            .push(buffer.as_ptr() as usize);
-        Ok(())
-    }
-
-    fn unregister_buffer(&self, buffer: &[u8]) -> mooncake_store_core::error::StoreResult<()> {
-        let mut state = self.state.lock().unwrap();
-        state.unregistrations.push(buffer.as_ptr() as usize);
-        if let Some(err) = state.unregister_failures.pop_front() {
-            return Err(err);
-        }
-        Ok(())
-    }
-
     fn batch_is_exist<'a>(
         &'a mut self,
         _keys: &'a [String],
@@ -153,8 +127,6 @@ async fn test_engram_lookup_rows_contiguous_builds_range_layout() {
 
     let s = store.into_inner();
     let s = s.state.lock().unwrap();
-    assert_eq!(s.registrations.len(), 1);
-    assert_eq!(s.unregistrations.len(), 1);
     assert_eq!(s.get_src_offsets[0][0].len(), 4);
     assert_eq!(s.get_src_offsets[0][1].len(), 4);
     assert_eq!(s.get_src_offsets[0][0], vec![0, 5 * 64, 64, 3 * 64]);
@@ -186,12 +158,10 @@ async fn test_engram_remove_from_store_counts_successes() {
 }
 
 #[tokio::test]
-async fn test_engram_populate_rolls_back_when_unregister_fails() {
+async fn test_engram_populate_rolls_back_when_batch_put_fails() {
     let mut state = MockState::default();
     state.exists_results = vec![false];
-    state.batch_put_statuses = vec![0];
-    state.unregister_failures =
-        VecDeque::from(vec![StoreError::Internal("unregister failed".to_string())]);
+    state.batch_put_statuses = vec![-1];
 
     let mut store = EngramStore::new(
         0,

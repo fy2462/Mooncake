@@ -164,7 +164,7 @@ pub(super) async fn read_k8s_view(
 ) -> Result<Option<MasterView>, HaError> {
     let api = k8s_lease_api(namespace).await?;
     match api.get(lease_name).await {
-        Ok(lease) => Ok(view_from_k8s_lease(&lease)),
+        Ok(lease) => active_view_from_k8s_lease(&lease, chrono::Utc::now()),
         Err(kube::Error::Api(err)) if err.code == 404 => Ok(None),
         Err(e) => Err(HaError::InvalidBackend(format!("k8s get lease: {e}"))),
     }
@@ -176,11 +176,12 @@ pub(super) async fn acquire_k8s_lease(
     leader_address: &str,
     lease_ttl_secs: i64,
 ) -> Result<AcquireLeadershipResult, HaError> {
-    if lease_ttl_secs <= 0 {
+    if leader_address.trim().is_empty() {
         return Err(HaError::InvalidParams(
-            "k8s lease ttl must be positive".into(),
+            "k8s leader address must not be empty".into(),
         ));
     }
+    let lease_ttl_secs_i32 = k8s_lease_ttl_i32(lease_ttl_secs)?;
 
     let api = k8s_lease_api(namespace).await?;
     for attempt in 0..K8S_OPERATION_MAX_ATTEMPTS {
@@ -188,10 +189,8 @@ pub(super) async fn acquire_k8s_lease(
         match api.get(lease_name).await {
             Ok(mut lease) => {
                 let spec = lease.spec.clone().unwrap_or_default();
-                let holder = spec.holder_identity.clone().unwrap_or_default();
-                let current_view = view_from_k8s_lease(&lease);
-                if !holder.is_empty() && holder != leader_address && !k8s_lease_expired(&spec, now)
-                {
+                let current_view = view_from_k8s_lease(&lease)?;
+                if !k8s_lease_available_for_acquisition(&spec, now) {
                     return Ok(AcquireLeadershipResult {
                         acquired: false,
                         view: current_view,
@@ -199,17 +198,13 @@ pub(super) async fn acquire_k8s_lease(
                     });
                 }
 
-                let holder_changed = holder != leader_address;
-                let transitions =
-                    spec.lease_transitions.unwrap_or_default() + if holder_changed { 1 } else { 0 };
+                // Every newly acquired session is a new term, including a
+                // restarted pod that reuses the same advertised address.
+                let transitions = next_k8s_lease_transition(spec.lease_transitions)?;
                 lease.spec = Some(LeaseSpec {
                     holder_identity: Some(leader_address.to_string()),
-                    lease_duration_seconds: Some(lease_ttl_secs as i32),
-                    acquire_time: if holder_changed {
-                        Some(MicroTime(now))
-                    } else {
-                        spec.acquire_time.clone()
-                    },
+                    lease_duration_seconds: Some(lease_ttl_secs_i32),
+                    acquire_time: Some(MicroTime(now)),
                     renew_time: Some(MicroTime(now)),
                     lease_transitions: Some(transitions),
                 });
@@ -219,10 +214,11 @@ pub(super) async fn acquire_k8s_lease(
                     .await
                 {
                     Ok(lease) => {
-                        let view = view_from_k8s_lease(&lease).unwrap_or(MasterView {
-                            leader_address: leader_address.to_string(),
-                            view_version: transitions as u64,
-                        });
+                        let view = validate_acquired_k8s_view(
+                            view_from_k8s_lease(&lease)?,
+                            leader_address,
+                            transitions,
+                        )?;
                         return Ok(k8s_acquired_result(
                             namespace,
                             lease_name,
@@ -246,7 +242,7 @@ pub(super) async fn acquire_k8s_lease(
                     },
                     spec: Some(LeaseSpec {
                         holder_identity: Some(leader_address.to_string()),
-                        lease_duration_seconds: Some(lease_ttl_secs as i32),
+                        lease_duration_seconds: Some(lease_ttl_secs_i32),
                         acquire_time: Some(MicroTime(now)),
                         renew_time: Some(MicroTime(now)),
                         lease_transitions: Some(1),
@@ -254,10 +250,11 @@ pub(super) async fn acquire_k8s_lease(
                 };
                 match api.create(&PostParams::default(), &lease).await {
                     Ok(lease) => {
-                        let view = view_from_k8s_lease(&lease).unwrap_or(MasterView {
-                            leader_address: leader_address.to_string(),
-                            view_version: 1,
-                        });
+                        let view = validate_acquired_k8s_view(
+                            view_from_k8s_lease(&lease)?,
+                            leader_address,
+                            1,
+                        )?;
                         return Ok(k8s_acquired_result(
                             namespace,
                             lease_name,
@@ -311,12 +308,17 @@ pub(super) async fn renew_k8s_lease(
                 )));
             }
         };
-        let mut spec = lease.spec.clone().unwrap_or_default();
-        if spec.holder_identity.as_deref() != Some(&session.view.leader_address) {
+        let mut spec = lease
+            .spec
+            .clone()
+            .ok_or_else(|| HaError::InvalidBackend("k8s lease has no spec during renew".into()))?;
+        validate_k8s_session_lease(&spec, session)?;
+        let now = chrono::Utc::now();
+        if k8s_lease_expired(&spec, now) {
             return Err(HaError::UnavailableInCurrentStatus);
         }
-        spec.renew_time = Some(MicroTime(chrono::Utc::now()));
-        spec.lease_duration_seconds = Some(session.lease_ttl.as_secs() as i32);
+        spec.renew_time = Some(MicroTime(now));
+        spec.lease_duration_seconds = Some(k8s_session_lease_ttl_i32(session)?);
         lease.spec = Some(spec);
         match api
             .replace(lease_name, &PostParams::default(), &lease)
@@ -349,7 +351,7 @@ pub(super) fn start_k8s_keepalive(
     let lease_name = lease_name.to_string();
     let session = session.clone();
     tokio::spawn(async move {
-        let sleep_for = std::cmp::max(Duration::from_secs(1), session.lease_ttl / 2);
+        let sleep_for = k8s_keepalive_interval(session.lease_ttl);
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(sleep_for) => {
@@ -371,6 +373,11 @@ pub(super) fn start_k8s_keepalive(
     Ok(())
 }
 
+fn k8s_keepalive_interval(lease_ttl: Duration) -> Duration {
+    let ttl_ms = u64::try_from(lease_ttl.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis((ttl_ms / 3).clamp(100, 3_000))
+}
+
 pub(super) async fn release_k8s_lease(
     namespace: &str,
     lease_name: &str,
@@ -390,10 +397,10 @@ pub(super) async fn release_k8s_lease(
                 )));
             }
         };
-        let mut spec = lease.spec.clone().unwrap_or_default();
-        if spec.holder_identity.as_deref() != Some(&session.view.leader_address) {
-            return Err(HaError::UnavailableInCurrentStatus);
-        }
+        let mut spec = lease.spec.clone().ok_or_else(|| {
+            HaError::InvalidBackend("k8s lease has no spec during release".into())
+        })?;
+        validate_k8s_session_lease(&spec, session)?;
         spec.holder_identity = None;
         spec.renew_time = Some(MicroTime(chrono::Utc::now()));
         lease.spec = Some(spec);
@@ -423,10 +430,13 @@ pub(super) async fn wait_for_k8s_view_change(
     let deadline = tokio::time::Instant::now() + timeout;
     let mut resource_version = match api.get(lease_name).await {
         Ok(lease) => {
-            let current = view_from_k8s_lease(&lease);
+            let current = active_view_from_k8s_lease(&lease, chrono::Utc::now())?;
             match current {
                 Some(view) if view.view_version != known_version => return Ok(Some(view)),
-                Some(_) | None => lease.resource_version().unwrap_or_default(),
+                None if known_version != 0 => return Ok(None),
+                Some(_) | None => lease.resource_version().ok_or_else(|| {
+                    HaError::InvalidBackend("k8s lease has no resource version".into())
+                })?,
             }
         }
         Err(kube::Error::Api(err)) if err.code == 404 && known_version != 0 => return Ok(None),
@@ -460,10 +470,11 @@ pub(super) async fn wait_for_k8s_view_change(
                     if let Some(rv) = lease.resource_version() {
                         resource_version = rv;
                     }
-                    match view_from_k8s_lease(&lease) {
+                    match active_view_from_k8s_lease(&lease, chrono::Utc::now())? {
                         Some(view) if view.view_version != known_version => {
                             return Ok(Some(view));
                         }
+                        None if known_version != 0 => return Ok(None),
                         Some(_) | None => {}
                     }
                 }
@@ -507,16 +518,131 @@ pub(super) async fn sleep_k8s_backoff(attempt: usize) {
     tokio::time::sleep(k8s_backoff_delay(attempt)).await;
 }
 
-pub(super) fn view_from_k8s_lease(lease: &Lease) -> Option<MasterView> {
-    let spec = lease.spec.as_ref()?;
-    let leader_address = spec.holder_identity.as_ref()?.clone();
+pub(super) fn view_from_k8s_lease(lease: &Lease) -> Result<Option<MasterView>, HaError> {
+    let spec = lease
+        .spec
+        .as_ref()
+        .ok_or_else(|| HaError::InvalidBackend("k8s lease has no spec".into()))?;
+    let Some(leader_address) = spec.holder_identity.as_ref() else {
+        return Ok(None);
+    };
     if leader_address.trim().is_empty() {
-        return None;
+        return Err(HaError::InvalidBackend(
+            "k8s lease holder identity is empty".into(),
+        ));
     }
-    Some(MasterView {
-        leader_address,
-        view_version: spec.lease_transitions.unwrap_or_default() as u64,
-    })
+    let transitions = spec.lease_transitions.ok_or_else(|| {
+        HaError::InvalidBackend("k8s held lease has no transition version".into())
+    })?;
+    let view_version = u64::try_from(transitions)
+        .ok()
+        .filter(|version| *version > 0)
+        .ok_or_else(|| {
+            HaError::InvalidBackend(format!(
+                "k8s held lease has invalid transition version: {transitions}"
+            ))
+        })?;
+    Ok(Some(MasterView {
+        leader_address: leader_address.clone(),
+        view_version,
+    }))
+}
+
+fn active_view_from_k8s_lease(
+    lease: &Lease,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<MasterView>, HaError> {
+    let view = view_from_k8s_lease(lease)?;
+    let Some(view) = view else {
+        return Ok(None);
+    };
+    let spec = lease
+        .spec
+        .as_ref()
+        .ok_or_else(|| HaError::InvalidBackend("k8s lease has no spec".into()))?;
+    if k8s_lease_expired(spec, now) {
+        Ok(None)
+    } else {
+        Ok(Some(view))
+    }
+}
+
+fn k8s_lease_ttl_i32(lease_ttl_secs: i64) -> Result<i32, HaError> {
+    i32::try_from(lease_ttl_secs)
+        .ok()
+        .filter(|ttl| *ttl > 0)
+        .ok_or_else(|| {
+            HaError::InvalidParams(
+                "k8s leadership lease TTL must be positive and fit i32 seconds".into(),
+            )
+        })
+}
+
+fn k8s_session_lease_ttl_i32(session: &LeadershipSession) -> Result<i32, HaError> {
+    i32::try_from(session.lease_ttl.as_secs())
+        .ok()
+        .filter(|ttl| *ttl > 0)
+        .ok_or_else(|| {
+            HaError::InvalidParams(
+                "k8s leadership session TTL must be positive whole seconds and fit i32".into(),
+            )
+        })
+}
+
+fn next_k8s_lease_transition(current: Option<i32>) -> Result<i32, HaError> {
+    let current = current.unwrap_or_default();
+    if current < 0 {
+        return Err(HaError::InvalidBackend(format!(
+            "k8s lease has negative transition version: {current}"
+        )));
+    }
+    current
+        .checked_add(1)
+        .ok_or_else(|| HaError::InvalidBackend("k8s lease transition version is exhausted".into()))
+}
+
+fn validate_acquired_k8s_view(
+    view: Option<MasterView>,
+    expected_leader_address: &str,
+    expected_transition: i32,
+) -> Result<MasterView, HaError> {
+    let view = view.ok_or_else(|| {
+        HaError::InvalidBackend("k8s acquisition succeeded without a leader view".into())
+    })?;
+    if view.leader_address != expected_leader_address
+        || view.view_version != expected_transition as u64
+    {
+        return Err(HaError::InvalidBackend(format!(
+            "k8s acquired view mismatch: expected_address={expected_leader_address:?}, expected_transition={expected_transition}, actual={view:?}"
+        )));
+    }
+    Ok(view)
+}
+
+fn validate_k8s_session_lease(
+    spec: &LeaseSpec,
+    session: &LeadershipSession,
+) -> Result<(), HaError> {
+    if spec.holder_identity.as_deref() != Some(&session.view.leader_address) {
+        return Err(HaError::UnavailableInCurrentStatus);
+    }
+    let transitions = spec.lease_transitions.ok_or_else(|| {
+        HaError::InvalidBackend("k8s held lease has no transition version".into())
+    })?;
+    let transitions = u64::try_from(transitions).map_err(|_| {
+        HaError::InvalidBackend("k8s held lease has negative transition version".into())
+    })?;
+    if transitions == 0 || transitions != session.view.view_version {
+        return Err(HaError::UnavailableInCurrentStatus);
+    }
+    Ok(())
+}
+
+fn k8s_lease_available_for_acquisition(
+    spec: &LeaseSpec,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    spec.holder_identity.is_none() || k8s_lease_expired(spec, now)
 }
 
 pub(super) fn k8s_lease_expired(spec: &LeaseSpec, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -544,5 +670,153 @@ pub(super) fn k8s_acquired_result(
             view,
             lease_ttl: Duration::from_secs(lease_ttl_secs as u64),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        active_view_from_k8s_lease, k8s_keepalive_interval, k8s_lease_available_for_acquisition,
+        next_k8s_lease_transition, validate_k8s_session_lease, view_from_k8s_lease,
+    };
+    use crate::ha::{LeadershipSession, MasterView};
+    use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+    use std::time::Duration;
+
+    fn lease(holder: Option<&str>, transitions: Option<i32>) -> Lease {
+        Lease {
+            spec: Some(LeaseSpec {
+                holder_identity: holder.map(ToOwned::to_owned),
+                lease_transitions: transitions,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn k8s_view_requires_a_positive_durable_term() {
+        let view = view_from_k8s_lease(&lease(Some("leader-a"), Some(7)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(view.leader_address, "leader-a");
+        assert_eq!(view.view_version, 7);
+        assert!(
+            view_from_k8s_lease(&lease(None, Some(7)))
+                .unwrap()
+                .is_none()
+        );
+        for malformed in [
+            lease(Some(""), Some(7)),
+            lease(Some("leader-a"), None),
+            lease(Some("leader-a"), Some(0)),
+            lease(Some("leader-a"), Some(-1)),
+        ] {
+            assert!(view_from_k8s_lease(&malformed).is_err());
+        }
+        assert!(view_from_k8s_lease(&Lease::default()).is_err());
+    }
+
+    #[test]
+    fn every_k8s_acquisition_advances_the_term() {
+        assert_eq!(next_k8s_lease_transition(None).unwrap(), 1);
+        assert_eq!(next_k8s_lease_transition(Some(7)).unwrap(), 8);
+        assert!(next_k8s_lease_transition(Some(-1)).is_err());
+        assert!(next_k8s_lease_transition(Some(i32::MAX)).is_err());
+    }
+
+    #[test]
+    fn live_k8s_lease_cannot_be_reacquired_by_the_same_address() {
+        let now = chrono::Utc::now();
+        let live = LeaseSpec {
+            holder_identity: Some("leader-a".into()),
+            lease_duration_seconds: Some(10),
+            renew_time: Some(MicroTime(now)),
+            lease_transitions: Some(7),
+            ..Default::default()
+        };
+        assert!(!k8s_lease_available_for_acquisition(&live, now));
+
+        let released = LeaseSpec {
+            holder_identity: None,
+            ..live.clone()
+        };
+        assert!(k8s_lease_available_for_acquisition(&released, now));
+
+        let expired = LeaseSpec {
+            renew_time: Some(MicroTime(now - chrono::Duration::seconds(10))),
+            ..live
+        };
+        assert!(k8s_lease_available_for_acquisition(&expired, now));
+    }
+
+    #[test]
+    fn expired_k8s_lease_is_not_a_discoverable_leader() {
+        let now = chrono::Utc::now();
+        let live = Lease {
+            spec: Some(LeaseSpec {
+                holder_identity: Some("leader-a".into()),
+                lease_duration_seconds: Some(10),
+                renew_time: Some(MicroTime(now)),
+                lease_transitions: Some(7),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            active_view_from_k8s_lease(&live, now)
+                .unwrap()
+                .unwrap()
+                .view_version,
+            7
+        );
+
+        let expired = Lease {
+            spec: Some(LeaseSpec {
+                renew_time: Some(MicroTime(now - chrono::Duration::seconds(10))),
+                ..live.spec.unwrap()
+            }),
+            ..Default::default()
+        };
+        assert!(active_view_from_k8s_lease(&expired, now).unwrap().is_none());
+    }
+
+    #[test]
+    fn k8s_keepalive_interval_precedes_short_lease_expiry() {
+        assert_eq!(
+            k8s_keepalive_interval(Duration::from_secs(1)),
+            Duration::from_millis(333)
+        );
+        assert_eq!(
+            k8s_keepalive_interval(Duration::from_secs(30)),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn k8s_session_fences_on_address_or_term_mismatch() {
+        let session = LeadershipSession {
+            view: MasterView {
+                leader_address: "leader-a".into(),
+                view_version: 7,
+            },
+            owner_token: "k8s:ns/lease:7".into(),
+            lease_ttl: Duration::from_secs(5),
+        };
+        assert!(
+            validate_k8s_session_lease(
+                lease(Some("leader-a"), Some(7)).spec.as_ref().unwrap(),
+                &session,
+            )
+            .is_ok()
+        );
+        for stale in [
+            lease(Some("leader-b"), Some(7)),
+            lease(Some("leader-a"), Some(8)),
+            lease(Some("leader-a"), None),
+        ] {
+            assert!(validate_k8s_session_lease(stale.spec.as_ref().unwrap(), &session).is_err());
+        }
     }
 }

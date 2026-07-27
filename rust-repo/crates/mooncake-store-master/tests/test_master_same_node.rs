@@ -35,6 +35,7 @@ async fn test_put_start_rejects_same_node_preference_with_nof_replicas() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -48,6 +49,7 @@ async fn test_put_start_rejects_same_node_preference_with_nof_replicas() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -97,6 +99,7 @@ async fn test_put_start_rejects_same_node_preference_with_nof_replicas() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -125,6 +128,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -161,6 +165,7 @@ async fn test_put_start_same_node_nof_requires_matching_host() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -192,6 +197,22 @@ async fn test_client_monitor_reaps_expired_clients() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::re_mount_segment(
+        &service,
+        Request::new(proto::ReMountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_names: vec![],
+            segment_sizes: vec![],
+            base_addrs: vec![],
+            te_endpoints: vec![],
+            protocols: vec![],
+            segment_ids: vec![],
+            host_ids: vec![],
         }),
     )
     .await
@@ -217,6 +238,7 @@ async fn test_client_monitor_reaps_expired_clients() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -270,5 +292,20 @@ async fn test_client_monitor_reaps_expired_clients() {
         )
         .await
         .is_err()
+    );
+    let ping_after_purge = MasterService::ping(
+        &service,
+        Request::new(proto::PingRequest {
+            client_id: Some(proto_uuid(client_id)),
+            mounted_segments: vec![],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(
+        ping_after_purge.client_status,
+        proto::ClientStatus::NeedRemount as i32
     );
 }

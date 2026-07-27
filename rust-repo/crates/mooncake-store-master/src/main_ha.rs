@@ -42,7 +42,9 @@ async fn back_to_standby(
     shutdown_rx: ShutdownReceiver,
 ) {
     supervisor.enable_standby_updates();
-    let _ = supervisor.enter_standby_mode(None);
+    if let Err(e) = supervisor.enter_standby_mode(None) {
+        warn!("enter_standby_mode during retry failed: {}", e);
+    }
     let _ = sleep_or_shutdown(Duration::from_secs(sleep_secs), shutdown_rx).await;
 }
 
@@ -53,7 +55,11 @@ async fn release_and_retry(
     session: &LeadershipSession,
     shutdown_rx: ShutdownReceiver,
 ) {
-    let _ = coordinator.release_leadership(session).await;
+    if let Err(error) = coordinator.release_leadership(session).await {
+        warn!(
+            "leadership release failed; local role is fenced and remote lease will expire: {error}"
+        );
+    }
     back_to_standby(supervisor, 1, shutdown_rx).await;
 }
 
@@ -80,8 +86,9 @@ async fn run_until_shutdown(
 }
 
 fn build_ha_loop_context(args: Args) -> HaLoopResult<HaLoopContext> {
-    let (snapshot_backend_type, snapshot_dir) = parse_snapshot_config(&args);
+    let (snapshot_backend_type, snapshot_dir) = parse_snapshot_config(&args)?;
     let ha_spec = build_ha_spec(&args)?;
+    validate_ha_backend_for_serving(&ha_spec)?;
     let snapshot_object_store_type = args
         .snapshot_object_store_type
         .as_deref()
@@ -140,7 +147,7 @@ async fn run_coordinator_lifecycle(
             &context.ha_spec.cluster_namespace,
         ),
         context.runtime_config.clone(),
-    );
+    )?;
     service_arc.set_service_available(false);
 
     let mut supervisor = new_supervisor(
@@ -314,11 +321,10 @@ async fn ensure_leader_oplog(
     session: &LeadershipSession,
     shutdown_rx: ShutdownReceiver,
 ) -> bool {
-    if service_arc.oplog_manager().lock().store().is_some() {
-        return true;
-    }
-
-    match build_leader_oplog_manager(&context.ha_spec, 0).await {
+    // Always replace the standby reader with an election-fenced writer.
+    // Reusing the reader store would permit writes without comparing the
+    // current election-key revision.
+    match build_leader_oplog_manager(&context.ha_spec, session.view.view_version).await {
         Some(manager) => {
             *service_arc.oplog_manager().lock() = manager;
             true
@@ -334,6 +340,7 @@ async fn ensure_leader_oplog(
 fn apply_acquired_view(service_arc: &Arc<MasterServiceImpl>, view: &Option<MasterView>) {
     if let Some(view) = view {
         service_arc.set_view_version(view.view_version as i64);
+        service_arc.set_leadership_view_version(view.view_version);
         service_arc
             .oplog_manager()
             .lock()
@@ -361,10 +368,41 @@ async fn run_leader_term(
         return;
     };
 
+    if let Err(error) = service_arc.prepare_tenant_quota_leadership_term(session.view.view_version)
+    {
+        error!("Tenant quota policy term preflight failed: {error}");
+        supervisor.enable_standby_updates();
+        drop(keepalive_handle);
+        release_and_retry(coordinator, supervisor, &session, shutdown_rx.clone()).await;
+        return;
+    }
+
+    let catalog_publisher = match preflight_snapshot_pipeline(
+        &context.args,
+        &context.ha_spec.cluster_namespace,
+        service_arc,
+    ) {
+        Ok(publisher) => publisher,
+        Err(error) => {
+            error!("Snapshot pipeline preflight failed: {error}");
+            supervisor.enable_standby_updates();
+            drop(keepalive_handle);
+            release_and_retry(coordinator, supervisor, &session, shutdown_rx.clone()).await;
+            return;
+        }
+    };
+
     let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
     let shutdown_forwarder =
         forward_process_shutdown(shutdown_rx.clone(), server_shutdown_tx.clone());
-    let monitor = match start_leadership_monitor(coordinator, &session, server_shutdown_tx).await {
+    let monitor = match start_leadership_monitor(
+        coordinator,
+        &session,
+        server_shutdown_tx,
+        service_arc.clone(),
+    )
+    .await
+    {
         Ok(handle) => handle,
         Err(e) => {
             warn!("Leadership monitor start failed: {}", e);
@@ -378,6 +416,15 @@ async fn run_leader_term(
 
     supervisor.activate_serving_state();
     service_arc.set_service_available(true);
+    if !service_arc.is_service_available() {
+        error!("Refusing to publish or serve leadership because the master is durability-fenced");
+        coordinator.set_k8s_leader_label(false);
+        drop(monitor);
+        shutdown_forwarder.abort();
+        drop(keepalive_handle);
+        cleanup_leader_term(coordinator, supervisor, &session).await;
+        return;
+    }
     // Match C++ routing semantics: advertise the K8s leader label only after
     // the service plane is actually accepting requests.
     coordinator.set_k8s_leader_label(true);
@@ -387,6 +434,7 @@ async fn run_leader_term(
         &context.args,
         server_shutdown_rx,
         Some(session.view.clone()),
+        catalog_publisher,
     )
     .await;
 
@@ -410,16 +458,8 @@ async fn prepare_leader_for_serving(
     session: &LeadershipSession,
     shutdown_rx: ShutdownReceiver,
 ) -> Option<mooncake_store_master::ha::LeadershipHandle> {
-    // Match C++: stop accepting standby runtime callbacks before promotion, so
-    // LeaderWarmup cannot be overwritten by standby.
-    supervisor.disable_standby_updates();
-    if let Err(e) = supervisor.promote_to_leader_warmup() {
-        error!("Promotion failed: {}", e);
-        supervisor.enable_standby_updates();
-        release_and_retry(coordinator, supervisor, session, shutdown_rx.clone()).await;
-        return None;
-    }
-
+    // Keep the lease alive before promotion/final catch-up. Promotion can
+    // legitimately take longer than one lease TTL when it resolves gaps.
     let keepalive_handle = match tokio::select! {
         result = coordinator.start_leadership_keepalive(session) => result,
         _ = wait_for_shutdown(shutdown_rx.clone()) => {
@@ -430,11 +470,21 @@ async fn prepare_leader_for_serving(
         Ok(handle) => handle,
         Err(e) => {
             error!("Keepalive start failed: {}", e);
-            supervisor.enable_standby_updates();
             release_and_retry(coordinator, supervisor, session, shutdown_rx.clone()).await;
             return None;
         }
     };
+
+    // Match C++: stop accepting standby runtime callbacks before promotion, so
+    // LeaderWarmup cannot be overwritten by standby.
+    supervisor.disable_standby_updates();
+    if let Err(e) = supervisor.promote_to_leader_warmup() {
+        error!("Promotion failed: {}", e);
+        supervisor.enable_standby_updates();
+        drop(keepalive_handle);
+        release_and_retry(coordinator, supervisor, session, shutdown_rx.clone()).await;
+        return None;
+    }
 
     if !warmup_with_renewal(
         coordinator,
@@ -476,13 +526,24 @@ async fn cleanup_leader_term(
 ) {
     supervisor.deactivate_serving_state();
     supervisor.enable_standby_updates();
-    let _ = coordinator.release_leadership(session).await;
+    if let Err(error) = coordinator.release_leadership(session).await {
+        warn!(
+            "leader cleanup could not revoke remote lease; local role is fenced and remote lease will expire: {error}"
+        );
+    }
 
     if let Ok(post_view) = coordinator.read_current_view().await {
         supervisor.update_observed_leader(post_view.clone());
-        let _ = supervisor.enter_standby_mode(post_view);
+        if let Err(e) = supervisor.enter_standby_mode(post_view) {
+            warn!("enter_standby_mode after leader cleanup failed: {}", e);
+        }
     } else {
-        let _ = supervisor.enter_standby_mode(None);
+        if let Err(e) = supervisor.enter_standby_mode(None) {
+            warn!(
+                "enter_standby_mode after leader cleanup without a current view failed: {}",
+                e
+            );
+        }
     }
 
     info!("Returning to standby loop");

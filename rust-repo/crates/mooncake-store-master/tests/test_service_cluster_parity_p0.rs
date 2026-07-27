@@ -20,6 +20,7 @@ fn replicate_config() -> proto::ReplicateConfig {
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
         group_ids: vec![],
+        host_id: String::new(),
     }
 }
 
@@ -33,6 +34,7 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await

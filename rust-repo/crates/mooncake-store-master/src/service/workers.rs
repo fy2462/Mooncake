@@ -19,16 +19,17 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use super::background_ops::{
-    reap_expired_background_tasks, run_automatic_eviction_once,
+    reap_expired_background_tasks, run_automatic_eviction_once, run_automatic_nof_eviction_once,
     run_default_promotion_candidate_retry,
 };
 use super::helpers::{
-    clear_invalid_handles, get_alive_clients_snapshot, host_from_segment_name,
-    sync_client_segments, unmount_nof_segment_owned, unmount_segment_owned,
+    bump_view_version, clear_invalid_handles_locked, get_alive_clients_snapshot,
+    host_from_segment_name, sync_client_segments, unmount_nof_segment_owned_durable,
+    unmount_nof_segment_owned_durable_locked, unmount_segment_owned_durable_locked,
 };
 use super::state::{MasterState, NoFHeartbeatState};
 use crate::http_metadata::MetadataState;
@@ -45,15 +46,15 @@ pub(crate) use nof_heartbeat::NofHeartbeatWorker;
 struct GracefulUnmountRecord {
     segment_id: Uuid,
     client_id: Uuid,
-    /// 过期时间，到达后执行实际卸载 / Expiry time; actual unmount happens after this.
-    expire_at: Instant,
+    /// Portable wall-clock deadline used by snapshots and oplog replay.
+    deadline_epoch_ms: u64,
 }
 
 impl PartialEq for GracefulUnmountRecord {
     fn eq(&self, other: &Self) -> bool {
         self.segment_id == other.segment_id
             && self.client_id == other.client_id
-            && self.expire_at == other.expire_at
+            && self.deadline_epoch_ms == other.deadline_epoch_ms
     }
 }
 
@@ -72,7 +73,7 @@ impl PartialOrd for GracefulUnmountRecord {
 /// allowing the worker to quickly retrieve the next batch of due unmounts.
 impl Ord for GracefulUnmountRecord {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.expire_at.cmp(&self.expire_at)
+        other.deadline_epoch_ms.cmp(&self.deadline_epoch_ms)
     }
 }
 
@@ -81,6 +82,9 @@ impl Ord for GracefulUnmountRecord {
 struct GracefulUnmountSchedulerState {
     /// 按过期时间排序的待卸载队列 / Queue of pending unmounts, ordered by expiry.
     queue: BinaryHeap<GracefulUnmountRecord>,
+    /// False while the service is a standby. Pending intents remain durable in
+    /// MasterState and are repopulated on promotion.
+    active: bool,
     /// 停止标志 / Stop flag.
     stopping: bool,
 }
@@ -141,6 +145,9 @@ impl GracefulUnmountScheduler {
         let inner = Arc::new(GracefulUnmountSchedulerInner {
             state: Mutex::new(GracefulUnmountSchedulerState {
                 queue: BinaryHeap::new(),
+                active: state
+                    .service_available
+                    .load(std::sync::atomic::Ordering::Acquire),
                 stopping: false,
             }),
             condvar: Condvar::new(),
@@ -151,7 +158,7 @@ impl GracefulUnmountScheduler {
                 let mut guard = worker_inner.state.lock().expect("scheduler mutex poisoned");
                 // 队列空时无限等待，有新记录加入时被 notify 唤醒
                 // Wait indefinitely when queue is empty; woken by notify on new records
-                while !guard.stopping && guard.queue.is_empty() {
+                while !guard.stopping && (!guard.active || guard.queue.is_empty()) {
                     guard = worker_inner
                         .condvar
                         .wait(guard)
@@ -166,9 +173,12 @@ impl GracefulUnmountScheduler {
                 let Some(next) = guard.queue.peek().cloned() else {
                     continue;
                 };
-                let now = Instant::now();
-                if next.expire_at > now {
-                    let timeout = next.expire_at.saturating_duration_since(now);
+                let now_epoch_ms = current_epoch_millis();
+                if next.deadline_epoch_ms > now_epoch_ms {
+                    // Periodically re-read wall time so large deadlines and
+                    // clock adjustments cannot turn into an unbounded OS wait.
+                    let timeout =
+                        Duration::from_millis((next.deadline_epoch_ms - now_epoch_ms).min(60_000));
                     let (g, timeout_res) = worker_inner
                         .condvar
                         .wait_timeout(guard, timeout)
@@ -185,9 +195,9 @@ impl GracefulUnmountScheduler {
                 // 批量收集所有已到期的记录，一次性释放锁后再执行卸载
                 // Batch-collect all expired records, release lock, then execute unmounts
                 let mut expired = Vec::new();
-                let now = Instant::now();
+                let now_epoch_ms = current_epoch_millis();
                 while let Some(record) = guard.queue.peek().cloned() {
-                    if record.expire_at > now {
+                    if record.deadline_epoch_ms > now_epoch_ms {
                         break;
                     }
                     expired.push(record);
@@ -196,7 +206,62 @@ impl GracefulUnmountScheduler {
                 drop(guard); // 尽早释放锁，卸载操作可能耗时 / Release lock early; unmount may take time
 
                 for record in expired {
-                    unmount_segment_owned(&state, record.segment_id, record.client_id);
+                    if !state
+                        .service_available
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        continue;
+                    }
+                    let _global_mutation_guard = state.key_mutations.lock_snapshot();
+                    if !state
+                        .service_available
+                        .load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        continue;
+                    }
+                    let Some(pending) = state
+                        .graceful_unmounts
+                        .get(&record.segment_id)
+                        .map(|entry| entry.value().clone())
+                    else {
+                        continue;
+                    };
+                    if pending.client_id != record.client_id
+                        || pending.deadline_epoch_ms != record.deadline_epoch_ms
+                    {
+                        continue;
+                    }
+                    if pending.deadline_epoch_ms > current_epoch_millis() {
+                        // The wall clock moved backwards after this record was
+                        // collected. Requeue the authoritative deadline.
+                        let mut guard =
+                            worker_inner.state.lock().expect("scheduler mutex poisoned");
+                        if guard.active && !guard.stopping {
+                            guard.queue.push(record);
+                        }
+                        drop(guard);
+                        worker_inner.condvar.notify_all();
+                        continue;
+                    }
+
+                    let Some(segment) = state.segments.get(&record.segment_id) else {
+                        state.graceful_unmounts.remove(&record.segment_id);
+                        continue;
+                    };
+                    if segment.client_id != record.client_id
+                        || segment.status != crate::proto::SegmentStatus::GracefullyUnmounting
+                    {
+                        drop(segment);
+                        state.graceful_unmounts.remove(&record.segment_id);
+                        continue;
+                    }
+                    drop(segment);
+                    let _ = unmount_segment_owned_durable_locked(
+                        &state,
+                        record.segment_id,
+                        record.client_id,
+                        "graceful_unmount_completion",
+                    );
                 }
             }
         });
@@ -206,9 +271,8 @@ impl GracefulUnmountScheduler {
         }
     }
 
-    /// 安排 segment 在 grace_period_ms 毫秒后执行卸载。
-    /// Schedule a segment to be unmounted after grace_period_ms milliseconds.
-    pub(crate) fn schedule(&self, segment_id: Uuid, client_id: Uuid, grace_period_ms: u64) {
+    /// Schedule an authoritative persisted epoch deadline.
+    pub(crate) fn schedule_at(&self, segment_id: Uuid, client_id: Uuid, deadline_epoch_ms: u64) {
         let mut guard = self.inner.state.lock().expect("scheduler mutex poisoned");
         if guard.stopping {
             return;
@@ -216,10 +280,35 @@ impl GracefulUnmountScheduler {
         guard.queue.push(GracefulUnmountRecord {
             segment_id,
             client_id,
-            expire_at: Instant::now() + Duration::from_millis(grace_period_ms),
+            deadline_epoch_ms,
         });
         drop(guard);
         self.inner.condvar.notify_all(); // 唤醒 worker 线程重新计算等待时间 / Wake worker to recalculate wait
+    }
+
+    /// Replace volatile scheduling hints from the durable state map. This is
+    /// used after snapshot restore and whenever a standby is promoted.
+    pub(crate) fn sync_from_state(&self, state: &MasterState, active: bool) {
+        let records = state
+            .graceful_unmounts
+            .iter()
+            .map(|entry| GracefulUnmountRecord {
+                segment_id: entry.segment_id,
+                client_id: entry.client_id,
+                deadline_epoch_ms: entry.deadline_epoch_ms,
+            })
+            .collect::<Vec<_>>();
+        let mut guard = self.inner.state.lock().expect("scheduler mutex poisoned");
+        if guard.stopping {
+            return;
+        }
+        guard.queue.clear();
+        guard.active = active;
+        if active {
+            guard.queue.extend(records);
+        }
+        drop(guard);
+        self.inner.condvar.notify_all();
     }
 
     /// 停止调度线程：设置停止标志、唤醒、join 线程。
@@ -239,6 +328,14 @@ impl GracefulUnmountScheduler {
     }
 }
 
+fn current_epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 impl ProcessingReaper {
     /// 启动后台任务回收线程，周期性地清理超时的 offload/promotion/PutStart 任务。
     /// 使用 mpsc channel 实现可停止的周期性循环：stop() 时 drop sender 即中断。
@@ -253,6 +350,10 @@ impl ProcessingReaper {
                 match rx.recv_timeout(interval) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let Some(_background_mutation_guard) = state.begin_background_mutation()
+                        else {
+                            continue;
+                        };
                         reap_expired_background_tasks(&state, Instant::now());
                     }
                 }
@@ -286,7 +387,12 @@ impl EvictionWorker {
                 match rx.recv_timeout(interval) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let Some(_background_mutation_guard) = state.begin_background_mutation()
+                        else {
+                            continue;
+                        };
                         let _ = run_automatic_eviction_once(&state);
+                        let _ = run_automatic_nof_eviction_once(&state);
                         run_default_promotion_candidate_retry(&state);
                     }
                 }
@@ -316,6 +422,7 @@ impl EvictionWorker {
 /// Prefers O(N_keys) index lookup via client_objects;
 /// falls back to full scan only when the index is missing (legacy client compatibility).
 fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, client_id: Uuid) {
+    let _global_mutation_guard = state.key_mutations.lock_snapshot();
     state.client_objects.remove(&client_id);
 
     // 移除该 client 的所有待处理任务 / Remove all pending tasks assigned to this client
@@ -325,11 +432,29 @@ fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, cli
         .filter(|entry| entry.info.assigned_client == Some(client_id))
         .map(|entry| *entry.key())
         .collect::<Vec<_>>();
-    for task_id in task_ids {
-        state.tasks.remove(&task_id);
+    if !task_ids.is_empty()
+        && state
+            .persist_task_state_batch_or_fence(&[], &task_ids, "expired_client_remove_tasks")
+            .is_err()
+    {
+        return;
+    }
+    for task_id in &task_ids {
+        state.tasks.remove(task_id);
     }
 
-    state.local_disk_segments.remove(&client_id);
+    if let Some((_, storage_id)) = state.local_disk_client_sessions.remove(&client_id)
+        && let Some(mut local_disk) = state.local_disk_segments.get_mut(&storage_id)
+        && local_disk.active_client_id == Some(client_id)
+    {
+        local_disk.active_client_id = None;
+        local_disk.recovery_complete = false;
+        local_disk.recovery_session_id = None;
+        local_disk.enable_offloading = false;
+        local_disk.recovered_objects.clear();
+        local_disk.offloading_objects.clear();
+        local_disk.promotion_objects.clear();
+    }
 
     // 卸载该 client 拥有的所有 NOF segment / Unmount all NoF segments owned by this client
     let nof_segment_ids = state
@@ -339,7 +464,16 @@ fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, cli
         .map(|entry| entry.segment.id)
         .collect::<Vec<_>>();
     for segment_id in nof_segment_ids {
-        unmount_nof_segment_owned(state, segment_id, client_id);
+        if unmount_nof_segment_owned_durable_locked(
+            state,
+            segment_id,
+            client_id,
+            "expired_client_unmount_nof",
+        )
+        .is_err()
+        {
+            return;
+        }
     }
 
     // 卸载该 client 拥有的所有常规 Memory segment / Unmount all Memory segments owned by this client
@@ -350,12 +484,34 @@ fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, cli
         .map(|entry| (entry.segment.id, entry.segment.name.clone()))
         .collect::<Vec<_>>();
     for (segment_id, segment_name) in segment_ids {
-        unmount_segment_owned(state, segment_id, client_id);
+        if unmount_segment_owned_durable_locked(
+            state,
+            segment_id,
+            client_id,
+            "expired_client_unmount_memory",
+        )
+        .is_err()
+        {
+            return;
+        }
         metadata_state.remove_node_blocking(&host_from_segment_name(&segment_name));
+        let (ram_removed, rpc_removed) =
+            metadata_state.remove_segment_metadata_blocking(&segment_name);
+        tracing::info!(
+            %client_id,
+            %segment_name,
+            ram_removed,
+            rpc_removed,
+            "cleaned expired client HTTP metadata"
+        );
     }
     state.clients.remove(&client_id);
+    // A client that has been fully purged must complete ReMount again before
+    // Ping can report Ok. Keeping this tombstone would let a restarted client
+    // skip topology reconstruction after all of its segments were removed.
+    state.ok_clients.remove(&client_id);
     let alive_clients = get_alive_clients_snapshot(state);
-    clear_invalid_handles(state, &alive_clients);
+    clear_invalid_handles_locked(state, &alive_clients);
     sync_client_segments(state, client_id);
 }
 
@@ -376,6 +532,10 @@ impl ClientMonitorWorker {
                 match rx.recv_timeout(interval) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let Some(_background_mutation_guard) = state.begin_background_mutation()
+                        else {
+                            continue;
+                        };
                         let now = SystemTime::now();
                         let expired = state
                             .clients
@@ -434,6 +594,10 @@ impl DrainWorker {
                 match rx.recv_timeout(Duration::from_millis(500)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let Some(_background_mutation_guard) = state.begin_background_mutation()
+                        else {
+                            continue;
+                        };
                         crate::service::background_ops::process_drain_jobs(&state);
                     }
                 }

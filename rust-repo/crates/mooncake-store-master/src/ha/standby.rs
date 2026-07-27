@@ -254,7 +254,6 @@ pub struct CapabilityDrivenStandbyController {
     /// C++ equivalent: `std::unique_ptr<HotStandbyService> standby_service_` in standby_controller.cpp.
     service: HotStandbyService,
     observed_leader: Option<MasterView>,
-    standby_running: bool,
     last_error: Option<HaError>,
     callback: Option<RuntimeStateCallback>,
     last_reported_runtime_state: Option<MasterRuntimeState>,
@@ -322,7 +321,6 @@ impl CapabilityDrivenStandbyController {
             capabilities,
             service,
             observed_leader: None,
-            standby_running: false,
             last_error: None,
             callback: None,
             last_reported_runtime_state: None,
@@ -348,7 +346,6 @@ impl CapabilityDrivenStandbyController {
             capabilities,
             service,
             observed_leader: None,
-            standby_running: false,
             last_error: None,
             callback: None,
             last_reported_runtime_state: None,
@@ -433,15 +430,17 @@ impl StandbyController for CapabilityDrivenStandbyController {
         //   → standby_service_->Start(leader_address, oplog_connstring, cluster_id)
         self.observed_leader = observed_leader;
 
-        if self.standby_running {
+        if self.service.is_running() {
             self.notify_runtime_state_if_changed();
             return Ok(());
         }
 
+        // A follower thread that exhausted bounded reconnects leaves the state
+        // machine in Failed. Stop resets it before creating a fresh follower.
+        self.service.stop();
         self.ensure_oplog_store()?;
         block_on_runtime(self.service.start())?;
 
-        self.standby_running = true;
         self.last_error = None;
         self.notify_runtime_state_if_changed();
         Ok(())
@@ -451,7 +450,6 @@ impl StandbyController for CapabilityDrivenStandbyController {
         // C++: StopStandby at standby_controller.cpp:167-182
         //   → standby_service_->Stop()
         self.service.stop();
-        self.standby_running = false;
         self.observed_leader = None;
         self.last_error = None;
         self.notify_runtime_state_if_changed();
@@ -460,7 +458,7 @@ impl StandbyController for CapabilityDrivenStandbyController {
     fn promote_standby(&mut self) -> Result<(), HaError> {
         // C++: PromoteStandby at standby_controller.cpp:184-209
         //   → standby_service_->Promote()
-        if !self.standby_running {
+        if !self.service.is_running() {
             return Err(self
                 .last_error
                 .clone()
@@ -470,13 +468,11 @@ impl StandbyController for CapabilityDrivenStandbyController {
         let result = block_on_runtime(self.service.promote());
         match result {
             Ok(_seq_id) => {
-                self.standby_running = false;
                 self.notify_runtime_state_if_changed();
                 Ok(())
             }
             Err(e) => {
                 self.service.stop();
-                self.standby_running = false;
                 self.last_error = Some(e.clone());
                 self.notify_runtime_state_if_changed();
                 Err(e)
@@ -493,7 +489,7 @@ impl StandbyController for CapabilityDrivenStandbyController {
     fn get_standby_runtime_state(&self) -> MasterRuntimeState {
         // C++: GetStandbyRuntimeState at standby_controller.cpp:221-234
         //   → MapStandbyRuntimeState(standby_service_->GetSyncStatus(), ...)
-        if !self.standby_running {
+        if !self.service.is_running() {
             return MasterRuntimeState::Standby;
         }
         let sync = self.service.sync_status();

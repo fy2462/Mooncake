@@ -7,14 +7,18 @@ use super::snapshot::{
 };
 use super::types::HaError;
 use crate::TenantId;
+use crate::allocator::{AllocationStrategy, AllocatorSnapshotConfig};
 use crate::proto::SegmentStatus;
-use crate::service::{ObjectEntry, SegmentEntry};
+use crate::service::{
+    GracefulUnmountSnapshotEntry, ObjectEntry, ReplicationTaskSnapshotEntry, SegmentEntry,
+};
 use crate::storage_backend::LocalDiskSnapshotEntry;
 use chrono::{Datelike, Timelike};
 use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 use rmpv::Value;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +26,51 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 const MANIFEST_PROTOCOL: &str = "messagepack";
 const MANIFEST_VERSION: &str = "1.0.0";
+const CPP_METADATA_SHARD_COUNT: u64 = 1024;
+const RUST_REPLICATION_TASKS_EXTENSION: &str = "rust_replication_tasks_v2";
+const RUST_REPLICATION_TASKS_EXTENSION_V1: &str = "rust_replication_tasks_v1";
+const RUST_GRACEFUL_UNMOUNTS_EXTENSION: &str = "rust_graceful_unmounts_v1";
+const RUST_DELAYED_REPLICA_RELEASES_EXTENSION: &str = "rust_delayed_replica_releases_v1";
+const RUST_LOCAL_DISK_REPLICA_IDENTITIES_EXTENSION: &str = "rust_local_disk_replica_identities_v1";
+const RUST_ALLOCATOR_CONFIG_EXTENSION: &str = "rust_allocator_config_v1";
+
+#[derive(Serialize, Deserialize)]
+struct ReplicationTasksExtension {
+    schema_version: u32,
+    tasks: Vec<ReplicationTaskSnapshotEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GracefulUnmountsExtension {
+    schema_version: u32,
+    entries: Vec<GracefulUnmountSnapshotEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DelayedReplicaReleasesExtension {
+    schema_version: u32,
+    entries: Vec<crate::service::state::DelayedReplicaReleaseEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LocalDiskReplicaIdentitiesExtension {
+    schema_version: u32,
+    entries: Vec<LocalDiskReplicaIdentity>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LocalDiskReplicaIdentity {
+    scoped_key: String,
+    replica_index: u32,
+    storage_id: Option<Uuid>,
+    generation_id: Option<Uuid>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AllocatorConfigExtension {
+    schema_version: u32,
+    config: AllocatorSnapshotConfig,
+}
 pub struct CatalogBackedSnapshotProvider {
     cluster_id: String,
     catalog_store: Box<dyn SnapshotCatalogStore>,
@@ -38,6 +87,26 @@ impl CatalogBackedSnapshotProvider {
             catalog_store,
             object_store,
         }
+    }
+
+    /// Probe both catalog reads and object-store write/delete before the
+    /// process publishes a leader label. The object key is unique and never
+    /// enters the snapshot catalog.
+    pub fn preflight(&self) -> Result<(), HaError> {
+        self.catalog_store.get_latest()?;
+        let root = self.catalog_store.get_snapshot_root().trim_end_matches('/');
+        let probe_suffix = format!(".preflight/{}/{}", self.cluster_id, Uuid::new_v4());
+        let probe_prefix = if root.is_empty() {
+            probe_suffix
+        } else {
+            format!("{root}/{probe_suffix}")
+        };
+        let probe_key = format!("{probe_prefix}/probe");
+        self.object_store
+            .upload_buffer(&probe_key, b"mooncake-catalog-preflight-v1")?;
+        self.object_store
+            .delete_objects_with_prefix(&probe_prefix)?;
+        Ok(())
     }
 
     /// Publish a Rust-loaded snapshot using the C++ catalog object layout.
@@ -71,9 +140,34 @@ impl CatalogBackedSnapshotProvider {
             &format!("{prefix}task_manager"),
             &encode_task_manager(&snapshot.tasks)?,
         )?;
+        self.object_store.upload_buffer(
+            &format!("{prefix}{RUST_REPLICATION_TASKS_EXTENSION}"),
+            &encode_replication_tasks_extension(&snapshot.replication_tasks)?,
+        )?;
+        self.object_store.upload_buffer(
+            &format!("{prefix}{RUST_GRACEFUL_UNMOUNTS_EXTENSION}"),
+            &encode_graceful_unmounts_extension(&snapshot.graceful_unmounts)?,
+        )?;
+        self.object_store.upload_buffer(
+            &format!("{prefix}{RUST_DELAYED_REPLICA_RELEASES_EXTENSION}"),
+            &encode_delayed_replica_releases_extension(&snapshot.delayed_replica_releases)?,
+        )?;
+        self.object_store.upload_buffer(
+            &format!("{prefix}{RUST_LOCAL_DISK_REPLICA_IDENTITIES_EXTENSION}"),
+            &encode_local_disk_replica_identities_extension(snapshot)?,
+        )?;
+        if let Some(config) = snapshot.allocator_config {
+            self.object_store.upload_buffer(
+                &format!("{prefix}{RUST_ALLOCATOR_CONFIG_EXTENSION}"),
+                &encode_allocator_config_extension(config)?,
+            )?;
+        }
         self.object_store.upload_string(
             &descriptor.manifest_key,
-            &format!("{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|rust"),
+            &format!(
+                "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}",
+                descriptor.snapshot_id
+            ),
         )?;
         self.catalog_store.publish(&descriptor)?;
         Ok(descriptor)
@@ -83,12 +177,288 @@ impl CatalogBackedSnapshotProvider {
         if retention_count == 0 {
             return Ok(());
         }
-        let snapshots = self.catalog_store.list(0)?;
+        let mut snapshots = self.catalog_store.list(0)?;
+        sort_snapshot_descriptors_newest_first(&mut snapshots);
         for descriptor in snapshots.into_iter().skip(retention_count) {
             self.catalog_store.delete(&descriptor.snapshot_id)?;
         }
         Ok(())
     }
+}
+
+fn sort_snapshot_descriptors_newest_first(snapshots: &mut [SnapshotDescriptor]) {
+    snapshots.sort_by(|left, right| {
+        right
+            .producer_view_version
+            .cmp(&left.producer_view_version)
+            .then_with(|| right.last_included_seq.cmp(&left.last_included_seq))
+            .then_with(|| right.snapshot_id.cmp(&left.snapshot_id))
+    });
+}
+
+fn encode_replication_tasks_extension(
+    tasks: &[ReplicationTaskSnapshotEntry],
+) -> Result<Vec<u8>, HaError> {
+    let payload = ReplicationTasksExtension {
+        schema_version: 2,
+        tasks: tasks.to_vec(),
+    };
+    let encoded = rmp_serde::to_vec_named(&payload).map_err(snapshot_io)?;
+    zstd::stream::encode_all(Cursor::new(encoded), 3).map_err(snapshot_io)
+}
+
+fn load_replication_tasks_extension(
+    object_store: &dyn SnapshotObjectStore,
+    prefix: &str,
+) -> Result<Vec<ReplicationTaskSnapshotEntry>, HaError> {
+    for (extension_name, expected_schema) in [
+        (RUST_REPLICATION_TASKS_EXTENSION, 2),
+        (RUST_REPLICATION_TASKS_EXTENSION_V1, 1),
+    ] {
+        let key = format!("{prefix}{extension_name}");
+        let data = match object_store.download_buffer(&key) {
+            Ok(data) => data,
+            Err(error) if object_store.is_not_found_error(&error.to_string()) => continue,
+            Err(error) => return Err(error),
+        };
+        let decoded = zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?;
+        let extension: ReplicationTasksExtension =
+            rmp_serde::from_slice(&decoded).map_err(snapshot_io)?;
+        if extension.schema_version != expected_schema {
+            return Err(snapshot_error(format!(
+                "Rust replication task extension {extension_name} has schema {}, expected {expected_schema}",
+                extension.schema_version
+            )));
+        }
+        return Ok(extension.tasks);
+    }
+    Ok(Vec::new())
+}
+
+fn encode_graceful_unmounts_extension(
+    entries: &[GracefulUnmountSnapshotEntry],
+) -> Result<Vec<u8>, HaError> {
+    let payload = GracefulUnmountsExtension {
+        schema_version: 1,
+        entries: entries.to_vec(),
+    };
+    let encoded = rmp_serde::to_vec_named(&payload).map_err(snapshot_io)?;
+    zstd::stream::encode_all(Cursor::new(encoded), 3).map_err(snapshot_io)
+}
+
+fn encode_delayed_replica_releases_extension(
+    entries: &[crate::service::state::DelayedReplicaReleaseEntry],
+) -> Result<Vec<u8>, HaError> {
+    let payload = DelayedReplicaReleasesExtension {
+        schema_version: 1,
+        entries: entries.to_vec(),
+    };
+    let encoded = rmp_serde::to_vec_named(&payload).map_err(snapshot_io)?;
+    zstd::stream::encode_all(Cursor::new(encoded), 3).map_err(snapshot_io)
+}
+
+fn load_delayed_replica_releases_extension(
+    object_store: &dyn SnapshotObjectStore,
+    prefix: &str,
+) -> Result<Vec<crate::service::state::DelayedReplicaReleaseEntry>, HaError> {
+    let key = format!("{prefix}{RUST_DELAYED_REPLICA_RELEASES_EXTENSION}");
+    let encoded = match object_store.download_buffer(&key) {
+        Ok(encoded) => encoded,
+        Err(error) if object_store.is_not_found_error(&error.to_string()) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let decoded = zstd::stream::decode_all(Cursor::new(encoded)).map_err(snapshot_io)?;
+    let payload: DelayedReplicaReleasesExtension =
+        rmp_serde::from_slice(&decoded).map_err(snapshot_io)?;
+    if payload.schema_version != 1 {
+        return Err(HaError::Snapshot(format!(
+            "unsupported delayed replica release extension schema {}",
+            payload.schema_version
+        )));
+    }
+    Ok(payload.entries)
+}
+
+fn load_graceful_unmounts_extension(
+    object_store: &dyn SnapshotObjectStore,
+    prefix: &str,
+) -> Result<Vec<GracefulUnmountSnapshotEntry>, HaError> {
+    let key = format!("{prefix}{RUST_GRACEFUL_UNMOUNTS_EXTENSION}");
+    let data = match object_store.download_buffer(&key) {
+        Ok(data) => data,
+        Err(error) if object_store.is_not_found_error(&error.to_string()) => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let decoded = zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?;
+    let extension: GracefulUnmountsExtension =
+        rmp_serde::from_slice(&decoded).map_err(snapshot_io)?;
+    if extension.schema_version != 1 {
+        return Err(snapshot_error(format!(
+            "unsupported Rust graceful-unmount snapshot schema {}",
+            extension.schema_version
+        )));
+    }
+    Ok(extension.entries)
+}
+
+fn encode_allocator_config_extension(config: AllocatorSnapshotConfig) -> Result<Vec<u8>, HaError> {
+    let payload = AllocatorConfigExtension {
+        schema_version: 1,
+        config,
+    };
+    let encoded = rmp_serde::to_vec_named(&payload).map_err(snapshot_io)?;
+    zstd::stream::encode_all(Cursor::new(encoded), 3).map_err(snapshot_io)
+}
+
+fn load_allocator_config_extension(
+    object_store: &dyn SnapshotObjectStore,
+    prefix: &str,
+) -> Result<Option<AllocatorSnapshotConfig>, HaError> {
+    let key = format!("{prefix}{RUST_ALLOCATOR_CONFIG_EXTENSION}");
+    let data = match object_store.download_buffer(&key) {
+        Ok(data) => data,
+        Err(error) if object_store.is_not_found_error(&error.to_string()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let decoded = zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?;
+    let extension: AllocatorConfigExtension =
+        rmp_serde::from_slice(&decoded).map_err(snapshot_io)?;
+    if extension.schema_version != 1 {
+        return Err(snapshot_error(format!(
+            "unsupported Rust allocator configuration snapshot schema {}",
+            extension.schema_version
+        )));
+    }
+    Ok(Some(extension.config))
+}
+
+fn encode_local_disk_replica_identities_extension(
+    snapshot: &LoadedSnapshot,
+) -> Result<Vec<u8>, HaError> {
+    let mut entries = Vec::new();
+    for (scoped_key, object) in &snapshot.objects {
+        for (replica_index, replica) in object.replicas.iter().enumerate() {
+            if replica.replica_type != ReplicaType::LocalDisk {
+                continue;
+            }
+            if replica
+                .local_disk_storage_id
+                .is_some_and(|storage_id| storage_id.is_nil())
+                || replica
+                    .local_disk_generation_id
+                    .is_some_and(|generation_id| generation_id.is_nil())
+            {
+                return Err(snapshot_error(format!(
+                    "LocalDisk replica for {scoped_key:?} has a nil durable identity"
+                )));
+            }
+            entries.push(LocalDiskReplicaIdentity {
+                scoped_key: scoped_key.clone(),
+                replica_index: u32::try_from(replica_index)
+                    .map_err(|_| snapshot_error("LocalDisk replica index exceeds u32"))?,
+                storage_id: replica.local_disk_storage_id,
+                generation_id: replica.local_disk_generation_id,
+            });
+        }
+    }
+    let payload = LocalDiskReplicaIdentitiesExtension {
+        schema_version: 1,
+        entries,
+    };
+    let encoded = rmp_serde::to_vec_named(&payload).map_err(snapshot_io)?;
+    zstd::stream::encode_all(Cursor::new(encoded), 3).map_err(snapshot_io)
+}
+
+fn load_local_disk_replica_identities_extension(
+    object_store: &dyn SnapshotObjectStore,
+    prefix: &str,
+) -> Result<Option<Vec<LocalDiskReplicaIdentity>>, HaError> {
+    let key = format!("{prefix}{RUST_LOCAL_DISK_REPLICA_IDENTITIES_EXTENSION}");
+    let data = match object_store.download_buffer(&key) {
+        Ok(data) => data,
+        Err(error) if object_store.is_not_found_error(&error.to_string()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let decoded = zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?;
+    let extension: LocalDiskReplicaIdentitiesExtension =
+        rmp_serde::from_slice(&decoded).map_err(snapshot_io)?;
+    if extension.schema_version != 1 {
+        return Err(snapshot_error(format!(
+            "unsupported Rust LocalDisk identity snapshot schema {}",
+            extension.schema_version
+        )));
+    }
+    Ok(Some(extension.entries))
+}
+
+fn apply_local_disk_replica_identities_extension(
+    objects: &mut [(String, ObjectEntry)],
+    entries: Vec<LocalDiskReplicaIdentity>,
+) -> Result<(), HaError> {
+    let object_indexes = objects
+        .iter()
+        .enumerate()
+        .map(|(index, (key, _))| (key.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if entry
+            .storage_id
+            .is_some_and(|storage_id| storage_id.is_nil())
+            || entry
+                .generation_id
+                .is_some_and(|generation_id| generation_id.is_nil())
+        {
+            return Err(snapshot_error(format!(
+                "LocalDisk identity extension contains a nil identity for {:?}",
+                entry.scoped_key
+            )));
+        }
+        let replica_index = usize::try_from(entry.replica_index)
+            .map_err(|_| snapshot_error("LocalDisk replica index exceeds usize"))?;
+        if !seen.insert((entry.scoped_key.clone(), replica_index)) {
+            return Err(snapshot_error(format!(
+                "duplicate LocalDisk identity for {:?} replica {}",
+                entry.scoped_key, replica_index
+            )));
+        }
+        let Some(object_index) = object_indexes.get(&entry.scoped_key).copied() else {
+            // Object expiry is evaluated while loading metadata. Its sidecar
+            // identity may therefore legitimately outlive the decoded object.
+            continue;
+        };
+        let replica = objects[object_index]
+            .1
+            .replicas
+            .get_mut(replica_index)
+            .ok_or_else(|| {
+                snapshot_error(format!(
+                    "LocalDisk identity references missing replica {} for {:?}",
+                    replica_index, entry.scoped_key
+                ))
+            })?;
+        if replica.replica_type != ReplicaType::LocalDisk {
+            return Err(snapshot_error(format!(
+                "LocalDisk identity references a non-LocalDisk replica for {:?}",
+                entry.scoped_key
+            )));
+        }
+        replica.local_disk_storage_id = entry.storage_id;
+        replica.local_disk_generation_id = entry.generation_id;
+    }
+
+    for (scoped_key, object) in objects {
+        for (replica_index, replica) in object.replicas.iter().enumerate() {
+            if replica.replica_type == ReplicaType::LocalDisk
+                && !seen.contains(&(scoped_key.clone(), replica_index))
+            {
+                return Err(snapshot_error(format!(
+                    "Rust catalog snapshot is missing LocalDisk identity for {scoped_key:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 pub fn create_catalog_backed_snapshot_provider(
     cluster_id: impl Into<String>,
@@ -145,17 +515,54 @@ pub fn create_catalog_backed_snapshot_provider(
         object_store,
     ))
 }
-impl SnapshotProvider for CatalogBackedSnapshotProvider {
-    fn load_latest_snapshot(&self, cluster_id: &str) -> Result<Option<LoadedSnapshot>, HaError> {
+impl CatalogBackedSnapshotProvider {
+    fn validate_cluster_id(&self, cluster_id: &str) -> Result<(), HaError> {
         if !cluster_id.is_empty() && cluster_id != self.cluster_id {
             return Err(HaError::InvalidParams(format!(
                 "snapshot provider cluster mismatch: requested={cluster_id}, configured={}",
                 self.cluster_id
             )));
         }
-        let Some(descriptor) = self.catalog_store.get_latest()? else {
-            return Ok(None);
+        Ok(())
+    }
+
+    fn restore_descriptors(&self) -> Result<Vec<SnapshotDescriptor>, HaError> {
+        let latest = match self.catalog_store.get_latest() {
+            Ok(latest) => latest,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load latest snapshot marker; falling back to catalog listing");
+                None
+            }
         };
+        let listed = match self.catalog_store.list(0) {
+            Ok(listed) => listed,
+            Err(error) if latest.is_some() => {
+                tracing::warn!(%error, "failed to list snapshot fallbacks; trying latest only");
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
+        let mut ids = HashSet::new();
+        let mut descriptors = Vec::new();
+        if let Some(latest) = latest {
+            ids.insert(latest.snapshot_id.clone());
+            descriptors.push(latest);
+        }
+        for descriptor in listed {
+            if ids.insert(descriptor.snapshot_id.clone()) {
+                descriptors.push(descriptor);
+            }
+        }
+        // `latest` is an availability hint, not a cross-term ordering oracle:
+        // a demoted leader may finish an already-started synchronous object
+        // store publish after the successor has published. The durable view
+        // and sequence carried by each descriptor prevent that late old-term
+        // marker from hiding the successor's baseline.
+        sort_snapshot_descriptors_newest_first(&mut descriptors);
+        Ok(descriptors)
+    }
+
+    fn load_descriptor(&self, descriptor: SnapshotDescriptor) -> Result<LoadedSnapshot, HaError> {
         let prefix = if descriptor.object_prefix.is_empty() {
             format!(
                 "{}{}/",
@@ -170,32 +577,105 @@ impl SnapshotProvider for CatalogBackedSnapshotProvider {
         } else {
             descriptor.manifest_key.clone()
         };
-        validate_manifest(&self.object_store.download_string(&manifest_key)?)?;
+        validate_manifest(
+            &self.object_store.download_string(&manifest_key)?,
+            &descriptor.snapshot_id,
+        )?;
+        let allocator_config =
+            load_allocator_config_extension(self.object_store.as_ref(), &prefix)?;
         let segment_payload = self
             .object_store
             .download_buffer(&format!("{prefix}segments"))?;
-        let decoded_segments = decode_segments(&segment_payload)?;
+        let mut decoded_segments = decode_segments(&segment_payload)?;
+        // The legacy C++ Segment wire predates the protocol field. Rust's CXL
+        // catalog snapshots carry the authoritative allocator strategy in a
+        // versioned extension, so restore every alias as CXL before decoding
+        // Memory replicas and handing the snapshot to the allocator rebuild.
+        // C++ catalog snapshots never supported the Cachelib-backed CXL
+        // SegmentSerializer, so a missing extension remains a non-CXL legacy
+        // snapshot rather than being guessed from addresses or names.
+        if allocator_config
+            .is_some_and(|config| config.allocation_strategy == AllocationStrategy::Cxl)
+        {
+            for segment in decoded_segments.values_mut() {
+                segment.entry.segment.protocol = "cxl".to_string();
+            }
+        }
         let local_disk_segments = decode_local_disk_segments(&segment_payload)?;
         let segments = decoded_segments
             .values()
             .map(|segment| segment.entry.clone())
             .collect();
-        let objects = decode_metadata(
-            &self
-                .object_store
-                .download_buffer(&format!("{prefix}metadata"))?,
-            &decoded_segments,
-        )?;
+        let metadata_payload = self
+            .object_store
+            .download_buffer(&format!("{prefix}metadata"))?;
+        let mut objects = decode_metadata(&metadata_payload, &decoded_segments)?;
+        if let Some(entries) =
+            load_local_disk_replica_identities_extension(self.object_store.as_ref(), &prefix)?
+        {
+            apply_local_disk_replica_identities_extension(&mut objects, entries)?;
+        }
         let tasks = load_task_manager(self.object_store.as_ref(), &prefix)?;
-        Ok(Some(LoadedSnapshot {
+        let mut delayed_replica_releases =
+            load_delayed_replica_releases_extension(self.object_store.as_ref(), &prefix)?;
+        if delayed_replica_releases.is_empty() {
+            delayed_replica_releases =
+                decode_cpp_discarded_replicas(&metadata_payload, &decoded_segments)?;
+        }
+        Ok(LoadedSnapshot {
             snapshot_id: descriptor.snapshot_id,
             snapshot_sequence_id: descriptor.last_included_seq,
+            allocator_config,
             segments,
             nof_segments: Vec::new(),
             objects,
             tasks,
+            replication_tasks: load_replication_tasks_extension(
+                self.object_store.as_ref(),
+                &prefix,
+            )?,
+            graceful_unmounts: load_graceful_unmounts_extension(
+                self.object_store.as_ref(),
+                &prefix,
+            )?,
+            delayed_replica_releases,
             local_disk_segments,
-        }))
+        })
+    }
+
+    fn load_catalog_candidates(&self, cluster_id: &str) -> Result<Vec<LoadedSnapshot>, HaError> {
+        self.validate_cluster_id(cluster_id)?;
+        let descriptors = self.restore_descriptors()?;
+        let mut snapshots = Vec::new();
+        let mut first_error = None;
+        for descriptor in descriptors {
+            let snapshot_id = descriptor.snapshot_id.clone();
+            match self.load_descriptor(descriptor) {
+                Ok(snapshot) => snapshots.push(snapshot),
+                Err(error) => {
+                    tracing::warn!(snapshot_id, %error, "snapshot candidate is unusable");
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        if snapshots.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error);
+        }
+        Ok(snapshots)
+    }
+}
+
+impl SnapshotProvider for CatalogBackedSnapshotProvider {
+    fn load_latest_snapshot(&self, cluster_id: &str) -> Result<Option<LoadedSnapshot>, HaError> {
+        Ok(self.load_catalog_candidates(cluster_id)?.into_iter().next())
+    }
+
+    fn load_snapshot_candidates(&self, cluster_id: &str) -> Result<Vec<LoadedSnapshot>, HaError> {
+        self.load_catalog_candidates(cluster_id)
     }
 }
 #[derive(Clone)]
@@ -203,9 +683,13 @@ struct DecodedSegment {
     entry: SegmentEntry,
     has_allocator: bool,
 }
-fn validate_manifest(manifest: &str) -> Result<(), HaError> {
+fn validate_manifest(manifest: &str, snapshot_id: &str) -> Result<(), HaError> {
     let fields: Vec<_> = manifest.trim().split('|').collect();
-    if fields.len() != 3 || fields[0] != MANIFEST_PROTOCOL || fields[1] != MANIFEST_VERSION {
+    if fields.len() != 3
+        || fields[0] != MANIFEST_PROTOCOL
+        || fields[1] != MANIFEST_VERSION
+        || (fields[2] != snapshot_id && fields[2] != "rust")
+    {
         return Err(snapshot_error("unsupported snapshot manifest"));
     }
     Ok(())
@@ -230,6 +714,7 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
             SegmentStatus::Active => 1_i64,
             SegmentStatus::Draining => 2_i64,
             SegmentStatus::Unavailable => 3_i64,
+            SegmentStatus::GracefullyUnmounting => 4_i64,
             _ => 3_i64,
         };
         mounted_segments.push((
@@ -243,6 +728,7 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
                 status.into(),
                 true.into(),
                 allocator,
+                segment.host_id.clone().into(),
             ]),
         ));
         if entry.status == SegmentStatus::Active {
@@ -273,7 +759,7 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
     clients.sort_by(|left, right| left.0.as_str().cmp(&right.0.as_str()));
 
     let mut local_disks = snapshot.local_disk_segments.clone();
-    local_disks.sort_by_key(|entry| entry.client_id);
+    local_disks.sort_by_key(|entry| entry.storage_id);
     let local_disks = local_disks
         .into_iter()
         .map(|entry| {
@@ -288,7 +774,8 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
                 fields.push(size.into());
             }
             fields.push(entry.ssd_total_capacity_bytes.into());
-            (entry.client_id.to_string().into(), Value::Array(fields))
+            fields.push(entry.client_id.to_string().into());
+            (entry.storage_id.to_string().into(), Value::Array(fields))
         })
         .collect();
 
@@ -467,11 +954,20 @@ fn decode_segments(data: &[u8]) -> Result<HashMap<Uuid, DecodedSegment>, HaError
     let root = decode_value(&zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?)?;
     let mounted = value_map(map_field(&root, "ms")?, "mounted segments")?;
     let mut owners = HashMap::new();
-    if let Ok(clients) = map_field(&root, "cs") {
+    if let Some(clients) = optional_map_field(&root, "cs")? {
+        let mut client_ids = HashSet::new();
         for (client, ids) in value_map(clients, "client segments")? {
             let client_id = parse_uuid(value_str(client, "client UUID")?)?;
+            if !client_ids.insert(client_id) {
+                return Err(snapshot_error("duplicate client UUID in segment ownership"));
+            }
             for id in value_array(ids, "client segment IDs")? {
-                owners.insert(parse_uuid(value_str(id, "segment UUID")?)?, client_id);
+                let segment_id = parse_uuid(value_str(id, "segment UUID")?)?;
+                if owners.insert(segment_id, client_id).is_some() {
+                    return Err(snapshot_error(
+                        "segment is assigned to more than one client",
+                    ));
+                }
             }
         }
     }
@@ -479,17 +975,36 @@ fn decode_segments(data: &[u8]) -> Result<HashMap<Uuid, DecodedSegment>, HaError
     for (id, value) in mounted {
         let map_id = parse_uuid(value_str(id, "segment UUID")?)?;
         let fields = value_array(value, "mounted segment")?;
-        if fields.len() < 8 {
-            return Err(snapshot_error("mounted segment is too short"));
+        if !(8..=9).contains(&fields.len()) {
+            return Err(snapshot_error("mounted segment has invalid shape"));
         }
         let segment_id = parse_uuid(value_str(&fields[0], "segment UUID")?)?;
         if segment_id != map_id {
             return Err(snapshot_error("mounted segment UUID mismatch"));
         }
-        let status = match value_i64(&fields[5], "segment status")? {
+        let encoded_status = value_i64(&fields[5], "segment status")?;
+        let status = match encoded_status {
+            0 | 3 | 5 => SegmentStatus::Unavailable,
             1 => SegmentStatus::Active,
             2 => SegmentStatus::Draining,
-            _ => SegmentStatus::Unavailable,
+            4 => SegmentStatus::GracefullyUnmounting,
+            _ => {
+                return Err(snapshot_error(format!(
+                    "mounted segment has unknown status {encoded_status}"
+                )));
+            }
+        };
+        let segment_name = value_str(&fields[1], "segment name")?;
+        let segment_base = value_u64(&fields[2], "segment base")?;
+        let segment_size = value_u64(&fields[3], "segment size")?;
+        let segment_endpoint = value_str(&fields[4], "segment endpoint")?;
+        segment_base
+            .checked_add(segment_size)
+            .ok_or_else(|| snapshot_error("mounted segment address range overflows"))?;
+        let segment_host_id = if fields.len() == 9 {
+            value_str(&fields[8], "segment host id")?
+        } else {
+            ""
         };
         let has_allocator = value_bool(&fields[6], "allocator flag")?;
         let used = if has_allocator {
@@ -497,42 +1012,80 @@ fn decode_segments(data: &[u8]) -> Result<HashMap<Uuid, DecodedSegment>, HaError
             if allocator.len() != 6 {
                 return Err(snapshot_error("invalid offset allocator"));
             }
-            value_u64(&allocator[3], "allocator current size")?
+            if value_str(&allocator[0], "allocator segment name")? != segment_name
+                || value_u64(&allocator[1], "allocator base")? != segment_base
+                || value_u64(&allocator[2], "allocator size")? != segment_size
+                || value_str(&allocator[4], "allocator endpoint")? != segment_endpoint
+            {
+                return Err(snapshot_error(
+                    "offset allocator identity differs from mounted segment",
+                ));
+            }
+            let used = value_u64(&allocator[3], "allocator current size")?;
+            if used > segment_size {
+                return Err(snapshot_error(
+                    "offset allocator usage exceeds segment capacity",
+                ));
+            }
+            used
         } else {
+            if !fields[7].is_nil() {
+                return Err(snapshot_error(
+                    "mounted segment without allocator has non-nil allocator state",
+                ));
+            }
             0
         };
         let entry = SegmentEntry {
             segment: Segment {
                 id: segment_id,
-                name: value_str(&fields[1], "segment name")?.to_string(),
-                base: value_u64(&fields[2], "segment base")?,
-                size: value_u64(&fields[3], "segment size")?,
-                te_endpoint: value_str(&fields[4], "segment endpoint")?.to_string(),
+                name: segment_name.to_string(),
+                base: segment_base,
+                size: segment_size,
+                te_endpoint: segment_endpoint.to_string(),
                 protocol: "tcp".to_string(),
+                host_id: segment_host_id.to_string(),
             },
             used,
             client_id: owners.get(&segment_id).copied().unwrap_or_else(Uuid::nil),
             status,
         };
-        result.insert(
-            segment_id,
-            DecodedSegment {
-                entry,
-                has_allocator,
-            },
-        );
+        if result
+            .insert(
+                segment_id,
+                DecodedSegment {
+                    entry,
+                    has_allocator,
+                },
+            )
+            .is_some()
+        {
+            return Err(snapshot_error("duplicate mounted segment UUID"));
+        }
+    }
+    if let Some(segment_id) = owners
+        .keys()
+        .find(|segment_id| !result.contains_key(segment_id))
+    {
+        return Err(snapshot_error(format!(
+            "client ownership references unknown segment {segment_id}"
+        )));
     }
     Ok(result)
 }
 
 fn decode_local_disk_segments(data: &[u8]) -> Result<Vec<LocalDiskSnapshotEntry>, HaError> {
     let root = decode_value(&zstd::stream::decode_all(Cursor::new(data)).map_err(snapshot_io)?)?;
-    let Ok(local_disks) = map_field(&root, "ld") else {
+    let Some(local_disks) = optional_map_field(&root, "ld")? else {
         return Ok(Vec::new());
     };
     let mut result = Vec::new();
-    for (client, value) in value_map(local_disks, "local disk segments")? {
-        let client_id = parse_uuid(value_str(client, "local disk client UUID")?)?;
+    let mut storage_ids = HashSet::new();
+    for (storage, value) in value_map(local_disks, "local disk segments")? {
+        let storage_id = parse_uuid(value_str(storage, "local disk storage UUID")?)?;
+        if !storage_ids.insert(storage_id) {
+            return Err(snapshot_error("duplicate local disk storage UUID"));
+        }
         let fields = value_array(value, "local disk segment")?;
         if fields.len() < 2 {
             return Err(snapshot_error("local disk segment is too short"));
@@ -547,17 +1100,42 @@ fn decode_local_disk_segments(data: &[u8]) -> Result<Vec<LocalDiskSnapshotEntry>
                     .ok_or_else(|| snapshot_error("local disk object count overflow"))?,
             )
             .ok_or_else(|| snapshot_error("local disk object count overflow"))?;
-        if fields.len() < capacity_index {
-            return Err(snapshot_error("local disk object list is truncated"));
+        if fields.len() < capacity_index || fields.len() > capacity_index + 2 {
+            return Err(snapshot_error("local disk segment has invalid shape"));
         }
         let mut offloading_objects = HashMap::new();
         for pair in fields[2..capacity_index].chunks_exact(2) {
-            let key = value_str(&pair[0], "local disk object key")?.to_string();
-            let size = value_i64(&pair[1], "local disk object size")?;
+            let storage_key = value_str(&pair[0], "local disk object key")?.to_string();
+            let size = if let Some(task) = pair[1].as_array() {
+                if task.len() != 3 {
+                    return Err(snapshot_error(
+                        "local disk offloading task has invalid shape",
+                    ));
+                }
+                let tenant_id =
+                    TenantId::new(value_str(&task[0], "local disk task tenant")?.to_string())
+                        .map_err(|error| {
+                            snapshot_error(format!(
+                                "local disk task has invalid tenant id: {error}"
+                            ))
+                        })?;
+                let user_key = value_str(&task[1], "local disk task key")?;
+                if tenant_id.make_scoped_key(user_key) != storage_key {
+                    return Err(snapshot_error(
+                        "local disk task identity does not match its storage key",
+                    ));
+                }
+                value_i64(&task[2], "local disk task size")?
+            } else {
+                // Legacy C++ and early Rust snapshots stored only key -> size.
+                value_i64(&pair[1], "local disk object size")?
+            };
             if size < 0 {
                 return Err(snapshot_error("local disk object size is negative"));
             }
-            offloading_objects.insert(key, size);
+            if offloading_objects.insert(storage_key, size).is_some() {
+                return Err(snapshot_error("duplicate local disk object key"));
+            }
         }
         let ssd_total_capacity_bytes = if fields.len() > capacity_index {
             let capacity = value_i64(&fields[capacity_index], "local disk SSD capacity")?;
@@ -568,7 +1146,18 @@ fn decode_local_disk_segments(data: &[u8]) -> Result<Vec<LocalDiskSnapshotEntry>
         } else {
             0
         };
+        let client_id = if fields.len() > capacity_index + 1 {
+            parse_uuid(value_str(
+                &fields[capacity_index + 1],
+                "local disk active client UUID",
+            )?)?
+        } else {
+            // Legacy catalog entries were keyed by the active client and had
+            // no independent durable storage identity.
+            storage_id
+        };
         result.push(LocalDiskSnapshotEntry {
+            storage_id,
             client_id,
             enable_offloading,
             offloading_objects,
@@ -585,7 +1174,16 @@ fn decode_metadata(
     let shards = value_map(map_field(&root, "shards")?, "metadata shards")?;
     let now = SystemTime::now();
     let mut objects = Vec::new();
-    for (_, blob) in shards {
+    let mut object_keys = HashSet::new();
+    let mut shard_ids = HashSet::new();
+    for (encoded_shard_id, blob) in shards {
+        let shard_id = value_u64(encoded_shard_id, "metadata shard id")?;
+        if shard_id >= CPP_METADATA_SHARD_COUNT {
+            return Err(snapshot_error("metadata shard id is out of range"));
+        }
+        if !shard_ids.insert(shard_id) {
+            return Err(snapshot_error("duplicate metadata shard id"));
+        }
         let compressed = match blob {
             Value::Binary(value) => value,
             _ => return Err(snapshot_error("metadata shard is not binary")),
@@ -614,11 +1212,63 @@ fn decode_metadata(
                 _ => return Err(snapshot_error("metadata item has invalid shape")),
             };
             if let Some(entry) = decode_object(metadata, &tenant_id, &user_key, segments, now)? {
-                objects.push((tenant_id.make_scoped_key(&user_key), entry));
+                let scoped_key = tenant_id.make_scoped_key(&user_key);
+                if !object_keys.insert(scoped_key.clone()) {
+                    return Err(snapshot_error("duplicate object identity in metadata"));
+                }
+                objects.push((scoped_key, entry));
             }
         }
     }
     Ok(objects)
+}
+
+fn decode_cpp_discarded_replicas(
+    data: &[u8],
+    segments: &HashMap<Uuid, DecodedSegment>,
+) -> Result<Vec<crate::service::state::DelayedReplicaReleaseEntry>, HaError> {
+    let root = decode_value(data)?;
+    let discarded = match optional_map_field(&root, "discarded_replicas")? {
+        Some(value) => value_array(value, "discarded replicas")?,
+        None => return Ok(Vec::new()),
+    };
+    let mut result = Vec::with_capacity(discarded.len());
+    for encoded in discarded {
+        let fields = value_array(encoded, "discarded replica entry")?;
+        if fields.len() < 3 {
+            return Err(snapshot_error("discarded replica entry is too short"));
+        }
+        let deadline_epoch_ms = value_u64(&fields[0], "discarded replica deadline")?;
+        let _memory_size = value_u64(&fields[1], "discarded replica memory size")?;
+        let replica_count = usize::try_from(value_u64(&fields[2], "discarded replica count")?)
+            .map_err(|_| snapshot_error("discarded replica count exceeds usize"))?;
+        if replica_count == 0 || fields.len() != 3 + replica_count {
+            return Err(snapshot_error(
+                "discarded replica entry count does not match payload",
+            ));
+        }
+        let mut replicas = Vec::with_capacity(replica_count);
+        for encoded_replica in &fields[3..] {
+            let Some(replica) = decode_replica(encoded_replica, segments, false)? else {
+                return Err(snapshot_error("discarded replica cannot be reconstructed"));
+            };
+            if replica.replica_type != ReplicaType::Memory {
+                return Err(snapshot_error(
+                    "discarded replica entry contains a non-memory replica",
+                ));
+            }
+            replicas.push(replica);
+        }
+        let id = Uuid::new_v4();
+        result.push(crate::service::state::DelayedReplicaReleaseEntry {
+            id,
+            scoped_key: TenantId::default()
+                .make_scoped_key(&format!("__cpp_discarded_replica_{id}")),
+            deadline_epoch_ms,
+            replicas,
+        });
+    }
+    Ok(result)
 }
 
 fn decode_object(
@@ -652,9 +1302,7 @@ fn decode_object(
     } else {
         None
     };
-    if size == 0
-        || (lease_timeout <= now && soft_pin_timeout.map_or(true, |timeout| timeout <= now))
-    {
+    if size == 0 {
         return Ok(None);
     }
     let mut index = 7;
@@ -674,6 +1322,7 @@ fn decode_object(
                 .get(index)
                 .ok_or_else(|| snapshot_error("truncated replica list"))?,
             segments,
+            false,
         )?;
         index += 1;
         let Some(replica) = replica else {
@@ -688,11 +1337,37 @@ fn decode_object(
     if fields.get(index).and_then(Value::as_bool).is_some() {
         index += 1;
     }
-    let group_id = fields
-        .get(index)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+    let group_id = match fields.get(index) {
+        Some(value) => {
+            let value = value_str(value, "object group id")?.to_string();
+            index += 1;
+            value
+        }
+        None => String::new(),
+    };
+    if index != fields.len() {
+        return Err(snapshot_error(
+            "object metadata contains unsupported trailing fields",
+        ));
+    }
+    // Hard pin is an eviction override, not another expiring lease. Parse it
+    // before applying the C++ catalog's post-restore expiry cleanup so a
+    // hard-pinned object survives even when both ordinary pin deadlines have
+    // elapsed. The current C++ cleanup omits this check; Rust intentionally
+    // preserves the public hard-pin invariant instead of reproducing that
+    // recovery-time data-loss bug.
+    if !hard_pinned
+        && replicas
+            .iter()
+            .all(|replica| replica.status == ReplicaStatus::Complete)
+        && lease_timeout <= now
+        && soft_pin_timeout.map_or(true, |timeout| timeout <= now)
+    {
+        return Ok(None);
+    }
+    let quota_committed = replicas
+        .iter()
+        .all(|replica| replica.status == ReplicaStatus::Complete);
     Ok(Some(ObjectEntry {
         replicas,
         size,
@@ -705,7 +1380,10 @@ fn decode_object(
         soft_pin_timeout,
         tenant_id: tenant_id.clone(),
         group_id,
-        quota_committed: true,
+        quota_committed,
+        reserved_quota_charge_bytes: 0,
+        committed_quota_charge_bytes: 0,
+        pending_replaced_quota_charge_bytes: 0,
         memory_cache_total_accounted: false,
         disk_cache_total_accounted: false,
         user_key: user_key.to_string(),
@@ -715,12 +1393,29 @@ fn decode_object(
 fn decode_replica(
     value: &Value,
     segments: &HashMap<Uuid, DecodedSegment>,
+    require_complete: bool,
 ) -> Result<Option<ReplicaDescriptor>, HaError> {
     let fields = value_array(value, "replica")?;
     if fields.len() != 4 {
         return Err(snapshot_error("replica has invalid shape"));
     }
-    if value_i64(&fields[1], "replica status")? != ReplicaStatus::Complete as i64 {
+    let _replica_id = value_u64(&fields[0], "replica id")?;
+    let encoded_status = value_i64(&fields[1], "replica status")?;
+    let status = match encoded_status {
+        0 => ReplicaStatus::Undefined,
+        1 => ReplicaStatus::Allocating,
+        // C++ creates freshly reserved/writing replicas directly in
+        // PROCESSING. Rust's corresponding Master-owned state is Allocating;
+        // Written is a Rust wire state that has no distinct C++ catalog phase.
+        2 => ReplicaStatus::Allocating,
+        3 => ReplicaStatus::Complete,
+        // C++ has separate REMOVED=4 and FAILED=5 terminal states. Rust has
+        // one unreadable terminal state, so both normalize to Failed rather
+        // than being revived as an Allocating replica after recovery.
+        4 | 5 => ReplicaStatus::Failed,
+        _ => return Err(snapshot_error("replica status is invalid")),
+    };
+    if require_complete && status != ReplicaStatus::Complete {
         return Ok(None);
     }
     let payload = value_array(&fields[3], "replica payload")?;
@@ -733,10 +1428,37 @@ fn decode_replica(
                 let size = value_u64(&payload[0], "replica size")?;
                 let address = value_u64(&payload[1], "replica address")?;
                 let segment_id = parse_uuid(value_str(&payload[2], "replica segment UUID")?)?;
+                let has_offset_handle = value_bool(&payload[3], "replica offset handle flag")?;
+                if has_offset_handle {
+                    let handle = value_array(&payload[4], "replica offset handle")?;
+                    if handle.len() != 3 {
+                        return Err(snapshot_error("replica offset handle has invalid shape"));
+                    }
+                    let _real_base = value_u64(&handle[0], "replica handle real base")?;
+                    let _requested_size = value_u64(&handle[1], "replica handle requested size")?;
+                    let allocation = value_array(&handle[2], "replica handle allocation metadata")?;
+                    if allocation.len() != 2 {
+                        return Err(snapshot_error(
+                            "replica handle allocation metadata has invalid shape",
+                        ));
+                    }
+                    u32::try_from(value_u64(&allocation[0], "replica handle offset")?)
+                        .map_err(|_| snapshot_error("replica handle offset exceeds u32"))?;
+                    u32::try_from(value_u64(&allocation[1], "replica handle metadata")?)
+                        .map_err(|_| snapshot_error("replica handle metadata exceeds u32"))?;
+                } else if !payload[4].is_nil() {
+                    return Err(snapshot_error(
+                        "replica without offset handle has non-nil handle payload",
+                    ));
+                }
                 let segment = segments
                     .get(&segment_id)
                     .ok_or_else(|| snapshot_error("replica references unknown segment"))?;
-                if segment.entry.status != SegmentStatus::Active || !segment.has_allocator {
+                if !matches!(
+                    segment.entry.status,
+                    SegmentStatus::Active | SegmentStatus::GracefullyUnmounting
+                ) || !segment.has_allocator
+                {
                     return Ok(None);
                 }
                 let offset = address
@@ -798,9 +1520,14 @@ fn decode_replica(
         segment_name,
         offset,
         size,
-        status: ReplicaStatus::Complete,
+        status,
         replica_type,
         holder_client_id: holder,
+        // The C++ v1 payload stores only the active client UUID. Durable
+        // storage identity is restored from the Rust sidecar when present, or
+        // from the LocalDisk segment table by restore_loaded_snapshot_state.
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         refcnt: 0,
         handle_valid: true,
         base_addr,
@@ -809,15 +1536,30 @@ fn decode_replica(
 }
 
 fn decode_value(data: &[u8]) -> Result<Value, HaError> {
-    rmpv::decode::read_value(&mut Cursor::new(data)).map_err(snapshot_io)
+    let mut cursor = Cursor::new(data);
+    let value = rmpv::decode::read_value(&mut cursor).map_err(snapshot_io)?;
+    if cursor.position() != data.len() as u64 {
+        return Err(snapshot_error("snapshot payload contains trailing bytes"));
+    }
+    Ok(value)
 }
 
 fn map_field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, HaError> {
-    value_map(value, "map")?
-        .iter()
-        .find(|(key, _)| key.as_str() == Some(name))
-        .map(|(_, value)| value)
+    optional_map_field(value, name)?
         .ok_or_else(|| snapshot_error(format!("missing snapshot field: {name}")))
+}
+
+fn optional_map_field<'a>(value: &'a Value, name: &str) -> Result<Option<&'a Value>, HaError> {
+    let mut result = None;
+    for (key, value) in value_map(value, "map")? {
+        if key.as_str() != Some(name) {
+            continue;
+        }
+        if result.replace(value).is_some() {
+            return Err(snapshot_error(format!("duplicate snapshot field: {name}")));
+        }
+    }
+    Ok(result)
 }
 
 fn value_map<'a>(value: &'a Value, name: &str) -> Result<&'a [(Value, Value)], HaError> {
@@ -874,4 +1616,235 @@ fn snapshot_io(error: impl std::fmt::Display) -> HaError {
 
 fn snapshot_error(error: impl Into<String>) -> HaError {
     HaError::Snapshot(error.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_cpp_discarded_replicas, decode_local_disk_segments, decode_metadata,
+        decode_segments, decode_value, encode_compressed_value, encode_value,
+    };
+    use mooncake_store_core::{ReplicaStatus, ReplicaType};
+    use rmpv::Value;
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
+
+    fn future_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 60_000
+    }
+
+    fn disk_metadata_with_status(status: i64, extra_fields: Vec<Value>) -> Value {
+        let replica = Value::Array(vec![
+            1_u64.into(),
+            status.into(),
+            (ReplicaType::Disk as i32 as i64).into(),
+            Value::Array(vec!["disk/object".into(), 1_u64.into()]),
+        ]);
+        let mut fields = vec![
+            Uuid::nil().to_string().into(),
+            0_u64.into(),
+            1_u64.into(),
+            future_ms().into(),
+            false.into(),
+            0_u64.into(),
+            1_u64.into(),
+            replica,
+        ];
+        fields.extend(extra_fields);
+        Value::Array(fields)
+    }
+
+    fn disk_metadata(extra_fields: Vec<Value>) -> Value {
+        disk_metadata_with_status(ReplicaStatus::Complete as i32 as i64, extra_fields)
+    }
+
+    #[test]
+    fn messagepack_decoder_rejects_trailing_bytes() {
+        let mut encoded = encode_value(&Value::Map(Vec::new())).unwrap();
+        encoded.push(0);
+        assert!(decode_value(&encoded).is_err());
+    }
+
+    #[test]
+    fn metadata_decoder_rejects_duplicate_object_identity() {
+        let item = Value::Array(vec![
+            "tenant-a".into(),
+            "key".into(),
+            disk_metadata(Vec::new()),
+        ]);
+        let shard = Value::Map(vec![(
+            "metadata".into(),
+            Value::Array(vec![item.clone(), item]),
+        )]);
+        let encoded_shard = encode_compressed_value(&shard).unwrap();
+        let payload = encode_value(&Value::Map(vec![(
+            "shards".into(),
+            Value::Map(vec![(0.into(), Value::Binary(encoded_shard))]),
+        )]))
+        .unwrap();
+
+        assert!(decode_metadata(&payload, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn metadata_decoder_rejects_unknown_trailing_shape() {
+        let item = Value::Array(vec![
+            "tenant-a".into(),
+            "key".into(),
+            disk_metadata(vec![false.into(), "".into(), 7_u64.into()]),
+        ]);
+        let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
+        let encoded_shard = encode_compressed_value(&shard).unwrap();
+        let payload = encode_value(&Value::Map(vec![(
+            "shards".into(),
+            Value::Map(vec![(0.into(), Value::Binary(encoded_shard))]),
+        )]))
+        .unwrap();
+
+        assert!(decode_metadata(&payload, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn metadata_decoder_rejects_duplicate_shard_identity() {
+        let encoded_shard =
+            encode_compressed_value(&Value::Map(vec![("metadata".into(), Value::Array(vec![]))]))
+                .unwrap();
+        let payload = encode_value(&Value::Map(vec![(
+            "shards".into(),
+            Value::Map(vec![
+                (0.into(), Value::Binary(encoded_shard.clone())),
+                (0.into(), Value::Binary(encoded_shard)),
+            ]),
+        )]))
+        .unwrap();
+
+        assert!(decode_metadata(&payload, &HashMap::new()).is_err());
+    }
+
+    #[test]
+    fn metadata_decoder_preserves_cpp_replica_status_semantics() {
+        let expected = [
+            ReplicaStatus::Undefined,
+            ReplicaStatus::Allocating,
+            ReplicaStatus::Allocating,
+            ReplicaStatus::Complete,
+            ReplicaStatus::Failed,
+            ReplicaStatus::Failed,
+        ];
+        for (encoded_status, expected_status) in expected.into_iter().enumerate() {
+            let item = Value::Array(vec![
+                "tenant-a".into(),
+                format!("key-{encoded_status}").into(),
+                disk_metadata_with_status(encoded_status as i64, Vec::new()),
+            ]);
+            let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
+            let encoded_shard = encode_compressed_value(&shard).unwrap();
+            let payload = encode_value(&Value::Map(vec![(
+                "shards".into(),
+                Value::Map(vec![(0.into(), Value::Binary(encoded_shard))]),
+            )]))
+            .unwrap();
+
+            let objects = decode_metadata(&payload, &HashMap::new()).unwrap();
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0].1.replicas[0].status, expected_status);
+        }
+    }
+
+    #[test]
+    fn segment_decoder_rejects_unknown_future_status() {
+        let segment_id = Uuid::new_v4();
+        let mounted = Value::Array(vec![
+            segment_id.to_string().into(),
+            "segment-a".into(),
+            0x1000_u64.into(),
+            4096_u64.into(),
+            "tcp://node-a".into(),
+            6_i64.into(),
+            false.into(),
+            Value::Nil,
+        ]);
+        let payload = encode_compressed_value(&Value::Map(vec![(
+            "ms".into(),
+            Value::Map(vec![(segment_id.to_string().into(), mounted)]),
+        )]))
+        .unwrap();
+
+        assert!(decode_segments(&payload).is_err());
+    }
+
+    #[test]
+    fn segment_decoder_rejects_duplicate_optional_client_ownership() {
+        let payload = encode_compressed_value(&Value::Map(vec![
+            ("ms".into(), Value::Map(Vec::new())),
+            ("cs".into(), Value::Map(Vec::new())),
+            ("cs".into(), Value::Map(Vec::new())),
+        ]))
+        .unwrap();
+
+        assert!(decode_segments(&payload).is_err());
+    }
+
+    #[test]
+    fn segment_decoder_rejects_dangling_client_ownership() {
+        let segment_id = Uuid::new_v4();
+        let payload = encode_compressed_value(&Value::Map(vec![
+            ("ms".into(), Value::Map(Vec::new())),
+            (
+                "cs".into(),
+                Value::Map(vec![(
+                    Uuid::new_v4().to_string().into(),
+                    Value::Array(vec![segment_id.to_string().into()]),
+                )]),
+            ),
+        ]))
+        .unwrap();
+
+        assert!(decode_segments(&payload).is_err());
+    }
+
+    #[test]
+    fn segment_decoder_rejects_duplicate_client_identity() {
+        let client_id = Uuid::new_v4().to_string();
+        let payload = encode_compressed_value(&Value::Map(vec![
+            ("ms".into(), Value::Map(Vec::new())),
+            (
+                "cs".into(),
+                Value::Map(vec![
+                    (client_id.clone().into(), Value::Array(Vec::new())),
+                    (client_id.into(), Value::Array(Vec::new())),
+                ]),
+            ),
+        ]))
+        .unwrap();
+
+        assert!(decode_segments(&payload).is_err());
+    }
+
+    #[test]
+    fn local_disk_decoder_rejects_duplicate_optional_inventory() {
+        let payload = encode_compressed_value(&Value::Map(vec![
+            ("ld".into(), Value::Map(Vec::new())),
+            ("ld".into(), Value::Map(Vec::new())),
+        ]))
+        .unwrap();
+
+        assert!(decode_local_disk_segments(&payload).is_err());
+    }
+
+    #[test]
+    fn discarded_replica_decoder_rejects_duplicate_optional_field() {
+        let payload = encode_value(&Value::Map(vec![
+            ("discarded_replicas".into(), Value::Array(Vec::new())),
+            ("discarded_replicas".into(), Value::Array(Vec::new())),
+        ]))
+        .unwrap();
+
+        assert!(decode_cpp_discarded_replicas(&payload, &HashMap::new()).is_err());
+    }
 }

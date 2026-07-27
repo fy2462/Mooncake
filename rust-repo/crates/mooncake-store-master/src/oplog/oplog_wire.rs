@@ -95,7 +95,9 @@ pub(super) fn validate_wire_entry_size(wire: &CppOpLogWireEntry) -> Result<(), H
 
 pub(super) fn cpp_wire_entry_from_record(entry: &OpLogRecord) -> Option<CppOpLogWireEntry> {
     if let Some(payload_bytes) = decode_msgpack_record_payload_bytes(&entry.payload).ok()? {
-        if payload_bytes.starts_with(PUT_END_MSGPACK_MAGIC) {
+        if payload_bytes.starts_with(PUT_END_MSGPACK_MAGIC_V2)
+            || payload_bytes.starts_with(PUT_END_MSGPACK_MAGIC_V1)
+        {
             let payload = decode_put_end_msgpack_typed(&payload_bytes).ok()?;
             let object_key = payload.key;
             let checksum = compute_cpp_checksum(&payload_bytes);
@@ -124,21 +126,38 @@ pub(super) fn cpp_wire_entry_from_payload_json(
 ) -> Option<CppOpLogWireEntry> {
     let op = payload_json.get("op")?.as_str()?;
     let (op_type, object_key, payload_bytes) = match op {
-        "put_end" => (
-            CPP_OP_PUT_END,
-            payload_json.get("key")?.as_str()?.to_string(),
-            encode_put_end_msgpack_from_json(&payload_json).ok()?,
-        ),
-        "put_revoke" => (
-            CPP_OP_PUT_REVOKE,
-            payload_json.get("key")?.as_str()?.to_string(),
-            Vec::new(),
-        ),
-        "remove" => (
-            CPP_OP_REMOVE,
-            payload_json.get("key")?.as_str()?.to_string(),
-            Vec::new(),
-        ),
+        "put_end"
+            if payload_json
+                .get("replicas")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|replicas| !replicas.is_empty()) =>
+        {
+            (
+                CPP_OP_PUT_END,
+                payload_json.get("key")?.as_str()?.to_string(),
+                encode_put_end_msgpack_from_json(payload_json).ok()?,
+            )
+        }
+        "put_revoke" => {
+            if payload_json.get("schema_version").is_some() {
+                return None;
+            }
+            (
+                CPP_OP_PUT_REVOKE,
+                payload_json.get("key")?.as_str()?.to_string(),
+                Vec::new(),
+            )
+        }
+        "remove" => {
+            if payload_json.get("schema_version").is_some() {
+                return None;
+            }
+            (
+                CPP_OP_REMOVE,
+                payload_json.get("key")?.as_str()?.to_string(),
+                Vec::new(),
+            )
+        }
         _ => return None,
     };
 
@@ -167,17 +186,6 @@ pub(super) fn encode_msgpack_record_payload_value(
     ))
 }
 
-pub(super) fn encode_put_end_record_payload(
-    payload: &PutEndMetadataPayloadV1,
-) -> Result<String, HaError> {
-    let bytes = encode_put_end_msgpack(payload)?;
-    Ok(format!(
-        "{}{}",
-        OPLOG_MSGPACK_RECORD_PREFIX,
-        BASE64_STANDARD.encode(bytes)
-    ))
-}
-
 pub(super) fn decode_msgpack_record_payload_bytes(
     payload: &str,
 ) -> Result<Option<Vec<u8>>, HaError> {
@@ -191,19 +199,33 @@ pub(super) fn decode_msgpack_record_payload_bytes(
 }
 
 pub(super) fn encode_put_end_msgpack(
-    payload: &PutEndMetadataPayloadV1,
+    payload: &PutEndMetadataPayloadV2,
 ) -> Result<Vec<u8>, HaError> {
-    let mut bytes = Vec::from(PUT_END_MSGPACK_MAGIC);
+    let mut bytes = Vec::from(PUT_END_MSGPACK_MAGIC_V2);
     let body = rmp_serde::to_vec_named(payload)
         .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack encode: {e}")))?;
     bytes.extend_from_slice(&body);
     Ok(bytes)
 }
 
+pub(super) fn encode_put_end_object_image_msgpack(
+    payload: &PutEndMetadataPayloadV3,
+) -> Result<String, HaError> {
+    let mut bytes = Vec::from(PUT_END_MSGPACK_MAGIC);
+    let body = rmp_serde::to_vec_named(payload)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end v3 msgpack encode: {e}")))?;
+    bytes.extend_from_slice(&body);
+    Ok(format!(
+        "{}{}",
+        OPLOG_MSGPACK_RECORD_PREFIX,
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
 pub(super) fn encode_put_end_msgpack_from_json(
     payload_json: &serde_json::Value,
 ) -> Result<Vec<u8>, HaError> {
-    let payload = PutEndMetadataPayloadV1 {
+    let payload = PutEndMetadataPayloadV2 {
         op: "put_end".to_string(),
         key: payload_json
             .get("key")
@@ -246,14 +268,32 @@ pub(super) fn encode_put_end_msgpack_from_json(
 
 pub(super) fn decode_put_end_msgpack_typed(
     bytes: &[u8],
-) -> Result<PutEndMetadataPayloadV1, HaError> {
+) -> Result<PutEndMetadataPayloadV2, HaError> {
+    reject_unknown_put_end_msgpack_version(bytes)?;
     let body = bytes
-        .strip_prefix(PUT_END_MSGPACK_MAGIC)
+        .strip_prefix(PUT_END_MSGPACK_MAGIC_V2)
+        .or_else(|| bytes.strip_prefix(PUT_END_MSGPACK_MAGIC_V1))
         .ok_or_else(|| HaError::InvalidBackend("put_end msgpack magic mismatch".into()))?;
-    let payload: PutEndMetadataPayloadV1 = rmp_serde::from_slice(body)
+    let payload: PutEndMetadataPayloadV2 = rmp_serde::from_slice(body)
         .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))?;
     recover_object_identity(&payload.key, &payload.tenant_id, &payload.user_key)?;
     Ok(payload)
+}
+
+fn decode_put_end_object_image_msgpack(bytes: &[u8]) -> Result<serde_json::Value, HaError> {
+    let body = bytes
+        .strip_prefix(PUT_END_MSGPACK_MAGIC)
+        .ok_or_else(|| HaError::InvalidBackend("put_end v3 msgpack magic mismatch".into()))?;
+    let payload: PutEndMetadataPayloadV3 = rmp_serde::from_slice(body)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end v3 msgpack decode: {e}")))?;
+    if payload.schema_version != 3 || payload.op != "put_end" {
+        return Err(HaError::InvalidBackend(
+            "put_end v3 payload identity mismatch".into(),
+        ));
+    }
+    recover_object_identity(&payload.key, &payload.tenant_id, &payload.user_key)?;
+    serde_json::to_value(payload)
+        .map_err(|e| HaError::InvalidBackend(format!("put_end v3 msgpack to json: {e}")))
 }
 
 pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, HaError> {
@@ -263,7 +303,13 @@ pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, 
 
 pub(crate) fn decode_record_payload_value(payload: &str) -> Result<serde_json::Value, HaError> {
     if let Some(bytes) = decode_msgpack_record_payload_bytes(payload)? {
+        reject_unknown_put_end_msgpack_version(&bytes)?;
         if bytes.starts_with(PUT_END_MSGPACK_MAGIC) {
+            return decode_put_end_object_image_msgpack(&bytes);
+        }
+        if bytes.starts_with(PUT_END_MSGPACK_MAGIC_V2)
+            || bytes.starts_with(PUT_END_MSGPACK_MAGIC_V1)
+        {
             return decode_put_end_msgpack(&bytes);
         }
         return rmp_serde::from_slice(&bytes)
@@ -293,7 +339,11 @@ pub(super) fn rust_payload_from_cpp_wire_entry(
     match wire.op_type {
         CPP_OP_PUT_END => {
             let metadata_payload_base64 = BASE64_STANDARD.encode(&decoded_payload);
-            if decoded_payload.starts_with(PUT_END_MSGPACK_MAGIC) {
+            reject_unknown_put_end_msgpack_version(&decoded_payload)?;
+            if decoded_payload.starts_with(PUT_END_MSGPACK_MAGIC)
+                || decoded_payload.starts_with(PUT_END_MSGPACK_MAGIC_V2)
+                || decoded_payload.starts_with(PUT_END_MSGPACK_MAGIC_V1)
+            {
                 return Ok(format!(
                     "{}{}",
                     OPLOG_MSGPACK_RECORD_PREFIX,
@@ -324,6 +374,24 @@ pub(super) fn rust_payload_from_cpp_wire_entry(
             "unsupported C++ oplog op_type: {other}"
         ))),
     }
+}
+
+fn reject_unknown_put_end_msgpack_version(bytes: &[u8]) -> Result<(), HaError> {
+    if bytes.starts_with(PUT_END_MSGPACK_MAGIC_PREFIX)
+        && !bytes.starts_with(PUT_END_MSGPACK_MAGIC)
+        && !bytes.starts_with(PUT_END_MSGPACK_MAGIC_V2)
+        && !bytes.starts_with(PUT_END_MSGPACK_MAGIC_V1)
+    {
+        let version = bytes
+            .get(PUT_END_MSGPACK_MAGIC_PREFIX.len())
+            .copied()
+            .map(char::from)
+            .unwrap_or('?');
+        return Err(HaError::InvalidBackend(format!(
+            "unsupported put_end msgpack schema version '{version}'"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn compute_cpp_checksum(payload: &[u8]) -> u32 {

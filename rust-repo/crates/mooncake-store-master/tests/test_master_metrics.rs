@@ -24,6 +24,7 @@ fn replicate_config(segment: &str) -> proto::ReplicateConfig {
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
         group_ids: vec![],
+        host_id: String::new(),
     }
 }
 
@@ -39,6 +40,7 @@ fn multi_replicate_config(segments: &[&str]) -> proto::ReplicateConfig {
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
         group_ids: vec![],
+        host_id: String::new(),
     }
 }
 
@@ -52,6 +54,7 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -115,20 +118,70 @@ async fn put_complete_with_config(
     .unwrap();
 }
 
-async fn mount_local_disk_and_notify_success(
-    service: &MasterServiceImpl,
-    holder_id: Uuid,
-    key: &str,
-) {
+async fn mount_local_disk(service: &MasterServiceImpl, holder_id: Uuid) {
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            enable_offloading: false,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: false,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
     MasterService::mount_local_disk_segment(
         service,
         Request::new(proto::MountLocalDiskSegmentRequest {
             client_id: Some(proto_uuid(holder_id)),
             enable_offloading: true,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
         }),
     )
     .await
     .unwrap();
+}
+
+async fn seed_local_disk_object(service: &MasterServiceImpl, holder_id: Uuid, key: &str) {
+    let source_segment = format!("metrics-offload-source-{key}");
+    let source_segment_id = MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            segment_name: source_segment.clone(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .segment_id
+    .unwrap();
+    put_complete(service, holder_id, key, &source_segment).await;
+    let task = MasterService::offload_object_heartbeat(
+        service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(holder_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks
+    .into_iter()
+    .find(|task| task.key == key)
+    .expect("Master must issue the metrics fixture offload task");
+    assert!(task.generation_id.is_some());
     MasterService::notify_offload_success(
         service,
         Request::new(proto::NotifyOffloadSuccessRequest {
@@ -141,7 +194,17 @@ async fn mount_local_disk_and_notify_success(
                 data_size: 128,
                 transport_endpoint: "holder".into(),
             }],
-            tasks: vec![],
+            tasks: vec![task],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::unmount_segment(
+        service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(source_segment_id),
+            client_id: Some(proto_uuid(holder_id)),
         }),
     )
     .await
@@ -174,8 +237,9 @@ async fn test_promotion_candidate_metrics_are_registered_and_incremented() {
         ..Default::default()
     });
     let holder_id = Uuid::new_v4();
-    mount_local_disk_and_notify_success(&service, holder_id, "metric-first").await;
-    mount_local_disk_and_notify_success(&service, holder_id, "metric-retry").await;
+    mount_local_disk(&service, holder_id).await;
+    seed_local_disk_object(&service, holder_id, "metric-first").await;
+    seed_local_disk_object(&service, holder_id, "metric-retry").await;
     for key in ["metric-first", "metric-retry"] {
         trigger_promotion_lookup(&service, key).await;
         trigger_promotion_lookup(&service, key).await;
@@ -239,7 +303,8 @@ async fn test_cache_hit_metrics_count_memory_and_local_disk_bytes() {
         "metrics-memory:1",
     )
     .await;
-    mount_local_disk_and_notify_success(&service, disk_holder, "metrics-disk-key").await;
+    mount_local_disk(&service, disk_holder).await;
+    seed_local_disk_object(&service, disk_holder, "metrics-disk-key").await;
 
     let base_mem_hits = metrics::MEM_CACHE_HITS.get();
     let base_file_hits = metrics::FILE_CACHE_HITS.get();
@@ -294,7 +359,9 @@ async fn test_cache_total_metrics_track_object_inventory() {
     .await;
     assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total + 1);
 
-    mount_local_disk_and_notify_success(&service, disk_holder, "inventory-disk-key").await;
+    mount_local_disk(&service, disk_holder).await;
+    seed_local_disk_object(&service, disk_holder, "inventory-disk-key").await;
+    assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total + 1);
     assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_file_total + 1);
 
     MasterService::evict_disk_replica(

@@ -32,8 +32,14 @@ use uuid::Uuid;
 use super::MooncakeClient;
 use crate::proto;
 
+fn default_task_tenant() -> String {
+    "default".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 struct ReplicaCopyPayload {
+    #[serde(default = "default_task_tenant")]
+    tenant_id: String,
     key: String,
     source: String,
     targets: Vec<String>,
@@ -41,6 +47,8 @@ struct ReplicaCopyPayload {
 
 #[derive(Debug, Deserialize)]
 struct ReplicaMovePayload {
+    #[serde(default = "default_task_tenant")]
+    tenant_id: String,
     key: String,
     source: String,
     target: String,
@@ -63,10 +71,22 @@ impl MooncakeClient {
     ///
     /// C++ equivalent: `Client::CreateCopyTask(key, targets)`
     pub async fn create_copy_task(&mut self, key: &str, targets: &[String]) -> StoreResult<Uuid> {
+        let tenant_id = self.tenant_id.clone();
+        self.create_copy_task_for_tenant(key, &tenant_id, targets)
+            .await
+    }
+
+    /// Create a copy task for an explicitly selected tenant.
+    pub async fn create_copy_task_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        targets: &[String],
+    ) -> StoreResult<Uuid> {
         let request = proto::CreateCopyTaskRequest {
             key: key.to_string(),
             targets: targets.to_vec(),
-            tenant_id: self.tenant_id.clone(),
+            tenant_id: tenant_id.to_string(),
         };
         let response = self
             .master
@@ -95,11 +115,24 @@ impl MooncakeClient {
         source: &str,
         target: &str,
     ) -> StoreResult<Uuid> {
+        let tenant_id = self.tenant_id.clone();
+        self.create_move_task_for_tenant(key, &tenant_id, source, target)
+            .await
+    }
+
+    /// Create a move task for an explicitly selected tenant.
+    pub async fn create_move_task_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        source: &str,
+        target: &str,
+    ) -> StoreResult<Uuid> {
         let request = proto::CreateMoveTaskRequest {
             key: key.to_string(),
             source: source.to_string(),
             target: target.to_string(),
-            tenant_id: self.tenant_id.clone(),
+            tenant_id: tenant_id.to_string(),
         };
         let response = self
             .master
@@ -229,40 +262,113 @@ impl MooncakeClient {
             .map(|id| Uuid::from_u64_pair(id.high, id.low))
             .ok_or_else(|| StoreError::InvalidParams("task assignment missing id".to_string()))?;
 
-        let result = match proto::TaskType::try_from(task.r#type) {
-            Ok(proto::TaskType::ReplicaCopy) => {
-                let payload: ReplicaCopyPayload =
-                    serde_json::from_str(&task.payload).map_err(|e| {
-                        StoreError::InvalidParams(format!("invalid replica copy payload: {e}"))
-                    })?;
-                self.copy(&payload.key, &payload.source, &payload.targets)
-                    .await
+        let mut retry_count = 0_u32;
+        let result = loop {
+            let result = match proto::TaskType::try_from(task.r#type) {
+                Ok(proto::TaskType::ReplicaCopy) => {
+                    match serde_json::from_str::<ReplicaCopyPayload>(&task.payload) {
+                        Ok(payload) => {
+                            self.copy_for_tenant(
+                                &payload.key,
+                                &payload.tenant_id,
+                                &payload.source,
+                                &payload.targets,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(StoreError::InvalidParams(format!(
+                            "invalid replica copy payload: {error}"
+                        ))),
+                    }
+                }
+                Ok(proto::TaskType::ReplicaMove) => {
+                    match serde_json::from_str::<ReplicaMovePayload>(&task.payload) {
+                        Ok(payload) => {
+                            self.move_object_for_tenant(
+                                &payload.key,
+                                &payload.tenant_id,
+                                &payload.source,
+                                &payload.target,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(StoreError::InvalidParams(format!(
+                            "invalid replica move payload: {error}"
+                        ))),
+                    }
+                }
+                Err(_) => Err(StoreError::InvalidParams(format!(
+                    "unknown task type: {}",
+                    task.r#type
+                ))),
+            };
+
+            if matches!(&result, Err(StoreError::NoAvailableHandle))
+                && retry_count < task.max_retry_attempts
+            {
+                retry_count += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    50 * u64::from(retry_count),
+                ))
+                .await;
+                continue;
             }
-            Ok(proto::TaskType::ReplicaMove) => {
-                let payload: ReplicaMovePayload =
-                    serde_json::from_str(&task.payload).map_err(|e| {
-                        StoreError::InvalidParams(format!("invalid replica move payload: {e}"))
-                    })?;
-                self.move_object(&payload.key, &payload.source, &payload.target)
-                    .await
-            }
-            Err(_) => Err(StoreError::InvalidParams(format!(
-                "unknown task type: {}",
-                task.r#type
-            ))),
+            break result;
         };
 
         match result {
             Ok(()) => {
-                self.mark_task_to_complete(task_id, proto::TaskStatus::TaskSuccess, "")
-                    .await
+                self.mark_task_to_complete(
+                    task_id,
+                    proto::TaskStatus::TaskSuccess,
+                    "Task completed successfully",
+                )
+                .await
             }
             Err(e) => {
-                let message = e.to_string();
-                self.mark_task_to_complete(task_id, proto::TaskStatus::TaskFailed, &message)
-                    .await?;
+                let message = format!("{e} (max retries reached: {})", task.max_retry_attempts);
+                if let Err(report_error) = self
+                    .mark_task_to_complete(task_id, proto::TaskStatus::TaskFailed, &message)
+                    .await
+                {
+                    tracing::warn!(
+                        %task_id,
+                        %report_error,
+                        "failed to report terminal task failure"
+                    );
+                }
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplicaCopyPayload, ReplicaMovePayload};
+
+    #[test]
+    fn task_payload_preserves_explicit_tenant() {
+        let copy: ReplicaCopyPayload = serde_json::from_str(
+            r#"{"tenant_id":"tenant-a","key":"k","source":"s","targets":["t"]}"#,
+        )
+        .unwrap();
+        let move_payload: ReplicaMovePayload =
+            serde_json::from_str(r#"{"tenant_id":"tenant-b","key":"k","source":"s","target":"t"}"#)
+                .unwrap();
+
+        assert_eq!(copy.tenant_id, "tenant-a");
+        assert_eq!(move_payload.tenant_id, "tenant-b");
+    }
+
+    #[test]
+    fn legacy_task_payload_defaults_to_default_tenant() {
+        let copy: ReplicaCopyPayload =
+            serde_json::from_str(r#"{"key":"k","source":"s","targets":["t"]}"#).unwrap();
+        let move_payload: ReplicaMovePayload =
+            serde_json::from_str(r#"{"key":"k","source":"s","target":"t"}"#).unwrap();
+
+        assert_eq!(copy.tenant_id, "default");
+        assert_eq!(move_payload.tenant_id, "default");
     }
 }

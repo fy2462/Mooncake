@@ -6,6 +6,145 @@ use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
+fn uuid_proto(id: Uuid) -> proto::Uuid {
+    proto::Uuid {
+        high: id.as_u64_pair().0,
+        low: id.as_u64_pair().1,
+    }
+}
+
+async fn mount_local_disk(service: &MasterServiceImpl, holder_id: Uuid) {
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            enable_offloading: false,
+            storage_id: Some(uuid_proto(storage_id)),
+            recovery_complete: false,
+            recovery_session_id: Some(uuid_proto(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            enable_offloading: true,
+            storage_id: Some(uuid_proto(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(uuid_proto(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_local_disk_object(
+    service: &MasterServiceImpl,
+    holder_id: Uuid,
+    key: &str,
+    size: u64,
+) {
+    let source_segment = format!("promotion-source-{key}");
+    let source_segment_id = MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            segment_name: source_segment.clone(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .segment_id
+    .unwrap();
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            key: key.into(),
+            slice_length: size,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: source_segment,
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
+                host_id: String::new(),
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let task = MasterService::offload_object_heartbeat(
+        service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks
+    .into_iter()
+    .find(|task| task.key == key)
+    .expect("Master must issue the promotion fixture offload task");
+    assert!(task.generation_id.is_some());
+    MasterService::notify_offload_success(
+        service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(uuid_proto(holder_id)),
+            keys: vec![key.into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: key.len() as i64,
+                data_size: size as i64,
+                transport_endpoint: "holder-endpoint".into(),
+            }],
+            tasks: vec![task],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::unmount_segment(
+        service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(source_segment_id),
+            client_id: Some(uuid_proto(holder_id)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn test_promotion_flow_success_and_failure() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
@@ -15,18 +154,7 @@ async fn test_promotion_flow_success_and_failure() {
     let holder_id = Uuid::new_v4();
     let dram_client = Uuid::new_v4();
 
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: holder_id.as_u64_pair().0,
-                low: holder_id.as_u64_pair().1,
-            }),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
+    mount_local_disk(&service, holder_id).await;
     MasterService::mount_segment(
         &service,
         Request::new(proto::MountSegmentRequest {
@@ -39,32 +167,14 @@ async fn test_promotion_flow_success_and_failure() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
     .unwrap();
 
     for key in ["promo-ok", "promo-fail"] {
-        MasterService::notify_offload_success(
-            &service,
-            Request::new(proto::NotifyOffloadSuccessRequest {
-                client_id: Some(proto::Uuid {
-                    high: holder_id.as_u64_pair().0,
-                    low: holder_id.as_u64_pair().1,
-                }),
-                keys: vec![key.to_string()],
-                metadatas: vec![proto::StorageObjectMetadata {
-                    bucket_id: 0,
-                    offset: 0,
-                    key_size: key.len() as i64,
-                    data_size: 256,
-                    transport_endpoint: "holder-endpoint".into(),
-                }],
-                tasks: vec![],
-            }),
-        )
-        .await
-        .unwrap();
+        seed_local_disk_object(&service, holder_id, key, 256).await;
 
         MasterService::get_replica_list(
             &service,
@@ -228,38 +338,8 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
     });
     let holder_id = Uuid::new_v4();
 
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: holder_id.as_u64_pair().0,
-                low: holder_id.as_u64_pair().1,
-            }),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
-    MasterService::notify_offload_success(
-        &service,
-        Request::new(proto::NotifyOffloadSuccessRequest {
-            client_id: Some(proto::Uuid {
-                high: holder_id.as_u64_pair().0,
-                low: holder_id.as_u64_pair().1,
-            }),
-            keys: vec!["threshold-key".into()],
-            metadatas: vec![proto::StorageObjectMetadata {
-                bucket_id: 0,
-                offset: 0,
-                key_size: 13,
-                data_size: 256,
-                transport_endpoint: "holder-threshold".into(),
-            }],
-            tasks: vec![],
-        }),
-    )
-    .await
-    .unwrap();
+    mount_local_disk(&service, holder_id).await;
+    seed_local_disk_object(&service, holder_id, "threshold-key", 256).await;
 
     MasterService::get_replica_list(
         &service,
@@ -317,18 +397,7 @@ async fn test_promotion_queue_limit_released_after_success() {
     });
     let holder_id = Uuid::new_v4();
 
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: holder_id.as_u64_pair().0,
-                low: holder_id.as_u64_pair().1,
-            }),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
+    mount_local_disk(&service, holder_id).await;
     MasterService::mount_segment(
         &service,
         Request::new(proto::MountSegmentRequest {
@@ -341,32 +410,14 @@ async fn test_promotion_queue_limit_released_after_success() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
     .unwrap();
 
     for key in ["limit-a", "limit-b"] {
-        MasterService::notify_offload_success(
-            &service,
-            Request::new(proto::NotifyOffloadSuccessRequest {
-                client_id: Some(proto::Uuid {
-                    high: holder_id.as_u64_pair().0,
-                    low: holder_id.as_u64_pair().1,
-                }),
-                keys: vec![key.to_string()],
-                metadatas: vec![proto::StorageObjectMetadata {
-                    bucket_id: 0,
-                    offset: 0,
-                    key_size: key.len() as i64,
-                    data_size: 128,
-                    transport_endpoint: "holder-limit".into(),
-                }],
-                tasks: vec![],
-            }),
-        )
-        .await
-        .unwrap();
+        seed_local_disk_object(&service, holder_id, key, 128).await;
         MasterService::get_replica_list(
             &service,
             Request::new(proto::GetReplicaListRequest {
@@ -470,18 +521,7 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
     });
     let holder_id = Uuid::new_v4();
 
-    MasterService::mount_local_disk_segment(
-        &service,
-        Request::new(proto::MountLocalDiskSegmentRequest {
-            client_id: Some(proto::Uuid {
-                high: holder_id.as_u64_pair().0,
-                low: holder_id.as_u64_pair().1,
-            }),
-            enable_offloading: true,
-        }),
-    )
-    .await
-    .unwrap();
+    mount_local_disk(&service, holder_id).await;
     MasterService::mount_segment(
         &service,
         Request::new(proto::MountSegmentRequest {
@@ -494,30 +534,12 @@ async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
     .unwrap();
-    MasterService::notify_offload_success(
-        &service,
-        Request::new(proto::NotifyOffloadSuccessRequest {
-            client_id: Some(proto::Uuid {
-                high: holder_id.as_u64_pair().0,
-                low: holder_id.as_u64_pair().1,
-            }),
-            keys: vec!["reaper-key".into()],
-            metadatas: vec![proto::StorageObjectMetadata {
-                bucket_id: 0,
-                offset: 0,
-                key_size: 10,
-                data_size: 256,
-                transport_endpoint: "holder-reaper".into(),
-            }],
-            tasks: vec![],
-        }),
-    )
-    .await
-    .unwrap();
+    seed_local_disk_object(&service, holder_id, "reaper-key", 256).await;
 
     let baseline = MasterService::query_segments(
         &service,

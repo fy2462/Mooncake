@@ -41,13 +41,12 @@ use crate::TenantId;
 use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
 use crate::metrics;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use mooncake_store_core::ReplicaDescriptor;
+use mooncake_store_core::{ObjectDataType, ReplicaDescriptor, ReplicaType};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
@@ -58,7 +57,14 @@ const CPP_OP_PUT_REVOKE: u8 = 2;
 const CPP_OP_REMOVE: u8 = 3;
 const MAX_OBJECT_KEY_SIZE: usize = 4096;
 const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
-const PUT_END_MSGPACK_MAGIC: &[u8] = b"MCOPMETA1";
+/// Stable prefix followed by the decimal payload schema version.
+const PUT_END_MSGPACK_MAGIC_PREFIX: &[u8] = b"MCOPMETA";
+/// Version 2 persists the exact LocalDisk storage and byte-generation identity
+/// carried by ReplicaDescriptor. Version 1 remains readable for upgrade, but
+/// any LocalDisk replica without a generation is restored offline.
+const PUT_END_MSGPACK_MAGIC_V1: &[u8] = b"MCOPMETA1";
+const PUT_END_MSGPACK_MAGIC_V2: &[u8] = b"MCOPMETA2";
+const PUT_END_MSGPACK_MAGIC: &[u8] = b"MCOPMETA3";
 const OPLOG_MSGPACK_RECORD_PREFIX: &str = "msgpack:";
 const ETCD_WATCH_SYNC_BATCH_SIZE: usize = 1000;
 const ETCD_WATCH_MAX_CONSECUTIVE_ERRORS: usize = 10;
@@ -77,7 +83,7 @@ struct CppOpLogWireEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PutEndMetadataPayloadV1 {
+pub(crate) struct PutEndMetadataPayloadV2 {
     pub(crate) op: String,
     pub(crate) key: String,
     pub(crate) size: u64,
@@ -88,26 +94,134 @@ pub(crate) struct PutEndMetadataPayloadV1 {
     pub(crate) replicas: Vec<ReplicaDescriptor>,
 }
 
-impl PutEndMetadataPayloadV1 {
-    fn new(
-        key: &str,
-        size: u64,
-        client_id: Option<Uuid>,
-        tenant_id: &TenantId,
-        group_id: &str,
-        user_key: &str,
-        replicas: &[ReplicaDescriptor],
-    ) -> Self {
-        Self {
-            op: "put_end".to_string(),
-            key: key.to_string(),
-            size,
-            client_id: client_id.map(|id| id.to_string()),
-            tenant_id: tenant_id.as_str().to_string(),
-            group_id: group_id.to_string(),
-            user_key: user_key.to_string(),
-            replicas: replicas.to_vec(),
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DurableObjectImagePayloadV3 {
+    pub(crate) size: u64,
+    pub(crate) client_id: String,
+    pub(crate) group_id: String,
+    pub(crate) replicas: Vec<ReplicaDescriptor>,
+    pub(crate) hard_pinned: bool,
+    pub(crate) data_type: ObjectDataType,
+    #[serde(default)]
+    pub(crate) last_access_ms: Option<i64>,
+    pub(crate) put_start_time_ms: Option<i64>,
+    pub(crate) lease_timeout_ms: Option<i64>,
+    pub(crate) soft_pin_timeout_ms: Option<i64>,
+    pub(crate) quota_committed: bool,
+    pub(crate) reserved_quota_charge_bytes: u64,
+    pub(crate) committed_quota_charge_bytes: u64,
+    pub(crate) pending_replaced_quota_charge_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PutEndMetadataPayloadV3 {
+    pub(crate) op: String,
+    pub(crate) schema_version: u32,
+    pub(crate) key: String,
+    pub(crate) tenant_id: String,
+    pub(crate) user_key: String,
+    pub(crate) object: DurableObjectImagePayloadV3,
+}
+
+fn system_time_to_epoch_millis(value: SystemTime) -> i64 {
+    match value.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+        Err(error) => -i64::try_from(error.duration().as_millis()).unwrap_or(i64::MAX),
+    }
+}
+
+impl PutEndMetadataPayloadV3 {
+    fn try_new(key: &str, object: &crate::service::ObjectEntry) -> Result<Self, HaError> {
+        if key.len() > MAX_OBJECT_KEY_SIZE {
+            return Err(HaError::InvalidBackend(
+                "put_end v3 object key exceeds maximum length".into(),
+            ));
         }
+        let identity =
+            recover_object_identity(key, object.tenant_id.as_str(), object.user_key.as_str())?;
+        if identity.scoped_key != key {
+            return Err(HaError::InvalidBackend(
+                "put_end v3 object key is not canonical".into(),
+            ));
+        }
+        if object.size == 0 || object.replicas.is_empty() {
+            return Err(HaError::InvalidBackend(
+                "put_end v3 object image requires non-zero size and replicas".into(),
+            ));
+        }
+        let mut locations = HashSet::with_capacity(object.replicas.len());
+        for replica in &object.replicas {
+            if replica.replica_type == ReplicaType::All
+                || replica.size != object.size
+                || replica.offset.checked_add(replica.size).is_none()
+                || (matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd
+                ) && replica.segment_id.is_nil())
+                || !locations.insert((
+                    replica.segment_id,
+                    replica.offset,
+                    replica.size,
+                    replica.replica_type,
+                    replica.local_disk_storage_id,
+                    replica.local_disk_generation_id,
+                ))
+            {
+                return Err(HaError::InvalidBackend(
+                    "put_end v3 object image has invalid replica geometry".into(),
+                ));
+            }
+        }
+        let completed_charge =
+            crate::service::helpers::checked_durable_committed_memory_quota_charge(object)
+                .map_err(|_| {
+                    HaError::InvalidBackend(
+                        "put_end v3 committed Memory quota charge overflows uint64".into(),
+                    )
+                })?;
+        let allocating_charge = crate::service::helpers::checked_allocating_memory_quota_charge(
+            object,
+        )
+        .map_err(|_| {
+            HaError::InvalidBackend(
+                "put_end v3 allocating Memory quota charge overflows uint64".into(),
+            )
+        })?;
+        if (object.quota_committed
+            && (object.reserved_quota_charge_bytes != 0
+                || object.pending_replaced_quota_charge_bytes != 0
+                || object.committed_quota_charge_bytes != completed_charge))
+            || (!object.quota_committed
+                && (object.committed_quota_charge_bytes != 0
+                    || object.reserved_quota_charge_bytes != allocating_charge))
+        {
+            return Err(HaError::InvalidBackend(
+                "put_end v3 object image has inconsistent quota charges".into(),
+            ));
+        }
+        Ok(Self {
+            op: "put_end".to_string(),
+            schema_version: 3,
+            key: key.to_string(),
+            tenant_id: object.tenant_id.as_str().to_string(),
+            user_key: object.user_key.clone(),
+            object: DurableObjectImagePayloadV3 {
+                size: object.size,
+                client_id: object.client_id.to_string(),
+                group_id: object.group_id.clone(),
+                replicas: object.replicas.clone(),
+                hard_pinned: object.hard_pinned,
+                data_type: object.data_type,
+                last_access_ms: Some(system_time_to_epoch_millis(object.last_access)),
+                put_start_time_ms: object.put_start_time.map(system_time_to_epoch_millis),
+                lease_timeout_ms: object.lease_timeout.map(system_time_to_epoch_millis),
+                soft_pin_timeout_ms: object.soft_pin_timeout.map(system_time_to_epoch_millis),
+                quota_committed: object.quota_committed,
+                reserved_quota_charge_bytes: object.reserved_quota_charge_bytes,
+                committed_quota_charge_bytes: object.committed_quota_charge_bytes,
+                pending_replaced_quota_charge_bytes: object.pending_replaced_quota_charge_bytes,
+            },
+        })
     }
 }
 
@@ -324,7 +438,9 @@ impl OpLogStore for InMemoryOpLog {
     /// Append entry: increments sequence counter, evicts oldest if at capacity.
     /// 追加条目：自增序列号，FIFO 淘汰超出容量的旧数据。
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
-        self.last_seq += 1;
+        self.last_seq = self.last_seq.checked_add(1).ok_or_else(|| {
+            HaError::InvalidBackend("oplog sequence exhausted at u64::MAX".into())
+        })?;
         if self.buffer.len() >= self.max_entries {
             self.buffer.pop_front();
         }
@@ -354,6 +470,11 @@ impl OpLogStore for InMemoryOpLog {
     }
 
     fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+        if sequence_id < self.last_seq || !self.buffer.is_empty() {
+            return Err(HaError::InvalidBackend(
+                "oplog latest sequence cannot move backwards or bypass buffered entries".into(),
+            ));
+        }
         self.last_seq = sequence_id;
         Ok(())
     }
@@ -388,7 +509,10 @@ impl OpLogStore for InMemoryOpLog {
 
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
         let records = self.read_since(since_seq, max_count).unwrap_or_default();
-        let next_seq = records.last().map(|r| r.seq + 1).unwrap_or(since_seq);
+        let next_seq = records
+            .last()
+            .map(|r| r.seq.saturating_add(1))
+            .unwrap_or(since_seq);
         OpLogPollResult {
             records,
             next_seq,
@@ -426,6 +550,7 @@ pub mod test_support;
 
 pub use oplog_etcd::EtcdOpLogStore;
 pub use oplog_local::LocalFsOpLogStore;
+pub(crate) use oplog_manager::LeaseRefreshEntry;
 pub use oplog_manager::OpLogManager;
 pub(crate) use oplog_wire::decode_record_payload_value;
 

@@ -178,6 +178,7 @@ impl ReplicateConfigPy {
                 _ => ObjectDataType::Unknown,
             },
             group_ids: self.group_ids.clone(),
+            host_id: String::new(),
         }
     }
 }

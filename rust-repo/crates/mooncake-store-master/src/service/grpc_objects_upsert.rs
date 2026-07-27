@@ -1,16 +1,27 @@
 use super::*;
 
 impl MasterServiceImpl {
-    fn schedule_delayed_release(&self, replicas: Vec<ReplicaDescriptor>) {
-        if replicas.is_empty() {
-            return;
-        }
-        let state = self.state.clone();
-        let delay = self.state.runtime_config.put_start_release_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            release_replicas(&state, &replicas);
-        });
+    fn schedule_delayed_release(
+        &self,
+        scoped_key: &str,
+        authoritative_object: Option<ObjectEntry>,
+        replicas: Vec<ReplicaDescriptor>,
+        operation: &str,
+    ) -> Result<bool, Status> {
+        self.state
+            .schedule_delayed_replica_release_or_fence(
+                scoped_key,
+                authoritative_object,
+                replicas,
+                None,
+                operation,
+            )
+            .map(|release_id| release_id.is_some())
+            .map_err(|error| {
+                Status::unavailable(format!(
+                    "failed to persist {operation} delayed release: {error}"
+                ))
+            })
     }
 
     fn reconcile_soft_pin(
@@ -39,6 +50,52 @@ impl MasterServiceImpl {
         slice_length: u64,
         config: ReplicateConfig,
     ) -> Result<Vec<ReplicaDescriptor>, Status> {
+        const MAX_TENANT_QUOTA_EVICTION_RETRIES: usize = 2;
+        let requested_quota_charge =
+            checked_requested_memory_quota_charge(slice_length, config.replica_num as usize)
+                .map_err(|_| {
+                    Status::invalid_argument("Memory replica quota charge overflows uint64")
+                })?;
+        let scoped_key = tenant_id.make_scoped_key(user_key);
+        // C++ holds AcquireObjectOperationLock across all quota-eviction
+        // retries. Keep request identity stable while each attempt acquires
+        // and releases the actual mutation/snapshot guard independently.
+        let _operation_guard = self.state.key_mutations.lock_operation(&scoped_key);
+        for attempt in 0..=MAX_TENANT_QUOTA_EVICTION_RETRIES {
+            match self.upsert_start_for_entry_once(
+                client_id,
+                user_key,
+                tenant_id,
+                slice_length,
+                config.clone(),
+            ) {
+                Err(status)
+                    if Self::is_tenant_quota_exceeded_status(&status)
+                        && attempt < MAX_TENANT_QUOTA_EVICTION_RETRIES =>
+                {
+                    // The failed attempt has returned and released its
+                    // tenant-scoped mutation guard before eviction locks other
+                    // keys. The next attempt fully revalidates object state.
+                    self.evict_tenant_quota_deficit(
+                        tenant_id,
+                        requested_quota_charge,
+                        Some(&scoped_key),
+                    )?;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("bounded Upsert quota-admission loop always returns")
+    }
+
+    fn upsert_start_for_entry_once(
+        &self,
+        client_id: Uuid,
+        user_key: &str,
+        tenant_id: &TenantId,
+        slice_length: u64,
+        config: ReplicateConfig,
+    ) -> Result<Vec<ReplicaDescriptor>, Status> {
         if user_key.is_empty() {
             return Err(Status::invalid_argument("empty key"));
         }
@@ -46,9 +103,11 @@ impl MasterServiceImpl {
             return Err(Status::invalid_argument("zero slice_length"));
         }
         validate_user_key(user_key)?;
-        if config.replica_num == 0 && config.nof_replica_num == 0 {
+        let scoped_key = tenant_id.make_scoped_key(user_key);
+        let disk_enabled = global_disk_replica(&self.state, &scoped_key, slice_length).is_some();
+        if config.replica_num == 0 && config.nof_replica_num == 0 && !disk_enabled {
             return Err(Status::invalid_argument(
-                "replica_num and nof_replica_num cannot both be zero",
+                "replica_num and nof_replica_num cannot both be zero when global DISK is disabled",
             ));
         }
         if config.prefer_alloc_in_same_node && config.nof_replica_num > 0 {
@@ -61,7 +120,11 @@ impl MasterServiceImpl {
         }
         let requested_group_id = Self::group_id_for_key(&config, 1, 0)?;
 
-        let scoped_key = tenant_id.make_scoped_key(user_key);
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
+        let alive_clients = get_alive_clients_snapshot(&self.state);
+        clear_invalid_handles_for_key_locked(&self.state, &alive_clients, &scoped_key).map_err(
+            |error| Status::unavailable(format!("stale handle cleanup failed: {error}")),
+        )?;
         if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition("object has replication task"));
         }
@@ -72,17 +135,7 @@ impl MasterServiceImpl {
         let replica_count = config.replica_num as usize;
         let now = SystemTime::now();
         if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
-            let alive_clients = get_alive_clients_snapshot(&self.state);
-            let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
-            if should_remove {
-                drop(existing);
-                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
-                    self.account_removed_object_quota(&removed);
-                }
-            } else {
-                if existing.replicas.iter().any(|r| r.refcnt > 0) {
-                    return Err(Status::failed_precondition("object replica busy"));
-                }
+            if self.state.processing_keys.contains_key(&scoped_key) {
                 let existing_group_id = existing.group_id.clone();
                 if !config.group_ids.is_empty() && requested_group_id != existing_group_id {
                     return Err(Status::invalid_argument(
@@ -90,56 +143,180 @@ impl MasterServiceImpl {
                     ));
                 }
                 let effective_group_id = if config.group_ids.is_empty() {
-                    existing_group_id.clone()
+                    existing_group_id
                 } else {
                     requested_group_id.clone()
                 };
-                if existing.size == slice_length {
-                    existing.client_id = client_id;
-                    existing.put_start_time = Some(now);
-                    existing.last_access = now;
-                    existing.soft_pin_timeout =
-                        Self::reconcile_soft_pin(config.with_soft_pin, existing.soft_pin_timeout);
-                    existing.data_type = config.data_type;
-                    existing.group_id = effective_group_id;
-                    for replica in &mut existing.replicas {
-                        if replica.status == ReplicaStatus::Complete {
-                            replica.status = ReplicaStatus::Allocating;
-                        }
-                    }
-                    let replicas = existing.replicas.clone();
-                    drop(existing);
-                    self.state.processing_keys.insert(scoped_key, ());
-                    return Ok(replicas);
-                }
-
                 let previous_soft_pin = existing.soft_pin_timeout;
                 let previous_hard_pin = existing.hard_pinned;
-                let old_replicas = existing.replicas.clone();
-                drop(existing);
-                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
-                    self.account_removed_object_quota(&removed);
-                }
-                self.schedule_delayed_release(old_replicas);
+                let mut preempted = Vec::new();
+                existing.replicas.retain(|replica| {
+                    if replica.status == ReplicaStatus::Allocating {
+                        preempted.push(replica.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                self.state.processing_keys.remove(&scoped_key);
 
-                let mut merged_config = config.clone();
-                merged_config.with_hard_pin = merged_config.with_hard_pin || previous_hard_pin;
-                merged_config.with_soft_pin =
-                    merged_config.with_soft_pin || previous_soft_pin.is_some();
-                let hard_pinned = merged_config.with_hard_pin;
-                return self.allocate_and_insert_upsert(
-                    client_id,
-                    user_key,
-                    tenant_id,
+                let has_completed_write_target = existing.replicas.iter().any(|replica| {
+                    matches!(
+                        replica.replica_type,
+                        ReplicaType::Memory | ReplicaType::NoFSsd | ReplicaType::Disk
+                    ) && replica.status == ReplicaStatus::Complete
+                });
+                if !has_completed_write_target {
+                    // C++ performs PopReplicas(PROCESSING), clears the
+                    // processing marker, and erases metadata with no COMPLETE
+                    // survivor inside one object lock. Persist that resulting
+                    // absence together with every retained old allocation;
+                    // never publish an intermediate empty object image.
+                    preempted.extend(existing.replicas.clone());
+                    drop(existing);
+                    if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                        self.account_removed_object_quota(&removed)?;
+                    }
+                    let delayed = self.schedule_delayed_release(
+                        &scoped_key,
+                        None,
+                        preempted,
+                        "upsert_preempt_inflight_remove",
+                    )?;
+                    if !delayed {
+                        self.persist_object_image_or_remove(
+                            &scoped_key,
+                            "upsert_preempt_inflight_remove",
+                        )?;
+                    }
+
+                    let mut merged_config = config.clone();
+                    merged_config.with_hard_pin = merged_config.with_hard_pin || previous_hard_pin;
+                    merged_config.with_soft_pin =
+                        merged_config.with_soft_pin || previous_soft_pin.is_some();
+                    let hard_pinned = merged_config.with_hard_pin;
+                    return self.allocate_and_insert_upsert(
+                        client_id,
+                        user_key,
+                        tenant_id,
+                        &scoped_key,
+                        slice_length,
+                        replica_count,
+                        merged_config,
+                        None,
+                        hard_pinned,
+                        effective_group_id,
+                        false,
+                        0,
+                    );
+                }
+                self.schedule_delayed_release(
                     &scoped_key,
-                    slice_length,
-                    replica_count,
-                    merged_config,
-                    None,
-                    hard_pinned,
-                    effective_group_id,
-                );
+                    Some(existing.clone()),
+                    preempted,
+                    "upsert_preempt_allocating",
+                )?;
             }
+
+            if existing.replicas.iter().any(|r| r.refcnt > 0) {
+                return Err(Status::failed_precondition("object replica busy"));
+            }
+            let existing_group_id = existing.group_id.clone();
+            if !config.group_ids.is_empty() && requested_group_id != existing_group_id {
+                return Err(Status::invalid_argument(
+                    "group membership is immutable while object exists",
+                ));
+            }
+            let effective_group_id = if config.group_ids.is_empty() {
+                existing_group_id.clone()
+            } else {
+                requested_group_id.clone()
+            };
+            if existing.size == slice_length {
+                existing.client_id = client_id;
+                existing.put_start_time = Some(now);
+                existing.last_access = now;
+                existing.soft_pin_timeout =
+                    Self::reconcile_soft_pin(config.with_soft_pin, existing.soft_pin_timeout);
+                existing.data_type = config.data_type;
+                existing.group_id = effective_group_id;
+                // A LocalDisk replica contains the previous generation and
+                // is not a write target of Upsert. Drop the descriptor
+                // before making the new Memory/NoF/global-DISK generation
+                // unreadable and writable.
+                existing
+                    .replicas
+                    .retain(|replica| replica.replica_type != ReplicaType::LocalDisk);
+                for replica in &mut existing.replicas {
+                    if matches!(
+                        replica.replica_type,
+                        ReplicaType::Memory | ReplicaType::NoFSsd | ReplicaType::Disk
+                    ) && replica.status == ReplicaStatus::Complete
+                    {
+                        replica.status = ReplicaStatus::Allocating;
+                    }
+                }
+                sync_cache_total_accounting(&mut existing);
+                let replicas = existing.replicas.clone();
+                drop(existing);
+                self.state.processing_keys.insert(scoped_key.clone(), ());
+                self.persist_object_image_or_remove(&scoped_key, "upsert_start_reuse")?;
+                return Ok(replicas);
+            }
+
+            let previous_soft_pin = existing.soft_pin_timeout;
+            let previous_hard_pin = existing.hard_pinned;
+            let preserve_replaced_charge = existing.quota_committed;
+            let pending_replaced_quota_charge_bytes = if preserve_replaced_charge {
+                if existing.committed_quota_charge_bytes == 0 {
+                    completed_memory_quota_charge(&existing)
+                } else {
+                    existing.committed_quota_charge_bytes
+                }
+            } else {
+                0
+            };
+            let old_replicas = (!preserve_replaced_charge).then(|| existing.replicas.clone());
+            drop(existing);
+            if !preserve_replaced_charge {
+                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                    self.account_removed_object_quota(&removed)?;
+                }
+                if let Some(old_replicas) = old_replicas {
+                    let delayed = self.schedule_delayed_release(
+                        &scoped_key,
+                        None,
+                        old_replicas,
+                        "upsert_replace_uncommitted_remove",
+                    )?;
+                    if !delayed {
+                        self.persist_object_image_or_remove(
+                            &scoped_key,
+                            "upsert_replace_uncommitted_remove",
+                        )?;
+                    }
+                }
+            }
+
+            let mut merged_config = config.clone();
+            merged_config.with_hard_pin = merged_config.with_hard_pin || previous_hard_pin;
+            merged_config.with_soft_pin =
+                merged_config.with_soft_pin || previous_soft_pin.is_some();
+            let hard_pinned = merged_config.with_hard_pin;
+            return self.allocate_and_insert_upsert(
+                client_id,
+                user_key,
+                tenant_id,
+                &scoped_key,
+                slice_length,
+                replica_count,
+                merged_config,
+                previous_soft_pin,
+                hard_pinned,
+                effective_group_id,
+                preserve_replaced_charge,
+                pending_replaced_quota_charge_bytes,
+            );
         }
 
         self.allocate_and_insert_upsert(
@@ -153,6 +330,8 @@ impl MasterServiceImpl {
             None,
             config.with_hard_pin,
             requested_group_id,
+            false,
+            0,
         )
     }
 
@@ -168,8 +347,14 @@ impl MasterServiceImpl {
         previous_soft_pin: Option<SystemTime>,
         hard_pinned: bool,
         group_id: String,
+        replacing_existing: bool,
+        pending_replaced_quota_charge_bytes: u64,
     ) -> Result<Vec<ReplicaDescriptor>, Status> {
-        self.reserve_tenant_quota(tenant_id, slice_length)?;
+        let requested_quota_charge =
+            checked_requested_memory_quota_charge(slice_length, replica_count).map_err(|_| {
+                Status::invalid_argument("Memory replica quota charge overflows uint64")
+            })?;
+        self.reserve_tenant_quota(tenant_id, requested_quota_charge)?;
         let mut replicas = if replica_count > 0 {
             allocate_memory_replicas(
                 &self.state,
@@ -183,8 +368,8 @@ impl MasterServiceImpl {
             Vec::new()
         };
         if replicas.len() != replica_count {
-            release_replicas(&self.state, &replicas);
-            self.abort_tenant_quota(tenant_id, slice_length);
+            release_replicas(&self.state, &replicas)?;
+            self.abort_tenant_quota(tenant_id, requested_quota_charge)?;
             return Err(Status::resource_exhausted(format!(
                 "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                 PUT_NO_SPACE_HELPER_STR,
@@ -200,12 +385,15 @@ impl MasterServiceImpl {
             ) {
                 Ok(replicas) => replicas,
                 Err(status) => {
-                    release_replicas(&self.state, &replicas);
-                    self.abort_tenant_quota(tenant_id, slice_length);
+                    release_replicas(&self.state, &replicas)?;
+                    self.abort_tenant_quota(tenant_id, requested_quota_charge)?;
                     return Err(status);
                 }
             };
             replicas.extend(nof_replicas);
+        }
+        if let Some(disk_replica) = global_disk_replica(&self.state, scoped_key, slice_length) {
+            replicas.push(disk_replica);
         }
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
         sync_nof_segment_usage(
@@ -218,7 +406,7 @@ impl MasterServiceImpl {
 
         let soft_pin_timeout = Self::reconcile_soft_pin(config.with_soft_pin, previous_soft_pin);
         let now = SystemTime::now();
-        self.state.objects.insert(
+        let replaced = self.state.objects.insert(
             scoped_key.to_string(),
             ObjectEntry {
                 replicas: replicas.clone(),
@@ -233,14 +421,36 @@ impl MasterServiceImpl {
                 tenant_id: tenant_id.clone(),
                 group_id,
                 quota_committed: false,
+                reserved_quota_charge_bytes: requested_quota_charge,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
                 user_key: user_key.to_string(),
             },
         );
+        if replacing_existing {
+            let mut replaced = replaced.expect(
+                "size-changing Upsert holds the key mutation lock and replaces an existing object",
+            );
+            account_cache_total_removal(&mut replaced);
+            self.schedule_delayed_release(
+                scoped_key,
+                self.state
+                    .objects
+                    .get(scoped_key)
+                    .map(|object| object.clone()),
+                replaced.replicas,
+                "upsert_start_replacement",
+            )?;
+        } else {
+            debug_assert!(replaced.is_none());
+            self.register_tenant_metadata_object(tenant_id);
+        }
         self.state
             .processing_keys
             .insert(scoped_key.to_string(), ());
+        self.persist_object_image_or_remove(scoped_key, "upsert_start")?;
         Ok(replicas)
     }
 

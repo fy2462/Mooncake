@@ -1,6 +1,8 @@
 use super::MooncakeClient;
+use crate::hot_cache::HotCacheAdmission;
 use crate::local_storage_backend::{
-    AttachedLocalStorage, LocalStorageBackend, OffsetAllocatorStorageBackend,
+    AttachedLocalStorage, BucketStorageBackend, DistributedStorageBackend, LocalStorageBackend,
+    OffsetAllocatorStorageBackend,
 };
 use crate::proto;
 use crate::{
@@ -53,7 +55,46 @@ impl MooncakeClient {
     /// duplicate views are filtered by the caller, while this method performs
     /// the actual channel swap atomically from the client's perspective.
     pub async fn switch_master(&mut self, master_addr: &str) -> StoreResult<()> {
-        let next_master = Self::connect_master_addr(master_addr).await?;
+        let mut next_master = Self::connect_master_addr(master_addr, self.metrics.clone()).await?;
+        let storage_config = next_master
+            .get_storage_config(Self::rpc_request_with_timeout(
+                proto::GetStorageConfigRequest {},
+                self.rpc_request_timeout,
+            ))
+            .await
+            .map_err(Self::rpc_status_to_error)?
+            .into_inner();
+        let failover_alignment = Self::validate_memory_segment_alignment(
+            &storage_config.memory_allocator,
+            storage_config.memory_segment_alignment,
+        )?;
+        if failover_alignment != self.memory_segment_alignment {
+            return Err(StoreError::InvalidParams(format!(
+                "failover Master Memory segment alignment changed from {} to {}",
+                self.memory_segment_alignment, failover_alignment
+            )));
+        }
+        match (&self.global_disk, storage_config.fs_dir.is_empty()) {
+            (None, true) => {}
+            (Some(storage), false) => storage.validate_advertised_config(
+                &storage_config.fs_dir,
+                storage_config.enable_disk_eviction,
+                storage_config.quota_bytes,
+                storage_config.enable_tenant_scope,
+            )?,
+            (None, false) => {
+                return Err(StoreError::InvalidParams(
+                    "failover Master enables global DISK but this client was initialized without it"
+                        .to_string(),
+                ));
+            }
+            (Some(_), true) => {
+                return Err(StoreError::InvalidParams(
+                    "failover Master disables global DISK for a client initialized with it"
+                        .to_string(),
+                ));
+            }
+        }
         self.master = next_master;
         *self.master_addr.write() = master_addr.trim().to_string();
         self.health_state.record_failure();
@@ -122,68 +163,113 @@ impl MooncakeClient {
         // C++ client_service.cpp:3547 — check client_status for NeedRemount
         // C++ 中检查 client_status 是否为 NeedRemount
         if response.client_status == proto::ClientStatus::NeedRemount as i32 {
-            self.try_trigger_remount();
+            if let Err(error) = self.remount_all().await {
+                self.health_state.record_failure();
+                return Err(error);
+            }
         }
 
         Ok(())
     }
 
-    /// Trigger an asynchronous ReMountSegment if one is not already in progress.
-    /// 如果没有正在进行的 remount，触发异步 ReMountSegment。
+    /// Restore every mounted storage role after a Master failover.
     ///
-    /// C++ equivalent: the std::async + remount_segment_future guard in client_service.cpp:L3546-L3551
-    fn try_trigger_remount(&self) {
-        // Ensure at most one remount segment task is running.
-        // 确保同一时间最多只有一个 remount 任务在运行。
+    /// Memory is remounted first. A LocalDisk namespace then performs the same
+    /// Begin → inventory report → Commit transaction as process restart; a
+    /// local-disk-only client therefore no longer loops forever in NeedRemount.
+    async fn remount_all(&mut self) -> StoreResult<()> {
         if !self.remount_state.try_start() {
-            return; // already in progress / 已有在途
+            return Ok(());
         }
-
-        if self.segment_name.is_empty() || self.segment_size == 0 {
-            self.remount_state.finish();
-            return; // not a storage node / 非存储节点
-        }
-
-        let mut master = self.master.clone();
-        let client_id = self.client_id_proto();
-        let segment_name = self.segment_name.clone();
-        let segment_size = self.segment_size;
-        let te_endpoint = self.local_hostname.clone();
-        let protocol = self.protocol.clone();
-        let rpc_request_timeout = self.rpc_request_timeout;
-        // SAFETY: segment_buffer is allocated in create() and never moved/reallocated
-        // during the client's lifetime, so its pointer remains valid.
-        let base_addr = self
-            .segment_buffer
-            .as_ref()
-            .map(|buf| buf.as_ptr() as u64)
-            .unwrap_or(0);
-        let remount_state = self.remount_state.clone();
-
-        // Spawn a background task so we don't block the caller.
-        // 启动后台任务，不阻塞调用方。
-        tokio::spawn(async move {
-            let request = proto::ReMountSegmentRequest {
-                client_id: Some(client_id),
-                segment_names: vec![segment_name],
-                segment_sizes: vec![segment_size],
-                base_addrs: vec![base_addr],
-                te_endpoints: vec![te_endpoint],
-                protocols: vec![protocol],
-            };
-            match master
-                .re_mount_segment(Self::rpc_request_with_timeout(request, rpc_request_timeout))
-                .await
-            {
-                Ok(_) => {
-                    tracing::info!("ReMountSegment succeeded");
-                }
-                Err(e) => {
-                    tracing::error!("ReMountSegment failed: {}", e);
-                }
+        let result = async {
+            let mut segment_names = self
+                .owned_store_segments
+                .iter()
+                .map(|segment| segment.segment_name.clone())
+                .collect::<Vec<_>>();
+            let mut segment_sizes = self
+                .owned_store_segments
+                .iter()
+                .map(|segment| segment.size)
+                .collect::<Vec<_>>();
+            let mut base_addrs = self
+                .owned_store_segments
+                .iter()
+                .map(super::OwnedStoreSegment::base_addr)
+                .collect::<Vec<_>>();
+            let mut te_endpoints =
+                vec![self.local_hostname.clone(); self.owned_store_segments.len()];
+            let mut protocols = vec![self.protocol.clone(); self.owned_store_segments.len()];
+            let mut host_ids = vec![self.host_id.clone(); self.owned_store_segments.len()];
+            let mut segment_ids = self
+                .owned_store_segments
+                .iter()
+                .map(|segment| Self::uuid_to_proto_uuid(segment.segment_id))
+                .collect::<Vec<_>>();
+            let mut external_segments = self
+                .mounted_external_segments
+                .read()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            external_segments.sort_by_key(|segment| segment.segment_id);
+            for segment in external_segments {
+                segment_names.push(segment.segment_name);
+                segment_sizes.push(segment.size);
+                base_addrs.push(segment.base_addr);
+                te_endpoints.push(segment.te_endpoint);
+                protocols.push(segment.protocol);
+                host_ids.push(segment.host_id);
+                segment_ids.push(Self::uuid_to_proto_uuid(segment.segment_id));
             }
-            remount_state.finish();
-        });
+            if let Some(registration) = &self.cxl_segment_registration {
+                let segment_id = self.cxl_segment_id.ok_or_else(|| {
+                    StoreError::Internal("CXL registration is missing segment UUID".to_string())
+                })?;
+                segment_names.push(self.local_hostname.clone());
+                segment_sizes.push(registration.len() as u64);
+                base_addrs.push(registration.base_addr());
+                te_endpoints.push(self.local_hostname.clone());
+                protocols.push("cxl".to_string());
+                host_ids.push(self.host_id.clone());
+                segment_ids.push(Self::uuid_to_proto_uuid(segment_id));
+            }
+            // A compute-only or NoF-only client sends empty vectors but still
+            // completes the Master session handshake.
+            let request = proto::ReMountSegmentRequest {
+                client_id: Some(self.client_id_proto()),
+                segment_names,
+                segment_sizes,
+                base_addrs,
+                te_endpoints,
+                protocols,
+                segment_ids,
+                host_ids,
+            };
+            self.master
+                .re_mount_segment(self.rpc_request(request))
+                .await
+                .map_err(Self::rpc_status_to_error)?;
+
+            let nof_segments = self
+                .mounted_nof_segments
+                .read()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            if !nof_segments.is_empty() {
+                self.remount_nof_segments(&nof_segments).await?;
+            }
+
+            if let Some(enable_offloading) = self.local_disk_mount_state.desired_enable_offloading()
+            {
+                self.mount_local_disk_segment(enable_offloading).await?;
+            }
+            Ok(())
+        }
+        .await;
+        self.remount_state.finish();
+        result
     }
 
     /// Register a local transport endpoint (e.g. the `te_endpoint` of a newly
@@ -240,7 +326,27 @@ impl MooncakeClient {
     /// 构建器模式方法：在 create() 之后调用。
     pub fn with_hot_cache(mut self, cache: Arc<LocalHotCache>) -> Self {
         self.hot_cache = Some(cache);
+        // Preserve the historical builder behavior: an explicitly attached
+        // cache admits on the first successful miss.
+        self.hot_cache_admission = Some(HotCacheAdmission::new(1));
         self
+    }
+
+    pub fn is_hot_cache_enabled(&self) -> bool {
+        self.hot_cache.is_some()
+    }
+
+    pub fn local_hot_cache_block_count(&self) -> usize {
+        self.hot_cache
+            .as_ref()
+            .map_or(0, |cache| cache.block_count())
+    }
+
+    pub fn hot_cache_admission_count(&self, key: &str) -> u8 {
+        let cache_key = super::read::scoped_cache_key(&self.tenant_id, key);
+        self.hot_cache_admission
+            .as_ref()
+            .map_or(0, |admission| admission.count(cache_key.as_ref()))
     }
 
     /// Return a snapshot of remote miss / hot-cache fallback statistics.
@@ -275,6 +381,22 @@ impl MooncakeClient {
         self
     }
 
+    /// Attach the C++-default bucket SSD backend for offload and promotion.
+    pub fn with_bucket_storage_backend(mut self, backend: Arc<BucketStorageBackend>) -> Self {
+        self.local_storage = Some(AttachedLocalStorage::Bucket(backend));
+        self
+    }
+
+    /// Attach the Distributed/HF3FS backend to the normal offload, promotion
+    /// and persistent LocalDisk recovery path.
+    pub fn with_distributed_storage_backend(
+        mut self,
+        backend: Arc<DistributedStorageBackend>,
+    ) -> Self {
+        self.local_storage = Some(AttachedLocalStorage::Distributed(backend));
+        self
+    }
+
     /// Attach an offset-allocator SSD backend for offload and promotion.
     pub fn with_offset_allocator_storage_backend(
         mut self,
@@ -300,14 +422,19 @@ impl MooncakeClient {
             )
         })?;
 
+        let pool =
+            crate::offload::buffer::OffloadBufferPool::from_environment(self.local_buffer.len())
+                .map_err(StoreError::InvalidParams)?;
         let handler = crate::offload::server::OffloadReadHandler {
             storage: storage.clone(),
-            engine: Arc::clone(&self.engine),
-            pool: Arc::new(crate::offload::buffer::OffloadBufferPool::new()),
+            engine: self.engine.required_arc()?,
+            pool,
             te_endpoint: self.local_hostname.clone(),
         };
 
-        let (port, handle) = crate::offload::server::start_offload_server(handler).await;
+        let (port, handle) = crate::offload::server::start_offload_server(handler)
+            .await
+            .map_err(StoreError::Internal)?;
         // Build the RPC address: hostname (without port) + offload port.
         let addr = if let Some(pos) = self.local_hostname.rfind(':') {
             format!("{}:{port}", &self.local_hostname[..pos])
@@ -346,7 +473,7 @@ impl MooncakeClient {
     /// 手动触发 ReMountSegment 请求。同一时间最多只有一个 remount 在途；
     /// 在已有的 remount 完成前，后续调用为 no-op。
     /// 当 master 返回 NeedRemount 时，health_check 也会自动调用此方法。
-    pub fn remount_segment(&self) {
-        self.try_trigger_remount();
+    pub async fn remount_segment(&mut self) -> StoreResult<()> {
+        self.remount_all().await
     }
 }

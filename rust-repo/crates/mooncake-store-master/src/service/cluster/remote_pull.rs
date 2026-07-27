@@ -23,6 +23,13 @@ impl MasterServiceImpl {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("client_id is required"))?;
         let client_id = uuid_from_proto(proto_id);
+        if client_id.is_nil() {
+            return Err(Status::invalid_argument("client_id must not be nil"));
+        }
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("key must not be empty"));
+        }
+        validate_user_key(&req.key)?;
         let tenant_id = resolve_request_tenant(
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
@@ -35,6 +42,11 @@ impl MasterServiceImpl {
                 retry_after_ms: 0,
             }));
         }
+
+        // Acquisition, stale-entry replacement, completion, and release share
+        // the same tenant-scoped key gate. Otherwise two callers can both
+        // observe an expired entry and each publish itself as the pull owner.
+        let _mutation_guard = self.state.key_mutations.lock(&key);
 
         // Check if another node is already pulling this key
         // 检查是否有其他节点正在拉取此 key
@@ -59,6 +71,7 @@ impl MasterServiceImpl {
             key,
             super::super::state::RemotePullEntry {
                 started_at: std::time::Instant::now(),
+                owner_client_id: client_id,
             },
         );
         Ok(Response::new(proto::AcquireRemotePullResponse {
@@ -74,12 +87,34 @@ impl MasterServiceImpl {
         request: Request<proto::CompleteRemotePullRequest>,
     ) -> Result<Response<proto::CompleteRemotePullResponse>, Status> {
         let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("client_id is required"))?,
+        );
+        if client_id.is_nil() {
+            return Err(Status::invalid_argument("client_id must not be nil"));
+        }
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("key must not be empty"));
+        }
+        validate_user_key(&req.key)?;
         let tenant_id = resolve_request_tenant(
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let key = tenant_id.make_scoped_key(&req.key);
 
+        let _mutation_guard = self.state.key_mutations.lock(&key);
+        if let Some(entry) = self.state.pending_remote_pulls.get(&key) {
+            if entry.owner_client_id != client_id {
+                return Err(Status::permission_denied(
+                    "remote pull is owned by another client",
+                ));
+            }
+        } else {
+            return Ok(Response::new(proto::CompleteRemotePullResponse {}));
+        }
         let removed = self.state.pending_remote_pulls.remove(&key);
         tracing::debug!(
             key = %key,
@@ -98,12 +133,34 @@ impl MasterServiceImpl {
         request: Request<proto::ReleaseRemotePullRequest>,
     ) -> Result<Response<proto::ReleaseRemotePullResponse>, Status> {
         let req = request.into_inner();
+        let client_id = uuid_from_proto(
+            req.client_id
+                .as_ref()
+                .ok_or_else(|| Status::invalid_argument("client_id is required"))?,
+        );
+        if client_id.is_nil() {
+            return Err(Status::invalid_argument("client_id must not be nil"));
+        }
+        if req.key.is_empty() {
+            return Err(Status::invalid_argument("key must not be empty"));
+        }
+        validate_user_key(&req.key)?;
         let tenant_id = resolve_request_tenant(
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let key = tenant_id.make_scoped_key(&req.key);
 
+        let _mutation_guard = self.state.key_mutations.lock(&key);
+        if let Some(entry) = self.state.pending_remote_pulls.get(&key) {
+            if entry.owner_client_id != client_id {
+                return Err(Status::permission_denied(
+                    "remote pull is owned by another client",
+                ));
+            }
+        } else {
+            return Ok(Response::new(proto::ReleaseRemotePullResponse {}));
+        }
         self.state.pending_remote_pulls.remove(&key);
         tracing::debug!(key = %key, "remote pull released");
         Ok(Response::new(proto::ReleaseRemotePullResponse {}))

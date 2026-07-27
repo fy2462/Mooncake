@@ -1,4 +1,6 @@
 use crate::TenantId;
+use etcd_client::{Compare, CompareOp, Txn, TxnOp};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -12,6 +14,8 @@ const DEFAULT_CLUSTER_ID: &str = "mooncake_cluster";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenantQuotaPolicySnapshot {
+    #[serde(default)]
+    pub producer_view_version: u64,
     #[serde(default)]
     pub tenant_quotas: BTreeMap<String, u64>,
 }
@@ -53,6 +57,34 @@ pub fn save_tenant_quota_policy(
     }
 }
 
+/// Advance the connector's producer term while preserving the policy that won
+/// every write serialized before this barrier.
+///
+/// A newly elected leader must call this before serving. An old-term writer
+/// then either commits before this operation and is included in the returned
+/// snapshot, or runs afterwards and is rejected by the monotonic term check.
+pub fn advance_tenant_quota_policy_term(
+    connector_type: &str,
+    connector_uri: &str,
+    cluster_id: &str,
+    producer_view_version: u64,
+) -> Result<TenantQuotaPolicySnapshot, String> {
+    if producer_view_version == 0 {
+        return Err("tenant quota policy producer term must be nonzero".to_string());
+    }
+    match connector_type {
+        "file" => {
+            require_tenant_quota_connector_uri("file", connector_uri)?;
+            advance_file_policy_term(connector_uri, producer_view_version)
+        }
+        "etcd" => {
+            require_tenant_quota_connector_uri("etcd", connector_uri)?;
+            advance_etcd_policy_term(connector_uri, cluster_id, producer_view_version)
+        }
+        other => Err(format!("unsupported tenant quota connector type: {other}")),
+    }
+}
+
 fn require_tenant_quota_connector_uri(
     connector_type: &str,
     connector_uri: &str,
@@ -77,14 +109,106 @@ fn load_file_policy(path: &str) -> Result<TenantQuotaPolicySnapshot, String> {
 }
 
 fn save_file_policy(path: &str, snapshot: &TenantQuotaPolicySnapshot) -> Result<(), String> {
-    if let Some(parent) = Path::new(path).parent() {
+    let target = Path::new(path);
+    if let Some(parent) = target.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
         }
     }
-    let yaml = format_tenant_quota_policy_yaml(snapshot);
-    write_atomic_file(path, yaml.as_bytes())
+    let lock_path = tenant_quota_policy_lock_path(target);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "failed to open tenant quota policy lock {}: {error}",
+                lock_path.display()
+            )
+        })?;
+    lock.lock_exclusive().map_err(|error| {
+        format!(
+            "failed to lock tenant quota policy {}: {error}",
+            lock_path.display()
+        )
+    })?;
+
+    let save_result = (|| {
+        let current = load_file_policy(path)?;
+        ensure_policy_view_is_monotonic(
+            current.producer_view_version,
+            snapshot.producer_view_version,
+        )?;
+        let yaml = format_tenant_quota_policy_yaml(snapshot);
+        write_atomic_file(path, yaml.as_bytes())
+    })();
+    let unlock_result = FileExt::unlock(&lock).map_err(|error| {
+        format!(
+            "failed to unlock tenant quota policy {}: {error}",
+            lock_path.display()
+        )
+    });
+    save_result.and(unlock_result)
+}
+
+fn advance_file_policy_term(
+    path: &str,
+    producer_view_version: u64,
+) -> Result<TenantQuotaPolicySnapshot, String> {
+    let target = Path::new(path);
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+    }
+    let lock_path = tenant_quota_policy_lock_path(target);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            format!(
+                "failed to open tenant quota policy lock {}: {error}",
+                lock_path.display()
+            )
+        })?;
+    lock.lock_exclusive().map_err(|error| {
+        format!(
+            "failed to lock tenant quota policy {}: {error}",
+            lock_path.display()
+        )
+    })?;
+
+    let advance_result = (|| {
+        let mut current = load_file_policy(path)?;
+        ensure_policy_view_is_monotonic(current.producer_view_version, producer_view_version)?;
+        if current.producer_view_version < producer_view_version {
+            current.producer_view_version = producer_view_version;
+            let yaml = format_tenant_quota_policy_yaml(&current);
+            write_atomic_file(path, yaml.as_bytes())?;
+        }
+        Ok(current)
+    })();
+    let unlock_result = FileExt::unlock(&lock).map_err(|error| {
+        format!(
+            "failed to unlock tenant quota policy {}: {error}",
+            lock_path.display()
+        )
+    });
+    match advance_result {
+        Ok(snapshot) => {
+            unlock_result?;
+            Ok(snapshot)
+        }
+        Err(error) => {
+            let _ = unlock_result;
+            Err(error)
+        }
+    }
 }
 
 fn load_etcd_policy(
@@ -126,16 +250,128 @@ fn save_etcd_policy(
     let key = build_tenant_quota_etcd_key(cluster_id)?;
     let endpoints = parse_etcd_endpoints(endpoints)?;
     let content = format_tenant_quota_policy_yaml(snapshot);
+    let producer_view_version = snapshot.producer_view_version;
     run_etcd_blocking(move || async move {
         let mut client = etcd_client::Client::connect(endpoints, None)
             .await
             .map_err(|e| format!("failed to connect tenant quota etcd store: {e}"))?;
-        client
-            .put(key.as_bytes(), content.as_bytes(), None)
-            .await
-            .map_err(|e| format!("failed to save tenant quota policy to etcd key '{key}': {e}"))?;
-        Ok(())
+        for _ in 0..8 {
+            let response = client.get(key.as_bytes(), None).await.map_err(|e| {
+                format!("failed to read tenant quota policy from etcd key '{key}': {e}")
+            })?;
+            let current = response.kvs().first();
+            let current_view_version = match current {
+                Some(kv) => {
+                    let current_content = decode_etcd_policy_content(&key, kv.value())?;
+                    parse_tenant_quota_policy_yaml(&current_content)?.producer_view_version
+                }
+                None => 0,
+            };
+            ensure_policy_view_is_monotonic(current_view_version, producer_view_version)?;
+
+            let compare = match current {
+                Some(kv) => Compare::mod_revision(
+                    key.as_bytes().to_vec(),
+                    CompareOp::Equal,
+                    kv.mod_revision(),
+                ),
+                None => Compare::version(key.as_bytes().to_vec(), CompareOp::Equal, 0),
+            };
+            let transaction = Txn::new().when([compare]).and_then([TxnOp::put(
+                key.as_bytes().to_vec(),
+                content.as_bytes().to_vec(),
+                None,
+            )]);
+            let transaction = client.txn(transaction).await.map_err(|e| {
+                format!("failed to save tenant quota policy to etcd key '{key}': {e}")
+            })?;
+            if transaction.succeeded() {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "tenant quota policy etcd CAS contention exceeded retry limit for key '{key}'"
+        ))
     })
+}
+
+fn advance_etcd_policy_term(
+    endpoints: &str,
+    cluster_id: &str,
+    producer_view_version: u64,
+) -> Result<TenantQuotaPolicySnapshot, String> {
+    let key = build_tenant_quota_etcd_key(cluster_id)?;
+    let endpoints = parse_etcd_endpoints(endpoints)?;
+    run_etcd_blocking(move || async move {
+        let mut client = etcd_client::Client::connect(endpoints, None)
+            .await
+            .map_err(|e| format!("failed to connect tenant quota etcd store: {e}"))?;
+        for _ in 0..8 {
+            let response = client.get(key.as_bytes(), None).await.map_err(|e| {
+                format!("failed to read tenant quota policy from etcd key '{key}': {e}")
+            })?;
+            let current_kv = response.kvs().first();
+            let mut current = match current_kv {
+                Some(kv) => {
+                    let content = decode_etcd_policy_content(&key, kv.value())?;
+                    parse_tenant_quota_policy_yaml(&content)?
+                }
+                None => TenantQuotaPolicySnapshot::default(),
+            };
+            ensure_policy_view_is_monotonic(current.producer_view_version, producer_view_version)?;
+            if current.producer_view_version == producer_view_version {
+                return Ok(current);
+            }
+
+            current.producer_view_version = producer_view_version;
+            let content = format_tenant_quota_policy_yaml(&current);
+            let compare = match current_kv {
+                Some(kv) => Compare::mod_revision(
+                    key.as_bytes().to_vec(),
+                    CompareOp::Equal,
+                    kv.mod_revision(),
+                ),
+                None => Compare::version(key.as_bytes().to_vec(), CompareOp::Equal, 0),
+            };
+            let transaction = client
+                .txn(Txn::new().when([compare]).and_then([TxnOp::put(
+                    key.as_bytes().to_vec(),
+                    content.into_bytes(),
+                    None,
+                )]))
+                .await
+                .map_err(|e| {
+                    format!("failed to advance tenant quota policy term for etcd key '{key}': {e}")
+                })?;
+            if transaction.succeeded() {
+                return Ok(current);
+            }
+        }
+        Err(format!(
+            "tenant quota policy term CAS contention exceeded retry limit for key '{key}'"
+        ))
+    })
+}
+
+fn ensure_policy_view_is_monotonic(
+    current_view_version: u64,
+    producer_view_version: u64,
+) -> Result<(), String> {
+    if producer_view_version < current_view_version {
+        return Err(format!(
+            "stale tenant quota policy producer view {producer_view_version}; \
+             current connector view is {current_view_version}"
+        ));
+    }
+    Ok(())
+}
+
+fn tenant_quota_policy_lock_path(target: &Path) -> PathBuf {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tenant_quota_policy");
+    target.with_file_name(format!("{file_name}.lock"))
 }
 
 fn run_etcd_blocking<F, Fut, T>(operation: F) -> Result<T, String>
@@ -229,9 +465,15 @@ fn write_atomic_file(path: &str, contents: &[u8]) -> Result<(), String> {
         ));
     }
 
-    if let Some(parent) = parent {
-        let _ = File::open(parent).and_then(|dir| dir.sync_all());
-    }
+    let sync_parent = parent.unwrap_or_else(|| Path::new("."));
+    File::open(sync_parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|error| {
+            format!(
+                "failed to sync tenant quota policy directory {}: {error}",
+                sync_parent.display()
+            )
+        })?;
     Ok(())
 }
 
@@ -281,7 +523,10 @@ fn parse_legacy_tenant_quota_policy(
             return Err(format!("duplicate tenant name '{tenant_id}'"));
         }
     }
-    Ok(TenantQuotaPolicySnapshot { tenant_quotas })
+    Ok(TenantQuotaPolicySnapshot {
+        producer_view_version: snapshot.producer_view_version,
+        tenant_quotas,
+    })
 }
 
 fn parse_cpp_tenant_quota_policy(
@@ -300,6 +545,17 @@ fn parse_cpp_tenant_quota_policy(
             "unsupported tenant quota policy version: {version}"
         ));
     }
+    let producer_view_version = root
+        .get(serde_yaml::Value::String(
+            "producer_view_version".to_string(),
+        ))
+        .map(|value| {
+            value
+                .as_u64()
+                .ok_or_else(|| "invalid producer_view_version".to_string())
+        })
+        .transpose()?
+        .unwrap_or(0);
 
     let tenants = root
         .get(serde_yaml::Value::String("tenants".to_string()))
@@ -327,7 +583,10 @@ fn parse_cpp_tenant_quota_policy(
         }
     }
 
-    Ok(TenantQuotaPolicySnapshot { tenant_quotas })
+    Ok(TenantQuotaPolicySnapshot {
+        producer_view_version,
+        tenant_quotas,
+    })
 }
 
 fn parse_quota_value(value: &serde_yaml::Value) -> Result<u64, String> {
@@ -378,7 +637,10 @@ fn normalize_policy_tenant_id(tenant_id: &str) -> Result<String, String> {
 }
 
 fn format_tenant_quota_policy_yaml(snapshot: &TenantQuotaPolicySnapshot) -> String {
-    let mut out = String::from("version: 1\n\n");
+    let mut out = format!(
+        "version: 1\nproducer_view_version: {}\n\n",
+        snapshot.producer_view_version
+    );
     if snapshot.tenant_quotas.is_empty() {
         out.push_str("tenants: []\n");
         return out;
@@ -437,13 +699,15 @@ tenants:
         )
         .unwrap();
 
+        assert_eq!(snapshot.producer_view_version, 0);
         assert_eq!(snapshot.tenant_quotas["tenant-a"], 1024);
         assert_eq!(snapshot.tenant_quotas["tenant-b"], 2 * 1024 * 1024);
     }
 
     #[test]
-    fn formats_cpp_compatible_tenant_quota_yaml() {
+    fn formats_versioned_tenant_quota_yaml() {
         let snapshot = TenantQuotaPolicySnapshot {
+            producer_view_version: 7,
             tenant_quotas: BTreeMap::from([
                 ("tenant-a".to_string(), 1024),
                 ("tenant\"b".to_string(), 2048),
@@ -453,7 +717,7 @@ tenants:
         let yaml = format_tenant_quota_policy_yaml(&snapshot);
         assert_eq!(
             yaml,
-            "version: 1\n\ntenants:\n  - name: \"tenant\\\"b\"\n    quota: 2048\n  - name: \"tenant-a\"\n    quota: 1024\n"
+            "version: 1\nproducer_view_version: 7\n\ntenants:\n  - name: \"tenant\\\"b\"\n    quota: 2048\n  - name: \"tenant-a\"\n    quota: 1024\n"
         );
         assert_eq!(parse_tenant_quota_policy_yaml(&yaml).unwrap(), snapshot);
     }
@@ -493,6 +757,7 @@ tenant_quotas:
         )
         .unwrap();
 
+        assert_eq!(snapshot.producer_view_version, 0);
         assert_eq!(snapshot.tenant_quotas["tenant-a"], 4096);
     }
 
@@ -502,6 +767,7 @@ tenant_quotas:
         let path = dir.path().join("tenant-policy.yaml");
         let path_str = path.to_string_lossy();
         let snapshot = TenantQuotaPolicySnapshot {
+            producer_view_version: 11,
             tenant_quotas: BTreeMap::from([("tenant-a".to_string(), 4096)]),
         };
 
@@ -510,7 +776,7 @@ tenant_quotas:
         let contents = fs::read_to_string(&path).unwrap();
         assert_eq!(
             contents,
-            "version: 1\n\ntenants:\n  - name: \"tenant-a\"\n    quota: 4096\n"
+            "version: 1\nproducer_view_version: 11\n\ntenants:\n  - name: \"tenant-a\"\n    quota: 4096\n"
         );
         assert_eq!(load_file_policy(&path_str).unwrap(), snapshot);
         let leftovers = fs::read_dir(dir.path())
@@ -519,6 +785,58 @@ tenant_quotas:
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn file_save_rejects_a_late_old_term_under_the_process_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tenant-policy.yaml");
+        let path_str = path.to_string_lossy();
+        let successor = TenantQuotaPolicySnapshot {
+            producer_view_version: 12,
+            tenant_quotas: BTreeMap::from([("tenant-a".to_string(), 8192)]),
+        };
+        let stale_predecessor = TenantQuotaPolicySnapshot {
+            producer_view_version: 11,
+            tenant_quotas: BTreeMap::from([("tenant-a".to_string(), 4096)]),
+        };
+
+        save_file_policy(&path_str, &successor).unwrap();
+        let error = save_file_policy(&path_str, &stale_predecessor).unwrap_err();
+
+        assert!(error.contains("stale tenant quota policy producer view"));
+        assert_eq!(load_file_policy(&path_str).unwrap(), successor);
+        assert!(tenant_quota_policy_lock_path(&path).exists());
+    }
+
+    #[test]
+    fn file_term_barrier_preserves_winning_policy_and_fences_old_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tenant-policy.yaml");
+        let path_str = path.to_string_lossy();
+        let predecessor = TenantQuotaPolicySnapshot {
+            producer_view_version: 11,
+            tenant_quotas: BTreeMap::from([("tenant-a".to_string(), 4096)]),
+        };
+        save_file_policy(&path_str, &predecessor).unwrap();
+
+        let advanced = advance_file_policy_term(&path_str, 12).unwrap();
+        assert_eq!(advanced.producer_view_version, 12);
+        assert_eq!(advanced.tenant_quotas, predecessor.tenant_quotas);
+
+        let late_predecessor = TenantQuotaPolicySnapshot {
+            producer_view_version: 11,
+            tenant_quotas: BTreeMap::from([("tenant-a".to_string(), 8192)]),
+        };
+        assert!(save_file_policy(&path_str, &late_predecessor).is_err());
+        assert_eq!(load_file_policy(&path_str).unwrap(), advanced);
+    }
+
+    #[test]
+    fn policy_view_monotonicity_accepts_same_or_newer_term_only() {
+        assert!(ensure_policy_view_is_monotonic(7, 7).is_ok());
+        assert!(ensure_policy_view_is_monotonic(7, 8).is_ok());
+        assert!(ensure_policy_view_is_monotonic(8, 7).is_err());
     }
 
     #[test]

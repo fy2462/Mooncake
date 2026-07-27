@@ -25,6 +25,7 @@ fn replica_config(segment: &str) -> proto::ReplicateConfig {
         preferred_nof_segments: vec![],
         data_type: proto::ObjectDataType::Unknown as i32,
         group_ids: vec![],
+        host_id: String::new(),
     }
 }
 
@@ -90,6 +91,9 @@ fn strict_service_with_unregistered_object(tenant_id: &str, key: &str) -> Master
             tenant_id: TenantId::new(tenant_id.to_owned()).unwrap(),
             group_id: String::new(),
             quota_committed: false,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
             user_key: key.to_owned(),
@@ -124,6 +128,7 @@ async fn mount_memory(service: &MasterServiceImpl, client_id: Uuid, segment: &st
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -131,15 +136,61 @@ async fn mount_memory(service: &MasterServiceImpl, client_id: Uuid, segment: &st
 }
 
 async fn mount_local_disk(service: &MasterServiceImpl, client_id: Uuid) {
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    MasterService::mount_local_disk_segment(
+        service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: false,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: false,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
     MasterService::mount_local_disk_segment(
         service,
         Request::new(proto::MountLocalDiskSegmentRequest {
             client_id: Some(proto_uuid(client_id)),
             enable_offloading: true,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
         }),
     )
     .await
     .unwrap();
+}
+
+async fn take_offload_task(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    tenant_id: &str,
+    key: &str,
+) -> proto::OffloadTaskItem {
+    let tasks = MasterService::offload_object_heartbeat(
+        service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks;
+    let task = tasks
+        .into_iter()
+        .find(|task| task.tenant_id == tenant_id && task.key == key)
+        .expect("Master must issue the admitted offload task");
+    assert!(
+        task.generation_id
+            .as_ref()
+            .is_some_and(|generation_id| generation_id.high != 0 || generation_id.low != 0)
+    );
+    task
 }
 
 async fn put_start(
@@ -297,6 +348,7 @@ async fn admitted_offload_task_can_complete_after_tenant_registration_is_removed
         service.replica_refcnts_for_test("in-flight", ReplicaType::Memory, "orphan"),
         vec![1]
     );
+    let task = take_offload_task(&service, client_id, "orphan", "in-flight").await;
 
     service.remove_tenant_registration_for_test("orphan");
     assert!(
@@ -312,12 +364,9 @@ async fn admitted_offload_task_can_complete_after_tenant_registration_is_removed
         Request::new(proto::NotifyOffloadSuccessRequest {
             client_id: Some(proto_uuid(client_id)),
             keys: vec![],
-            tasks: vec![proto::OffloadTaskItem {
-                tenant_id: "orphan".into(),
-                key: "in-flight".into(),
-                size: 128,
-            }],
+            tasks: vec![task],
             metadatas: vec![offload_metadata("in-flight", 128)],
+            recovery_session_id: None,
         }),
     )
     .await
@@ -347,6 +396,7 @@ async fn admitted_offload_task_can_complete_after_tenant_registration_is_removed
 async fn unsolicited_offload_success_rejects_unregistered_tenant_without_mutation() {
     let service = strict_service_with_unregistered_object("unregistered", "unsolicited");
     let client_id = Uuid::new_v4();
+    mount_local_disk(&service, client_id).await;
     assert_eq!(object_count(&service).await, 1);
 
     let error = MasterService::notify_offload_success(
@@ -358,8 +408,10 @@ async fn unsolicited_offload_success_rejects_unregistered_tenant_without_mutatio
                 tenant_id: "unregistered".into(),
                 key: "unsolicited".into(),
                 size: 128,
+                generation_id: Some(proto_uuid(Uuid::new_v4())),
             }],
             metadatas: vec![offload_metadata("unsolicited", 128)],
+            recovery_session_id: None,
         }),
     )
     .await
@@ -398,6 +450,7 @@ async fn mixed_offload_batch_rejection_does_not_clear_or_mutate_earlier_task() {
         service.replica_refcnts_for_test("admitted", ReplicaType::Memory, "registered"),
         vec![1]
     );
+    let admitted_task = take_offload_task(&service, client_id, "registered", "admitted").await;
 
     let error = MasterService::notify_offload_success(
         &service,
@@ -405,21 +458,19 @@ async fn mixed_offload_batch_rejection_does_not_clear_or_mutate_earlier_task() {
             client_id: Some(proto_uuid(client_id)),
             keys: vec![],
             tasks: vec![
-                proto::OffloadTaskItem {
-                    tenant_id: "registered".into(),
-                    key: "admitted".into(),
-                    size: 128,
-                },
+                admitted_task,
                 proto::OffloadTaskItem {
                     tenant_id: "unregistered".into(),
                     key: "unsolicited".into(),
                     size: 128,
+                    generation_id: Some(proto_uuid(Uuid::new_v4())),
                 },
             ],
             metadatas: vec![
                 offload_metadata("admitted", 128),
                 offload_metadata("unsolicited", 128),
             ],
+            recovery_session_id: None,
         }),
     )
     .await
@@ -610,6 +661,8 @@ async fn notify_offload_prevalidates_all_task_tenants_before_clearing_tasks() {
         service.replica_refcnts_for_test("offload-key", ReplicaType::Memory, "tenant:with:colon"),
         vec![1]
     );
+    let admitted_task =
+        take_offload_task(&service, client_id, "tenant:with:colon", "offload-key").await;
 
     let error = MasterService::notify_offload_success(
         &service,
@@ -617,15 +670,12 @@ async fn notify_offload_prevalidates_all_task_tenants_before_clearing_tasks() {
             client_id: Some(proto_uuid(client_id)),
             keys: vec![],
             tasks: vec![
-                proto::OffloadTaskItem {
-                    tenant_id: "tenant:with:colon".into(),
-                    key: "offload-key".into(),
-                    size: 128,
-                },
+                admitted_task,
                 proto::OffloadTaskItem {
                     tenant_id: "_reserved".into(),
                     key: "invalid".into(),
                     size: 128,
+                    generation_id: Some(proto_uuid(Uuid::new_v4())),
                 },
             ],
             metadatas: vec![
@@ -644,6 +694,7 @@ async fn notify_offload_prevalidates_all_task_tenants_before_clearing_tasks() {
                     transport_endpoint: "disk-holder".into(),
                 },
             ],
+            recovery_session_id: None,
         }),
     )
     .await
@@ -796,6 +847,37 @@ async fn strict_remote_pull_coordination_is_tenant_scoped_and_validated() {
 
     let error = acquire("_reserved").await.unwrap_err();
     assert_eq!(error.code(), Code::InvalidArgument);
+
+    let other_client = Uuid::new_v4();
+    let error = MasterService::complete_remote_pull(
+        &service,
+        Request::new(proto::CompleteRemotePullRequest {
+            client_id: Some(proto_uuid(other_client)),
+            key: "shared-key".into(),
+            success: true,
+            data_size: 128,
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
+    assert_eq!(
+        acquire("tenant-a").await.unwrap().into_inner().action,
+        proto::RemotePullAction::Wait as i32
+    );
+
+    let error = MasterService::release_remote_pull(
+        &service,
+        Request::new(proto::ReleaseRemotePullRequest {
+            client_id: Some(proto_uuid(other_client)),
+            key: "shared-key".into(),
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), Code::PermissionDenied);
 
     MasterService::complete_remote_pull(
         &service,

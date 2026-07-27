@@ -173,22 +173,24 @@ impl LeaderCoordinator {
         leader_address: &str,
         lease_ttl_secs: i64,
     ) -> Result<AcquireLeadershipResult, HaError> {
+        if self
+            .active_owner_token
+            .lock()
+            .expect("active owner token mutex poisoned")
+            .is_some()
+        {
+            return Err(HaError::UnavailableInCurrentStatus);
+        }
         match &self.backend {
             CoordinatorBackend::Etcd {
                 client,
                 election_key,
             } => {
-                let current = self.read_current_view().await?;
-                let acquired = coordinator_etcd::acquire(
-                    client,
-                    election_key,
-                    leader_address,
-                    lease_ttl_secs,
-                    current,
-                )
-                .await?;
+                let acquired =
+                    coordinator_etcd::acquire(client, election_key, leader_address, lease_ttl_secs)
+                        .await?;
                 if acquired.acquired {
-                    let _ = self.role_tx.send(LeaderRole::Leader);
+                    self.activate_acquired_session(&acquired)?;
                 }
                 Ok(acquired)
             }
@@ -206,7 +208,7 @@ impl LeaderCoordinator {
                 )
                 .await?;
                 if acquired.acquired {
-                    let _ = self.role_tx.send(LeaderRole::Leader);
+                    self.activate_acquired_session(&acquired)?;
                 }
                 Ok(acquired)
             }
@@ -218,20 +220,18 @@ impl LeaderCoordinator {
                 let acquired =
                     acquire_k8s_lease(namespace, lease_name, leader_address, lease_ttl_secs)
                         .await?;
-                if let Some(session) = acquired.session.as_ref() {
-                    self.set_active_owner_token(Some(session.owner_token.clone()));
-                    let _ = self.role_tx.send(LeaderRole::Leader);
+                if acquired.acquired {
+                    self.activate_acquired_session(&acquired)?;
                 }
                 Ok(acquired)
             }
             CoordinatorBackend::Manual => {
                 // Manual mode: instant leadership. / 手动模式：立即成为 leader。
-                let _ = self.role_tx.send(LeaderRole::Leader);
                 let view = MasterView {
                     leader_address: leader_address.to_string(),
                     view_version: 1,
                 };
-                Ok(AcquireLeadershipResult {
+                let acquired = AcquireLeadershipResult {
                     acquired: true,
                     view: Some(view.clone()),
                     session: Some(LeadershipSession {
@@ -239,7 +239,9 @@ impl LeaderCoordinator {
                         owner_token: "manual".into(),
                         lease_ttl: Duration::ZERO,
                     }),
-                })
+                };
+                self.activate_acquired_session(&acquired)?;
+                Ok(acquired)
             }
         }
     }
@@ -248,18 +250,18 @@ impl LeaderCoordinator {
     /// to Standby via the watch channel.
     ///
     /// 启动 Leader 续约后台任务。
-    /// - Etcd: lease_keep_alive stream with 3s interval.
-    ///   lease_keep_alive 流，3s 间隔。
+    /// - Etcd: lease_keep_alive stream with a TTL-derived interval and
+    ///   acknowledgement deadline.
     /// - Redis: PEXPIRE with 3s interval. / PEXPIRE，3s 间隔。
     /// - 续约失败时自动降级为 Standby，通过 role_tx channel 通知。
     pub async fn start_leadership_keepalive(
         &self,
         session: &LeadershipSession,
     ) -> Result<LeadershipHandle, HaError> {
+        self.ensure_active_session(session)?;
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
         match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
-                self.set_active_owner_token(Some(session.owner_token.clone()));
                 coordinator_etcd::start_keepalive(
                     client,
                     session,
@@ -274,8 +276,6 @@ impl LeaderCoordinator {
                 view_version_key: _,
             } => {
                 validate_session(session)?;
-                let owner_token = session.owner_token.clone();
-                self.set_active_owner_token(Some(owner_token.clone()));
                 coordinator_redis::start_keepalive(
                     client,
                     election_key,
@@ -291,8 +291,6 @@ impl LeaderCoordinator {
                 lease_name,
                 label_reconciler,
             } => {
-                let owner_token = session.owner_token.clone();
-                self.set_active_owner_token(Some(owner_token.clone()));
                 start_k8s_keepalive(
                     namespace,
                     lease_name,
@@ -303,9 +301,7 @@ impl LeaderCoordinator {
                     cancel_rx,
                 )?;
             }
-            CoordinatorBackend::Manual => {
-                self.set_active_owner_token(Some(session.owner_token.clone()));
-            }
+            CoordinatorBackend::Manual => {}
         }
         Ok(LeadershipHandle::new(cancel_tx))
     }
@@ -317,6 +313,7 @@ impl LeaderCoordinator {
     /// 尝试单次租约续期。成功返回 Ok(())。
     /// 用于预热循环和 serve 前飞行检查。
     pub async fn try_renew_leadership(&self, session: &LeadershipSession) -> Result<(), HaError> {
+        self.ensure_active_session(session)?;
         match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
                 coordinator_etcd::renew(client, session).await
@@ -341,42 +338,36 @@ impl LeaderCoordinator {
     /// - Manual: sends Standby via watch channel. / 通过 watch channel 发送 Standby。
     pub async fn release_leadership(&self, session: &LeadershipSession) -> Result<(), HaError> {
         self.ensure_release_session_matches(session)?;
-        match &self.backend {
+        let backend_result = match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
-                coordinator_etcd::release(client, session).await?;
-                let _ = self.role_tx.send(LeaderRole::Standby);
-                self.set_active_owner_token(None);
-                Ok(())
+                coordinator_etcd::release(client, session).await
             }
             CoordinatorBackend::Redis {
                 client,
                 election_key,
                 view_version_key: _,
-            } => {
-                coordinator_redis::release(client, election_key, session).await?;
-                let _ = self.role_tx.send(LeaderRole::Standby);
-                self.set_active_owner_token(None);
-                Ok(())
-            }
+            } => coordinator_redis::release(client, election_key, session).await,
             CoordinatorBackend::K8s {
                 namespace,
                 lease_name,
                 label_reconciler,
-            } => {
-                validate_session(session)?;
-                set_k8s_leader_label(label_reconciler, false);
-                release_k8s_lease(namespace, lease_name, session).await?;
-                let _ = self.role_tx.send(LeaderRole::Standby);
-                self.set_active_owner_token(None);
-                info!("K8s leadership released");
-                Ok(())
-            }
-            CoordinatorBackend::Manual => {
-                let _ = self.role_tx.send(LeaderRole::Standby);
-                self.set_active_owner_token(None);
-                Ok(())
-            }
+            } => match validate_session(session) {
+                Ok(()) => {
+                    set_k8s_leader_label(label_reconciler, false);
+                    release_k8s_lease(namespace, lease_name, session).await
+                }
+                Err(error) => Err(error),
+            },
+            CoordinatorBackend::Manual => Ok(()),
+        };
+        // Local demotion is unconditional: a revoke error means the remote
+        // lease may survive until TTL, not that this process may keep serving.
+        let _ = self.role_tx.send(LeaderRole::Standby);
+        self.set_active_owner_token(None);
+        if backend_result.is_ok() && matches!(&self.backend, CoordinatorBackend::K8s { .. }) {
+            info!("K8s leadership released");
         }
+        backend_result
     }
 
     /// Wait for a view change: poll every 200ms, return when `view_version`
@@ -496,6 +487,32 @@ impl LeaderCoordinator {
             .active_owner_token
             .lock()
             .expect("active owner token mutex poisoned") = token;
+    }
+
+    fn activate_acquired_session(&self, acquired: &AcquireLeadershipResult) -> Result<(), HaError> {
+        let session = acquired.session.as_ref().ok_or_else(|| {
+            HaError::InvalidBackend("leadership acquired without an owner session".into())
+        })?;
+        if acquired.view.as_ref() != Some(&session.view) {
+            return Err(HaError::InvalidBackend(
+                "leadership result view does not match its owner session".into(),
+            ));
+        }
+        if matches!(&self.backend, CoordinatorBackend::Manual) {
+            if session.owner_token.trim().is_empty() {
+                return Err(HaError::InvalidParams(
+                    "manual leadership session owner token must be set".into(),
+                ));
+            }
+        } else {
+            validate_session(session)?;
+        }
+        self.set_active_owner_token(Some(session.owner_token.clone()));
+        if self.role_tx.send(LeaderRole::Leader).is_err() {
+            self.set_active_owner_token(None);
+            return Err(HaError::UnavailableInCurrentStatus);
+        }
+        Ok(())
     }
 
     fn ensure_active_session(&self, session: &LeadershipSession) -> Result<(), HaError> {

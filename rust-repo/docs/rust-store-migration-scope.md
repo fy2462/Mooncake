@@ -36,6 +36,25 @@ The boundary is based on ownership:
 - C++ Store code is a reference for parity, not a reusable implementation
   dependency.
 
+## Current classic-parity freeze
+
+The active migration phase targets the classic Transfer Engine data plane and
+must not modify Transfer Engine C++ or its C ABI merely to complete Store
+parity. The existing create/register/open/submit/status/free surface is
+sufficient for that scope; ownership, lifetime, registration capabilities and
+safe submission belong in the Rust FFI wrapper.
+
+TENT lifecycle/scheduling and accelerator DLPack registration are independent
+optional capabilities. Until a separately reviewed, versioned
+capability/request/status ABI exists:
+
+- Rust Store rejects `MC_USE_TENT` and `MC_USE_TEV1` before creating a native
+  engine;
+- accelerator DLPack registration fails before consuming the producer capsule
+  because exact native device identity and DMA-safe synchronization cannot be
+  proven through the existing C ABI;
+- neither capability counts as completed classic Store parity.
+
 ## How to handle a missing capability
 
 When an audit or test finds behavior present in the C++ Store but absent from
@@ -63,8 +82,9 @@ The old C++ Store implements Store-side NoF support with
 does not validate the Rust replacement.
 
 The Rust implementation has its own NoF control-plane model, registration,
-allocation, replica selection, status handling, and master probing. The Rust
-master's optional direct SPDK probe is selected with the `spdk-nof-probe`
+allocation, replica selection, status handling, independent watermark and
+allocation-pressure eviction, and master probing. The Rust master's optional
+direct SPDK probe is selected with the `spdk-nof-probe`
 Cargo feature and uses OpenEBS `spdk-rs` v2.11.0 with its pinned OpenEBS SPDK
 25.05 and DPDK 25.03.0 SDK. NoF data transfers exposed by
 the native Transfer Engine are consumed through `transfer-engine-ffi`.

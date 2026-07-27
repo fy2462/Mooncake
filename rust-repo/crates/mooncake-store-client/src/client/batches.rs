@@ -14,13 +14,39 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig};
+use mooncake_store_core::{ReplicaDescriptor, ReplicateConfig, StoreError};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use super::MooncakeClient;
 use super::batch_types::{BatchPutStartResult, BatchUpsertEntry};
 use crate::proto;
+
+fn batch_upsert_entry_config(
+    config: &ReplicateConfig,
+    key_count: usize,
+    index: usize,
+) -> StoreResult<ReplicateConfig> {
+    if !config.group_ids.is_empty() && config.group_ids.len() != key_count {
+        return Err(StoreError::InvalidParams(
+            "group_ids length must match keys length".to_string(),
+        ));
+    }
+    let mut entry_config = config.clone();
+    if !entry_config.group_ids.is_empty() {
+        entry_config.group_ids = vec![entry_config.group_ids[index].clone()];
+    }
+    Ok(entry_config)
+}
+
+fn ensure_batch_response_len(operation: &str, expected: usize, actual: usize) -> StoreResult<()> {
+    if expected != actual {
+        return Err(StoreError::Internal(format!(
+            "{operation} response size mismatch: expected {expected}, got {actual}"
+        )));
+    }
+    Ok(())
+}
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------
@@ -125,31 +151,16 @@ impl MooncakeClient {
         config: &ReplicateConfig,
         tenant_id: &str,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
-        let request = proto::BatchPutStartRequest {
-            client_id: Some(self.client_id_proto()),
-            keys: keys.to_vec(),
-            slice_lengths: slice_lengths.to_vec(),
-            config: Some(proto::ReplicateConfig {
-                replica_num: config.replica_num,
-                nof_replica_num: config.nof_replica_num,
-                with_soft_pin: config.with_soft_pin,
-                with_hard_pin: config.with_hard_pin,
-                preferred_segment: config.preferred_segment.clone(),
-                prefer_alloc_in_same_node: config.prefer_alloc_in_same_node,
-                preferred_segments: config.preferred_segments.clone(),
-                preferred_nof_segments: config.preferred_nof_segments.clone(),
-                data_type: config.data_type as i32,
-                group_ids: config.group_ids.clone(),
-            }),
-            tenant_id: tenant_id.to_string(),
-        };
-        let response = self
-            .master
-            .batch_put_start(self.rpc_request(request))
-            .await
-            .map_err(Self::rpc_status_to_error)?
-            .into_inner();
-        Ok(self.replicas_from_proto(&response.replicas))
+        let results = self
+            .batch_put_start_results(keys, slice_lengths, config, tenant_id)
+            .await?;
+        if let Some(failed) = results.iter().find(|result| result.status != 0) {
+            return Err(StoreError::OperationFailed(failed.status));
+        }
+        Ok(results
+            .into_iter()
+            .flat_map(|result| result.replicas)
+            .collect())
     }
 
     pub async fn batch_put_start_results(
@@ -163,18 +174,7 @@ impl MooncakeClient {
             client_id: Some(self.client_id_proto()),
             keys: keys.to_vec(),
             slice_lengths: slice_lengths.to_vec(),
-            config: Some(proto::ReplicateConfig {
-                replica_num: config.replica_num,
-                nof_replica_num: config.nof_replica_num,
-                with_soft_pin: config.with_soft_pin,
-                with_hard_pin: config.with_hard_pin,
-                preferred_segment: config.preferred_segment.clone(),
-                prefer_alloc_in_same_node: config.prefer_alloc_in_same_node,
-                preferred_segments: config.preferred_segments.clone(),
-                preferred_nof_segments: config.preferred_nof_segments.clone(),
-                data_type: config.data_type as i32,
-                group_ids: config.group_ids.clone(),
-            }),
+            config: Some(self.replicate_config_to_proto(config)),
             tenant_id: tenant_id.to_string(),
         };
         let response = self
@@ -183,40 +183,32 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
-        if !response.results.is_empty() {
-            return Ok(response
-                .results
-                .iter()
-                .map(|result| BatchPutStartResult {
+        if response.results.len() != keys.len() {
+            return Err(StoreError::Internal(format!(
+                "BatchPutStart response size mismatch: expected {}, got {}",
+                keys.len(),
+                response.results.len()
+            )));
+        }
+        response
+            .results
+            .iter()
+            .zip(keys)
+            .map(|(result, requested_key)| {
+                if result.key != *requested_key {
+                    return Err(StoreError::Internal(format!(
+                        "BatchPutStart response key mismatch: expected {requested_key:?}, got {:?}",
+                        result.key
+                    )));
+                }
+                Ok(BatchPutStartResult {
                     key: result.key.clone(),
                     replicas: self.replicas_from_proto(&result.replicas),
                     status: result.status,
                     tenant_id: result.tenant_id.clone(),
                 })
-                .collect());
-        }
-
-        let replicas = self.replicas_from_proto(&response.replicas);
-        let per_key = (config.replica_num + config.nof_replica_num) as usize;
-        Ok(keys
-            .iter()
-            .enumerate()
-            .map(|(idx, key)| {
-                let start = idx * per_key;
-                let end = start.saturating_add(per_key);
-                let key_replicas = if per_key > 0 && end <= replicas.len() {
-                    replicas[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-                BatchPutStartResult {
-                    key: key.clone(),
-                    status: if key_replicas.is_empty() { -6 } else { 0 },
-                    replicas: key_replicas,
-                    tenant_id: tenant_id.to_string(),
-                }
             })
-            .collect())
+            .collect()
     }
 
     // -----------------------------------------------------------------------
@@ -255,6 +247,7 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
+        ensure_batch_response_len("BatchPutEnd", keys.len(), response.statuses.len())?;
         Ok(response.statuses)
     }
 
@@ -290,6 +283,7 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
+        ensure_batch_response_len("BatchPutRevoke", keys.len(), response.statuses.len())?;
         Ok(response.statuses)
     }
 
@@ -332,6 +326,7 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
+        ensure_batch_response_len("BatchUpsertEnd", entries.len(), response.statuses.len())?;
         Ok(response.statuses)
     }
 
@@ -342,29 +337,28 @@ impl MooncakeClient {
         config: &ReplicateConfig,
         tenant_id: &str,
     ) -> StoreResult<Vec<BatchPutStartResult>> {
+        if keys.len() != slice_lengths.len() {
+            return Err(StoreError::InvalidParams(
+                "keys and slice_lengths length mismatch".to_string(),
+            ));
+        }
         let request = proto::BatchUpsertStartRequest {
             entries: keys
                 .iter()
                 .zip(slice_lengths.iter())
-                .map(|(key, &slice_length)| proto::UpsertEntry {
-                    client_id: Some(self.client_id_proto()),
-                    key: key.clone(),
-                    slice_length,
-                    config: Some(proto::ReplicateConfig {
-                        replica_num: config.replica_num,
-                        nof_replica_num: config.nof_replica_num,
-                        with_soft_pin: config.with_soft_pin,
-                        with_hard_pin: config.with_hard_pin,
-                        preferred_segment: config.preferred_segment.clone(),
-                        prefer_alloc_in_same_node: config.prefer_alloc_in_same_node,
-                        preferred_segments: config.preferred_segments.clone(),
-                        preferred_nof_segments: config.preferred_nof_segments.clone(),
-                        data_type: config.data_type as i32,
-                        group_ids: config.group_ids.clone(),
-                    }),
-                    tenant_id: tenant_id.to_string(),
+                .enumerate()
+                .map(|(index, (key, &slice_length))| {
+                    batch_upsert_entry_config(config, keys.len(), index).map(|entry_config| {
+                        proto::UpsertEntry {
+                            client_id: Some(self.client_id_proto()),
+                            key: key.clone(),
+                            slice_length,
+                            config: Some(self.replicate_config_to_proto(&entry_config)),
+                            tenant_id: tenant_id.to_string(),
+                        }
+                    })
                 })
-                .collect(),
+                .collect::<StoreResult<Vec<_>>>()?,
         };
         let response = self
             .master
@@ -373,45 +367,32 @@ impl MooncakeClient {
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
 
-        if !response.results.is_empty() {
-            return Ok(response
-                .results
-                .iter()
-                .map(|result| BatchPutStartResult {
+        if response.results.len() != keys.len() {
+            return Err(StoreError::Internal(format!(
+                "BatchUpsertStart response size mismatch: expected {}, got {}",
+                keys.len(),
+                response.results.len()
+            )));
+        }
+        response
+            .results
+            .iter()
+            .zip(keys)
+            .map(|(result, requested_key)| {
+                if result.key != *requested_key {
+                    return Err(StoreError::Internal(format!(
+                        "BatchUpsertStart response key mismatch: expected {requested_key:?}, got {:?}",
+                        result.key
+                    )));
+                }
+                Ok(BatchPutStartResult {
                     key: result.key.clone(),
-                    replicas: self.replicas_from_proto(&result.replicas),
                     status: result.status,
+                    replicas: self.replicas_from_proto(&result.replicas),
                     tenant_id: result.tenant_id.clone(),
                 })
-                .collect());
-        }
-
-        let replicas = self.replicas_from_proto(&response.replicas);
-        let per_key = (config.replica_num + config.nof_replica_num) as usize;
-        Ok(keys
-            .iter()
-            .enumerate()
-            .map(|(idx, key)| {
-                let start = idx * per_key;
-                let end = start.saturating_add(per_key);
-                let key_replicas = if per_key > 0 && end <= replicas.len() {
-                    replicas[start..end].to_vec()
-                } else {
-                    Vec::new()
-                };
-                let status = response
-                    .statuses
-                    .get(idx)
-                    .copied()
-                    .unwrap_or_else(|| if key_replicas.is_empty() { -6 } else { 0 });
-                BatchPutStartResult {
-                    key: key.clone(),
-                    status,
-                    replicas: key_replicas,
-                    tenant_id: tenant_id.to_string(),
-                }
             })
-            .collect())
+            .collect()
     }
 
     pub async fn batch_upsert_revoke(
@@ -435,6 +416,29 @@ impl MooncakeClient {
             .await
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
+        ensure_batch_response_len("BatchUpsertRevoke", entries.len(), response.statuses.len())?;
         Ok(response.statuses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_upsert_indexes_group_ids_per_single_key_entry() {
+        let config = ReplicateConfig {
+            group_ids: vec!["group-a".to_string(), "group-b".to_string()],
+            ..ReplicateConfig::default()
+        };
+        assert_eq!(
+            batch_upsert_entry_config(&config, 2, 0).unwrap().group_ids,
+            vec!["group-a"]
+        );
+        assert_eq!(
+            batch_upsert_entry_config(&config, 2, 1).unwrap().group_ids,
+            vec!["group-b"]
+        );
+        assert!(batch_upsert_entry_config(&config, 1, 0).is_err());
     }
 }

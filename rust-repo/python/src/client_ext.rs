@@ -1,4 +1,4 @@
-use crate::client::{PythonMooncakeClient, get_pointer, replicas_to_py, take_client};
+use crate::client::{PythonMooncakeClient, get_writable_pointer, replicas_to_py, take_client};
 use crate::to_py_err;
 use mooncake_store_client::CachedQueryResultResponse;
 use pyo3::prelude::*;
@@ -47,7 +47,7 @@ pub(crate) fn register_nof_ssd<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let inner = slf.borrow().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut client = take_client(&inner)?;
+        let mut client = take_client(&inner).await?;
         let segment = client
             .register_nof_ssd_with_trtype(
                 &nqn,
@@ -59,7 +59,6 @@ pub(crate) fn register_nof_ssd<'py>(
                 trtype.as_deref(),
             )
             .await;
-        *inner.lock() = Some(client);
         let segment = segment.map_err(to_py_err)?;
         Ok((
             segment.id.to_string(),
@@ -83,7 +82,7 @@ pub(crate) fn unregister_nof_ssd_by_endpoint<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let inner = slf.borrow().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut client = take_client(&inner)?;
+        let mut client = take_client(&inner).await?;
         let result = client
             .unregister_nof_ssd_by_endpoint_with_trtype(
                 &nqn,
@@ -93,7 +92,6 @@ pub(crate) fn unregister_nof_ssd_by_endpoint<'py>(
                 trtype.as_deref(),
             )
             .await;
-        *inner.lock() = Some(client);
         result.map_err(to_py_err)
     })
 }
@@ -104,9 +102,8 @@ pub(crate) fn batch_get_query_results(
 ) -> PyResult<Vec<Py<PyAny>>> {
     let inner = slf.borrow().inner.clone();
     let results = tokio::runtime::Handle::current().block_on(async {
-        let mut client = take_client(&inner)?;
+        let mut client = take_client(&inner).await?;
         let result = client.batch_get_query_results(&keys).await;
-        *inner.lock() = Some(client);
         result.map_err(to_py_err)
     })?;
     results.into_iter().map(cached_query_to_py).collect()
@@ -118,9 +115,8 @@ pub(crate) fn get_segments_detail<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let inner = slf.borrow().inner.clone();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut client = take_client(&inner)?;
+        let mut client = take_client(&inner).await?;
         let details = client.get_segments_detail().await.map_err(to_py_err)?;
-        *inner.lock() = Some(client);
         let out: Vec<HashMap<String, String>> = details
             .into_iter()
             .map(|detail| {
@@ -157,7 +153,10 @@ pub(crate) fn get_into_ranges_cached(
     all_src_offsets: Vec<Vec<Vec<usize>>>,
     all_sizes: Vec<Vec<Vec<usize>>>,
 ) -> PyResult<Vec<Vec<Vec<i64>>>> {
-    let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
+    let ptrs: Vec<*mut c_void> = buffers
+        .iter()
+        .map(get_writable_pointer)
+        .collect::<PyResult<_>>()?;
     let mut unique_keys = Vec::<String>::new();
     for keys in &all_keys {
         for key in keys {
@@ -168,7 +167,7 @@ pub(crate) fn get_into_ranges_cached(
     }
     let inner = slf.borrow().inner.clone();
     tokio::runtime::Handle::current().block_on(async {
-        let mut client = take_client(&inner)?;
+        let mut client = take_client(&inner).await?;
         let query_results = client
             .batch_get_query_results(&unique_keys)
             .await
@@ -177,19 +176,16 @@ pub(crate) fn get_into_ranges_cached(
             .into_iter()
             .zip(query_results.into_iter())
             .collect();
-        let result = unsafe {
-            client
-                .get_into_ranges_with_query_cache(
-                    &ptrs,
-                    &all_keys,
-                    &all_dst_offsets,
-                    &all_src_offsets,
-                    &all_sizes,
-                    &cache,
-                )
-                .await
-        };
-        *inner.lock() = Some(client);
+        let result = client
+            .get_into_ranges_with_query_cache(
+                &ptrs,
+                &all_keys,
+                &all_dst_offsets,
+                &all_src_offsets,
+                &all_sizes,
+                &cache,
+            )
+            .await;
         result.map_err(to_py_err)
     })
 }

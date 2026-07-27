@@ -1,6 +1,19 @@
 use mooncake_store_client::{LocalStorageBackend, LocalStorageConfig};
 
-fn test_backend() -> LocalStorageBackend {
+struct TestBackend {
+    backend: LocalStorageBackend,
+    _tmp: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TestBackend {
+    type Target = LocalStorageBackend;
+
+    fn deref(&self) -> &Self::Target {
+        &self.backend
+    }
+}
+
+fn test_backend() -> TestBackend {
     let tmp = tempfile::TempDir::new().unwrap();
     let config = LocalStorageConfig {
         root_dir: tmp.path().to_path_buf(),
@@ -10,7 +23,7 @@ fn test_backend() -> LocalStorageBackend {
     };
     let backend = LocalStorageBackend::new(config);
     backend.init().unwrap();
-    backend
+    TestBackend { backend, _tmp: tmp }
 }
 
 fn eviction_backend(quota: u64) -> (LocalStorageBackend, tempfile::TempDir) {
@@ -27,7 +40,7 @@ fn eviction_backend(quota: u64) -> (LocalStorageBackend, tempfile::TempDir) {
 }
 
 #[test]
-fn test_ephemeral_storage_wipes_on_startup_and_drop() {
+fn test_ephemeral_storage_wipes_owned_data_on_startup_and_drop() {
     let tmp = tempfile::TempDir::new().unwrap();
     let config = LocalStorageConfig {
         root_dir: tmp.path().to_path_buf(),
@@ -37,21 +50,21 @@ fn test_ephemeral_storage_wipes_on_startup_and_drop() {
     };
     let data_dir = tmp.path().join("ephemeral_data");
 
-    std::fs::create_dir_all(data_dir.join("stale_subdir")).unwrap();
-    std::fs::write(data_dir.join("leftover.bin"), b"stale").unwrap();
+    let previous = LocalStorageBackend::new_ephemeral(config.clone());
+    previous.init().unwrap();
+    let leftover_path = previous.key_path("leftover");
+    drop(previous);
+    std::fs::create_dir_all(leftover_path.parent().unwrap()).unwrap();
+    std::fs::write(&leftover_path, b"\x0a\x08leftover\x12\x05stale").unwrap();
 
     {
-        let backend = LocalStorageBackend::new(config.clone());
+        let backend = LocalStorageBackend::new_ephemeral(config.clone());
         backend.init().unwrap();
 
         assert!(data_dir.exists(), "startup wipe keeps the data directory");
         assert!(
-            !data_dir.join("leftover.bin").exists(),
-            "startup wipe removes stale files"
-        );
-        assert!(
-            !data_dir.join("stale_subdir").exists(),
-            "startup wipe removes stale subdirectories"
+            !backend.exists("leftover"),
+            "startup wipe removes stale data owned by the Rust backend"
         );
 
         backend.write_object("live_key", b"live").unwrap();
@@ -59,11 +72,240 @@ fn test_ephemeral_storage_wipes_on_startup_and_drop() {
     }
 
     assert!(data_dir.exists(), "drop wipe keeps the data directory");
+    let remaining = std::fs::read_dir(&data_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
     assert_eq!(
-        std::fs::read_dir(&data_dir).unwrap().count(),
-        0,
-        "drop wipe removes cached data"
+        remaining,
+        [std::ffi::OsString::from(".mooncake-storage-format")],
+        "drop wipe preserves only the ownership/format marker"
     );
+}
+
+#[test]
+fn test_ephemeral_backend_refuses_persistent_marker_without_deletion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "persistent_data".to_string(),
+        enable_eviction: true,
+        quota_bytes: 1024 * 1024,
+    };
+
+    let persistent = LocalStorageBackend::new(config.clone());
+    persistent.init().unwrap();
+    persistent.write_object("keep", b"durable").unwrap();
+    let record_path = persistent.key_path("keep");
+    let record_bytes = std::fs::read(&record_path).unwrap();
+    drop(persistent);
+
+    let ephemeral = LocalStorageBackend::new_ephemeral(config);
+    let error = ephemeral.init().unwrap_err();
+    assert!(error.to_string().contains("foreign format marker"));
+    assert_eq!(std::fs::read(record_path).unwrap(), record_bytes);
+}
+
+#[test]
+fn test_persistent_reopen_over_quota_fails_without_eviction() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "over_quota".to_string(),
+        enable_eviction: true,
+        quota_bytes: 1024,
+    };
+
+    let backend = LocalStorageBackend::new(config.clone());
+    backend.init().unwrap();
+    backend.write_object("keep", &[7_u8; 128]).unwrap();
+    let record_path = backend.key_path("keep");
+    let record_bytes = std::fs::read(&record_path).unwrap();
+    drop(backend);
+
+    config.quota_bytes = 1;
+    let too_small = LocalStorageBackend::new(config);
+    let error = too_small.init().unwrap_err();
+    assert!(error.to_string().contains("exceeding configured quota"));
+    assert_eq!(std::fs::read(record_path).unwrap(), record_bytes);
+}
+
+#[test]
+fn test_persistent_init_cleans_reserved_stale_temp_namespace() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "temp_recovery".to_string(),
+        enable_eviction: false,
+        quota_bytes: 1024,
+    };
+    let backend = LocalStorageBackend::new(config.clone());
+    backend.init().unwrap();
+    backend.write_object("keep", b"value").unwrap();
+    drop(backend);
+
+    let temp_dir = tmp.path().join("temp_recovery/.mooncake-tmp");
+    std::fs::create_dir(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("stale"), b"partial").unwrap();
+
+    let reopened = LocalStorageBackend::new(config);
+    reopened.init().unwrap();
+    assert!(!temp_dir.exists());
+    assert_eq!(reopened.read_object("keep").unwrap(), b"value");
+}
+
+#[test]
+fn test_half_initialized_temp_namespace_is_recovered_without_manual_cleanup() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "half_initialized".to_string(),
+        enable_eviction: false,
+        quota_bytes: 1024,
+    };
+    let data_dir = tmp.path().join("half_initialized");
+    let temp_dir = data_dir.join(".mooncake-tmp");
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("stale-marker-write"), b"partial").unwrap();
+
+    let backend = LocalStorageBackend::new(config);
+    backend.init().unwrap();
+    assert!(!temp_dir.exists());
+    assert!(data_dir.join(".mooncake-storage-format").exists());
+}
+
+#[test]
+fn test_second_backend_for_same_directory_is_rejected_until_owner_drops() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "exclusive".to_string(),
+        enable_eviction: false,
+        quota_bytes: 1024,
+    };
+    let first = LocalStorageBackend::new(config.clone());
+    first.init().unwrap();
+
+    let second = LocalStorageBackend::new(config.clone());
+    let error = second.init().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("already open by another backend")
+    );
+
+    drop(first);
+    second.init().unwrap();
+}
+
+#[test]
+fn test_failed_ephemeral_lock_contender_does_not_clean_owner_data_on_drop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "ephemeral-lock".to_string(),
+        enable_eviction: false,
+        quota_bytes: 1024,
+    };
+    let owner = LocalStorageBackend::new_ephemeral(config.clone());
+    owner.init().unwrap();
+    owner.write_object("keep", b"value").unwrap();
+
+    let contender = LocalStorageBackend::new_ephemeral(config);
+    assert!(contender.init().is_err());
+    drop(contender);
+
+    assert_eq!(owner.read_object("keep").unwrap(), b"value");
+}
+
+#[test]
+fn test_unsafe_fsdir_is_rejected_before_touching_parent() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("root");
+    let backend = LocalStorageBackend::new(LocalStorageConfig {
+        root_dir: root.clone(),
+        fsdir: "..".to_string(),
+        enable_eviction: false,
+        quota_bytes: 1024,
+    });
+    let error = backend.init().unwrap_err();
+    assert!(error.to_string().contains("one normal path component"));
+    assert!(!root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn test_data_directory_symlink_is_rejected_without_touching_target() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("root");
+    let target = tmp.path().join("foreign-target");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&target).unwrap();
+    let sentinel = target.join("sentinel");
+    std::fs::write(&sentinel, b"keep").unwrap();
+    symlink(&target, root.join("linked")).unwrap();
+
+    let backend = LocalStorageBackend::new(LocalStorageConfig {
+        root_dir: root,
+        fsdir: "linked".to_string(),
+        enable_eviction: false,
+        quota_bytes: 1024,
+    });
+    let error = backend.init().unwrap_err();
+    assert!(error.to_string().contains("must not be a symbolic link"));
+    assert_eq!(std::fs::read(sentinel).unwrap(), b"keep");
+}
+
+#[test]
+fn test_nonempty_unowned_storage_is_rejected_without_deletion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "foreign_data".to_string(),
+        enable_eviction: true,
+        quota_bytes: 1024 * 1024,
+    };
+    let data_dir = tmp.path().join("foreign_data");
+    let foreign = data_dir.join("aa").join("bb").join("foreign-record");
+    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+    std::fs::write(&foreign, b"foreign").unwrap();
+
+    let backend = LocalStorageBackend::new(config);
+    let error = backend.init().unwrap_err();
+    assert!(error.to_string().contains("non-empty unowned storage path"));
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
+}
+
+#[test]
+fn test_foreign_format_marker_is_rejected_without_deletion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = LocalStorageConfig {
+        root_dir: tmp.path().to_path_buf(),
+        fsdir: "foreign_marker".to_string(),
+        enable_eviction: true,
+        quota_bytes: 1024 * 1024,
+    };
+    let data_dir = tmp.path().join("foreign_marker");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let marker = data_dir.join(".mooncake-storage-format");
+    let foreign = data_dir.join("foreign-record");
+    std::fs::write(
+        &marker,
+        b"backend=file-per-key\nformat=cpp-struct-pb\nversion=1\n",
+    )
+    .unwrap();
+    std::fs::write(&foreign, b"foreign").unwrap();
+
+    let backend = LocalStorageBackend::new(config);
+    let error = backend.init().unwrap_err();
+    assert!(error.to_string().contains("foreign format marker"));
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        b"backend=file-per-key\nformat=cpp-struct-pb\nversion=1\n"
+    );
+    assert_eq!(std::fs::read(&foreign).unwrap(), b"foreign");
 }
 
 // ------------------------------------------------------------------
@@ -76,6 +318,10 @@ fn test_key_path_is_deterministic() {
     let p1 = backend.key_path("hello");
     let p2 = backend.key_path("hello");
     assert_eq!(p1, p2);
+    assert_eq!(
+        p1.file_name().unwrap().to_str().unwrap(),
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
 }
 
 #[test]
@@ -83,33 +329,29 @@ fn test_key_path_uses_hash_dirs() {
     let backend = test_backend();
     let path = backend.key_path("my_key");
     let path_str = path.to_string_lossy();
-    // Should contain <fsdir>/<dir1>/<dir2>/sanitized_key
+    // Should contain <fsdir>/<digest[0..2]>/<digest[2..4]>/<digest>
     assert!(path_str.contains("test_data/"), "missing fsdir: {path_str}");
-    // dir1 and dir2 are single chars 'a'-'p'
     let parts: Vec<&str> = path_str.split('/').collect();
-    // Find the test_data segment and verify dir1/dir2 after it
     let idx = parts.iter().position(|p| *p == "test_data").unwrap();
     let dir1 = parts[idx + 1];
     let dir2 = parts[idx + 2];
     let filename = parts[idx + 3];
-    assert_eq!(dir1.len(), 1);
-    assert_eq!(dir2.len(), 1);
-    assert_eq!(filename, "my_key");
+    assert_eq!(dir1.len(), 2);
+    assert_eq!(dir2.len(), 2);
+    assert_eq!(filename.len(), 64);
+    assert!(filename.chars().all(|ch| ch.is_ascii_hexdigit()));
+    assert_eq!(&filename[0..2], dir1);
+    assert_eq!(&filename[2..4], dir2);
 }
 
 #[test]
-fn test_key_path_sanitizes_slashes() {
+fn test_key_path_digest_does_not_expose_slashes() {
     let backend = test_backend();
     let path = backend.key_path("prefix/suffix");
-    let path_str = path.to_string_lossy();
-    assert!(
-        path_str.contains("prefix_suffix"),
-        "expected prefix_suffix in: {path_str}"
-    );
-    assert!(
-        !path_str.contains("prefix/suffix"),
-        "slash should be replaced: {path_str}"
-    );
+    let filename = path.file_name().unwrap().to_str().unwrap();
+    assert_eq!(filename.len(), 64);
+    assert!(!filename.contains('/'));
+    assert!(!path.to_string_lossy().contains("prefix/suffix"));
 }
 
 #[test]
@@ -247,6 +489,7 @@ fn test_remove_by_regex() {
     assert!(!backend.exists("prefix_1"));
     assert!(!backend.exists("prefix_2"));
     assert!(backend.exists("other"));
+    assert!(backend.space_usage().0 > 0);
 }
 
 #[test]
@@ -264,7 +507,7 @@ fn test_remove_by_regex_no_match() {
 
 #[test]
 fn test_eviction_fifo_order() {
-    let quota = 100u64;
+    let quota = 110u64;
     let (backend, _tmp) = eviction_backend(quota);
 
     // Write 3 objects of 40 bytes each. Total 120 > quota 100.
@@ -295,7 +538,7 @@ fn test_no_eviction_when_under_quota() {
 
 #[test]
 fn test_eviction_returns_evicted_keys() {
-    let quota = 50u64;
+    let quota = 60u64;
     let (backend, _tmp) = eviction_backend(quota);
 
     backend.write_object("large", &vec![0u8; 40]).unwrap();

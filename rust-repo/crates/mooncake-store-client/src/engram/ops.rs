@@ -80,20 +80,8 @@ impl<C: EngramClient> EngramStore<C> {
             }
         }
 
-        // 注册所有 buffer 到 RDMA (register all buffers for RDMA transfer)
-        for (index, buffer) in embedding_buffers.iter().enumerate() {
-            if let Err(err) = self.store.register_buffer(buffer, &self.buffer_location) {
-                // 回滚已注册的 buffer (rollback already-registered buffers)
-                for registered in &embedding_buffers[..index] {
-                    let _ = self.store.unregister_buffer(registered);
-                }
-                return Err(StoreError::Internal(format!(
-                    "failed to register embedding buffer {index}: {err}"
-                )));
-            }
-        }
-
-        // 批量写入 (batch write)
+        // Safe slice-based batch write. The Store owns any staging and native
+        // registration required by the transfer path.
         let put_results = self
             .store
             .batch_put_from(
@@ -101,25 +89,14 @@ impl<C: EngramClient> EngramStore<C> {
                 embedding_buffers,
                 Some(ReplicateConfig::default()),
             )
-            .await;
-        let unregister_errors = embedding_buffers
-            .iter()
-            .filter_map(|buf| self.store.unregister_buffer(buf).err())
-            .collect::<Vec<_>>();
-
-        let put_results = put_results?;
+            .await?;
         let put_succeeded = put_results.len() == self.embed_keys.len()
             && put_results.iter().all(|result| *result == 0);
 
         // 失败时回滚 (rollback on failure)
-        if !put_succeeded || !unregister_errors.is_empty() {
+        if !put_succeeded {
             for key in &self.embed_keys {
                 let _ = self.store.remove(key).await;
-            }
-            if let Some(err) = unregister_errors.into_iter().next() {
-                return Err(StoreError::Internal(format!(
-                    "populate rolled back because buffer cleanup failed: {err}"
-                )));
             }
             return Err(StoreError::Internal(format!(
                 "populate failed with statuses: {:?}",

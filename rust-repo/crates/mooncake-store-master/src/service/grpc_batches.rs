@@ -52,6 +52,52 @@ impl From<BatchStatus> for i32 {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{BatchStatus, MasterServiceImpl};
+    use tonic::{Code, Status};
+
+    #[test]
+    fn batch_status_keeps_business_errors_per_item() {
+        assert_eq!(
+            MasterServiceImpl::batch_status_from_status(Status::not_found("missing")).unwrap(),
+            BatchStatus::KeyNotFound
+        );
+        assert_eq!(
+            MasterServiceImpl::batch_status_from_status(Status::already_exists("duplicate"))
+                .unwrap(),
+            BatchStatus::ObjectAlreadyExists
+        );
+        assert_eq!(
+            MasterServiceImpl::batch_status_from_status(Status::resource_exhausted("quota"))
+                .unwrap(),
+            BatchStatus::InvalidState
+        );
+        assert_eq!(
+            MasterServiceImpl::batch_status_from_status(Status::invalid_argument(
+                "invalid replica selector",
+            ))
+            .unwrap(),
+            BatchStatus::InvalidState
+        );
+    }
+
+    #[test]
+    fn batch_status_propagates_durability_and_infrastructure_errors() {
+        for status in [
+            Status::unavailable("oplog flush failed"),
+            Status::internal("invariant failed"),
+            Status::data_loss("corrupt state"),
+        ] {
+            let error = MasterServiceImpl::batch_status_from_status(status).unwrap_err();
+            assert!(matches!(
+                error.code(),
+                Code::Unavailable | Code::Internal | Code::DataLoss
+            ));
+        }
+    }
+}
+
 fn record_batch_cache_hit_metrics(replica_type: ReplicaType, object_size: u64) {
     match replica_type {
         ReplicaType::Memory => {
@@ -82,7 +128,7 @@ impl MasterServiceImpl {
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
         )?;
-        let results = self.batch_replica_lists_for_keys(&tenant_id, &req.keys);
+        let results = self.batch_replica_lists_for_keys(&tenant_id, &req.keys)?;
         Ok(Response::new(proto::BatchGetReplicaListResponse {
             results,
         }))
@@ -92,7 +138,7 @@ impl MasterServiceImpl {
         &self,
         tenant_id: &TenantId,
         keys: &[String],
-    ) -> Vec<proto::BatchGetReplicaListResult> {
+    ) -> Result<Vec<proto::BatchGetReplicaListResult>, Status> {
         struct BatchGetHit {
             scoped_key: String,
             first_replica_type: ReplicaType,
@@ -106,12 +152,12 @@ impl MasterServiceImpl {
 
         for key in keys {
             let scoped_key = tenant_id.make_scoped_key(key);
-            let result = match self.state.objects.get(&scoped_key) {
+            let result = match self.object_snapshot_and_grant_lease(&scoped_key, true)? {
                 Some(entry) => {
                     let complete = entry
                         .replicas
                         .iter()
-                        .filter(|replica| replica.status == ReplicaStatus::Complete)
+                        .filter(|replica| replica_is_routable(&self.state, replica))
                         .collect::<Vec<_>>();
                     if complete.is_empty() {
                         proto::BatchGetReplicaListResult {
@@ -121,15 +167,15 @@ impl MasterServiceImpl {
                         }
                     } else {
                         let first_replica_type = complete[0].replica_type;
-                        let promotion_eligible = !entry.replicas.iter().any(|replica| {
-                            replica.replica_type == ReplicaType::Memory
-                                && replica.status == ReplicaStatus::Complete
-                        }) && entry.replicas.iter().any(|replica| {
-                            replica.replica_type == ReplicaType::LocalDisk
-                                && replica.status == ReplicaStatus::Complete
-                        });
+                        let promotion_eligible = !complete
+                            .iter()
+                            .any(|replica| replica.replica_type == ReplicaType::Memory)
+                            && complete
+                                .iter()
+                                .any(|replica| replica.replica_type == ReplicaType::LocalDisk);
+                        let replicas = complete.into_iter().map(replica_to_proto).collect();
                         hits.push(BatchGetHit {
-                            scoped_key,
+                            scoped_key: scoped_key.clone(),
                             first_replica_type,
                             object_size: entry.size,
                             promotion_eligible,
@@ -137,11 +183,18 @@ impl MasterServiceImpl {
                         proto::BatchGetReplicaListResult {
                             status: BatchStatus::Success.into(),
                             response: Some(proto::GetReplicaListResponse {
-                                replicas: complete.into_iter().map(replica_to_proto).collect(),
+                                replicas,
                                 lease_ttl_ms,
                             }),
                             error_message: String::new(),
                         }
+                    }
+                }
+                None if self.state.objects.contains_key(&scoped_key) => {
+                    proto::BatchGetReplicaListResult {
+                        status: BatchStatus::ReplicaNotReady.into(),
+                        response: None,
+                        error_message: "replica is not ready".to_string(),
                     }
                 }
                 None => proto::BatchGetReplicaListResult {
@@ -153,25 +206,6 @@ impl MasterServiceImpl {
             results.push(result);
         }
 
-        let mut group_leases = Vec::new();
-        for hit in &hits {
-            if let Some(mut entry) = self.state.objects.get_mut(&hit.scoped_key) {
-                entry.last_access = SystemTime::now();
-                entry.grant_lease(
-                    self.state.runtime_config.lease_ttl,
-                    self.state.runtime_config.soft_pin_ttl,
-                );
-                if !entry.group_id.is_empty() {
-                    group_leases.push((entry.tenant_id.clone(), entry.group_id.clone()));
-                }
-            }
-        }
-        group_leases.sort();
-        group_leases.dedup();
-        for (tenant_id, group_id) in group_leases {
-            self.grant_group_lease(&tenant_id, &group_id);
-        }
-
         for hit in hits {
             if hit.promotion_eligible {
                 let _ = try_push_promotion_queue(&self.state, &hit.scoped_key, true);
@@ -180,7 +214,7 @@ impl MasterServiceImpl {
             record_batch_cache_hit_metrics(hit.first_replica_type, hit.object_size);
         }
 
-        results
+        Ok(results)
     }
 
     // ---- BatchExistKey ----
@@ -194,7 +228,7 @@ impl MasterServiceImpl {
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
         )?;
-        let results = self.batch_completed_objects_exist_and_grant_lease(&tenant_id, &req.keys);
+        let results = self.batch_completed_objects_exist_and_grant_lease(&tenant_id, &req.keys)?;
         Ok(Response::new(proto::BatchExistKeyResponse { results }))
     }
 
@@ -202,49 +236,17 @@ impl MasterServiceImpl {
         &self,
         tenant_id: &TenantId,
         keys: &[String],
-    ) -> Vec<bool> {
+    ) -> Result<Vec<bool>, Status> {
         let mut results = Vec::with_capacity(keys.len());
-        let mut lease_keys = Vec::new();
-
         for key in keys {
             let scoped_key = tenant_id.make_scoped_key(key);
-            let exists = self
-                .state
-                .objects
-                .get(&scoped_key)
-                .map(|entry| {
-                    entry
-                        .replicas
-                        .iter()
-                        .any(|replica| replica.status == ReplicaStatus::Complete)
-                })
-                .unwrap_or(false);
-            if exists {
-                lease_keys.push(scoped_key);
-            }
-            results.push(exists);
+            results.push(
+                self.object_snapshot_and_grant_lease(&scoped_key, false)?
+                    .is_some(),
+            );
         }
 
-        let mut group_leases = Vec::new();
-        for scoped_key in lease_keys {
-            if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
-                entry.last_access = SystemTime::now();
-                entry.grant_lease(
-                    self.state.runtime_config.lease_ttl,
-                    self.state.runtime_config.soft_pin_ttl,
-                );
-                if !entry.group_id.is_empty() {
-                    group_leases.push((entry.tenant_id.clone(), entry.group_id.clone()));
-                }
-            }
-        }
-        group_leases.sort();
-        group_leases.dedup();
-        for (tenant_id, group_id) in group_leases {
-            self.grant_group_lease(&tenant_id, &group_id);
-        }
-
-        results
+        Ok(results)
     }
 
     // ---- BatchQueryIp ----
@@ -286,10 +288,12 @@ impl MasterServiceImpl {
         let mut cleared = vec![];
         for raw_key in &req.object_keys {
             let key = tenant_id.make_scoped_key(raw_key);
+            let _mutation_guard = self.state.key_mutations.lock(&key);
             let mut remove_entire_object = false;
             let mut removed_replicas = Vec::new();
             let mut had_match = false;
             if let Some(mut object) = self.state.objects.get_mut(&key) {
+                let mut projected = clone_object_for_mutation(&object);
                 if object_owner_client_id(&self.state, &object) != Some(client_id) {
                     continue;
                 }
@@ -297,39 +301,76 @@ impl MasterServiceImpl {
                 if !is_lease_expired(&object) {
                     continue;
                 }
-                if object
-                    .replicas
-                    .iter()
-                    .any(|replica| replica.status != ReplicaStatus::Complete)
-                {
-                    continue;
-                }
                 if clear_all_segments {
+                    // Clearing the entire object is unsafe while any write is
+                    // incomplete. C++ applies this all-replica check only to
+                    // the clear-all form.
+                    if object
+                        .replicas
+                        .iter()
+                        .any(|replica| replica.status != ReplicaStatus::Complete)
+                    {
+                        continue;
+                    }
                     had_match = !object.replicas.is_empty();
                     removed_replicas = object.replicas.clone();
                     remove_entire_object = had_match;
                 } else {
                     let segment_name = req.segment_name.as_str();
-                    object.replicas.retain(|replica| {
-                        let matches = replica.segment_name == segment_name;
+                    projected.replicas.retain(|replica| {
+                        // Segment-scoped clear removes only completed matches
+                        // and may coexist with an unrelated in-flight replica.
+                        let matches = replica.segment_name == segment_name
+                            && replica.status == ReplicaStatus::Complete;
                         if matches {
                             had_match = true;
                             removed_replicas.push(replica.clone());
                         }
                         !matches
                     });
-                    remove_entire_object = object.replicas.is_empty() && had_match;
+                    remove_entire_object = projected.replicas.is_empty() && had_match;
+                }
+                if had_match && !remove_entire_object {
+                    let removed_memory_charge = requested_memory_quota_charge(
+                        projected.size,
+                        removed_replicas
+                            .iter()
+                            .filter(|replica| replica.replica_type == ReplicaType::Memory)
+                            .count(),
+                    );
+                    if let Err(error) = release_committed_memory_quota_charge(
+                        &self.state,
+                        &mut projected,
+                        removed_memory_charge,
+                    ) {
+                        tracing::warn!(
+                            key,
+                            ?error,
+                            removed_memory_charge,
+                            "failed to release tenant quota for cleared Memory replicas"
+                        );
+                        return Err(
+                            self.tenant_quota_mutation_status("batch_replica_clear_quota", error)
+                        );
+                    }
+                    sync_cache_total_accounting(&mut projected);
+                    *object = projected;
+                }
+            }
+            if had_match && remove_entire_object {
+                if let Some((_, object)) = self.state.objects.remove(&key) {
+                    self.account_removed_object_quota(&object)?;
                 }
             }
             if had_match {
+                // Replica removal is authoritative metadata. Persist the exact
+                // remaining image (or removal marker) before releasing buffers
+                // or publishing success, so promotion cannot resurrect the
+                // cleared generation.
+                self.persist_object_image_or_remove(&key, "batch_replica_clear")?;
                 clear_offloading_task(&self.state, &key);
                 clear_promotion_task(&self.state, &key);
-                release_replicas(&self.state, &removed_replicas);
-                if remove_entire_object {
-                    if let Some((_, object)) = self.state.objects.remove(&key) {
-                        account_removed_object_quota(&self.state, &object);
-                    }
-                }
+                release_replicas(&self.state, &removed_replicas)?;
                 cleared.push(raw_key.clone());
             }
         }
@@ -338,12 +379,19 @@ impl MasterServiceImpl {
         }))
     }
 
-    fn batch_status_from_status(status: &Status) -> BatchStatus {
+    fn batch_status_from_status(status: Status) -> Result<BatchStatus, Status> {
         match status.code() {
-            tonic::Code::NotFound => BatchStatus::KeyNotFound,
-            tonic::Code::PermissionDenied => BatchStatus::IllegalClient,
-            tonic::Code::FailedPrecondition => BatchStatus::InvalidState,
-            _ => BatchStatus::InvalidState,
+            tonic::Code::NotFound => Ok(BatchStatus::KeyNotFound),
+            tonic::Code::PermissionDenied => Ok(BatchStatus::IllegalClient),
+            tonic::Code::AlreadyExists => Ok(BatchStatus::ObjectAlreadyExists),
+            tonic::Code::InvalidArgument
+            | tonic::Code::FailedPrecondition
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Aborted => Ok(BatchStatus::InvalidState),
+            // Infrastructure, durability and invariant failures are RPC-level
+            // failures. Compressing them into a per-key business status would
+            // let a fenced Master appear to have completed the batch.
+            _ => Err(status),
         }
     }
 
@@ -365,25 +413,26 @@ impl MasterServiceImpl {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let statuses: Vec<i32> = req
-            .entries
-            .iter()
-            .zip(&tenant_ids)
-            .map(|(entry, tenant_id)| {
-                let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
-                    return BatchStatus::IllegalClient.into();
-                };
-                let scoped_key = tenant_id.make_scoped_key(&entry.key);
-                match self.apply_put_end_for_key(
-                    &scoped_key,
-                    client_id,
-                    replica_type_from_i32(entry.replica_type),
-                ) {
-                    Ok(()) => BatchStatus::Success.into(),
-                    Err(status) => Self::batch_status_from_status(&status).into(),
+        let mut statuses = Vec::with_capacity(req.entries.len());
+        for (entry, tenant_id) in req.entries.iter().zip(&tenant_ids) {
+            let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
+                statuses.push(BatchStatus::IllegalClient.into());
+                continue;
+            };
+            let target = match request_replica_type_from_i32(entry.replica_type) {
+                Ok(target) => target,
+                Err(status) => {
+                    statuses.push(Self::batch_status_from_status(status)?.into());
+                    continue;
                 }
-            })
-            .collect();
+            };
+            let scoped_key = tenant_id.make_scoped_key(&entry.key);
+            let status = match self.apply_put_end_for_key(&scoped_key, client_id, target) {
+                Ok(()) => BatchStatus::Success,
+                Err(status) => Self::batch_status_from_status(status)?,
+            };
+            statuses.push(status.into());
+        }
         Ok(Response::new(proto::BatchPutEndResponse { statuses }))
     }
 
@@ -400,58 +449,70 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let client_id = req.client_id.as_ref().map(uuid_from_proto);
-        let target = replica_type_from_i32(req.replica_type);
-        let statuses: Vec<i32> = req
-            .keys
-            .iter()
-            .map(|raw_key| {
-                let key = tenant_id.make_scoped_key(raw_key);
-                if self.state.replication_tasks.contains_key(&key) {
-                    return BatchStatus::HasReplicationTask.into();
+        let target = request_replica_type_from_i32(req.replica_type)?;
+        let mut statuses = Vec::with_capacity(req.keys.len());
+        for raw_key in &req.keys {
+            let key = tenant_id.make_scoped_key(raw_key);
+            let _mutation_guard = self.state.key_mutations.lock(&key);
+            if self.state.replication_tasks.contains_key(&key) {
+                statuses.push(BatchStatus::HasReplicationTask.into());
+                continue;
+            }
+            let Some(mut object) = self.state.objects.get_mut(&key) else {
+                statuses.push(BatchStatus::KeyNotFound.into());
+                continue;
+            };
+            if client_id.is_some_and(|cid| object.client_id != cid) {
+                statuses.push(BatchStatus::IllegalClient.into());
+                continue;
+            }
+            let has_matching = object
+                .replicas
+                .iter()
+                .any(|replica| Self::put_revoke_matches_target(replica, target));
+            let has_non_complete_matching = object.replicas.iter().any(|replica| {
+                Self::put_revoke_matches_target(replica, target)
+                    && replica.status != ReplicaStatus::Complete
+            });
+            if has_matching && !has_non_complete_matching {
+                statuses.push(BatchStatus::InvalidState.into());
+                continue;
+            }
+            let original_replicas = object.replicas.clone();
+            let mut removed = Vec::new();
+            object.replicas.retain(|replica| {
+                let matched = Self::put_revoke_matches_target(replica, target)
+                    && replica.status != ReplicaStatus::Complete;
+                if matched {
+                    removed.push(replica.clone());
                 }
-                match self.state.objects.get_mut(&key) {
-                    Some(mut object) => {
-                        if let Some(cid) = client_id {
-                            if object.client_id != cid {
-                                return BatchStatus::IllegalClient.into();
-                            }
-                        }
-                        let has_matching = object
-                            .replicas
-                            .iter()
-                            .any(|replica| Self::put_revoke_matches_target(replica, target));
-                        let has_non_complete_matching = object.replicas.iter().any(|replica| {
-                            Self::put_revoke_matches_target(replica, target)
-                                && replica.status != ReplicaStatus::Complete
-                        });
-                        if has_matching && !has_non_complete_matching {
-                            return BatchStatus::InvalidState.into();
-                        }
-                        let mut removed = Vec::new();
-                        object.replicas.retain(|replica| {
-                            let matched = Self::put_revoke_matches_target(replica, target)
-                                && replica.status != ReplicaStatus::Complete;
-                            if matched {
-                                removed.push(replica.clone());
-                            }
-                            !matched
-                        });
-                        let remove_object = object.replicas.is_empty();
-                        drop(object);
-                        release_object_replicas(&self.state, &key, &removed);
-                        if remove_object {
-                            if let Some((_, removed_object)) = self.state.objects.remove(&key) {
-                                account_removed_object_quota(&self.state, &removed_object);
-                            }
-                            self.state.processing_keys.remove(&key);
-                            self.oplog_manager.lock().record_put_revoke(&key);
-                        }
-                        BatchStatus::Success.into()
+                !matched
+            });
+            let remove_object = object.replicas.is_empty();
+            let quota_settled = if remove_object {
+                false
+            } else {
+                match self.settle_object_quota_if_ready(&mut object) {
+                    Ok(settled) => settled,
+                    Err(_) => {
+                        object.replicas = original_replicas;
+                        statuses.push(BatchStatus::InvalidState.into());
+                        continue;
                     }
-                    _ => BatchStatus::KeyNotFound.into(),
                 }
-            })
-            .collect();
+            };
+            drop(object);
+            if remove_object {
+                if let Some((_, removed_object)) = self.state.objects.remove(&key) {
+                    self.account_removed_object_quota(&removed_object)?;
+                }
+                self.state.processing_keys.remove(&key);
+            } else if quota_settled {
+                self.state.processing_keys.remove(&key);
+            }
+            self.persist_detached_allocator_replicas(&key, removed, "batch_put_revoke")?;
+            statuses.push(BatchStatus::Success.into());
+        }
         Ok(Response::new(proto::BatchPutRevokeResponse { statuses }))
     }
 
@@ -466,40 +527,42 @@ impl MasterServiceImpl {
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
         )?;
-        let statuses: Vec<i32> = req
-            .keys
-            .iter()
-            .map(|raw_key| {
-                let key = tenant_id.make_scoped_key(raw_key);
-                if self.state.replication_tasks.contains_key(&key) {
-                    return BatchStatus::HasReplicationTask.into();
-                }
-                let Some(object) = self.state.objects.get(&key) else {
-                    return BatchStatus::KeyNotFound.into();
-                };
-                if !req.force && !is_lease_expired(&object) {
-                    return BatchStatus::ObjectHasLease.into();
-                }
-                if !object
-                    .replicas
-                    .iter()
-                    .all(|r| r.status == ReplicaStatus::Complete)
-                {
-                    return BatchStatus::ReplicaNotReady.into();
-                }
-                drop(object);
-                if let Some((_, object)) = self.state.objects.remove(&key) {
-                    clear_offloading_task(&self.state, &key);
-                    clear_promotion_task(&self.state, &key);
-                    account_removed_object_quota(&self.state, &object);
-                    release_replicas(&self.state, &object.replicas);
-                    self.oplog_manager.lock().record_remove(&key);
-                    BatchStatus::Success.into()
-                } else {
-                    BatchStatus::KeyNotFound.into()
-                }
-            })
-            .collect();
+        let mut statuses = Vec::with_capacity(req.keys.len());
+        for raw_key in &req.keys {
+            let key = tenant_id.make_scoped_key(raw_key);
+            let _mutation_guard = self.state.key_mutations.lock(&key);
+            if self.state.replication_tasks.contains_key(&key) {
+                statuses.push(BatchStatus::HasReplicationTask.into());
+                continue;
+            }
+            let Some(object) = self.state.objects.get(&key) else {
+                statuses.push(BatchStatus::KeyNotFound.into());
+                continue;
+            };
+            if !req.force && !is_lease_expired(&object) {
+                statuses.push(BatchStatus::ObjectHasLease.into());
+                continue;
+            }
+            if !object
+                .replicas
+                .iter()
+                .all(|r| r.status == ReplicaStatus::Complete)
+            {
+                statuses.push(BatchStatus::ReplicaNotReady.into());
+                continue;
+            }
+            drop(object);
+            let Some((_, object)) = self.state.objects.remove(&key) else {
+                statuses.push(BatchStatus::KeyNotFound.into());
+                continue;
+            };
+            if let Err(status) = self.cleanup_removed_object(&key, &object) {
+                self.state.objects.insert(key, object);
+                return Err(status);
+            }
+            self.publish_kv_removed(&key, &object);
+            statuses.push(BatchStatus::Success.into());
+        }
         metrics::BATCH_REMOVE_REQUESTS.inc_by(req.keys.len() as u64);
         Ok(Response::new(proto::BatchRemoveResponse { statuses }))
     }
@@ -557,7 +620,7 @@ impl MasterServiceImpl {
                     });
                 }
                 Err(status) => {
-                    let status = Self::batch_status_from_status(&status).into();
+                    let status = Self::batch_status_from_status(status)?.into();
                     statuses.push(status);
                     results.push(proto::BatchStartEntryResult {
                         key: entry.key.clone(),
@@ -593,25 +656,26 @@ impl MasterServiceImpl {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let statuses = req
-            .entries
-            .iter()
-            .zip(&tenant_ids)
-            .map(|(entry, tenant_id)| {
-                let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
-                    return BatchStatus::IllegalClient.into();
-                };
-                let scoped_key = tenant_id.make_scoped_key(&entry.key);
-                match self.apply_put_end_for_key(
-                    &scoped_key,
-                    client_id,
-                    replica_type_from_i32(entry.replica_type),
-                ) {
-                    Ok(()) => BatchStatus::Success.into(),
-                    Err(status) => Self::batch_status_from_status(&status).into(),
+        let mut statuses = Vec::with_capacity(req.entries.len());
+        for (entry, tenant_id) in req.entries.iter().zip(&tenant_ids) {
+            let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
+                statuses.push(BatchStatus::IllegalClient.into());
+                continue;
+            };
+            let target = match request_replica_type_from_i32(entry.replica_type) {
+                Ok(target) => target,
+                Err(status) => {
+                    statuses.push(Self::batch_status_from_status(status)?.into());
+                    continue;
                 }
-            })
-            .collect();
+            };
+            let scoped_key = tenant_id.make_scoped_key(&entry.key);
+            let status = match self.apply_put_end_for_key(&scoped_key, client_id, target) {
+                Ok(()) => BatchStatus::Success,
+                Err(status) => Self::batch_status_from_status(status)?,
+            };
+            statuses.push(status.into());
+        }
         Ok(Response::new(proto::BatchUpsertEndResponse { statuses }))
     }
 
@@ -632,58 +696,103 @@ impl MasterServiceImpl {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let statuses = req
-            .entries
-            .iter()
-            .zip(&tenant_ids)
-            .map(|(entry, tenant_id)| {
-                let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
-                    return BatchStatus::IllegalClient.into();
-                };
-                let scoped_key = tenant_id.make_scoped_key(&entry.key);
-                if self.state.replication_tasks.contains_key(&scoped_key) {
-                    return BatchStatus::HasReplicationTask.into();
+        let mut statuses = Vec::with_capacity(req.entries.len());
+        for (entry, tenant_id) in req.entries.iter().zip(&tenant_ids) {
+            let Some(client_id) = entry.client_id.as_ref().map(uuid_from_proto) else {
+                statuses.push(BatchStatus::IllegalClient.into());
+                continue;
+            };
+            let target = match request_replica_type_from_i32(entry.replica_type) {
+                Ok(target) => target,
+                Err(status) => {
+                    statuses.push(Self::batch_status_from_status(status)?.into());
+                    continue;
                 }
-                let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
-                    return BatchStatus::KeyNotFound.into();
-                };
-                if object.client_id != client_id {
-                    return BatchStatus::IllegalClient.into();
+            };
+            let scoped_key = tenant_id.make_scoped_key(&entry.key);
+            let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
+            if self.state.replication_tasks.contains_key(&scoped_key) {
+                statuses.push(BatchStatus::HasReplicationTask.into());
+                continue;
+            }
+            let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
+                statuses.push(BatchStatus::KeyNotFound.into());
+                continue;
+            };
+            if object.client_id != client_id {
+                statuses.push(BatchStatus::IllegalClient.into());
+                continue;
+            }
+            let has_matching = object
+                .replicas
+                .iter()
+                .any(|replica| Self::put_revoke_matches_target(replica, target));
+            let has_non_complete_matching = object.replicas.iter().any(|replica| {
+                Self::put_revoke_matches_target(replica, target)
+                    && replica.status != ReplicaStatus::Complete
+            });
+            if has_matching && !has_non_complete_matching {
+                statuses.push(BatchStatus::InvalidState.into());
+                continue;
+            }
+            let original_replicas = object.replicas.clone();
+            let mut removed = Vec::new();
+            object.replicas.retain(|replica| {
+                let matched = Self::put_revoke_matches_target(replica, target)
+                    && replica.status != ReplicaStatus::Complete;
+                if matched {
+                    removed.push(replica.clone());
                 }
-                let target = replica_type_from_i32(entry.replica_type);
-                let has_matching = object
-                    .replicas
-                    .iter()
-                    .any(|replica| Self::put_revoke_matches_target(replica, target));
-                let has_non_complete_matching = object.replicas.iter().any(|replica| {
-                    Self::put_revoke_matches_target(replica, target)
-                        && replica.status != ReplicaStatus::Complete
-                });
-                if has_matching && !has_non_complete_matching {
-                    return BatchStatus::InvalidState.into();
-                }
-                let mut removed = Vec::new();
-                object.replicas.retain(|replica| {
-                    let matched = Self::put_revoke_matches_target(replica, target)
-                        && replica.status != ReplicaStatus::Complete;
-                    if matched {
-                        removed.push(replica.clone());
+                !matched
+            });
+            let has_completed_write_target = object.replicas.iter().any(|replica| {
+                matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd
+                ) && replica.status == ReplicaStatus::Complete
+            });
+            if !has_completed_write_target {
+                // A failed in-place upsert must make the previous LocalDisk
+                // value readable again. On partial success it stays
+                // Allocating until the new value is offloaded.
+                for replica in &mut object.replicas {
+                    if replica.replica_type == ReplicaType::LocalDisk
+                        && replica.status == ReplicaStatus::Allocating
+                    {
+                        replica.status = ReplicaStatus::Complete;
                     }
-                    !matched
-                });
-                let remove_object = object.replicas.is_empty();
-                drop(object);
-                release_object_replicas(&self.state, &scoped_key, &removed);
-                if remove_object {
-                    if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
-                        account_removed_object_quota(&self.state, &object);
-                    }
-                    self.state.processing_keys.remove(&scoped_key);
-                    self.oplog_manager.lock().record_put_revoke(&scoped_key);
                 }
-                BatchStatus::Success.into()
-            })
-            .collect();
+            }
+            let remove_object = object.replicas.is_empty();
+            let quota_settled = if remove_object {
+                false
+            } else {
+                match self.settle_object_quota_if_ready(&mut object) {
+                    Ok(settled) => settled,
+                    Err(_) => {
+                        object.replicas = original_replicas;
+                        statuses.push(BatchStatus::InvalidState.into());
+                        continue;
+                    }
+                }
+            };
+            // A global-DISK descriptor is also a Put/Upsert write target.
+            // Reuse the durable generation predicate so removing the final
+            // Memory/NoF target cannot expose an object while DISK is still
+            // Allocating.
+            let mutation_finished = !object_has_inflight_write(&object);
+            drop(object);
+            if remove_object {
+                if let Some((_, object)) = self.state.objects.remove(&scoped_key) {
+                    self.account_removed_object_quota(&object)?;
+                }
+                self.state.processing_keys.remove(&scoped_key);
+            } else if mutation_finished || quota_settled {
+                self.state.processing_keys.remove(&scoped_key);
+            }
+            self.persist_detached_allocator_replicas(&scoped_key, removed, "batch_upsert_revoke")?;
+            statuses.push(BatchStatus::Success.into());
+        }
         Ok(Response::new(proto::BatchUpsertRevokeResponse { statuses }))
     }
 }

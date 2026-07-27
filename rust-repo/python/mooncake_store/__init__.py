@@ -4,15 +4,24 @@ from importlib import import_module
 
 _RUST_EXPORTS = {
     "MooncakeClient",
+    "ParallelAxis",
+    "ReadTarget",
     "ReplicateConfig",
     "StoreError",
     "EngramStore",
     "EngramStoreConfig",
     "P2pStore",
     "BufferPool",
+    "BufferLease",
     "RegisteredBufferPool",
+    "RegisteredBufferLease",
     "S3Config",
+    "TensorParallelism",
+    "WriterPartition",
     "RemoteSourceConfig",
+    "_serialize_tensor",
+    "_deserialize_tensor",
+    "_tensor_metadata_size",
 }
 
 _STRUCTURED_EXPORTS = {

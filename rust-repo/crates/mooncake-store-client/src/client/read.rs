@@ -5,8 +5,8 @@
 // C++ equivalent: real_client.cpp Get() / BatchGet() / GetInto()
 // ============================================================================
 
-use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
+use mooncake_store_core::{ReplicaDescriptor, ReplicaType, StoreError};
 use std::borrow::Cow;
 use std::ffi::c_void;
 
@@ -21,6 +21,52 @@ pub(super) fn scoped_cache_key<'a>(tenant_id: &str, key: &'a str) -> Cow<'a, str
 }
 
 impl MooncakeClient {
+    fn hot_cache_should_admit(&self, cache_key: &str) -> bool {
+        self.hot_cache_admission
+            .as_ref()
+            .is_none_or(|admission| admission.should_admit(cache_key))
+    }
+
+    pub(crate) fn cache_value_if_admitted(&self, cache_key: &str, data: &[u8]) {
+        if self.hot_cache_should_admit(cache_key)
+            && let Some(cache) = &self.hot_cache
+        {
+            cache.put(cache_key, data);
+        }
+    }
+
+    pub(crate) fn cache_replica_value_if_admitted(
+        &self,
+        cache_key: &str,
+        data: &[u8],
+        replica: &ReplicaDescriptor,
+    ) {
+        if replica.replica_type != ReplicaType::Memory {
+            return;
+        }
+        let admitted = self.hot_cache_should_admit(cache_key);
+        // Match C++ ProcessSlicesAsync: local memory reads still contribute to
+        // frequency, but are not copied into a non-shared local hot cache.
+        if admitted
+            && !self.is_local_replica(replica)
+            && let Some(cache) = &self.hot_cache
+        {
+            cache.put(cache_key, data);
+        }
+    }
+
+    pub(crate) fn invalidate_hot_cache_key_for_tenant(&self, key: &str, tenant_id: &str) {
+        if let Some(ref cache) = self.hot_cache {
+            cache.remove(scoped_cache_key(tenant_id, key).as_ref());
+        }
+    }
+
+    pub(crate) fn invalidate_hot_cache_keys_for_tenant(&self, keys: &[String], tenant_id: &str) {
+        for key in keys {
+            self.invalidate_hot_cache_key_for_tenant(key, tenant_id);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Get — three-level cache lookup
     // Get —— 三级缓存查找
@@ -68,8 +114,15 @@ impl MooncakeClient {
     /// - `Err(KeyNotFound)` — key not in store and no remote source available.
     ///   key 不在存储中且没有可用的远程数据源。
     pub async fn get(&mut self, key: &str) -> StoreResult<Vec<u8>> {
+        let started_at = std::time::Instant::now();
         let tenant_id = self.tenant_id.clone();
-        self.get_for_tenant(key, &tenant_id).await
+        let result = self.get_for_tenant(key, &tenant_id).await;
+        if let Ok(data) = &result
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_get(data.len() as u64, started_at.elapsed());
+        }
+        result
     }
 
     pub(crate) async fn get_for_tenant(
@@ -92,7 +145,14 @@ impl MooncakeClient {
         // Level 1: fetch from memory store (gRPC → RDMA)
         // 第 1 级：从内存存储获取（gRPC → RDMA）
         tracing::info!(target: "te_debug", %key, "get: fetching replicas from master");
-        let replicas = self.fetch_replicas_for_tenant(key, tenant_id).await?;
+        let replicas = match self.fetch_replicas_for_tenant(key, tenant_id).await {
+            Ok(replicas) => replicas,
+            // A metadata miss is the signal to try the configured remote
+            // source. Transport/service failures must still be returned
+            // directly rather than being hidden behind a remote fetch.
+            Err(StoreError::KeyNotFound(_)) => Vec::new(),
+            Err(error) => return Err(error),
+        };
         tracing::info!(target: "te_debug", %key, replica_count = replicas.len(), "get: replicas received");
 
         let replica = self.select_best_replica(&replicas);
@@ -106,10 +166,7 @@ impl MooncakeClient {
                 );
                 let data = self.read_from_replica_for_tenant(key, tenant_id, r).await?;
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: read_from_replica success");
-                // Store in hot cache for future hits / 存入 hot_cache 以供将来命中
-                if let Some(ref cache) = self.hot_cache {
-                    cache.put(cache_key.as_ref(), &data);
-                }
+                self.cache_replica_value_if_admitted(cache_key.as_ref(), &data, r);
                 Ok(data)
             }
             None => {
@@ -121,9 +178,7 @@ impl MooncakeClient {
                         match handler.handle_miss(key).await {
                             Ok(data) => {
                                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: remote source success");
-                                if let Some(ref cache) = self.hot_cache {
-                                    cache.put(cache_key.as_ref(), &data);
-                                }
+                                self.cache_value_if_admitted(cache_key.as_ref(), &data);
                                 Ok(data)
                             }
                             Err(remote_err) => {
@@ -150,24 +205,35 @@ impl MooncakeClient {
     /// Zero-copy read: transfer data for `key` directly into a caller-provided
     /// buffer via RDMA/TCP, bypassing the internal `local_buffer`.
     ///
-    /// The buffer must be pre-registered with the TE via [`register_buffer`].
+    /// The buffer must be pre-registered with the TE via
+    /// [`register_owned_buffer`](Self::register_owned_buffer).
     ///
     /// 零拷贝读取：通过 RDMA/TCP 将 key 的数据直接传输到调用者提供的缓冲区，
-    /// 绕过内部 local_buffer。缓冲区必须预先通过 register_buffer 向 TE 注册。
+    /// 绕过内部 local_buffer。缓冲区必须预先通过 register_owned_buffer 向 TE 注册。
     ///
-    /// # Safety (安全性)
-    ///
-    /// - `buffer` must be valid for writes of at least `size` bytes.
-    ///   buffer 必须可写入至少 size 字节。
-    /// - The buffer must remain alive until the transfer completes.
-    ///   传输完成前缓冲区必须保持存活。
-    pub async unsafe fn get_into(
+    /// `buffer` is treated only as a lookup address. The method rejects it
+    /// unless the full requested range resolves to a live owner-bearing,
+    /// writable registration; the resulting region lease remains alive until
+    /// native transfer quiescence.
+    pub async fn get_into(
         &mut self,
         key: &str,
         buffer: *mut c_void,
         size: usize,
     ) -> StoreResult<usize> {
-        self.get_into_registered(key, buffer, size).await
+        let started_at = std::time::Instant::now();
+        let result = self.get_into_registered(key, buffer, size).await;
+        if let Ok(bytes) = &result
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Read,
+                "get_into",
+                *bytes as u64,
+                started_at.elapsed(),
+            );
+        }
+        result
     }
 
     pub(crate) async fn get_into_registered(
@@ -188,8 +254,9 @@ impl MooncakeClient {
             )));
         }
         let buffer = self.resolve_writable_buffer_region(buffer, object_size)?;
-        if replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
-            && !self.local_endpoints.read().contains(&replica.segment_name)
+        if replica.replica_type == mooncake_store_core::ReplicaType::Disk
+            || (replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
+                && !self.local_endpoints.read().contains(&replica.segment_name))
         {
             let data = self
                 .read_from_replica_for_tenant(key, &tenant_id, replica)
@@ -198,8 +265,7 @@ impl MooncakeClient {
                 .copy_from_host(buffer.foreign_region(), &data)?;
             return Ok(data.len());
         }
-        // SAFETY: the caller guarantees the buffer lifetime; its writable
-        // extent was validated above.
+        // The typed writable region owns an in-flight registration lease.
         self.zero_copy_read(replica, buffer).await
     }
 }

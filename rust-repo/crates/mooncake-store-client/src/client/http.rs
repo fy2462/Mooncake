@@ -3,10 +3,11 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::{Json, Router, routing::get};
 use parking_lot::RwLock;
-use prometheus::{Encoder, Gauge, Registry, TextEncoder};
 use serde::Serialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::metrics::ClientMetrics;
 
 pub const DEFAULT_CLIENT_HTTP_PORT: u16 = 9300;
 
@@ -29,11 +30,20 @@ impl Default for ClientHttpConfig {
 pub(super) struct ClientHttpSnapshot {
     healthy: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
+    metrics: Option<Arc<ClientMetrics>>,
 }
 
 impl ClientHttpSnapshot {
-    pub(super) fn new(healthy: Arc<AtomicBool>, closed: Arc<AtomicBool>) -> Self {
-        Self { healthy, closed }
+    pub(super) fn new(
+        healthy: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+        metrics: Option<Arc<ClientMetrics>>,
+    ) -> Self {
+        Self {
+            healthy,
+            closed,
+            metrics,
+        }
     }
 }
 
@@ -70,6 +80,7 @@ impl ClientHttpServerState {
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/metrics", get(metrics_handler))
+            .route("/metrics/summary", get(metrics_summary_handler))
             .with_state(snapshot);
         let handle = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
@@ -114,48 +125,39 @@ async fn health_handler(State(snapshot): State<ClientHttpSnapshot>) -> impl Into
 }
 
 async fn metrics_handler(State(snapshot): State<ClientHttpSnapshot>) -> impl IntoResponse {
-    let registry = Registry::new();
-    let healthy = Gauge::new(
-        "mooncake_client_healthy",
-        "Whether the last ping to the Mooncake master succeeded",
-    )
-    .expect("static Prometheus metric is valid");
-    healthy.set(if snapshot.healthy.load(Ordering::SeqCst) {
-        1.0
-    } else {
-        0.0
-    });
-    registry
-        .register(Box::new(healthy))
-        .expect("fresh registry accepts static metric");
-
-    let closed = Gauge::new(
-        "mooncake_client_closed",
-        "Whether the Mooncake client has been torn down",
-    )
-    .expect("static Prometheus metric is valid");
-    closed.set(if snapshot.closed.load(Ordering::SeqCst) {
-        1.0
-    } else {
-        0.0
-    });
-    registry
-        .register(Box::new(closed))
-        .expect("fresh registry accepts static metric");
-
-    let encoder = TextEncoder::new();
-    let mut body = Vec::new();
-    let status = match encoder.encode(&registry.gather(), &mut body) {
-        Ok(()) => StatusCode::OK,
+    let Some(metrics) = snapshot.metrics else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain".to_string())],
+            b"metrics not available".to_vec(),
+        );
+    };
+    let content_type = metrics.prometheus_content_type();
+    let (status, body) = match metrics.render_prometheus(
+        snapshot.healthy.load(Ordering::SeqCst),
+        snapshot.closed.load(Ordering::SeqCst),
+    ) {
+        Ok(body) => (StatusCode::OK, body),
         Err(error) => {
             tracing::warn!(%error, "failed to encode client metrics");
-            StatusCode::SERVICE_UNAVAILABLE
+            (StatusCode::SERVICE_UNAVAILABLE, Vec::new())
         }
     };
+    (status, [(header::CONTENT_TYPE, content_type)], body)
+}
+
+async fn metrics_summary_handler(State(snapshot): State<ClientHttpSnapshot>) -> impl IntoResponse {
+    let Some(metrics) = snapshot.metrics else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "text/plain")],
+            "metrics not available".to_string(),
+        );
+    };
     (
-        status,
-        [(header::CONTENT_TYPE, encoder.format_type().to_string())],
-        body,
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain")],
+        metrics.summary(),
     )
 }
 
@@ -197,7 +199,9 @@ mod tests {
     async fn health_and_prometheus_metrics_reflect_shared_state() {
         let healthy = Arc::new(AtomicBool::new(true));
         let closed = Arc::new(AtomicBool::new(false));
-        let snapshot = ClientHttpSnapshot::new(healthy.clone(), closed.clone());
+        let metrics = super::ClientMetrics::new(None, true).unwrap();
+        let snapshot =
+            ClientHttpSnapshot::new(healthy.clone(), closed.clone(), Some(Arc::new(metrics)));
         let state = ClientHttpServerState::default();
         state
             .start(
@@ -220,6 +224,9 @@ mod tests {
         let metrics = get(port, "/metrics").await;
         assert!(metrics.starts_with("HTTP/1.1 200"), "{metrics}");
         assert!(metrics.contains("mooncake_client_healthy 1"), "{metrics}");
+        let summary = get(port, "/metrics/summary").await;
+        assert!(summary.starts_with("HTTP/1.1 200"), "{summary}");
+        assert!(summary.contains("Client Metrics Summary"), "{summary}");
 
         healthy.store(false, Ordering::SeqCst);
         let unhealthy = get(port, "/health").await;
@@ -233,9 +240,10 @@ mod tests {
 
     #[tokio::test]
     async fn occupied_port_and_duplicate_start_do_not_replace_the_running_server() {
-        let occupied = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
+        // Bind the same wildcard interface used by ClientHttpServerState.
+        // On macOS a loopback-only listener does not reliably conflict with a
+        // later wildcard bind to the same port.
+        let occupied = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
         let occupied_port = occupied.local_addr().unwrap().port();
         let state = ClientHttpServerState::default();
 

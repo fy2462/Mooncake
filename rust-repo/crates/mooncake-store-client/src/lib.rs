@@ -62,9 +62,9 @@ mod pinned_memory;
 pub mod remote_source;
 
 pub use client::{
-    BufferHandle, CachedQueryResultResponse, ClientBackgroundConfig, ClientBackgroundHandle,
-    ClientHttpConfig, MooncakeClient, OffloadTaskItem, PromotionTaskItem, ReplicaScorer,
-    ReplicaSelectionPolicy, SegmentDetail, builtin_remote_replica_score,
+    BufferHandle, BufferRegistrationId, CachedQueryResultResponse, ClientBackgroundConfig,
+    ClientBackgroundHandle, ClientHttpConfig, MooncakeClient, OffloadTaskItem, PromotionTaskItem,
+    ReplicaScorer, ReplicaSelectionPolicy, SegmentDetail, builtin_remote_replica_score,
 };
 pub use dummy::{
     DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST,
@@ -73,9 +73,13 @@ pub use dummy::{
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::LocalHotCache;
 pub use local_storage_backend::{
-    LocalStorageBackend, LocalStorageConfig, OffsetAllocatorConfig, OffsetAllocatorStorageBackend,
+    BucketEvictionPolicy, BucketStorageBackend, BucketStorageConfig, DistributedStorageBackend,
+    DistributedStorageConfig, FilePerKeyMigrationReport, LocalStorageBackend, LocalStorageConfig,
+    OffsetAllocatorConfig, OffsetAllocatorMigrationReport, OffsetAllocatorStorageBackend,
     OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
+    migrate_cpp_file_per_key_layout, migrate_cpp_offset_allocator_layout,
 };
+pub use memory_ffi::RegisteredBufferAllocation;
 pub use remote_source::{
     RemoteSource,
     config::{RemoteSourceConfig, S3Config},

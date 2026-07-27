@@ -28,58 +28,29 @@ impl MasterServiceImpl {
         key: &str,
     ) -> Result<proto::GetReplicaListResponse, Status> {
         let scoped_key = tenant_id.make_scoped_key(key);
-
-        // Phase 1: read-only (uses get() — shared lock, allows concurrent reads).
-        // 阶段 1：只读（使用 get() — 共享锁，允许并发读）
-        let (completed_replicas, promotion_eligible, first_replica_type, object_size) =
-            match self.state.objects.get(&scoped_key) {
-                Some(entry) => {
-                    // 符合 promotion 条件：没有任何 Memory Complete 副本 + 有 LocalDisk Complete 副本
-                    // Promotion eligible: no Memory Complete replicas + at least one LocalDisk Complete replica
-                    let eligible = !entry.replicas.iter().any(|replica| {
-                        replica.replica_type == ReplicaType::Memory
-                            && replica.status == ReplicaStatus::Complete
-                    }) && entry.replicas.iter().any(|replica| {
-                        replica.replica_type == ReplicaType::LocalDisk
-                            && replica.status == ReplicaStatus::Complete
-                    });
-                    let complete = entry
-                        .replicas
-                        .iter()
-                        .filter(|r| r.status == ReplicaStatus::Complete)
-                        .collect::<Vec<_>>();
-                    let Some(first) = complete.first() else {
-                        return Err(Status::failed_precondition("replica is not ready"));
-                    };
-                    let first_replica_type = first.replica_type;
-                    let replicas = complete
-                        .into_iter()
-                        .map(replica_to_proto)
-                        .collect::<Vec<_>>();
-                    (replicas, eligible, first_replica_type, entry.size)
-                }
-                None => return Err(Status::not_found(format!("key not found: {key}"))),
+        let Some(entry) = self.object_snapshot_and_grant_lease(&scoped_key, true)? else {
+            return if self.state.objects.contains_key(&scoped_key) {
+                Err(Status::failed_precondition("replica is not ready"))
+            } else {
+                Err(Status::not_found(format!("key not found: {key}")))
             };
+        };
+        let promotion_eligible = !entry.replicas.iter().any(|replica| {
+            replica.replica_type == ReplicaType::Memory && replica.status == ReplicaStatus::Complete
+        }) && entry.replicas.iter().any(|replica| {
+            replica.replica_type == ReplicaType::LocalDisk
+                && replica_is_routable(&self.state, replica)
+        });
+        let complete = entry
+            .replicas
+            .iter()
+            .filter(|replica| replica_is_routable(&self.state, replica))
+            .collect::<Vec<_>>();
+        let first_replica_type = complete[0].replica_type;
+        let completed_replicas = complete.into_iter().map(replica_to_proto).collect();
+        let object_size = entry.size;
 
-        // Phase 2: brief write lock for timestamp updates only (microseconds).
-        // 阶段 2：短暂写锁仅更新时间戳（微秒级）
-        let mut group_to_refresh = None;
-        if let Some(mut entry) = self.state.objects.get_mut(&scoped_key) {
-            entry.last_access = SystemTime::now();
-            entry.grant_lease(
-                self.state.runtime_config.lease_ttl,
-                self.state.runtime_config.soft_pin_ttl,
-            );
-            if !entry.group_id.is_empty() {
-                group_to_refresh = Some((entry.tenant_id.clone(), entry.group_id.clone()));
-            }
-        }
-        if let Some((tenant_id, group_id)) = group_to_refresh {
-            self.grant_group_lease(&tenant_id, &group_id);
-        }
-
-        // Phase 3: promotion after all locks released.
-        // 阶段 3：锁释放后进行 promotion 条件检查和入队
+        // Promotion admission reacquires the tenant-scoped mutation gate.
         if promotion_eligible {
             let _ = try_push_promotion_queue(&self.state, &scoped_key, true);
         }
@@ -103,7 +74,7 @@ impl MasterServiceImpl {
                 let replicas: Vec<_> = entry
                     .replicas
                     .iter()
-                    .filter(|r| r.status == ReplicaStatus::Complete)
+                    .filter(|r| replica_is_routable(&self.state, r))
                     .map(replica_to_proto)
                     .collect();
                 if replicas.is_empty() {
@@ -176,27 +147,27 @@ impl MasterServiceImpl {
         let pattern = regex::Regex::new(&req.key_regex)
             .map_err(|e| Status::invalid_argument(format!("invalid regex: {e}")))?;
 
+        let candidate_keys = self
+            .state
+            .objects
+            .iter()
+            .filter(|entry| entry.tenant_id == tenant_filter && pattern.is_match(&entry.user_key))
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
         let mut entries = vec![];
-        let mut lease_keys = vec![];
-        // 遍历所有 key，按租户过滤后，对 user_key 进行正则匹配
-        // Iterate all keys, filter by tenant, match regex against user_key
-        for entry in self.state.objects.iter() {
-            if entry.tenant_id != tenant_filter {
+        for key in candidate_keys {
+            let Some(entry) = self.object_snapshot_and_grant_lease(&key, true)? else {
+                continue;
+            };
+            if entry.tenant_id != tenant_filter || !pattern.is_match(&entry.user_key) {
                 continue;
             }
-            if !pattern.is_match(&entry.user_key) {
-                continue;
-            }
-            // Only include COMPLETE replicas, matching C++ GetReplicaListByRegex semantics
-            let completed_replicas: Vec<_> = entry
+            let completed_replicas = entry
                 .replicas
                 .iter()
-                .filter(|r| r.status == ReplicaStatus::Complete)
+                .filter(|replica| replica_is_routable(&self.state, replica))
                 .map(replica_to_proto)
-                .collect();
-
-            // Skip keys that match but have no complete replicas
-            // 跳过匹配但无 Complete 副本的 key
+                .collect::<Vec<_>>();
             if completed_replicas.is_empty() {
                 tracing::warn!(
                     "user_key={} matched by regex, but has no complete replicas.",
@@ -204,31 +175,12 @@ impl MasterServiceImpl {
                 );
                 continue;
             }
-
             entries.push(proto::get_replica_list_by_regex_response::ObjectEntry {
-                key: entry.key().clone(),
+                key: key.clone(),
                 replicas: completed_replicas,
                 tenant_id: entry.tenant_id.as_str().to_owned(),
                 user_key: entry.user_key.clone(),
             });
-            lease_keys.push(entry.key().clone());
-        }
-
-        let mut groups_to_refresh = Vec::new();
-        for key in lease_keys {
-            if let Some(mut entry) = self.state.objects.get_mut(&key) {
-                entry.last_access = SystemTime::now();
-                entry.grant_lease(
-                    self.state.runtime_config.lease_ttl,
-                    self.state.runtime_config.soft_pin_ttl,
-                );
-                if !entry.group_id.is_empty() {
-                    groups_to_refresh.push((entry.tenant_id.clone(), entry.group_id.clone()));
-                }
-            }
-        }
-        for (tenant_id, group_id) in groups_to_refresh {
-            self.grant_group_lease(&tenant_id, &group_id);
         }
 
         metrics::GET_REQUESTS.inc();
@@ -253,6 +205,7 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
         if self.state.replication_tasks.contains_key(&scoped_key) {
             return Err(Status::failed_precondition(
                 "object has an ongoing replication task",
@@ -310,6 +263,7 @@ impl MasterServiceImpl {
             .collect();
 
         for key in keys_to_remove {
+            let _mutation_guard = self.state.key_mutations.lock(&key);
             if self.state.replication_tasks.contains_key(&key) {
                 continue;
             }
@@ -326,12 +280,12 @@ impl MasterServiceImpl {
                 }
             }
             if let Some((_, object)) = self.state.objects.remove(&key) {
-                if self.cleanup_removed_object(&key, &object).is_ok() {
-                    self.publish_kv_removed(&key, &object);
-                    removed += 1;
-                } else {
+                if let Err(status) = self.cleanup_removed_object(&key, &object) {
                     self.state.objects.insert(key, object);
+                    return Err(status);
                 }
+                self.publish_kv_removed(&key, &object);
+                removed += 1;
             }
         }
 

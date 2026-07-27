@@ -1,5 +1,31 @@
 use super::*;
 
+async fn put_grouped_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    group_id: &str,
+    hard_pinned: bool,
+) {
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                with_hard_pin: hard_pinned,
+                group_ids: vec![group_id.into()],
+                ..replicate_config()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    put_end_one(service, client_id, key).await;
+}
+
 #[tokio::test]
 async fn test_upsert_and_batch_upsert_follow_two_phase_semantics() {
     let service = MasterServiceImpl::default();
@@ -135,6 +161,191 @@ async fn test_upsert_and_batch_upsert_follow_two_phase_semantics() {
     .unwrap()
     .into_inner();
     assert_eq!(batch_end.statuses, vec![0]);
+}
+
+#[tokio::test]
+async fn test_upsert_all_does_not_complete_stale_local_disk_replica() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "upsert-local-disk:1").await;
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    MasterService::mount_local_disk_segment(
+        &service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: false,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: false,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::mount_local_disk_segment(
+        &service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: true,
+            storage_id: Some(proto_uuid(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(proto_uuid(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let config = proto::ReplicateConfig {
+        preferred_segment: "upsert-local-disk:1".into(),
+        ..replicate_config()
+    };
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "upsert-local-disk-key".into(),
+            slice_length: 128,
+            config: Some(config.clone()),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "upsert-local-disk-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let task = MasterService::offload_object_heartbeat(
+        &service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks
+    .into_iter()
+    .find(|task| task.key == "upsert-local-disk-key")
+    .expect("Master must issue the upsert fixture offload task");
+    assert!(task.generation_id.is_some());
+    MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["upsert-local-disk-key".into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: 21,
+                data_size: 128,
+                transport_endpoint: "disk-holder:50051".into(),
+            }],
+            tasks: vec![task],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let start = MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "upsert-local-disk-key".into(),
+            slice_length: 128,
+            config: Some(config),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(start.replicas.len(), 2);
+
+    MasterService::batch_upsert_end(
+        &service,
+        Request::new(proto::BatchUpsertEndRequest {
+            entries: vec![proto::PutEndEntry {
+                client_id: Some(proto_uuid(client_id)),
+                key: "upsert-local-disk-key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::All as i32,
+                tenant_id: String::new(),
+            }],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let readable = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "upsert-local-disk-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(readable.replicas.len(), 1);
+    assert_eq!(
+        readable.replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::Memory as i32
+    );
+}
+
+#[tokio::test]
+async fn test_upsert_start_preempts_inflight_buffer_without_reuse() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "upsert-preempt:1").await;
+    let config = proto::ReplicateConfig {
+        preferred_segment: "upsert-preempt:1".into(),
+        ..replicate_config()
+    };
+
+    let first = MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "preempt-key".into(),
+            slice_length: 128,
+            config: Some(config.clone()),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let second = MasterService::upsert(
+        &service,
+        Request::new(proto::UpsertRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "preempt-key".into(),
+            slice_length: 128,
+            config: Some(config),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(first.replicas.len(), 1);
+    assert_eq!(second.replicas.len(), 1);
+    assert_ne!(first.replicas[0].offset, second.replicas[0].offset);
 }
 
 #[tokio::test]
@@ -278,19 +489,19 @@ async fn test_reaper_removes_expired_processing_put_start() {
 }
 
 #[tokio::test]
-async fn test_soft_pinned_eviction_uses_force_second_pass() {
-    for (force, should_evict) in [(false, false), (true, true)] {
+async fn test_soft_pinned_eviction_uses_configured_second_pass() {
+    for (allow_soft_pinned, should_evict) in [(false, false), (true, true)] {
         let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
             lease_ttl: Duration::from_secs(3600),
             soft_pin_ttl: Duration::from_secs(3600),
-            offload_force_evict: force,
+            allow_evict_soft_pinned_objects: allow_soft_pinned,
             ..Default::default()
         });
         let client_id = Uuid::new_v4();
         mount_memory_segment(
             &service,
             client_id,
-            if force {
+            if allow_soft_pinned {
                 "soft-force:1"
             } else {
                 "soft-protect:1"
@@ -298,7 +509,7 @@ async fn test_soft_pinned_eviction_uses_force_second_pass() {
         )
         .await;
 
-        let key = if force {
+        let key = if allow_soft_pinned {
             "soft-force-key"
         } else {
             "soft-protected-key"
@@ -326,4 +537,81 @@ async fn test_soft_pinned_eviction_uses_force_second_pass() {
             should_evict
         );
     }
+}
+
+#[tokio::test]
+async fn test_automatic_eviction_expands_an_expired_group_atomically() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "group-eviction:1").await;
+    put_grouped_object(
+        &service,
+        client_id,
+        "group-expired-a",
+        "expired-group",
+        false,
+    )
+    .await;
+    put_grouped_object(
+        &service,
+        client_id,
+        "group-expired-b",
+        "expired-group",
+        false,
+    )
+    .await;
+
+    let evicted = service.run_eviction_cycle_for_test(1);
+    assert_eq!(evicted.len(), 2);
+    assert!(evicted.iter().any(|key| key == "group-expired-a"));
+    assert!(evicted.iter().any(|key| key == "group-expired-b"));
+}
+
+#[tokio::test]
+async fn test_automatic_eviction_live_group_lease_protects_every_member() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_secs(3600),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "group-live-lease:1").await;
+    put_grouped_object(&service, client_id, "group-expired", "lease-group", false).await;
+    put_grouped_object(&service, client_id, "group-live", "lease-group", false).await;
+    MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "group-live".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let evicted = service.run_eviction_cycle_for_test(1);
+    assert!(evicted.is_empty());
+}
+
+#[tokio::test]
+async fn test_automatic_eviction_keeps_hard_pinned_group_member() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "group-hard-pin:1").await;
+    put_grouped_object(&service, client_id, "group-safe", "hard-pin-group", false).await;
+    put_grouped_object(&service, client_id, "group-hard", "hard-pin-group", true).await;
+
+    let evicted = service.run_eviction_cycle_for_test(1);
+    assert_eq!(evicted, vec!["group-safe".to_string()]);
+    assert!(
+        MasterService::exist_key(
+            &service,
+            Request::new(proto::ExistKeyRequest {
+                key: "group-hard".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .exists
+    );
 }

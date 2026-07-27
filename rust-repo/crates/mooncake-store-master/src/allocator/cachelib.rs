@@ -48,6 +48,7 @@ use super::types::{
 #[derive(Debug, Clone)]
 pub(super) struct CachelibAllocation {
     pub(super) pool_id: PoolId,
+    pub(super) requested_size: u64,
     pub(super) class_size: u64,
     pub(super) slab_index: u32,
     pub(super) slot_index: u32,
@@ -231,6 +232,7 @@ pub(super) fn allocate_cachelib(
             offset,
             CachelibAllocation {
                 pool_id: default_pool_id,
+                requested_size: size,
                 class_size,
                 slab_index,
                 slot_index,
@@ -284,6 +286,7 @@ pub(super) fn allocate_cachelib(
         offset,
         CachelibAllocation {
             pool_id: default_pool_id,
+            requested_size: size,
             class_size,
             slab_index,
             slot_index,
@@ -304,7 +307,7 @@ pub(super) fn allocate_cachelib(
 /// Returns the class_size of the freed allocation.
 /// 返回已释放分配的 class_size。
 pub(super) fn release_cachelib(state: &mut CachelibSegmentState, offset: u64) -> Option<u64> {
-    let allocation = state.allocations.remove(&offset)?;
+    let allocation = state.allocations.get(&offset)?.clone();
     let pool = state.pools.get_mut(&allocation.pool_id)?;
     let slabs = pool.class_slabs.get_mut(&allocation.class_size)?;
     let slab_pos = slabs
@@ -316,9 +319,11 @@ pub(super) fn release_cachelib(state: &mut CachelibSegmentState, offset: u64) ->
         // Slab is being released — track freed slots for completion
         // Slab 正在释放中 —— 跟踪已释放 slot 以完成释放
         let pending = state.pending_releases.get_mut(&token)?;
+        state.allocations.remove(&offset)?;
         pending.active_allocations.remove(&offset);
         pending.freed_slots.push(allocation.slot_index);
     } else {
+        state.allocations.remove(&offset)?;
         // Normal release: return slot to free list
         // 正常释放：归还 slot 到空闲列表
         slab.free_slots.push(allocation.slot_index);

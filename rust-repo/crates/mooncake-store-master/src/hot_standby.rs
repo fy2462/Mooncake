@@ -18,7 +18,7 @@
 // │  └─────────────────┘  └──────────────────────────────────┘ │
 // │                                                            │
 // │  State Machine / 状态机:                                   │
-// │  Stopped → Connecting → Recovering → Watching → Promoting → Promoted
+// │  Stopped → Connecting → Recovering → Watching → Promoting → Promoted → Stopped
 // └───────────────────────────────────────────────────────────┘
 //
 // Recovery modes / 恢复模式:
@@ -35,10 +35,12 @@ use crate::ha::{
 };
 use crate::oplog::{OpLogChangeNotifier, OpLogStore};
 use crate::service::state::MasterState;
-use crate::service::sync_cache_total_accounting;
+use crate::service::{abort_orphaned_drain_segments_after_recovery, restore_loaded_snapshot_state};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
+
+const MAX_STANDBY_RECONNECT_ATTEMPTS: u32 = 3;
 
 fn wait_for_notifier_startup(
     notifier: &mut dyn OpLogChangeNotifier,
@@ -90,14 +92,112 @@ impl Default for HotStandbyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TenantId;
     use crate::ha::SnapshotProvider;
     use crate::oplog::{
         InMemoryOpLog, OpLogChangeNotifier, OpLogEntryCallback, OpLogErrorCallback,
+        OpLogPollResult, OpLogRecord, OpLogStore,
     };
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::service::{
+        ObjectEntry, ReplicationTaskKind, ReplicationTaskSnapshotEntry, SegmentEntry,
+    };
+    use mooncake_store_core::{
+        ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use uuid::Uuid;
 
     struct DelayedHealthyNotifier {
         healthy: Arc<AtomicBool>,
+    }
+
+    struct FlakyReadOpLog {
+        inner: InMemoryOpLog,
+        remaining_failures: Arc<AtomicUsize>,
+        read_attempts: Arc<AtomicUsize>,
+    }
+
+    impl FlakyReadOpLog {
+        fn new(remaining_failures: usize, read_attempts: Arc<AtomicUsize>) -> Self {
+            Self::with_failure_counter(
+                Arc::new(AtomicUsize::new(remaining_failures)),
+                read_attempts,
+            )
+        }
+
+        fn with_failure_counter(
+            remaining_failures: Arc<AtomicUsize>,
+            read_attempts: Arc<AtomicUsize>,
+        ) -> Self {
+            Self {
+                inner: InMemoryOpLog::new(16),
+                remaining_failures,
+                read_attempts,
+            }
+        }
+    }
+
+    impl OpLogStore for FlakyReadOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.read_attempts.fetch_add(1, Ordering::AcqRel);
+            if self
+                .remaining_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(HaError::InvalidBackend(
+                    "injected oplog reconnect failure".into(),
+                ));
+            }
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
     }
 
     impl OpLogChangeNotifier for DelayedHealthyNotifier {
@@ -125,6 +225,76 @@ mod tests {
             _cluster_id: &str,
         ) -> Result<Option<crate::ha::LoadedSnapshot>, HaError> {
             Err(HaError::Snapshot("snapshot unavailable".into()))
+        }
+    }
+
+    struct StaticSnapshotProvider {
+        snapshot: crate::ha::LoadedSnapshot,
+    }
+
+    impl SnapshotProvider for StaticSnapshotProvider {
+        fn load_latest_snapshot(
+            &self,
+            _cluster_id: &str,
+        ) -> Result<Option<crate::ha::LoadedSnapshot>, HaError> {
+            Ok(Some(self.snapshot.clone()))
+        }
+    }
+
+    struct CandidateSnapshotProvider {
+        snapshots: Vec<crate::ha::LoadedSnapshot>,
+    }
+
+    impl SnapshotProvider for CandidateSnapshotProvider {
+        fn load_latest_snapshot(
+            &self,
+            _cluster_id: &str,
+        ) -> Result<Option<crate::ha::LoadedSnapshot>, HaError> {
+            Ok(self.snapshots.first().cloned())
+        }
+
+        fn load_snapshot_candidates(
+            &self,
+            _cluster_id: &str,
+        ) -> Result<Vec<crate::ha::LoadedSnapshot>, HaError> {
+            Ok(self.snapshots.clone())
+        }
+    }
+
+    fn snapshot_object(key: &str, segment: &Segment, offset: u64, size: u64) -> ObjectEntry {
+        ObjectEntry {
+            replicas: vec![ReplicaDescriptor {
+                segment_id: segment.id,
+                segment_name: segment.name.clone(),
+                offset,
+                size,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Memory,
+                holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
+                refcnt: 0,
+                handle_valid: true,
+                base_addr: segment.base,
+                protocol: segment.protocol.clone(),
+            }],
+            size,
+            last_access: std::time::SystemTime::now(),
+            hard_pinned: false,
+            data_type: ObjectDataType::Unknown,
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::default(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: size,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: key.to_string(),
         }
     }
 
@@ -174,6 +344,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_oplog_polling_recovers_within_bounded_reconnect_budget() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        let read_attempts = Arc::new(AtomicUsize::new(0));
+        service.set_oplog_store(Box::new(FlakyReadOpLog::new(2, read_attempts.clone())));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let status = service.sync_status();
+                if read_attempts.load(Ordering::Acquire) >= 3
+                    && status.state == StandbyState::Watching
+                    && status.is_connected
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standby did not reconnect within its bounded retry budget");
+        assert!(service.is_running());
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_oplog_polling_stops_follower_after_reconnect_budget_exhaustion() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        let read_attempts = Arc::new(AtomicUsize::new(0));
+        service.set_oplog_store(Box::new(FlakyReadOpLog::new(
+            MAX_STANDBY_RECONNECT_ATTEMPTS as usize,
+            read_attempts,
+        )));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.sync_status().state != StandbyState::Failed {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standby follower did not stop after reconnect exhaustion");
+        assert!(!service.is_running());
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_oplog_polling_fails_on_unappliable_expected_record() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        let mut store = InMemoryOpLog::new(16);
+        store.append_payload(1, r#"{"op":"unsupported-future-op"}"#);
+        service.set_oplog_store(Box::new(store));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.sync_status().state != StandbyState::Failed {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standby did not fail after rejecting its expected oplog record");
+        assert!(!service.is_running());
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_promotion_fails_closed_when_final_oplog_read_fails() {
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "cluster-a".to_string(),
+                ..Default::default()
+            },
+        );
+        let remaining_failures = Arc::new(AtomicUsize::new(0));
+        let read_attempts = Arc::new(AtomicUsize::new(0));
+        let mut store =
+            FlakyReadOpLog::with_failure_counter(remaining_failures.clone(), read_attempts);
+        store
+            .inner
+            .append_payload(1, r#"{"op":"put_start","key":"promotion-read"}"#);
+        service.set_oplog_store(Box::new(store));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.sync_status().applied_seq_id < 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standby did not apply the initial record");
+
+        service.oplog_applier.as_ref().unwrap().recover(0);
+        remaining_failures.store(usize::MAX, Ordering::Release);
+        let error = service.promote().await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("injected oplog reconnect failure")
+        );
+        assert_eq!(service.sync_status().state, StandbyState::Failed);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_only_bootstrap_propagates_snapshot_error() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
@@ -207,6 +511,352 @@ mod tests {
         service.set_snapshot_provider(Box::new(FailingSnapshotProvider));
         service.set_oplog_store(Box::new(InMemoryOpLog::new(4)));
 
+        service.start().await.unwrap();
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_bootstrap_falls_back_after_latest_semantic_restore_failure() {
+        let state = Arc::new(MasterState::empty());
+        let duplicate_segment_id = Uuid::new_v4();
+        let invalid_segment = SegmentEntry {
+            segment: Segment {
+                id: duplicate_segment_id,
+                name: "duplicate-segment".into(),
+                base: 0,
+                size: 4096,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            },
+            used: 0,
+            client_id: Uuid::new_v4(),
+            status: crate::proto::SegmentStatus::Active,
+        };
+        let invalid_latest = crate::ha::LoadedSnapshot {
+            snapshot_id: "invalid-latest".into(),
+            snapshot_sequence_id: 9,
+            allocator_config: None,
+            segments: vec![invalid_segment.clone(), invalid_segment],
+            nof_segments: Vec::new(),
+            objects: Vec::new(),
+            tasks: Vec::new(),
+            replication_tasks: Vec::new(),
+            graceful_unmounts: Vec::new(),
+            delayed_replica_releases: Vec::new(),
+            local_disk_segments: Vec::new(),
+        };
+        let valid_older = crate::ha::LoadedSnapshot {
+            snapshot_id: "valid-older".into(),
+            snapshot_sequence_id: 7,
+            allocator_config: None,
+            segments: Vec::new(),
+            nof_segments: Vec::new(),
+            objects: Vec::new(),
+            tasks: Vec::new(),
+            replication_tasks: Vec::new(),
+            graceful_unmounts: Vec::new(),
+            delayed_replica_releases: Vec::new(),
+            local_disk_segments: Vec::new(),
+        };
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "cluster-a".into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(CandidateSnapshotProvider {
+            snapshots: vec![invalid_latest, valid_older],
+        }));
+
+        service.start().await.unwrap();
+        assert_eq!(service.sync_status().applied_seq_id, 7);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_bootstrap_replaces_stale_state_and_rebuilds_allocator_holes() {
+        let state = Arc::new(MasterState::empty());
+        state.objects.insert(
+            TenantId::default().make_scoped_key("stale"),
+            ObjectEntry {
+                replicas: vec![],
+                size: 1,
+                last_access: std::time::SystemTime::now(),
+                hard_pinned: false,
+                data_type: ObjectDataType::Unknown,
+                client_id: Uuid::nil(),
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: TenantId::default(),
+                group_id: String::new(),
+                quota_committed: false,
+                reserved_quota_charge_bytes: 0,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes: 0,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: "stale".into(),
+            },
+        );
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "standby-hole:1".into(),
+            base: 0x100000000,
+            size: 1_000,
+            te_endpoint: "tcp://stale-master-term".into(),
+            protocol: "rdma".into(),
+            host_id: String::new(),
+        };
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "snapshot-test".into(),
+            snapshot_sequence_id: 7,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: segment.clone(),
+                used: 200,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![
+                (
+                    TenantId::default().make_scoped_key("left"),
+                    snapshot_object("left", &segment, 0, 100),
+                ),
+                (
+                    TenantId::default().make_scoped_key("right"),
+                    snapshot_object("right", &segment, 300, 100),
+                ),
+            ],
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "cluster-a".into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+        service.start().await.unwrap();
+
+        assert!(
+            !state
+                .objects
+                .contains_key(&TenantId::default().make_scoped_key("stale"))
+        );
+        let left = state
+            .objects
+            .get(&TenantId::default().make_scoped_key("left"))
+            .unwrap();
+        assert!(!left.replicas[0].handle_valid);
+        assert_eq!(left.replicas[0].base_addr, 0);
+        assert!(left.replicas[0].protocol.is_empty());
+        drop(left);
+        let restored_segment = state.segments.get(&segment.id).unwrap();
+        assert_eq!(restored_segment.segment.base, 0);
+        assert!(restored_segment.segment.te_endpoint.is_empty());
+        assert!(restored_segment.segment.protocol.is_empty());
+        drop(restored_segment);
+        let unavailable = state.allocator.write().allocate(
+            "fills-hole",
+            150,
+            1,
+            &ReplicateConfig {
+                preferred_segment: segment.name.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            unavailable.is_empty(),
+            "restored process addresses must not accept allocations before ReMount"
+        );
+        state
+            .allocator
+            .write()
+            .rebind_segment(segment.clone(), client_id)
+            .unwrap();
+        let allocated = state.allocator.write().allocate(
+            "fills-hole",
+            150,
+            1,
+            &ReplicateConfig {
+                preferred_segment: segment.name,
+                ..Default::default()
+            },
+        );
+        assert_eq!(allocated.len(), 1);
+        assert_eq!(allocated[0].offset, 100);
+        assert_eq!(service.sync_status().applied_seq_id, 7);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_bootstrap_restores_native_copy_reservation_and_source_pin() {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "copy-restore:1".into(),
+            base: 0,
+            size: 1_000,
+            te_endpoint: String::new(),
+            protocol: "rdma".into(),
+            host_id: String::new(),
+        };
+        let scoped_key = TenantId::default().make_scoped_key("copying");
+        let source = ReplicaDescriptor {
+            segment_id: segment.id,
+            segment_name: segment.name.clone(),
+            offset: 0,
+            size: 100,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: Some(client_id),
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: segment.base,
+            protocol: segment.protocol.clone(),
+        };
+        let target = ReplicaDescriptor {
+            offset: 100,
+            status: ReplicaStatus::Allocating,
+            ..source.clone()
+        };
+        let mut object = snapshot_object("copying", &segment, 0, 100);
+        object.client_id = client_id;
+        object.replicas.push(target.clone());
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "copy-task-snapshot".into(),
+            snapshot_sequence_id: 8,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: segment.clone(),
+                used: 200,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![(scoped_key.clone(), object)],
+            tasks: vec![],
+            replication_tasks: vec![ReplicationTaskSnapshotEntry {
+                key: scoped_key.clone(),
+                client_id,
+                start_age_millis: 10,
+                kind: ReplicationTaskKind::Copy,
+                source: source.clone(),
+                targets: vec![target],
+                existing_move_target: None,
+                reserved_quota_charge_bytes: 100,
+            }],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "cluster-a".into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+        service.start().await.unwrap();
+
+        assert!(state.replication_tasks.contains_key(&scoped_key));
+        let object = state.objects.get(&scoped_key).unwrap();
+        assert_eq!(object.replicas.len(), 2);
+        assert_eq!(object.replicas[0].refcnt, 1);
+        assert_eq!(object.replicas[1].status, ReplicaStatus::Allocating);
+        drop(object);
+        assert_eq!(state.segments.get(&segment.id).unwrap().used, 200);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_oplog_following_and_promotion_converge_to_one_state() {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "promotion-baseline:1".into(),
+            base: 0,
+            size: 1_000,
+            te_endpoint: String::new(),
+            protocol: "rdma".into(),
+            host_id: String::new(),
+        };
+        let scoped_key = TenantId::default().make_scoped_key("baseline-key");
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "promotion-baseline".into(),
+            snapshot_sequence_id: 1,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: segment.clone(),
+                used: 100,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![(
+                scoped_key.clone(),
+                snapshot_object("baseline-key", &segment, 0, 100),
+            )],
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut oplog = InMemoryOpLog::new(16);
+        oplog.append_payload(1, r#"{"op":"put_start","key":"already-in-baseline"}"#);
+        oplog.append_payload(
+            1,
+            serde_json::json!({"op": "remove", "key": scoped_key}).to_string(),
+        );
+
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "cluster-a".into(),
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+        service.set_oplog_store(Box::new(oplog));
+        service.start().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while service.sync_status().applied_seq_id < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("standby did not catch up to the post-snapshot oplog");
+        assert!(!state.objects.contains_key(&scoped_key));
+
+        assert_eq!(service.promote().await.unwrap(), 2);
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
+        assert!(!state.objects.contains_key(&scoped_key));
+
+        // A completed promotion must leave the follower reusable for the next
+        // leader term instead of stranding it in Promoted.
         service.start().await.unwrap();
         assert_eq!(service.sync_status().state, StandbyState::Watching);
         service.stop();
@@ -293,16 +943,17 @@ impl HotStandbyService {
         self.sync_status.read().clone()
     }
 
+    pub fn is_running(&self) -> bool {
+        self.state_machine.is_running()
+    }
+
     /// Check if the standby is ready to be promoted.
     /// 检查备用节点是否准备好被提升。
     ///
-    /// Ready states: Watching (actively following) or Promoted (already promoted).
-    /// 就绪状态：Watching（活跃跟随中）或 Promoted（已提升）。
+    /// Ready state: Watching (actively following).
+    /// 就绪状态：Watching（活跃跟随中）。
     pub fn is_ready_for_promotion(&self) -> bool {
-        matches!(
-            self.sync_status.read().state,
-            StandbyState::Watching | StandbyState::Promoted
-        )
+        self.sync_status.read().state == StandbyState::Watching
     }
 
     /// Start the hot standby service.
@@ -346,79 +997,57 @@ impl HotStandbyService {
                 status.state = StandbyState::Recovering;
                 drop(status);
 
-                match provider.load_latest_snapshot(&self.config.cluster_id) {
-                    Ok(Some(snapshot)) => {
-                        self.state.clear_transient_promotion_candidates();
-                        // Restore memory segments into allocator
-                        // 恢复内存 segment 到分配器
-                        for seg in &snapshot.segments {
-                            let sid = seg.segment.id;
-                            if !self.state.segments.contains_key(&sid) {
-                                self.state.segments.insert(sid, seg.clone());
-                                // Register with the memory allocator so future allocations work
-                                // 注册到内存分配器，以支持后续分配
-                                self.state.allocator.write().add_segment(
-                                    seg.segment.clone(),
-                                    seg.used,
-                                    seg.client_id,
-                                );
+                match provider.load_snapshot_candidates(&self.config.cluster_id) {
+                    Ok(candidates) => {
+                        let mut last_restore_error = None;
+                        for snapshot in candidates {
+                            match restore_loaded_snapshot_state(
+                                &self.state,
+                                snapshot.segments.clone(),
+                                snapshot.nof_segments.clone(),
+                                snapshot.objects.clone(),
+                                snapshot.tasks.clone(),
+                                snapshot.replication_tasks.clone(),
+                                snapshot.local_disk_segments.clone(),
+                                snapshot.graceful_unmounts.clone(),
+                                snapshot.delayed_replica_releases.clone(),
+                                snapshot.allocator_config,
+                            ) {
+                                Ok(()) => {
+                                    let mut status = self.sync_status.write();
+                                    status.applied_seq_id = snapshot.snapshot_sequence_id;
+                                    baseline_seq_id = snapshot.snapshot_sequence_id;
+                                    drop(status);
+                                    info!(
+                                        snapshot_id = %snapshot.snapshot_id,
+                                        "Loaded snapshot with {} objects, {} segments",
+                                        snapshot.objects.len(),
+                                        snapshot.segments.len()
+                                    );
+                                    last_restore_error = None;
+                                    break;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        snapshot_id = %snapshot.snapshot_id,
+                                        %error,
+                                        "snapshot candidate failed semantic restore; trying older candidate"
+                                    );
+                                    last_restore_error = Some(HaError::Snapshot(error));
+                                }
                             }
                         }
-
-                        // Restore NoF (file-based) segments into NoF allocator
-                        // 恢复 NoF（基于文件的）segment 到 NoF 分配器
-                        for nof in &snapshot.nof_segments {
-                            let sid = nof.segment.id;
-                            if !self.state.nof_segments.contains_key(&sid) {
-                                self.state.nof_segments.insert(sid, nof.clone());
-                                self.state.nof_allocator.write().add_segment(
-                                    mooncake_store_core::Segment {
-                                        id: nof.segment.id,
-                                        name: nof.segment.name.clone(),
-                                        base: nof.segment.base,
-                                        size: nof.segment.size,
-                                        te_endpoint: nof.segment.te_endpoint.clone(),
-                                        protocol: String::new(),
-                                    },
-                                    nof.used,
-                                    nof.segment.client_id,
+                        if let Some(error) = last_restore_error {
+                            if self.config.enable_oplog_following {
+                                tracing::warn!(
+                                    "All snapshot baselines failed semantic restore, falling back to oplog-only bootstrap: {}",
+                                    error
                                 );
+                            } else {
+                                return Err(error);
                             }
                         }
-
-                        // Restore objects and tasks
-                        // 恢复对象和任务
-                        for entry in &snapshot.objects {
-                            let mut object = entry.1.clone();
-                            sync_cache_total_accounting(&mut object);
-                            self.state.objects.insert(entry.0.clone(), object);
-                        }
-                        for task in &snapshot.tasks {
-                            self.state.tasks.insert(task.info.id, task.clone());
-                        }
-                        for local_disk in &snapshot.local_disk_segments {
-                            self.state.local_disk_segments.insert(
-                                local_disk.client_id,
-                                crate::service::state::LocalDiskSegmentEntry {
-                                    enable_offloading: local_disk.enable_offloading,
-                                    offloading_objects: local_disk.offloading_objects.clone(),
-                                    promotion_objects: Default::default(),
-                                    ssd_total_capacity_bytes: local_disk.ssd_total_capacity_bytes,
-                                },
-                            );
-                        }
-
-                        let mut status = self.sync_status.write();
-                        status.applied_seq_id = snapshot.snapshot_sequence_id;
-                        baseline_seq_id = snapshot.snapshot_sequence_id;
-                        drop(status);
-                        info!(
-                            "Loaded snapshot with {} objects, {} segments",
-                            snapshot.objects.len(),
-                            snapshot.segments.len()
-                        );
                     }
-                    Ok(None) => {}
                     Err(error) if self.config.enable_oplog_following => {
                         tracing::warn!(
                             "Failed to load snapshot baseline, falling back to oplog-only bootstrap: {}",
@@ -433,6 +1062,16 @@ impl HotStandbyService {
         // Phase 2: Start oplog following (if enabled)
         // 阶段 2：启动 oplog 跟随（若启用）
         if self.config.enable_oplog_following {
+            if self.oplog_store.is_none() {
+                self.state_machine.process_event(StandbyEvent::FatalError);
+                let mut status = self.sync_status.write();
+                status.state = StandbyState::Failed;
+                status.is_connected = false;
+                status.is_syncing = false;
+                return Err(HaError::InvalidBackend(
+                    "oplog following is enabled but no oplog store is configured".into(),
+                ));
+            }
             let applier = Arc::new(OpLogApplier::new(self.state.clone()));
             applier.recover(baseline_seq_id);
             self.oplog_applier = Some(applier.clone());
@@ -462,24 +1101,48 @@ impl HotStandbyService {
                         let callback_applier = applier_clone.clone();
                         let callback_status = sync_status_ref.clone();
                         let callback_store = store.clone();
+                        let callback_state_machine = state_machine.clone();
                         let error_state_machine = state_machine.clone();
+                        let error_status = sync_status_ref.clone();
                         let start_seq_id = applier_clone.get_expected_sequence_id();
                         let start_result = notifier.start(
                             start_seq_id,
                             Box::new(move |entry| {
+                                let before_apply = callback_applier.get_expected_sequence_id();
+                                let entry_seq = entry.seq;
                                 callback_applier.apply_op_log_entries(&[entry]);
                                 let expected = callback_applier.get_expected_sequence_id();
                                 let applied = expected.saturating_sub(1);
                                 let primary = callback_store.latest_sequence();
+                                let rejected_expected =
+                                    entry_seq == before_apply && expected == before_apply;
+                                if rejected_expected {
+                                    callback_state_machine.process_event(StandbyEvent::FatalError);
+                                }
                                 if let Some(status) = callback_status.upgrade() {
                                     let mut st = status.write();
                                     st.applied_seq_id = applied;
                                     st.primary_seq_id = primary;
                                     st.lag_entries = primary.saturating_sub(applied);
+                                    if rejected_expected {
+                                        st.state = StandbyState::Failed;
+                                        st.is_connected = false;
+                                        st.is_syncing = false;
+                                    }
                                 }
                             }),
                             Box::new(move |_err| {
-                                error_state_machine.process_event(StandbyEvent::WatchBroken);
+                                if !error_state_machine.is_in_state(StandbyState::Failed) {
+                                    error_state_machine.process_event(StandbyEvent::WatchBroken);
+                                }
+                                if let Some(status) = error_status.upgrade() {
+                                    let mut st = status.write();
+                                    st.state = error_state_machine.get_state();
+                                    st.is_connected = false;
+                                    if st.state == StandbyState::Failed {
+                                        st.is_syncing = false;
+                                    }
+                                }
                             }),
                         );
                         if start_result.is_ok() {
@@ -492,8 +1155,10 @@ impl HotStandbyService {
                                         notifier.stop();
                                         return;
                                     }
-                                    if !notifier.is_healthy() {
-                                        state_machine.process_event(StandbyEvent::WatchBroken);
+                                    if !notifier.is_healthy() || !state_machine.is_connected() {
+                                        if state_machine.is_connected() {
+                                            state_machine.process_event(StandbyEvent::WatchBroken);
+                                        }
                                         notifier.stop();
                                         break;
                                     }
@@ -512,28 +1177,106 @@ impl HotStandbyService {
                                 state_machine.process_event(StandbyEvent::WatchBroken);
                                 notifier.stop();
                             }
+                        } else {
+                            state_machine.process_event(StandbyEvent::WatchBroken);
                         }
                     }
                 }
 
+                if state_machine.is_in_state(StandbyState::Failed) {
+                    return;
+                }
+                if !state_machine.is_connected() {
+                    if let Some(status) = sync_status_ref.upgrade() {
+                        let mut st = status.write();
+                        st.state = StandbyState::Reconnecting;
+                        st.is_connected = false;
+                    }
+                }
+
+                let mut consecutive_reconnect_failures = 0_u32;
                 loop {
                     if shutdown_rx.has_changed().unwrap_or(true) {
                         break;
                     }
-                    if !state_machine.is_connected() {
-                        std::thread::sleep(poll_interval);
-                        continue;
-                    }
                     let mut expected = applier_clone.get_expected_sequence_id();
-                    if let Some(store) = oplog_store.as_ref() {
-                        match store.read_since(expected, 1024) {
-                            Ok(entries) if !entries.is_empty() => {
+                    let read_result = oplog_store
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HaError::InvalidBackend(
+                                "standby oplog store disappeared during reconnect".into(),
+                            )
+                        })
+                        .and_then(|store| store.read_since(expected, 1024));
+                    match read_result {
+                        Ok(entries) => {
+                            if entries.first().is_some_and(|entry| entry.seq != expected) {
+                                state_machine.process_event(StandbyEvent::FatalError);
+                                if let Some(status) = sync_status_ref.upgrade() {
+                                    let mut st = status.write();
+                                    st.state = StandbyState::Failed;
+                                    st.is_connected = false;
+                                    st.is_syncing = false;
+                                }
+                                tracing::error!(
+                                    expected,
+                                    first_sequence = entries[0].seq,
+                                    "HotStandbyService: oplog replay encountered an unrecoverable sequence gap"
+                                );
+                                break;
+                            }
+                            if !entries.is_empty() {
+                                let before_apply = expected;
                                 applier_clone.apply_op_log_entries(&entries);
                                 expected = applier_clone.get_expected_sequence_id();
+                                if expected == before_apply {
+                                    state_machine.process_event(StandbyEvent::FatalError);
+                                    if let Some(status) = sync_status_ref.upgrade() {
+                                        let mut st = status.write();
+                                        st.state = StandbyState::Failed;
+                                        st.is_connected = false;
+                                        st.is_syncing = false;
+                                    }
+                                    tracing::error!(
+                                        expected,
+                                        "HotStandbyService: oplog replay rejected the expected record"
+                                    );
+                                    break;
+                                }
                             }
-                            Ok(_) => {}
-                            Err(_) => {
+                            if !state_machine.is_connected() {
+                                state_machine.process_event(StandbyEvent::Connected);
+                                state_machine.process_event(StandbyEvent::SyncComplete);
+                            }
+                            state_machine.reset_reconnect_count();
+                            consecutive_reconnect_failures = 0;
+                        }
+                        Err(error) => {
+                            if state_machine.is_connected() {
                                 state_machine.process_event(StandbyEvent::WatchBroken);
+                            }
+                            state_machine.increment_reconnect_count();
+                            consecutive_reconnect_failures =
+                                consecutive_reconnect_failures.saturating_add(1);
+                            if let Some(status) = sync_status_ref.upgrade() {
+                                let mut st = status.write();
+                                st.state = StandbyState::Reconnecting;
+                                st.is_connected = false;
+                            }
+                            if consecutive_reconnect_failures >= MAX_STANDBY_RECONNECT_ATTEMPTS {
+                                state_machine.process_event(StandbyEvent::MaxErrorsReached);
+                                if let Some(status) = sync_status_ref.upgrade() {
+                                    let mut st = status.write();
+                                    st.state = StandbyState::Failed;
+                                    st.is_connected = false;
+                                    st.is_syncing = false;
+                                }
+                                tracing::error!(
+                                    %error,
+                                    attempts = consecutive_reconnect_failures,
+                                    "HotStandbyService: oplog reconnect exhausted; stopping follower"
+                                );
+                                break;
                             }
                         }
                     }
@@ -548,6 +1291,11 @@ impl HotStandbyService {
                         st.applied_seq_id = applied;
                         st.primary_seq_id = primary;
                         st.lag_entries = primary.saturating_sub(applied);
+                        if state_machine.is_connected() {
+                            st.state = StandbyState::Watching;
+                            st.is_connected = true;
+                            st.is_syncing = true;
+                        }
                     }
 
                     std::thread::sleep(poll_interval);
@@ -590,14 +1338,16 @@ impl HotStandbyService {
     /// Promote the standby to leader.
     /// 提升备节点为 leader。
     ///
-    /// Transitions through Promoting → Promoted, returns the applied oplog seq_id.
-    /// 状态转为 Promoting → Promoted，返回已应用的 oplog 序列号。
+    /// Transitions through Promoting → Promoted → Stopped and returns the
+    /// applied oplog seq_id. Stopping the follower is part of successful
+    /// promotion so a later leader term can start standby again.
+    /// 状态转为 Promoting → Promoted → Stopped，返回已应用的 oplog 序列号。
     ///
     /// The returned seq_id can be used by the new leader to continue from where
     /// the old leader left off.
     /// 返回的 seq_id 可供新 leader 使用，从旧 leader 中断处继续。
     ///
-    /// 提升为 Leader：状态转为 Promoting → Promoted，返回已应用的 oplog 序列号。
+    /// 提升为 Leader：追平后停止 follower，返回已应用的 oplog 序列号。
     pub async fn promote(&mut self) -> Result<u64, HaError> {
         let result = self.state_machine.process_event(StandbyEvent::Promote);
         if !result.allowed {
@@ -612,49 +1362,82 @@ impl HotStandbyService {
             let _ = handle.join();
         }
 
-        // Gap resolution + final catch-up.
-        // C++: ResolvePromotionGapsLocked (3 retries, stops when all gaps filled).
-        if let Some(ref applier) = self.oplog_applier {
-            if let Some(ref store) = self.oplog_store {
-                for _ in 0..3 {
-                    let (needed, fetched) = applier.try_resolve_gaps_once(store.as_ref(), 1024);
-                    // Match C++: stop when all needed entries were fetched.
-                    if needed == 0 || fetched >= needed {
-                        break;
+        let catch_up_result = (|| -> Result<(), HaError> {
+            // Gap resolution + final catch-up.
+            // C++: ResolvePromotionGapsLocked (3 retries, stops when all gaps filled).
+            if let Some(ref applier) = self.oplog_applier {
+                if let Some(ref store) = self.oplog_store {
+                    for _ in 0..3 {
+                        let (needed, fetched) = applier.try_resolve_gaps_once(store.as_ref(), 1024);
+                        // Match C++: stop when all needed entries were fetched.
+                        if needed == 0 || fetched >= needed {
+                            break;
+                        }
                     }
-                }
-                // Final catch-up (C++: FinalCatchUpForPromotionLocked).
-                // Uses same store (shared Arc) — C++ creates a NEW store, but in
-                // Rust the Arc clone preserves the store reference.
-                let mut expected = applier.get_expected_sequence_id();
-                let latest = store.latest_sequence();
-                if latest >= expected {
-                    let start = std::time::Instant::now();
-                    let timeout = std::time::Duration::from_secs(30);
-                    for _ in 0..100 {
-                        if start.elapsed() >= timeout {
-                            break;
-                        }
-                        expected = applier.get_expected_sequence_id();
-                        if latest < expected {
-                            break;
-                        }
-                        let to_read = ((latest - expected + 1) as usize).min(1000);
-                        if to_read == 0 {
-                            break;
-                        }
-                        if let Ok(entries) = store.read_since(expected, to_read) {
-                            if entries.is_empty() {
+                    // Final catch-up (C++: FinalCatchUpForPromotionLocked).
+                    // Uses same store (shared Arc) — C++ creates a NEW store, but in
+                    // Rust the Arc clone preserves the store reference.
+                    let mut expected = applier.get_expected_sequence_id();
+                    let latest = store.max_sequence_id()?;
+                    if latest >= expected {
+                        let start = std::time::Instant::now();
+                        let timeout = std::time::Duration::from_secs(30);
+                        for _ in 0..100 {
+                            if start.elapsed() >= timeout {
+                                return Err(HaError::InvalidBackend(format!(
+                                    "promotion final catch-up timed out: expected={expected}, latest={latest}"
+                                )));
+                            }
+                            expected = applier.get_expected_sequence_id();
+                            if latest < expected {
                                 break;
                             }
+                            let to_read =
+                                latest.saturating_sub(expected).saturating_add(1).min(1000)
+                                    as usize;
+                            if to_read == 0 {
+                                break;
+                            }
+                            let entries = store.read_since(expected, to_read)?;
+                            if entries.is_empty() {
+                                return Err(HaError::InvalidBackend(format!(
+                                    "promotion final catch-up returned no entries: expected={expected}, latest={latest}"
+                                )));
+                            }
+                            let before_apply = expected;
                             applier.apply_op_log_entries(&entries);
-                        } else {
-                            break;
+                            expected = applier.get_expected_sequence_id();
+                            if expected <= before_apply {
+                                return Err(HaError::InvalidBackend(format!(
+                                    "promotion final catch-up made no progress: expected={before_apply}, latest={latest}"
+                                )));
+                            }
+                        }
+                        expected = applier.get_expected_sequence_id();
+                        if expected <= latest {
+                            return Err(HaError::InvalidBackend(format!(
+                                "promotion final catch-up is incomplete: expected={expected}, latest={latest}"
+                            )));
                         }
                     }
                 }
             }
+            Ok(())
+        })();
+        if let Err(error) = catch_up_result {
+            self.state_machine
+                .process_event(StandbyEvent::PromotionFailed);
+            let mut status = self.sync_status.write();
+            status.state = StandbyState::Failed;
+            status.is_connected = false;
+            status.is_syncing = false;
+            return Err(error);
         }
+
+        // Drain jobs are runtime schedulers rather than durable Store state.
+        // Terminal segment statuses are replayed, while an unfinished
+        // DRAINING status must be treated as an aborted job before serving.
+        abort_orphaned_drain_segments_after_recovery(&self.state);
 
         self.state_machine
             .process_event(StandbyEvent::PromotionSuccess);
@@ -665,11 +1448,14 @@ impl HotStandbyService {
             .map(|a| a.get_expected_sequence_id().saturating_sub(1))
             .unwrap_or(0);
 
-        let mut status = self.sync_status.write();
-        status.state = StandbyState::Promoted;
-        drop(status);
+        // Match the C++ lifecycle: promotion consumes and stops the follower.
+        // Keeping the service in Promoted would reject Start on the next term.
+        self.stop();
 
-        info!("HotStandbyService: promoted with seq_id={}", applied);
+        info!(
+            "HotStandbyService: promoted and stopped follower with seq_id={}",
+            applied
+        );
         Ok(applied)
     }
 }

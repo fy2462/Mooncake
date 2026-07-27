@@ -9,17 +9,135 @@ use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use transfer_engine_ffi::{Opcode, TransferRequest};
+use transfer_engine_ffi::{RegisteredSubmitOutcome, RegisteredTransferRequest};
 
 use super::{
     MooncakeClient,
     finalize::{ReplicaFinalizeDecision, ReplicaTransferSummary, determine_finalize_decision},
+    storage_local::{EvictionNotificationError, notify_evicted_disk_replicas_with},
+    transfer_local::ReadableBufferRegion,
 };
 use crate::proto;
 
 pub(super) const BATCH_STATUS_OBJECT_ALREADY_EXISTS: i32 = -7;
 
 impl MooncakeClient {
+    pub(super) async fn write_global_disk_replica(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        replica: &ReplicaDescriptor,
+        data: &[u8],
+    ) -> StoreResult<()> {
+        if replica.replica_type != ReplicaType::Disk {
+            return Err(StoreError::InvalidParams(
+                "global DISK writer received a non-Disk replica".to_string(),
+            ));
+        }
+        if replica.size != data.len() as u64 {
+            return Err(StoreError::InvalidParams(format!(
+                "global DISK write size mismatch: descriptor={}, payload={}",
+                replica.size,
+                data.len()
+            )));
+        }
+        let storage = self.global_disk.as_ref().cloned().ok_or_else(|| {
+            StoreError::InvalidParams(
+                "Master returned a global DISK replica but the client has no shared storage backend"
+                    .to_string(),
+            )
+        })?;
+        let pending = storage
+            .prepare_write(
+                replica.segment_name.clone(),
+                tenant_id.to_string(),
+                key.to_string(),
+                replica.size,
+            )
+            .await?;
+        let evicted_storage_keys = pending.eviction_storage_keys();
+        match notify_evicted_disk_replicas_with(
+            self,
+            &evicted_storage_keys,
+            proto::replica_descriptor::ReplicaType::Disk as i32,
+        )
+        .await
+        {
+            Ok(_) => storage.commit_write(pending, data.to_vec()).await,
+            Err(EvictionNotificationError {
+                accepted_storage_keys,
+                source,
+            }) => {
+                match storage
+                    .finalize_partial(pending, accepted_storage_keys)
+                    .await
+                {
+                    Ok(_) => Err(source),
+                    Err(finalize_error) => Err(StoreError::Internal(format!(
+                        "global DISK eviction notification failed: {source}; \
+                         accepted victim finalization failed: {finalize_error}"
+                    ))),
+                }
+            }
+        }
+    }
+
+    pub(super) async fn write_global_disk_parts(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        replica: &ReplicaDescriptor,
+        regions: &[ReadableBufferRegion],
+        sizes: &[usize],
+    ) -> StoreResult<()> {
+        if regions.len() != sizes.len() {
+            return Err(StoreError::InvalidParams(
+                "global DISK regions and sizes length mismatch".to_string(),
+            ));
+        }
+        let total = sizes.iter().try_fold(0usize, |total, size| {
+            total.checked_add(*size).ok_or_else(|| {
+                StoreError::InvalidParams("global DISK payload size overflow".to_string())
+            })
+        })?;
+        let mut payload = vec![0_u8; total];
+        let mut offset = 0;
+        for (region, size) in regions.iter().zip(sizes) {
+            if region.len() != *size {
+                return Err(StoreError::InvalidParams(
+                    "global DISK registered region size mismatch".to_string(),
+                ));
+            }
+            self.accelerator.copy_to_host(
+                &mut payload[offset..offset + *size],
+                region.foreign_region(),
+            )?;
+            offset += *size;
+        }
+        self.write_global_disk_replica(key, tenant_id, replica, &payload)
+            .await
+    }
+
+    pub(super) async fn finalize_global_disk_for_key(
+        &mut self,
+        key: &str,
+        summary: &ReplicaTransferSummary,
+        tenant_id: &str,
+    ) -> StoreResult<()> {
+        if summary.allocated_disk_replicas == 0 {
+            return Ok(());
+        }
+        if summary.successful_disk_writes == summary.allocated_disk_replicas
+            && summary.failed_disk_writes == 0
+        {
+            self.put_end_for_type(key, ReplicaType::Disk, tenant_id)
+                .await
+        } else {
+            self.put_revoke_for_type(key, ReplicaType::Disk, tenant_id)
+                .await
+        }
+    }
+
     pub(super) async fn put_end_for_type(
         &mut self,
         key: &str,
@@ -149,10 +267,10 @@ impl MooncakeClient {
         }
     }
 
-    pub(super) async unsafe fn write_parts_from_to_replica(
+    pub(super) async fn write_parts_from_to_replica(
         &self,
         replica: &ReplicaDescriptor,
-        buffers: &[*mut c_void],
+        buffers: &[ReadableBufferRegion],
         sizes: &[usize],
     ) -> StoreResult<()> {
         if buffers.len() != sizes.len() {
@@ -180,53 +298,76 @@ impl MooncakeClient {
         // 从这里开始同时持有远端 Segment 和 native batch 资源；后续每个错误分支都要
         // 按 batch → Segment 的逆序清理，但 source buffer 必须继续活到任务终态。
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
-        let batch_id = match self.engine.allocate_batch_id(buffers.len()) {
-            Ok(id) => id,
-            Err(e) => {
+        let requests = self.close_segment_on_prepare_error(
+            segment_id,
+            (|| -> StoreResult<_> {
+                let mut offset = 0usize;
+                let mut requests = Vec::with_capacity(buffers.len());
+                for (buffer, &size) in buffers.iter().zip(sizes.iter()) {
+                    requests.push(RegisteredTransferRequest::write(
+                        buffer.registered_region(),
+                        segment_id,
+                        Self::checked_replica_target_offset(replica, offset)?,
+                        size,
+                    )?);
+                    offset = offset.checked_add(size).ok_or_else(|| {
+                        StoreError::InvalidParams(
+                            "multi-buffer transfer offset overflows usize".to_string(),
+                        )
+                    })?;
+                }
+                Ok(requests)
+            })(),
+        )?;
+
+        // Region capabilities are cloned into the payload so cancellation of
+        // this borrowed call frame cannot unregister/reuse source memory.
+        let payload_regions = buffers.to_vec();
+        let outcome = match self.engine.submit_transfer(requests) {
+            Ok(outcome) => outcome,
+            Err(error) => {
                 let _ = self.engine.close_segment(segment_id);
-                return Err(e.into());
+                return Err(error.into());
+            }
+        };
+        let batch = match outcome {
+            RegisteredSubmitOutcome::Submitted(batch) => batch,
+            RegisteredSubmitOutcome::NativeRejected { error, batch } => {
+                let _completion = self
+                    .release_failed_submission_owned(
+                        batch,
+                        segment_id,
+                        std::time::Duration::from_secs(10),
+                        payload_regions,
+                    )
+                    .await?;
+                return Err(error.into());
             }
         };
 
-        let mut offset = 0u64;
-        let mut requests = Vec::with_capacity(buffers.len());
-        for (&buffer, &size) in buffers.iter().zip(sizes.iter()) {
-            requests.push(TransferRequest {
-                opcode: Opcode::Write,
-                source: buffer,
-                target_id: segment_id,
-                target_offset: replica.base_addr + replica.offset + offset,
-                length: size as u64,
-            });
-            offset += size as u64;
-        }
-
-        if let Err(e) = self.engine.submit_transfer(batch_id, &requests) {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e.into());
-        }
-
-        // wait_for_transfer_batch 是 payload 生命周期的栅栏：只有越过它，调用者才可
-        // 认为 RNIC/transport 不再访问 requests 中的裸指针。
-        if let Err(e) = self
-            .wait_for_transfer_batch(
-                batch_id,
-                buffers.len(),
-                tokio::time::Duration::from_secs(10),
+        let completion = self
+            .wait_for_transfer_batch_owned(
+                batch,
+                segment_id,
+                std::time::Duration::from_secs(10),
+                payload_regions,
             )
-            .await
-        {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e);
+            .await?;
+        if !super::transfer::transfer_statuses_match_lengths(
+            &completion.statuses,
+            sizes.iter().map(|size| *size as u64),
+        ) {
+            return Err(StoreError::Internal(
+                "multi-buffer write completed with a short transfer".to_string(),
+            ));
         }
-
-        if let Err(e) = self.engine.free_batch_id(batch_id) {
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e.into());
+        drop(completion);
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_transfer_bytes(
+                super::metrics::TransferOperationKind::Write,
+                total_len as u64,
+            );
         }
-        self.engine.close_segment(segment_id)?;
         Ok(())
     }
 
@@ -289,6 +430,7 @@ impl MooncakeClient {
         value: &[u8],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<()> {
+        let started_at = std::time::Instant::now();
         tracing::info!(target: "te_debug", %key, value_len = value.len(), "put: ENTER");
 
         // Guard: empty key or value is invalid. / 守卫：空 key 或 value 无效。
@@ -300,6 +442,7 @@ impl MooncakeClient {
         }
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
+        self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
 
         // Phase 1: put_start — allocate replicas on master.
         // 阶段 1：put_start —— 在 master 上分配副本。
@@ -308,18 +451,7 @@ impl MooncakeClient {
             key: key.to_string(),
             slice_length: value.len() as u64,
             tenant_id: tenant_id.clone(),
-            config: Some(proto::ReplicateConfig {
-                replica_num: cfg.replica_num,
-                nof_replica_num: cfg.nof_replica_num,
-                with_soft_pin: cfg.with_soft_pin,
-                with_hard_pin: cfg.with_hard_pin,
-                preferred_segment: cfg.preferred_segment.clone(),
-                prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
-                preferred_segments: cfg.preferred_segments.clone(),
-                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
-                data_type: cfg.data_type as i32,
-                group_ids: cfg.group_ids.clone(),
-            }),
+            config: Some(self.replicate_config_to_proto(&cfg)),
         };
 
         tracing::info!(target: "te_debug", %key, "put: calling put_start");
@@ -329,6 +461,9 @@ impl MooncakeClient {
                 tracing::error!(target: "te_debug", %key, error = %status, "put: put_start FAILED");
                 let err = Self::put_start_error_from_status(key, status);
                 if matches!(err, StoreError::ObjectExists(_)) {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.observe_put(value.len() as u64, started_at.elapsed());
+                    }
                     return Ok(());
                 }
                 return Err(err);
@@ -345,9 +480,24 @@ impl MooncakeClient {
         let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
         let mut first_error = None;
 
-        // Phase 2: write_to_replica — write data to each allocated Memory/NoF replica.
-        // 阶段 2：write_to_replica —— 向每个已分配 Memory/NoF 副本写入数据。
+        // Phase 2: write Memory/NoF through TE and global DISK through the
+        // shared-filesystem adapter.
         for (i, replica) in replicas.iter().enumerate() {
+            if replica.replica_type == ReplicaType::Disk {
+                match self
+                    .write_global_disk_replica(key, &tenant_id, replica, value)
+                    .await
+                {
+                    Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                    Err(error) => {
+                        transfer_summary.record_failure(ReplicaType::Disk);
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                continue;
+            }
             if !matches!(
                 replica.replica_type,
                 ReplicaType::Memory | ReplicaType::NoFSsd
@@ -377,11 +527,16 @@ impl MooncakeClient {
         tracing::info!(target: "te_debug", %key, "put: calling put_end");
         let decision = determine_finalize_decision(&cfg, &transfer_summary);
         self.finalize_put_for_key(key, decision, &tenant_id).await?;
+        self.finalize_global_disk_for_key(key, &transfer_summary, &tenant_id)
+            .await?;
         if !decision.success {
             return Err(first_error.unwrap_or(StoreError::NoAvailableHandle));
         }
 
         tracing::info!(target: "te_debug", %key, "put: EXIT (success)");
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_put(value.len() as u64, started_at.elapsed());
+        }
         Ok(())
     }
 }

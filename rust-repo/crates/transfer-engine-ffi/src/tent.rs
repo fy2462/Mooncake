@@ -1,7 +1,8 @@
 use crate::ffi;
+use crate::transfer::next_engine_instance_id;
 use crate::{
-    BatchId, Opcode, TransferEngineError, TransferEngineResult, TransferRequest, TransferStatus,
-    TransferStatusEnum,
+    Opcode, OwnedBatchId as BatchId, TransferEngineError, TransferEngineResult, TransferRequest,
+    TransferStatus, TransferStatusEnum,
 };
 use std::ffi::{CString, c_void};
 use std::mem::size_of;
@@ -147,7 +148,11 @@ impl TentTransferRequest {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn from_raw_parts(
+    /// # Safety
+    ///
+    /// `source..source + length` must identify memory that remains valid and
+    /// correctly registered until the submitted native transfer is quiescent.
+    pub unsafe fn from_raw_parts(
         opcode: Opcode,
         source: *mut c_void,
         target_id: u64,
@@ -275,6 +280,7 @@ fn check_native_result(rc: i32) -> TransferEngineResult<()> {
 #[derive(Debug)]
 pub struct TentEngine {
     handle: NonNull<c_void>,
+    instance_id: u64,
 }
 
 // SAFETY: TENT owns synchronization for its opaque engine handle. Rust never
@@ -302,7 +308,10 @@ impl TentEngine {
         }
         let handle = NonNull::new(unsafe { ffi::tent_create_engine() })
             .ok_or(TransferEngineError::NullHandle)?;
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            instance_id: next_engine_instance_id(),
+        })
     }
 
     pub fn available(&self) -> bool {
@@ -328,7 +337,16 @@ impl TentEngine {
     /// Register memory owned by a foreign runtime such as CPython/PyTorch.
     /// Raw-address unsafety is contained in this FFI crate; the foreign caller
     /// is responsible for keeping the allocation alive until unregistration.
-    pub fn register_foreign_memory(&self, address: usize, size: usize) -> TransferEngineResult<()> {
+    /// # Safety
+    ///
+    /// `address..address + size` must be a live allocation owned by the
+    /// caller. It must remain live and unavailable for conflicting access
+    /// until it is unregistered after all in-flight transfers are quiescent.
+    pub unsafe fn register_foreign_memory(
+        &self,
+        address: usize,
+        size: usize,
+    ) -> TransferEngineResult<()> {
         if address == 0 || size == 0 {
             return Err(TransferEngineError::NullPointer);
         }
@@ -338,7 +356,11 @@ impl TentEngine {
         check_native_result(rc)
     }
 
-    pub fn unregister_foreign_memory(
+    /// # Safety
+    ///
+    /// The range must denote the same live registration previously passed to
+    /// [`Self::register_foreign_memory`], with no in-flight native access.
+    pub unsafe fn unregister_foreign_memory(
         &self,
         address: usize,
         size: usize,
@@ -357,22 +379,27 @@ impl TentEngine {
         if id == u64::MAX {
             return Err(TransferEngineError::OperationFailed(-1));
         }
-        Ok(BatchId(id))
+        Ok(BatchId::allocated(id, self.instance_id))
     }
 
     /// Submit through the legacy TENT ABI when the request uses only fields
     /// supported by `tent_request_t`; otherwise use `tent_submit_v2`.
-    pub fn submit_transfer(
+    /// # Safety
+    ///
+    /// Every request's source range must remain valid, registered, and free of
+    /// conflicting access until the native transfer is quiescent.
+    pub unsafe fn submit_transfer(
         &self,
-        batch_id: BatchId,
+        batch_id: &BatchId,
         requests: &[TentTransferRequest],
     ) -> TransferEngineResult<()> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
         let rc = if submission_abi(requests) == SubmissionAbi::Legacy {
             let mut raw = build_legacy_requests(requests);
             unsafe {
                 ffi::tent_submit(
                     self.handle.as_ptr(),
-                    batch_id.0,
+                    raw_batch_id,
                     raw.as_mut_ptr(),
                     raw.len(),
                 )
@@ -382,7 +409,7 @@ impl TentEngine {
             unsafe {
                 ffi::tent_submit_v2(
                     self.handle.as_ptr(),
-                    batch_id.0,
+                    raw_batch_id,
                     raw.requests.as_ptr(),
                     raw.requests.len(),
                 )
@@ -391,22 +418,24 @@ impl TentEngine {
         check_native_result(rc)
     }
 
-    pub fn cancel_transfer(&self, batch_id: BatchId, task_id: usize) -> TransferEngineResult<()> {
-        let rc = unsafe { ffi::tent_cancel_task(self.handle.as_ptr(), batch_id.0, task_id) };
+    pub fn cancel_transfer(&self, batch_id: &BatchId, task_id: usize) -> TransferEngineResult<()> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
+        let rc = unsafe { ffi::tent_cancel_task(self.handle.as_ptr(), raw_batch_id, task_id) };
         check_native_result(rc)
     }
 
     pub fn transfer_status(
         &self,
-        batch_id: BatchId,
+        batch_id: &BatchId,
         task_id: usize,
     ) -> TransferEngineResult<TransferStatus> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
         let mut raw = ffi::tent_status_t {
             status: 0,
             transferred_bytes: 0,
         };
         let rc =
-            unsafe { ffi::tent_task_status(self.handle.as_ptr(), batch_id.0, task_id, &mut raw) };
+            unsafe { ffi::tent_task_status(self.handle.as_ptr(), raw_batch_id, task_id, &mut raw) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
@@ -416,9 +445,15 @@ impl TentEngine {
         })
     }
 
-    pub fn free_batch(&self, batch_id: BatchId) -> TransferEngineResult<()> {
-        let rc = unsafe { ffi::tent_free_batch(self.handle.as_ptr(), batch_id.0) };
-        check_native_result(rc)
+    pub fn free_batch(&self, batch_id: &mut BatchId) -> TransferEngineResult<()> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
+        let rc = unsafe { ffi::tent_free_batch(self.handle.as_ptr(), raw_batch_id) };
+        if matches!(rc, 4 | -4) {
+            return Err(TransferEngineError::BatchBusy);
+        }
+        check_native_result(rc)?;
+        batch_id.mark_released();
+        Ok(())
     }
 
     pub fn metrics_status(&self) -> TransferEngineResult<TentMetricsStatus> {

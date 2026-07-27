@@ -27,6 +27,7 @@ async fn test_create_and_query_task_returns_real_state() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -44,6 +45,7 @@ async fn test_create_and_query_task_returns_real_state() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -70,7 +72,22 @@ async fn test_create_and_query_task_returns_real_state() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto::Uuid {
+                high: client_id.as_u64_pair().0,
+                low: client_id.as_u64_pair().1,
+            }),
+            key: "task-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
         }),
     )
     .await
@@ -103,7 +120,7 @@ async fn test_create_and_query_task_returns_real_state() {
     assert_eq!(task.task_type, proto::TaskType::ReplicaCopy as i32);
     assert_eq!(task.status, proto::TaskStatus::TaskPending as i32);
     assert!(task.created_at_ms_epoch > 0);
-    assert!(task.message.contains("task-key"));
+    assert!(task.message.is_empty());
     assert!(task.assigned_client.is_some());
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -145,6 +162,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
@@ -172,6 +190,7 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -220,6 +239,21 @@ async fn test_fetch_tasks_marks_processing_and_respects_batch_size() {
     .into_inner()
     .task_id
     .unwrap();
+
+    let zero_batch = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            batch_size: 0,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(zero_batch.tasks.is_empty());
 
     let first_batch = MasterService::fetch_tasks(
         &service,
@@ -341,6 +375,7 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
@@ -368,6 +403,7 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -449,6 +485,24 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
     .await;
     assert!(nonterminal_status.is_err());
 
+    let unknown_status = MasterService::mark_task_to_complete(
+        &service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(task_id.clone()),
+                status: 99,
+                message: "unknown-status".into(),
+            }),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(unknown_status.code(), tonic::Code::InvalidArgument);
+
     MasterService::mark_task_to_complete(
         &service,
         Request::new(proto::MarkTaskToCompleteRequest {
@@ -460,6 +514,40 @@ async fn test_mark_task_to_complete_updates_state_and_rejects_wrong_client() {
                 id: Some(task_id.clone()),
                 status: proto::TaskStatus::TaskSuccess as i32,
                 message: "done".into(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
+    MasterService::mark_task_to_complete(
+        &service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(task_id.clone()),
+                status: proto::TaskStatus::TaskSuccess as i32,
+                message: "done".into(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
+    MasterService::mark_task_to_complete(
+        &service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto::Uuid {
+                high: source_client_id.as_u64_pair().0,
+                low: source_client_id.as_u64_pair().1,
+            }),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(task_id.clone()),
+                status: proto::TaskStatus::TaskFailed as i32,
+                message: "late-conflicting-retry".into(),
             }),
         }),
     )

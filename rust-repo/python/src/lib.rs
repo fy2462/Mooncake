@@ -14,12 +14,15 @@
 mod buffer_pool;
 mod client;
 mod client_ext;
+mod dlpack;
 mod dummy_client;
 mod dummy_ipc;
 mod engram;
 mod p2p_store;
 pub mod remote_config;
 mod replicate_config;
+mod tensor_codec;
+mod tensor_parallelism;
 mod transfer_engine;
 
 use pyo3::prelude::*;
@@ -143,7 +146,9 @@ fn enable_te_debug_tracing() {
 fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<client::PythonMooncakeClient>()?;
     m.add_class::<buffer_pool::BufferPoolPy>()?;
-    m.add_class::<buffer_pool::RegisteredBufferPoolPy>()?;
+    m.add_class::<buffer_pool::BufferLeasePy>()?;
+    m.add("RegisteredBufferPool", m.getattr("BufferPool")?)?;
+    m.add("RegisteredBufferLease", m.getattr("BufferLease")?)?;
     m.add_class::<dummy_client::PythonMooncakeDummyClient>()?;
     m.add_class::<dummy_ipc::PythonMooncakeDummyIpcChannel>()?;
     m.add_class::<replicate_config::ReplicateConfigPy>()?;
@@ -152,12 +157,19 @@ fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<engram::EngramStoreConfigPy>()?;
     m.add_class::<engram::EngramStorePy>()?;
     m.add_class::<p2p_store::P2pStorePy>()?;
+    m.add_class::<tensor_parallelism::ParallelAxisPy>()?;
+    m.add_class::<tensor_parallelism::TensorParallelismPy>()?;
+    m.add_class::<tensor_parallelism::ReadTargetPy>()?;
+    m.add_class::<tensor_parallelism::WriterPartitionPy>()?;
     m.add_class::<transfer_engine::PyTransferIntent>()?;
     m.add_class::<transfer_engine::PyTransferPriority>()?;
     m.add_class::<transfer_engine::PyTentMetricsStatus>()?;
     m.add_class::<transfer_engine::PyTransferStatus>()?;
     m.add_class::<transfer_engine::PyTransferRequest>()?;
     m.add_class::<transfer_engine::PyTransferEngine>()?;
+    m.add_function(wrap_pyfunction!(tensor_codec::tensor_metadata_size, m)?)?;
+    m.add_function(wrap_pyfunction!(tensor_codec::serialize_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(tensor_codec::deserialize_tensor, m)?)?;
     m.add("StoreError", m.py().get_type::<StoreErrorPy>())?;
     m.add_function(wrap_pyfunction!(enable_te_debug_tracing, m)?)?;
     Ok(())

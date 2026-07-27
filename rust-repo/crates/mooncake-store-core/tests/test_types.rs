@@ -2,6 +2,52 @@ use mooncake_store_core::{
     ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment, StorageObjectMetadata,
     TaskAssignment, TaskCompleteRequest, TaskInfo, TaskStatus, TaskType,
 };
+
+#[test]
+fn memory_segment_identity_is_stable_and_field_delimited() {
+    let client_id = uuid::Uuid::new_v4();
+    let identity = |name, endpoint| {
+        mooncake_store_core::stable_memory_segment_id(
+            client_id, name, 0x1000, 0x2000, endpoint, "tcp", "host-a",
+        )
+    };
+    assert_eq!(
+        identity("segment-a", "tcp://a"),
+        identity("segment-a", "tcp://a")
+    );
+    assert_ne!(
+        identity("segment-a", "tcp://a"),
+        identity("segment-b", "tcp://a")
+    );
+    assert_ne!(
+        identity("segment-a", "tcp://a"),
+        identity("segment-a", "tcp://b")
+    );
+    assert_ne!(
+        identity("a", "bc"),
+        identity("ab", "c"),
+        "length framing must prevent concatenation ambiguity"
+    );
+}
+
+#[test]
+fn resolve_host_id_matches_store_identity_rules() {
+    assert_eq!(
+        mooncake_store_core::resolve_host_id(" node-a:1234 "),
+        "node-a"
+    );
+    assert_eq!(
+        mooncake_store_core::resolve_host_id("2001:db8::1"),
+        "2001:db8::1"
+    );
+    assert_eq!(
+        mooncake_store_core::resolve_host_id("[2001:db8::1]:1234"),
+        "2001:db8::1"
+    );
+    for local in ["localhost:1", "127.0.0.1:1", "[::1]:1", "::", "0.0.0.0:1"] {
+        assert!(mooncake_store_core::resolve_host_id(local).is_empty());
+    }
+}
 use uuid::Uuid;
 
 // =========================================================================
@@ -103,6 +149,7 @@ fn test_segment_creation() {
         base: 0x7f0000000000,
         te_endpoint: "192.168.1.1:12345".into(),
         protocol: "tcp".into(),
+        host_id: String::new(),
     };
     assert_eq!(seg.name, "node1:12345");
     assert_eq!(seg.size, 104857600);
@@ -121,6 +168,7 @@ fn test_segment_empty() {
         base: 0,
         te_endpoint: String::new(),
         protocol: String::new(),
+        host_id: String::new(),
     };
     assert!(seg.name.is_empty());
     assert_eq!(seg.size, 0);
@@ -138,6 +186,7 @@ fn test_segment_rdma_protocol() {
         base: 0x1000000,
         te_endpoint: "192.168.1.2:54321".into(),
         protocol: "rdma".into(),
+        host_id: String::new(),
     };
     assert_eq!(seg.protocol, "rdma");
     assert_eq!(seg.te_endpoint, "192.168.1.2:54321");
@@ -153,6 +202,7 @@ fn test_segment_clone() {
         base: 0xdead0000,
         te_endpoint: "10.0.0.1:9000".into(),
         protocol: "tcp".into(),
+        host_id: String::new(),
     };
     let cloned = seg.clone();
     assert_eq!(seg.id, cloned.id);
@@ -173,6 +223,7 @@ fn test_segment_serde_roundtrip() {
         base: 0x7fff00000000,
         te_endpoint: "10.0.0.2:8080".into(),
         protocol: "rdma".into(),
+        host_id: String::new(),
     };
     let json = serde_json::to_string(&seg).unwrap();
     let restored: Segment = serde_json::from_str(&json).unwrap();
@@ -193,6 +244,7 @@ fn test_segment_serde_json_keys() {
         base: 0x1000,
         te_endpoint: "ep1".into(),
         protocol: "tcp".into(),
+        host_id: String::new(),
     };
     let json = serde_json::to_value(&seg).unwrap();
     assert!(json.get("id").is_some());
@@ -221,6 +273,8 @@ fn test_replica_descriptor() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         handle_valid: true,
         protocol: "rdma".into(),
     };
@@ -240,6 +294,8 @@ fn test_replica_descriptor_disk() {
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         handle_valid: true,
         protocol: String::new(),
     };
@@ -267,6 +323,8 @@ fn test_replica_descriptor_all_statuses() {
             status: *status,
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
             handle_valid: true,
             protocol: "tcp".into(),
         };
@@ -286,6 +344,8 @@ fn test_replica_descriptor_clone() {
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         handle_valid: true,
         protocol: "rdma".into(),
     };
@@ -310,6 +370,8 @@ fn test_replica_descriptor_serde_roundtrip() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         handle_valid: true,
         protocol: String::new(),
     };
@@ -622,6 +684,13 @@ fn test_error_all_variants() {
         (
             "segment not found: s1",
             StoreError::SegmentNotFound("s1".into()),
+        ),
+        (
+            "segment mount outcome is ambiguous for 00000000-0000-0000-0000-000000000000: cleanup failed",
+            StoreError::SegmentMountOutcomeAmbiguous {
+                segment_id: uuid::Uuid::nil(),
+                reason: "cleanup failed".into(),
+            },
         ),
         ("service unavailable", StoreError::ServiceUnavailable),
         (

@@ -4,6 +4,9 @@ use mooncake_store_core::{
     TaskType,
 };
 use mooncake_store_master::TenantId;
+use mooncake_store_master::allocator::{
+    AllocationStrategy, AllocatorSnapshotConfig, MemoryAllocatorKind,
+};
 use mooncake_store_master::ha::{
     CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, LoadedSnapshot,
     LocalFileSnapshotObjectStore, SnapshotCatalogStore, SnapshotCatalogStoreType,
@@ -11,7 +14,10 @@ use mooncake_store_master::ha::{
     create_catalog_backed_snapshot_provider,
 };
 use mooncake_store_master::proto::SegmentStatus;
-use mooncake_store_master::service::{ObjectEntry, SegmentEntry, TaskEntry};
+use mooncake_store_master::service::{
+    DelayedReplicaReleaseEntry, GracefulUnmountSnapshotEntry, ObjectEntry, ReplicationTaskKind,
+    ReplicationTaskSnapshotEntry, SegmentEntry, TaskEntry,
+};
 use mooncake_store_master::storage_backend::LocalDiskSnapshotEntry;
 use rmpv::Value;
 use std::io::Cursor;
@@ -30,7 +36,25 @@ fn compress(value: &Value) -> Vec<u8> {
     zstd::stream::encode_all(Cursor::new(encode(value)), 3).unwrap()
 }
 
-fn cxx_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
+fn empty_loaded_snapshot(snapshot_id: &str, snapshot_sequence_id: u64) -> LoadedSnapshot {
+    LoadedSnapshot {
+        snapshot_id: snapshot_id.to_string(),
+        snapshot_sequence_id,
+        allocator_config: None,
+        segments: Vec::new(),
+        nof_segments: Vec::new(),
+        objects: Vec::new(),
+        tasks: Vec::new(),
+        replication_tasks: Vec::new(),
+        graceful_unmounts: Vec::new(),
+        delayed_replica_releases: Vec::new(),
+        local_disk_segments: Vec::new(),
+    }
+}
+
+// These helpers synthesize audited C++ wire shapes with Rust encoders. They
+// exercise decoder branches but are not C++-produced golden fixtures.
+fn synthetic_cpp_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
     let allocator = Value::Array(vec![
         "segment-a".into(),
         0x1000_u64.into(),
@@ -48,6 +72,7 @@ fn cxx_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
         1.into(),
         true.into(),
         allocator,
+        "node-a".into(),
     ]);
     compress(&Value::Map(vec![
         ("ma".into(), 0.into()),
@@ -71,19 +96,30 @@ fn cxx_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
                     true.into(),
                     1_u64.into(),
                     "tenant-a\0key-a".into(),
-                    128_i64.into(),
+                    Value::Array(vec!["tenant-a".into(), "key-a".into(), 128_i64.into()]),
+                    4096_i64.into(),
                 ]),
             )]),
         ),
     ]))
 }
 
-fn cxx_metadata(
+#[derive(Clone, Copy)]
+enum SyntheticCppMetadataShape {
+    V1,
+    V2DataType,
+    V2HardPinned,
+    V3DataTypeHardPinned,
+    CurrentV4,
+}
+
+fn synthetic_cpp_metadata_with_shape(
     segment_id: Uuid,
     client_id: Uuid,
     tenant_id: Option<&str>,
     object_key: &str,
     lease_timeout_ms: u64,
+    shape: SyntheticCppMetadataShape,
 ) -> Vec<u8> {
     let replica = Value::Array(vec![
         7_u64.into(),
@@ -95,6 +131,99 @@ fn cxx_metadata(
             segment_id.to_string().into(),
             false.into(),
             Value::Nil,
+        ]),
+    ]);
+    let mut metadata = vec![
+        client_id.to_string().into(),
+        1000_u64.into(),
+        128_u64.into(),
+        lease_timeout_ms.into(),
+        false.into(),
+        0_u64.into(),
+        1_u64.into(),
+    ];
+    if matches!(
+        shape,
+        SyntheticCppMetadataShape::V2DataType
+            | SyntheticCppMetadataShape::V3DataTypeHardPinned
+            | SyntheticCppMetadataShape::CurrentV4
+    ) {
+        metadata.push((ObjectDataType::Kvcache as u64).into());
+    }
+    metadata.push(replica);
+    if matches!(
+        shape,
+        SyntheticCppMetadataShape::V2HardPinned
+            | SyntheticCppMetadataShape::V3DataTypeHardPinned
+            | SyntheticCppMetadataShape::CurrentV4
+    ) {
+        metadata.push(true.into());
+    }
+    if matches!(shape, SyntheticCppMetadataShape::CurrentV4) {
+        metadata.push("group-a".into());
+    }
+    let metadata = Value::Array(metadata);
+    let item = match tenant_id {
+        Some(tenant_id) => Value::Array(vec![tenant_id.into(), object_key.into(), metadata]),
+        None => Value::Array(vec![object_key.into(), metadata]),
+    };
+    let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
+    encode(&Value::Map(vec![(
+        "shards".into(),
+        Value::Map(vec![(0.into(), Value::Binary(compress(&shard)))]),
+    )]))
+}
+
+fn synthetic_cpp_metadata_with_discarded_replica(
+    segment_id: Uuid,
+    client_id: Uuid,
+    lease_timeout_ms: u64,
+    release_deadline_ms: u64,
+) -> Vec<u8> {
+    let encoded = synthetic_cpp_metadata_with_shape(
+        segment_id,
+        client_id,
+        Some("tenant-a"),
+        "key-a",
+        lease_timeout_ms,
+        SyntheticCppMetadataShape::CurrentV4,
+    );
+    let mut cursor = Cursor::new(encoded);
+    let mut root = rmpv::decode::read_value(&mut cursor).unwrap();
+    let fields = root.as_map_mut().unwrap();
+    fields.push((
+        "discarded_replicas".into(),
+        Value::Array(vec![Value::Array(vec![
+            release_deadline_ms.into(),
+            128_u64.into(),
+            1_u64.into(),
+            Value::Array(vec![
+                99_u64.into(),
+                2_i64.into(),
+                0_i64.into(),
+                Value::Array(vec![
+                    128_u64.into(),
+                    0x1200_u64.into(),
+                    segment_id.to_string().into(),
+                    false.into(),
+                    Value::Nil,
+                ]),
+            ]),
+        ])]),
+    ));
+    fields.push(("replica_next_id".into(), 100_u64.into()));
+    encode(&root)
+}
+
+fn synthetic_cpp_local_disk_metadata(client_id: Uuid, lease_timeout_ms: u64) -> Vec<u8> {
+    let replica = Value::Array(vec![
+        0_u64.into(),
+        (ReplicaStatus::Complete as i32 as i64).into(),
+        (ReplicaType::LocalDisk as i32 as i64).into(),
+        Value::Array(vec![
+            client_id.to_string().into(),
+            128_u64.into(),
+            "local://legacy-disk".into(),
         ]),
     ]);
     let metadata = Value::Array(vec![
@@ -110,23 +239,26 @@ fn cxx_metadata(
         true.into(),
         "group-a".into(),
     ]);
-    let item = match tenant_id {
-        Some(tenant_id) => Value::Array(vec![tenant_id.into(), object_key.into(), metadata]),
-        None => Value::Array(vec![object_key.into(), metadata]),
-    };
-    let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
+    let shard = Value::Map(vec![(
+        "metadata".into(),
+        Value::Array(vec![Value::Array(vec![
+            "tenant-a".into(),
+            "legacy-local-disk".into(),
+            metadata,
+        ])]),
+    )]);
     encode(&Value::Map(vec![(
         "shards".into(),
         Value::Map(vec![(0.into(), Value::Binary(compress(&shard)))]),
     )]))
 }
 
-fn cxx_tasks(task_id: Uuid, client_id: Uuid) -> Vec<u8> {
+fn synthetic_cpp_tasks(task_id: Uuid, client_id: Uuid) -> Vec<u8> {
     compress(&Value::Array(vec![Value::Array(vec![
         task_id.to_string().into(),
         1.into(),
         0.into(),
-        r#"{"key":"tenant-a\u0000key-a","source":"a","target":"b"}"#.into(),
+        r#"{"tenant_id":"tenant-a","key":"key-a","source":"a","target":"b"}"#.into(),
         1_000_i64.into(),
         2_000_i64.into(),
         "pending move".into(),
@@ -157,6 +289,26 @@ fn publish_fixture_with_identity(
     Uuid,
     Uuid,
 ) {
+    publish_fixture_with_identity_and_shape(
+        tenant_id,
+        object_key,
+        lease_timeout_ms,
+        SyntheticCppMetadataShape::CurrentV4,
+    )
+}
+
+fn publish_fixture_with_identity_and_shape(
+    tenant_id: Option<&str>,
+    object_key: &str,
+    lease_timeout_ms: u64,
+    shape: SyntheticCppMetadataShape,
+) -> (
+    tempfile::TempDir,
+    CatalogBackedSnapshotProvider,
+    Uuid,
+    Uuid,
+    Uuid,
+) {
     let root = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
     let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
@@ -167,30 +319,34 @@ fn publish_fixture_with_identity(
     descriptor.last_included_seq = 42;
     catalog.publish(&descriptor).unwrap();
     object_store
-        .upload_string(&descriptor.manifest_key, "messagepack|1.0.0|ignored")
+        .upload_string(
+            &descriptor.manifest_key,
+            &format!("messagepack|1.0.0|{}", descriptor.snapshot_id),
+        )
         .unwrap();
     object_store
         .upload_buffer(
             &format!("{}segments", descriptor.object_prefix),
-            &cxx_segments(segment_id, client_id),
+            &synthetic_cpp_segments(segment_id, client_id),
         )
         .unwrap();
     object_store
         .upload_buffer(
             &format!("{}metadata", descriptor.object_prefix),
-            &cxx_metadata(
+            &synthetic_cpp_metadata_with_shape(
                 segment_id,
                 client_id,
                 tenant_id,
                 object_key,
                 lease_timeout_ms,
+                shape,
             ),
         )
         .unwrap();
     object_store
         .upload_buffer(
             &format!("{}task_manager", descriptor.object_prefix),
-            &cxx_tasks(task_id, client_id),
+            &synthetic_cpp_tasks(task_id, client_id),
         )
         .unwrap();
     let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
@@ -198,7 +354,7 @@ fn publish_fixture_with_identity(
 }
 
 #[test]
-fn test_catalog_provider_loads_cxx_snapshot_payloads() {
+fn test_catalog_provider_loads_synthetic_cpp_wire_shapes() {
     let future_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -211,6 +367,7 @@ fn test_catalog_provider_loads_cxx_snapshot_payloads() {
     assert_eq!(snapshot.snapshot_sequence_id, 42);
     assert_eq!(snapshot.segments.len(), 1);
     assert_eq!(snapshot.segments[0].segment.id, segment_id);
+    assert_eq!(snapshot.segments[0].segment.host_id, "node-a");
     assert_eq!(snapshot.segments[0].client_id, client_id);
     assert_eq!(snapshot.segments[0].used, 512);
     assert_eq!(snapshot.segments[0].status, SegmentStatus::Active);
@@ -225,6 +382,10 @@ fn test_catalog_provider_loads_cxx_snapshot_payloads() {
     assert_eq!(object.replicas[0].base_addr, 0x1000);
     assert_eq!(snapshot.tasks.len(), 1);
     assert_eq!(snapshot.tasks[0].info.id, task_id);
+    assert!(
+        snapshot.graceful_unmounts.is_empty(),
+        "C++/legacy snapshots without the Rust sidecar remain readable"
+    );
     assert_eq!(
         snapshot.tasks[0].info.task_type,
         mooncake_store_core::TaskType::ReplicaMove
@@ -236,7 +397,122 @@ fn test_catalog_provider_loads_cxx_snapshot_payloads() {
     assert_eq!(snapshot.tasks[0].key, "tenant-a\0key-a");
     assert_eq!(snapshot.local_disk_segments.len(), 1);
     assert_eq!(snapshot.local_disk_segments[0].client_id, client_id);
-    assert_eq!(snapshot.local_disk_segments[0].ssd_total_capacity_bytes, 0);
+    assert_eq!(
+        snapshot.local_disk_segments[0].offloading_objects,
+        std::collections::HashMap::from([("tenant-a\0key-a".to_string(), 128)])
+    );
+    assert_eq!(
+        snapshot.local_disk_segments[0].ssd_total_capacity_bytes,
+        4096
+    );
+}
+
+#[test]
+fn test_catalog_provider_restores_synthetic_cpp_discarded_replica() {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let (root, provider, segment_id, client_id, _) = publish_fixture(now_ms + 60_000);
+    let metadata_path = root
+        .path()
+        .join("mooncake_master_snapshot/20260610_120000_001/metadata");
+    std::fs::write(
+        metadata_path,
+        synthetic_cpp_metadata_with_discarded_replica(
+            segment_id,
+            client_id,
+            now_ms + 60_000,
+            now_ms + 600_000,
+        ),
+    )
+    .unwrap();
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.delayed_replica_releases.len(), 1);
+    let delayed = &snapshot.delayed_replica_releases[0];
+    assert_eq!(delayed.deadline_epoch_ms, now_ms + 600_000);
+    assert_eq!(delayed.replicas[0].segment_id, segment_id);
+    assert_eq!(delayed.replicas[0].offset, 0x200);
+    assert_eq!(delayed.replicas[0].status, ReplicaStatus::Allocating);
+}
+
+#[test]
+fn test_catalog_provider_decodes_all_cxx_metadata_shapes() {
+    let future_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    for (shape, expected_data_type, expected_hard_pinned, expected_group_id) in [
+        (
+            SyntheticCppMetadataShape::V1,
+            ObjectDataType::Unknown,
+            false,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::V2DataType,
+            ObjectDataType::Kvcache,
+            false,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::V2HardPinned,
+            ObjectDataType::Unknown,
+            true,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::V3DataTypeHardPinned,
+            ObjectDataType::Kvcache,
+            true,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::CurrentV4,
+            ObjectDataType::Kvcache,
+            true,
+            "group-a",
+        ),
+    ] {
+        let (_root, provider, _, _, _) =
+            publish_fixture_with_identity_and_shape(Some("tenant-a"), "key-a", future_ms, shape);
+        let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+        let object = &snapshot.objects[0].1;
+        assert_eq!(object.data_type, expected_data_type);
+        assert_eq!(object.hard_pinned, expected_hard_pinned);
+        assert_eq!(object.group_id, expected_group_id);
+    }
+}
+
+#[test]
+fn test_catalog_provider_keeps_legacy_local_disk_generation_missing() {
+    let future_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let (root, provider, _, client_id, _) = publish_fixture(future_ms);
+    std::fs::write(
+        root.path()
+            .join("mooncake_master_snapshot/20260610_120000_001/metadata"),
+        synthetic_cpp_local_disk_metadata(client_id, future_ms),
+    )
+    .unwrap();
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.objects.len(), 1);
+    let replica = &snapshot.objects[0].1.replicas[0];
+    assert_eq!(replica.replica_type, ReplicaType::LocalDisk);
+    assert_eq!(replica.holder_client_id, Some(client_id));
+    assert_eq!(replica.local_disk_storage_id, None);
+    assert_eq!(
+        replica.local_disk_generation_id, None,
+        "legacy/C++ snapshots must not invent a byte generation"
+    );
 }
 
 #[test]
@@ -282,6 +558,22 @@ fn test_catalog_provider_skips_expired_unpinned_objects() {
 }
 
 #[test]
+fn test_catalog_provider_preserves_expired_hard_pinned_objects() {
+    let (_root, provider, _, _, _) = publish_fixture_with_identity_and_shape(
+        Some("tenant-a"),
+        "hard-pinned",
+        1,
+        SyntheticCppMetadataShape::V2HardPinned,
+    );
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.objects.len(), 1);
+    assert_eq!(snapshot.objects[0].0, "tenant-a\0hard-pinned");
+    assert!(snapshot.objects[0].1.hard_pinned);
+}
+
+#[test]
 fn test_catalog_provider_rejects_cluster_mismatch() {
     let (_root, provider, _, _, _) = publish_fixture(u64::MAX / 2);
 
@@ -314,6 +606,7 @@ fn test_catalog_provider_round_trips_three_field_user_key_with_embedded_nul() {
     let snapshot = LoadedSnapshot {
         snapshot_id: "20260610_120002_003".to_string(),
         snapshot_sequence_id: 77,
+        allocator_config: None,
         segments: Vec::new(),
         nof_segments: Vec::new(),
         objects: vec![(
@@ -327,6 +620,8 @@ fn test_catalog_provider_round_trips_three_field_user_key_with_embedded_nul() {
                     status: ReplicaStatus::Complete,
                     replica_type: ReplicaType::Disk,
                     holder_client_id: None,
+                    local_disk_storage_id: None,
+                    local_disk_generation_id: None,
                     refcnt: 0,
                     handle_valid: true,
                     base_addr: 0,
@@ -343,12 +638,18 @@ fn test_catalog_provider_round_trips_three_field_user_key_with_embedded_nul() {
                 tenant_id: tenant_id.clone(),
                 group_id: "group-a".to_string(),
                 quota_committed: true,
+                reserved_quota_charge_bytes: 0,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
                 user_key: user_key.to_string(),
             },
         )],
         tasks: Vec::new(),
+        replication_tasks: Vec::new(),
+        graceful_unmounts: Vec::new(),
+        delayed_replica_releases: Vec::new(),
         local_disk_segments: Vec::new(),
     };
 
@@ -368,42 +669,102 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
     let provider =
         CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store.clone());
     let segment_id = Uuid::new_v4();
+    let target_segment_id = Uuid::new_v4();
     let client_id = Uuid::new_v4();
+    let local_disk_storage_id = Uuid::new_v4();
+    let local_disk_generation_id = Uuid::new_v4();
     let task_id = Uuid::new_v4();
     let now = SystemTime::now();
+    let replication_source = ReplicaDescriptor {
+        segment_id,
+        segment_name: "segment-a".to_string(),
+        offset: 0x100,
+        size: 128,
+        status: ReplicaStatus::Complete,
+        replica_type: ReplicaType::Memory,
+        holder_client_id: Some(client_id),
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
+        refcnt: 0,
+        handle_valid: true,
+        base_addr: 0x1000,
+        protocol: "tcp".to_string(),
+    };
+    let replication_existing_target = ReplicaDescriptor {
+        segment_id: target_segment_id,
+        segment_name: "segment-b".to_string(),
+        offset: 0,
+        size: 128,
+        status: ReplicaStatus::Complete,
+        replica_type: ReplicaType::Memory,
+        holder_client_id: Some(client_id),
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
+        refcnt: 0,
+        handle_valid: true,
+        base_addr: 0x2000,
+        protocol: "tcp".to_string(),
+    };
     let snapshot = LoadedSnapshot {
         snapshot_id: "20260610_120001_002".to_string(),
         snapshot_sequence_id: 77,
-        segments: vec![SegmentEntry {
-            segment: Segment {
-                id: segment_id,
-                name: "segment-a".to_string(),
-                base: 0x1000,
-                size: 4096,
-                te_endpoint: "tcp://node-a".to_string(),
-                protocol: "tcp".to_string(),
+        allocator_config: Some(AllocatorSnapshotConfig {
+            allocation_strategy: AllocationStrategy::FreeRatioFirst,
+            memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+        }),
+        segments: vec![
+            SegmentEntry {
+                segment: Segment {
+                    id: segment_id,
+                    name: "segment-a".to_string(),
+                    base: 0x1000,
+                    size: 4096,
+                    te_endpoint: "tcp://node-a".to_string(),
+                    protocol: "tcp".to_string(),
+                    host_id: String::new(),
+                },
+                used: 512,
+                client_id,
+                status: SegmentStatus::GracefullyUnmounting,
             },
-            used: 512,
-            client_id,
-            status: SegmentStatus::Active,
-        }],
+            SegmentEntry {
+                segment: Segment {
+                    id: target_segment_id,
+                    name: "segment-b".to_string(),
+                    base: 0x2000,
+                    size: 4096,
+                    te_endpoint: "tcp://node-b".to_string(),
+                    protocol: "tcp".to_string(),
+                    host_id: String::new(),
+                },
+                used: 128,
+                client_id,
+                status: SegmentStatus::Active,
+            },
+        ],
         nof_segments: Vec::new(),
         objects: vec![(
             "tenant-a\0key-a".to_string(),
             ObjectEntry {
-                replicas: vec![ReplicaDescriptor {
-                    segment_id,
-                    segment_name: "segment-a".to_string(),
-                    offset: 0x100,
-                    size: 128,
-                    status: ReplicaStatus::Complete,
-                    replica_type: ReplicaType::Memory,
-                    holder_client_id: Some(client_id),
-                    refcnt: 0,
-                    handle_valid: true,
-                    base_addr: 0x1000,
-                    protocol: "tcp".to_string(),
-                }],
+                replicas: vec![
+                    replication_source.clone(),
+                    replication_existing_target.clone(),
+                    ReplicaDescriptor {
+                        segment_id: Uuid::nil(),
+                        segment_name: "local://disk-a".to_string(),
+                        offset: 0,
+                        size: 128,
+                        status: ReplicaStatus::Complete,
+                        replica_type: ReplicaType::LocalDisk,
+                        holder_client_id: Some(client_id),
+                        local_disk_storage_id: Some(local_disk_storage_id),
+                        local_disk_generation_id: Some(local_disk_generation_id),
+                        refcnt: 0,
+                        handle_valid: true,
+                        base_addr: 0,
+                        protocol: String::new(),
+                    },
+                ],
                 size: 128,
                 last_access: now,
                 hard_pinned: true,
@@ -415,6 +776,9 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
                 tenant_id: TenantId::new("tenant-a".to_string()).unwrap(),
                 group_id: "group-a".to_string(),
                 quota_committed: true,
+                reserved_quota_charge_bytes: 0,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
                 user_key: "key-a".to_string(),
@@ -434,7 +798,43 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
             payload: r#"{"key":"tenant-a\u0000key-a","source":"a","target":"b"}"#.to_string(),
             max_retry_attempts: 3,
         }],
+        replication_tasks: vec![ReplicationTaskSnapshotEntry {
+            key: "tenant-a\0key-a".to_string(),
+            client_id,
+            start_age_millis: 25,
+            kind: ReplicationTaskKind::Move,
+            source: replication_source,
+            targets: Vec::new(),
+            existing_move_target: Some(replication_existing_target),
+            reserved_quota_charge_bytes: 0,
+        }],
+        graceful_unmounts: vec![GracefulUnmountSnapshotEntry {
+            segment_id,
+            client_id,
+            deadline_epoch_ms: 1_900_000_000_000,
+        }],
+        delayed_replica_releases: vec![DelayedReplicaReleaseEntry {
+            id: Uuid::new_v4(),
+            scoped_key: "tenant-a\0retired-key".to_string(),
+            deadline_epoch_ms: 1_900_000_000_500,
+            replicas: vec![ReplicaDescriptor {
+                segment_id,
+                segment_name: "segment-a".to_string(),
+                offset: 0x300,
+                size: 128,
+                status: ReplicaStatus::Allocating,
+                replica_type: ReplicaType::Memory,
+                holder_client_id: Some(client_id),
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
+                refcnt: 0,
+                handle_valid: true,
+                base_addr: 0x1000,
+                protocol: "tcp".to_string(),
+            }],
+        }],
         local_disk_segments: vec![LocalDiskSnapshotEntry {
+            storage_id: local_disk_storage_id,
             client_id,
             enable_offloading: true,
             offloading_objects: std::collections::HashMap::from([(
@@ -449,6 +849,12 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
     assert_eq!(descriptor.snapshot_id, "20260610_120001_002");
     assert_eq!(descriptor.last_included_seq, 77);
     assert_eq!(descriptor.producer_view_version, 9);
+    assert_eq!(
+        object_store
+            .download_string(&descriptor.manifest_key)
+            .unwrap(),
+        "messagepack|1.0.0|20260610_120001_002"
+    );
 
     let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
     assert_eq!(loaded.snapshot_id, "20260610_120001_002");
@@ -459,15 +865,155 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
         8 * 1024 * 1024
     );
     assert_eq!(loaded.snapshot_sequence_id, 77);
+    assert_eq!(loaded.allocator_config, snapshot.allocator_config);
     assert_eq!(loaded.segments[0].segment.id, segment_id);
     assert_eq!(loaded.segments[0].used, 512);
     assert_eq!(loaded.objects.len(), 1);
     assert_eq!(loaded.objects[0].0, "tenant-a\0key-a");
     assert_eq!(loaded.objects[0].1.replicas[0].offset, 0x100);
+    let local_disk = loaded.objects[0]
+        .1
+        .replicas
+        .iter()
+        .find(|replica| replica.replica_type == ReplicaType::LocalDisk)
+        .unwrap();
+    assert_eq!(local_disk.replica_type, ReplicaType::LocalDisk);
+    assert_eq!(
+        local_disk.local_disk_storage_id,
+        Some(local_disk_storage_id)
+    );
+    assert_eq!(
+        local_disk.local_disk_generation_id,
+        Some(local_disk_generation_id)
+    );
     assert_eq!(loaded.objects[0].1.group_id, "group-a");
     assert_eq!(loaded.tasks.len(), 1);
     assert_eq!(loaded.tasks[0].info.id, task_id);
     assert_eq!(loaded.tasks[0].info.status, TaskStatus::Failed);
+    assert_eq!(loaded.replication_tasks.len(), 1);
+    assert_eq!(loaded.replication_tasks[0].kind, ReplicationTaskKind::Move);
+    assert_eq!(
+        loaded.replication_tasks[0]
+            .existing_move_target
+            .as_ref()
+            .map(|target| target.segment_id),
+        Some(target_segment_id)
+    );
+    assert_eq!(
+        loaded.graceful_unmounts,
+        vec![GracefulUnmountSnapshotEntry {
+            segment_id,
+            client_id,
+            deadline_epoch_ms: 1_900_000_000_000,
+        }]
+    );
+    assert_eq!(loaded.delayed_replica_releases.len(), 1);
+    assert_eq!(loaded.delayed_replica_releases[0].replicas[0].offset, 0x300);
+}
+
+#[test]
+fn test_catalog_provider_restores_cxl_protocol_from_allocator_extension() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    let segment_id = Uuid::new_v4();
+    let client_id = Uuid::new_v4();
+    let snapshot = LoadedSnapshot {
+        snapshot_id: "20260610_120002_003".to_string(),
+        snapshot_sequence_id: 78,
+        allocator_config: Some(AllocatorSnapshotConfig {
+            allocation_strategy: AllocationStrategy::Cxl,
+            memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+        }),
+        segments: vec![SegmentEntry {
+            segment: Segment {
+                id: segment_id,
+                name: "cxl-alias-a".to_string(),
+                base: 0,
+                size: 4 * 1024 * 1024,
+                te_endpoint: "cxl://node-a".to_string(),
+                protocol: "cxl".to_string(),
+                host_id: "node-a".to_string(),
+            },
+            used: 0,
+            client_id,
+            status: SegmentStatus::Active,
+        }],
+        nof_segments: Vec::new(),
+        objects: Vec::new(),
+        tasks: Vec::new(),
+        replication_tasks: Vec::new(),
+        graceful_unmounts: Vec::new(),
+        delayed_replica_releases: Vec::new(),
+        local_disk_segments: Vec::new(),
+    };
+
+    provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(loaded.allocator_config, snapshot.allocator_config);
+    assert_eq!(loaded.segments.len(), 1);
+    assert_eq!(loaded.segments[0].segment.id, segment_id);
+    assert_eq!(loaded.segments[0].segment.protocol, "cxl");
+}
+
+#[test]
+fn test_catalog_provider_falls_back_when_latest_manifest_is_corrupt() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider =
+        CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store.clone());
+    let older = empty_loaded_snapshot("20260610_120002_003", 77);
+    let latest = empty_loaded_snapshot("20260610_120003_004", 78);
+
+    provider.publish_loaded_snapshot(&older, 9).unwrap();
+    let latest_descriptor = provider.publish_loaded_snapshot(&latest, 9).unwrap();
+    object_store
+        .upload_string(
+            &latest_descriptor.manifest_key,
+            "messagepack|1.0.0|wrong-snapshot",
+        )
+        .unwrap();
+
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+    assert_eq!(loaded.snapshot_id, older.snapshot_id);
+    assert_eq!(loaded.snapshot_sequence_id, older.snapshot_sequence_id);
+}
+
+#[test]
+fn test_catalog_provider_rejects_late_old_term_latest_marker_for_restore_and_retention() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    let successor = empty_loaded_snapshot("20260610_120001_001", 80);
+    let stale_predecessor = empty_loaded_snapshot("20260610_120002_002", 79);
+
+    provider.publish_loaded_snapshot(&successor, 10).unwrap();
+    // Simulate a predecessor whose synchronous object-store publication
+    // completes after the successor and overwrites the marker.
+    provider
+        .publish_loaded_snapshot(&stale_predecessor, 9)
+        .unwrap();
+
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+    assert_eq!(loaded.snapshot_id, successor.snapshot_id);
+    assert_eq!(loaded.snapshot_sequence_id, successor.snapshot_sequence_id);
+
+    provider.prune_snapshots(1).unwrap();
+    let loaded_after_prune = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+    assert_eq!(loaded_after_prune.snapshot_id, successor.snapshot_id);
+    assert!(
+        !root
+            .path()
+            .join(format!(
+                "mooncake_master_snapshot/{}/manifest.txt",
+                stale_predecessor.snapshot_id
+            ))
+            .exists()
+    );
 }
 
 #[test]
@@ -520,10 +1066,14 @@ fn test_catalog_provider_factory_publishes_cluster_scoped_snapshot_objects() {
     let snapshot = LoadedSnapshot {
         snapshot_id: "20260610_120003_004".to_string(),
         snapshot_sequence_id: 11,
+        allocator_config: None,
         segments: Vec::new(),
         nof_segments: Vec::new(),
         objects: Vec::new(),
         tasks: Vec::new(),
+        replication_tasks: Vec::new(),
+        graceful_unmounts: Vec::new(),
+        delayed_replica_releases: Vec::new(),
         local_disk_segments: Vec::new(),
     };
 
@@ -565,10 +1115,14 @@ fn test_catalog_provider_prunes_old_snapshots() {
         let snapshot = LoadedSnapshot {
             snapshot_id: snapshot_id.to_string(),
             snapshot_sequence_id: 1,
+            allocator_config: None,
             segments: Vec::new(),
             nof_segments: Vec::new(),
             objects: Vec::new(),
             tasks: Vec::new(),
+            replication_tasks: Vec::new(),
+            graceful_unmounts: Vec::new(),
+            delayed_replica_releases: Vec::new(),
             local_disk_segments: Vec::new(),
         };
         provider.publish_loaded_snapshot(&snapshot, 1).unwrap();

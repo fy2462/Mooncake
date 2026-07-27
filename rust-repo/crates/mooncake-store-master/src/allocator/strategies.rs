@@ -192,6 +192,7 @@ impl SegmentAllocator {
         &mut self,
         key: &str,
         client_id: Option<Uuid>,
+        requested_host_id: &str,
         slice_size: u64,
         plan: &mut AllocationPlan,
         excluded_segments: &HashSet<String>,
@@ -201,7 +202,7 @@ impl SegmentAllocator {
             return;
         }
 
-        for segment_name in self.host_ordered_segment_names(client_id, key) {
+        for segment_name in self.host_ordered_segment_names(client_id, requested_host_id, key) {
             if plan.is_complete() {
                 return;
             }
@@ -274,20 +275,30 @@ impl SegmentAllocator {
         offset_layout::free_ratio(total, used)
     }
 
-    fn host_ordered_segment_names(&self, client_id: Option<Uuid>, key: &str) -> Vec<String> {
-        let Some(client_id) = client_id else {
-            return Vec::new();
+    fn host_ordered_segment_names(
+        &self,
+        client_id: Option<Uuid>,
+        requested_host_id: &str,
+        key: &str,
+    ) -> Vec<String> {
+        let writer_host = if requested_host_id.is_empty() {
+            client_id.and_then(|id| self.host_for_client(id))
+        } else {
+            Some(requested_host_id.to_string())
         };
-        let Some(writer_host) = self.host_for_client(client_id) else {
+        let Some(writer_host) = writer_host else {
             return Vec::new();
         };
 
         let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for name in self.segment_names() {
-            by_host
-                .entry(host_from_segment_name(&name))
-                .or_default()
-                .push(name);
+            let host_id = self.host_for_segment_name(&name);
+            // C++ HostSegmentIndex does not index segments without a stable
+            // physical host identity. They remain available to the ordinary
+            // random fallback after host-ordered candidates are exhausted.
+            if !host_id.is_empty() {
+                by_host.entry(host_id).or_default().push(name);
+            }
         }
         if by_host.is_empty() {
             return Vec::new();
@@ -323,7 +334,16 @@ impl SegmentAllocator {
         self.segments
             .values()
             .find(|state| state.client_id == client_id)
-            .map(|state| host_from_segment_name(&state.segment.name))
+            .map(|state| segment_host_id(&state.segment))
+            .filter(|host| !host.is_empty())
+    }
+
+    fn host_for_segment_name(&self, segment_name: &str) -> String {
+        self.segments
+            .values()
+            .find(|state| state.segment.name == segment_name)
+            .map(|state| segment_host_id(&state.segment))
+            .unwrap_or_default()
     }
 
     pub(super) fn allocate_from_segment_name(
@@ -339,19 +359,22 @@ impl SegmentAllocator {
             .collect::<Vec<_>>();
         ids.shuffle(&mut thread_rng());
         for segment_id in ids {
-            if let Some(replica) = self.allocate_from_segment_id(segment_id, slice_size) {
+            if let Some(replica) = self.allocate_from_segment_id_inner(segment_id, slice_size) {
                 return Some(replica);
             }
         }
         None
     }
 
-    fn allocate_from_segment_id(
+    fn allocate_from_segment_id_inner(
         &mut self,
         segment_id: Uuid,
         slice_size: u64,
     ) -> Option<ReplicaDescriptor> {
         let state = self.segments.get_mut(&segment_id)?;
+        if !state.runtime_bound {
+            return None;
+        }
         let (offset, accounted_size) = state.allocate(slice_size)?;
         state.used = state.used.saturating_add(accounted_size);
         Some(ReplicaDescriptor {
@@ -364,14 +387,20 @@ impl SegmentAllocator {
             status: ReplicaStatus::Allocating,
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
             base_addr: state.segment.base,
             protocol: state.segment.protocol.clone(),
         })
     }
 }
 
-fn host_from_segment_name(name: &str) -> String {
-    name.split(':').next().unwrap_or(name).to_string()
+fn segment_host_id(segment: &Segment) -> String {
+    if segment.host_id.is_empty() {
+        mooncake_store_core::resolve_host_id(&segment.name)
+    } else {
+        segment.host_id.clone()
+    }
 }
 
 fn stable_key_hash(key: &str) -> usize {

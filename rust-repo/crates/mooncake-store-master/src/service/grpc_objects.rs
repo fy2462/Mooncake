@@ -41,6 +41,89 @@
 use super::*;
 
 impl MasterServiceImpl {
+    pub(crate) fn persist_object_image_or_remove(
+        &self,
+        scoped_key: &str,
+        operation: &str,
+    ) -> Result<(), Status> {
+        if let Err(error) = self
+            .state
+            .persist_object_image_or_remove_or_fence(scoped_key, operation)
+        {
+            return Err(Status::unavailable(format!(
+                "failed to persist {operation} oplog: {error}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Publish a metadata detach and retain every removed allocator range
+    /// until a durable tombstone authorizes reuse.
+    pub(crate) fn persist_detached_allocator_replicas(
+        &self,
+        scoped_key: &str,
+        replicas: Vec<ReplicaDescriptor>,
+        operation: &str,
+    ) -> Result<(), Status> {
+        let authoritative_object = self
+            .state
+            .objects
+            .get(scoped_key)
+            .map(|object| object.clone());
+        let release_id = self
+            .state
+            .schedule_delayed_replica_release_or_fence(
+                scoped_key,
+                authoritative_object,
+                replicas,
+                Some(SystemTime::now()),
+                operation,
+            )
+            .map_err(|error| {
+                Status::unavailable(format!(
+                    "failed to persist {operation} allocator reservation: {error}"
+                ))
+            })?;
+        let Some(release_id) = release_id else {
+            return self.persist_object_image_or_remove(scoped_key, operation);
+        };
+        let entry = self
+            .state
+            .delayed_replica_releases
+            .get(&release_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| {
+                self.state.fence_after_invariant_failure(
+                    operation,
+                    &format!("delayed release {release_id} disappeared before its tombstone"),
+                );
+                Status::internal("delayed allocator reservation disappeared")
+            })?;
+        self.state
+            .persist_delayed_replica_release_removal_or_fence(&entry, operation)
+            .map_err(|error| {
+                Status::unavailable(format!(
+                    "failed to persist {operation} allocator tombstone: {error}"
+                ))
+            })?;
+        let Some((_, removed)) = self.state.delayed_replica_releases.remove(&release_id) else {
+            self.state.fence_after_invariant_failure(
+                operation,
+                &format!("delayed release {release_id} disappeared after its tombstone"),
+            );
+            return Err(Status::internal(
+                "delayed allocator reservation disappeared after persistence",
+            ));
+        };
+        release_replicas(&self.state, &removed.replicas)?;
+        if self.state.service_fenced.load(Ordering::Acquire) {
+            return Err(Status::unavailable(format!(
+                "{operation} fenced the service"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn group_id_for_key(
         config: &ReplicateConfig,
         key_count: usize,
@@ -55,32 +138,137 @@ impl MasterServiceImpl {
         Ok(config.group_ids[key_index].clone())
     }
 
-    pub(crate) fn grant_group_lease(&self, tenant_id: &TenantId, group_id: &str) {
-        if group_id.is_empty() {
-            return;
+    fn object_is_lease_eligible(&self, object: &ObjectEntry, require_routable: bool) -> bool {
+        object.replicas.iter().any(|replica| {
+            if require_routable {
+                replica_is_routable(&self.state, replica)
+            } else {
+                replica.status == ReplicaStatus::Complete
+            }
+        })
+    }
+
+    fn lease_refresh_entry(
+        scoped_key: &str,
+        object: &ObjectEntry,
+    ) -> Result<crate::oplog::LeaseRefreshEntry, Status> {
+        let Some(lease_timeout) = object.lease_timeout else {
+            return Err(Status::internal(
+                "lease refresh did not produce a lease deadline",
+            ));
+        };
+        Ok(crate::oplog::LeaseRefreshEntry {
+            key: scoped_key.to_owned(),
+            tenant_id: object.tenant_id.clone(),
+            group_id: object.group_id.clone(),
+            last_access: object.last_access,
+            lease_timeout,
+            soft_pin_timeout: object.soft_pin_timeout,
+        })
+    }
+
+    fn persist_lease_refresh(
+        &self,
+        entries: &[crate::oplog::LeaseRefreshEntry],
+    ) -> Result<(), Status> {
+        if let Err(error) = self
+            .oplog_manager
+            .lock()
+            .record_lease_refresh_batch_durable(entries)
+        {
+            self.state
+                .fence_after_durability_failure("lease_refresh", &error);
+            return Err(Status::unavailable(format!(
+                "failed to persist lease refresh oplog: {error}"
+            )));
         }
-        let keys = self
-            .state
-            .objects
-            .iter()
-            .filter(|entry| &entry.tenant_id == tenant_id && entry.group_id == group_id)
-            .filter(|entry| {
-                entry
+        Ok(())
+    }
+
+    fn grant_group_lease_locked(
+        &self,
+        scoped_key: &str,
+        tenant_id: &TenantId,
+        group_id: &str,
+    ) -> Result<(ObjectEntry, Vec<crate::oplog::LeaseRefreshEntry>), Status> {
+        debug_assert!(!group_id.is_empty());
+        let mut target_snapshot = None;
+        let mut refreshes = Vec::new();
+        for mut entry in self.state.objects.iter_mut() {
+            if &entry.tenant_id == tenant_id
+                && entry.group_id == group_id
+                && entry
                     .replicas
                     .iter()
                     .any(|replica| replica.status == ReplicaStatus::Complete)
-            })
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            if let Some(mut entry) = self.state.objects.get_mut(&key) {
+            {
                 entry.last_access = SystemTime::now();
                 entry.grant_lease(
                     self.state.runtime_config.lease_ttl,
                     self.state.runtime_config.soft_pin_ttl,
                 );
+                let entry_key = entry.key().clone();
+                refreshes.push(Self::lease_refresh_entry(&entry_key, &entry)?);
+                if entry_key == scoped_key {
+                    target_snapshot = Some(entry.clone());
+                }
             }
         }
+        let Some(target_snapshot) = target_snapshot else {
+            return Err(Status::internal(
+                "eligible group target disappeared during lease refresh",
+            ));
+        };
+        Ok((target_snapshot, refreshes))
+    }
+
+    /// Return one object snapshot and publish its read lease at the same
+    /// linearization point. Grouped objects retry under the exclusive snapshot
+    /// barrier so the response and all-member lease update are atomic with
+    /// respect to remove/upsert/eviction.
+    pub(crate) fn object_snapshot_and_grant_lease(
+        &self,
+        scoped_key: &str,
+        require_routable: bool,
+    ) -> Result<Option<ObjectEntry>, Status> {
+        let mutation_guard = self.state.key_mutations.lock(scoped_key);
+        let Some(mut entry) = self.state.objects.get_mut(scoped_key) else {
+            return Ok(None);
+        };
+        if !self.object_is_lease_eligible(&entry, require_routable) {
+            return Ok(None);
+        }
+        if entry.group_id.is_empty() {
+            entry.last_access = SystemTime::now();
+            entry.grant_lease(
+                self.state.runtime_config.lease_ttl,
+                self.state.runtime_config.soft_pin_ttl,
+            );
+            let snapshot = entry.clone();
+            let refresh = Self::lease_refresh_entry(scoped_key, &snapshot)?;
+            self.persist_lease_refresh(&[refresh])?;
+            return Ok(Some(snapshot));
+        }
+        let tenant_id = entry.tenant_id.clone();
+        let group_id = entry.group_id.clone();
+        drop(entry);
+        drop(mutation_guard);
+
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
+        let Some(entry) = self.state.objects.get(scoped_key) else {
+            return Ok(None);
+        };
+        if entry.tenant_id != tenant_id
+            || entry.group_id != group_id
+            || !self.object_is_lease_eligible(&entry, require_routable)
+        {
+            return Ok(None);
+        }
+        drop(entry);
+        let (snapshot, refreshes) =
+            self.grant_group_lease_locked(scoped_key, &tenant_id, &group_id)?;
+        self.persist_lease_refresh(&refreshes)?;
+        Ok(Some(snapshot))
     }
 
     pub(crate) fn cleanup_removed_object(
@@ -88,42 +276,31 @@ impl MasterServiceImpl {
         scoped_key: &str,
         object: &ObjectEntry,
     ) -> Result<(), Status> {
-        self.oplog_manager
-            .lock()
-            .record_remove_durable(scoped_key)
-            .map_err(|e| Status::internal(format!("failed to persist remove oplog: {e}")))?;
+        if let Err(error) = self.oplog_manager.lock().record_remove_durable(scoped_key) {
+            self.state.fence_after_durability_failure("remove", &error);
+            return Err(Status::unavailable(format!(
+                "failed to persist remove oplog: {error}"
+            )));
+        }
         for mut entry in self.state.client_objects.iter_mut() {
             entry.value_mut().remove(scoped_key);
         }
-        self.account_removed_object_quota(object);
+        self.account_removed_object_quota(object)?;
         self.state.processing_keys.remove(scoped_key);
         self.state.replication_tasks.remove(scoped_key);
         clear_offloading_task(&self.state, scoped_key);
         clear_promotion_task(&self.state, scoped_key);
-        release_object_replicas(&self.state, scoped_key, &object.replicas);
+        release_object_replicas(&self.state, scoped_key, &object.replicas)?;
         Ok(())
     }
 
-    pub(crate) fn completed_object_exists_and_grant_lease(&self, scoped_key: &str) -> bool {
-        let Some(mut entry) = self.state.objects.get_mut(scoped_key) else {
-            return false;
-        };
-        let exists = entry
-            .replicas
-            .iter()
-            .any(|replica| replica.status == ReplicaStatus::Complete);
-        if exists {
-            entry.last_access = SystemTime::now();
-            entry.grant_lease(
-                self.state.runtime_config.lease_ttl,
-                self.state.runtime_config.soft_pin_ttl,
-            );
-            let tenant_id = entry.tenant_id.clone();
-            let group_id = entry.group_id.clone();
-            drop(entry);
-            self.grant_group_lease(&tenant_id, &group_id);
-        }
-        exists
+    pub(crate) fn completed_object_exists_and_grant_lease(
+        &self,
+        scoped_key: &str,
+    ) -> Result<bool, Status> {
+        Ok(self
+            .object_snapshot_and_grant_lease(scoped_key, false)?
+            .is_some())
     }
 
     pub(crate) fn apply_put_end_for_key(
@@ -132,39 +309,91 @@ impl MasterServiceImpl {
         client_id: Uuid,
         target: ReplicaType,
     ) -> Result<(), Status> {
+        let _mutation_guard = self.state.key_mutations.lock(scoped_key);
         match self.state.objects.get_mut(scoped_key) {
             Some(mut entry) => {
                 if entry.client_id != client_id {
                     return Err(Status::permission_denied("illegal client"));
                 }
-                for r in &mut entry.replicas {
-                    let matches_type = target == ReplicaType::All || r.replica_type == target;
+                // Complete a projected image first. Quota mismatch must not
+                // expose Complete replicas, lease changes, or cache metrics.
+                let mut completed = clone_object_for_mutation(&entry);
+                for r in &mut completed.replicas {
+                    let matches_type = if target == ReplicaType::All {
+                        matches!(r.replica_type, ReplicaType::Memory | ReplicaType::NoFSsd)
+                    } else {
+                        r.replica_type == target
+                    };
                     if matches_type && r.status == ReplicaStatus::Allocating && r.handle_valid {
                         r.status = ReplicaStatus::Complete;
                     }
                 }
-                sync_cache_total_accounting(&mut entry);
                 // C++ PutEnd grants ttl=0: the object starts without a hard read lease,
                 // while soft pin is extended when enabled.
-                entry.grant_lease(Duration::ZERO, self.state.runtime_config.soft_pin_ttl);
-                let all_complete = entry
+                completed.grant_lease(Duration::ZERO, self.state.runtime_config.soft_pin_ttl);
+                let has_write_target = completed.replicas.iter().any(|r| {
+                    matches!(
+                        r.replica_type,
+                        ReplicaType::Memory | ReplicaType::NoFSsd | ReplicaType::Disk
+                    )
+                });
+                let all_complete = has_write_target
+                    && completed
+                        .replicas
+                        .iter()
+                        .filter(|r| {
+                            matches!(
+                                r.replica_type,
+                                ReplicaType::Memory | ReplicaType::NoFSsd | ReplicaType::Disk
+                            )
+                        })
+                        .all(|r| r.status == ReplicaStatus::Complete);
+                let size = completed.size;
+                let tenant_id = completed.tenant_id.clone();
+                let has_memory_replica = completed
                     .replicas
                     .iter()
-                    .all(|r| r.status == ReplicaStatus::Complete);
-                let size = entry.size;
-                let tenant_id = entry.tenant_id.clone();
-                let should_commit_quota = all_complete
-                    && !entry.quota_committed
-                    && self.state.processing_keys.contains_key(scoped_key);
-                if should_commit_quota {
-                    entry.quota_committed = true;
+                    .any(|replica| replica.replica_type == ReplicaType::Memory);
+                let should_settle_quota = !completed.quota_committed
+                    && self.state.processing_keys.contains_key(scoped_key)
+                    && (target == ReplicaType::Memory
+                        || (target == ReplicaType::All && has_memory_replica)
+                        || !has_memory_replica);
+                if should_settle_quota {
+                    let reserved_charge = completed.reserved_quota_charge_bytes;
+                    let committed_charge = completed_memory_quota_charge(&completed);
+                    self.settle_tenant_quota(
+                        &tenant_id,
+                        reserved_charge,
+                        committed_charge,
+                        true,
+                        completed.pending_replaced_quota_charge_bytes,
+                    )?;
+                    completed.quota_committed = true;
+                    completed.reserved_quota_charge_bytes = 0;
+                    completed.committed_quota_charge_bytes = committed_charge;
+                    completed.pending_replaced_quota_charge_bytes = 0;
                 }
+                if all_complete {
+                    completed.put_start_time = None;
+                }
+                sync_cache_total_accounting(&mut completed);
                 let offload_enabled = !self.state.runtime_config.offload_on_evict;
+                let durable_image = completed.clone();
+                *entry = completed;
                 drop(entry);
 
-                if should_commit_quota {
-                    self.commit_tenant_quota(&tenant_id, size)?;
+                if let Err(error) = self
+                    .oplog_manager
+                    .lock()
+                    .record_object_image_durable(scoped_key, &durable_image)
+                {
+                    self.state.fence_after_durability_failure("put_end", &error);
+                    return Err(Status::unavailable(format!(
+                        "failed to persist put_end oplog: {error}"
+                    )));
                 }
+
                 if offload_enabled {
                     push_offloading_queue(&self.state, client_id, scoped_key, size);
                 }
@@ -183,24 +412,52 @@ impl MasterServiceImpl {
                         if all_complete {
                             self.publish_kv_stored(scoped_key, target, &entry);
                         }
-                        self.oplog_manager.lock().record_put_end_with_metadata(
-                            scoped_key,
-                            size,
-                            Some(entry.client_id),
-                            &entry.tenant_id,
-                            &entry.group_id,
-                            &entry.user_key,
-                            &entry.replicas,
-                        );
                     }
-                    _ => {
-                        self.oplog_manager.lock().record_put_end(scoped_key, size);
-                    }
+                    _ => {}
                 }
                 Ok(())
             }
             _ => Err(Status::not_found("key not found")),
         }
+    }
+
+    pub(crate) fn settle_object_quota_if_ready(
+        &self,
+        object: &mut ObjectEntry,
+    ) -> Result<bool, Status> {
+        let write_targets = object.replicas.iter().filter(|replica| {
+            matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd | ReplicaType::Disk
+            )
+        });
+        let mut has_write_target = false;
+        let mut all_complete = true;
+        for replica in write_targets {
+            has_write_target = true;
+            all_complete &= replica.status == ReplicaStatus::Complete;
+        }
+        if !has_write_target || !all_complete {
+            return Ok(false);
+        }
+        object.put_start_time = None;
+        if object.quota_committed {
+            return Ok(true);
+        }
+
+        let committed_charge = completed_memory_quota_charge(object);
+        self.settle_tenant_quota(
+            &object.tenant_id,
+            object.reserved_quota_charge_bytes,
+            committed_charge,
+            true,
+            object.pending_replaced_quota_charge_bytes,
+        )?;
+        object.quota_committed = true;
+        object.reserved_quota_charge_bytes = 0;
+        object.committed_quota_charge_bytes = committed_charge;
+        object.pending_replaced_quota_charge_bytes = 0;
+        Ok(true)
     }
 
     // ---- ExistKey ----
@@ -216,7 +473,7 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
-        let exists = self.completed_object_exists_and_grant_lease(&scoped_key);
+        let exists = self.completed_object_exists_and_grant_lease(&scoped_key)?;
         metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::ExistKeyResponse { exists }))
     }
@@ -436,5 +693,278 @@ impl MasterServiceImpl {
             },
         );
         Ok(Response::new(proto::CalcCacheStatsResponse { stats }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn completed_test_object(tenant_id: TenantId, user_key: &str) -> ObjectEntry {
+        ObjectEntry {
+            replicas: vec![ReplicaDescriptor {
+                segment_id: Uuid::nil(),
+                segment_name: String::new(),
+                offset: 0,
+                size: 1,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Disk,
+                holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
+                refcnt: 0,
+                handle_valid: true,
+                base_addr: 0,
+                protocol: String::new(),
+            }],
+            size: 1,
+            last_access: SystemTime::UNIX_EPOCH,
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id,
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: user_key.into(),
+        }
+    }
+
+    #[test]
+    fn exist_lease_refresh_waits_for_tenant_scoped_mutation_guard() {
+        let service = Arc::new(MasterServiceImpl::default());
+        let tenant_id = TenantId::default();
+        let key = tenant_id.make_scoped_key("lease-atomic");
+        service.state.objects.insert(
+            key.clone(),
+            completed_test_object(tenant_id, "lease-atomic"),
+        );
+        let mutation_guard = service.state.key_mutations.lock(&key);
+        let worker = Arc::clone(&service);
+        let worker_key = key.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let exists = worker
+                .completed_object_exists_and_grant_lease(&worker_key)
+                .unwrap();
+            tx.send(exists).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(25)).is_err(),
+            "lease mutation bypassed the tenant-scoped key guard"
+        );
+        drop(mutation_guard);
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        thread.join().unwrap();
+        assert!(
+            service
+                .state
+                .objects
+                .get(&key)
+                .unwrap()
+                .lease_timeout
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn group_lease_refresh_waits_for_all_inflight_key_mutations() {
+        let service = Arc::new(MasterServiceImpl::default());
+        let tenant_id = TenantId::default();
+        let first_key = tenant_id.make_scoped_key("group-first");
+        let second_key = tenant_id.make_scoped_key("group-second");
+        for (key, user_key) in [(&first_key, "group-first"), (&second_key, "group-second")] {
+            let mut object = completed_test_object(tenant_id.clone(), user_key);
+            object.group_id = "atomic-group".into();
+            service.state.objects.insert(key.clone(), object);
+        }
+        let second_mutation = service.state.key_mutations.lock(&second_key);
+        let worker = Arc::clone(&service);
+        let worker_key = first_key.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let found = worker
+                .object_snapshot_and_grant_lease(&worker_key, false)
+                .unwrap()
+                .is_some();
+            tx.send(found).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(25)).is_err(),
+            "group lease did not wait for the full mutation epoch"
+        );
+        drop(second_mutation);
+        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        thread.join().unwrap();
+        assert!(
+            service
+                .state
+                .objects
+                .get(&first_key)
+                .unwrap()
+                .lease_timeout
+                .is_some()
+        );
+        assert!(
+            service
+                .state
+                .objects
+                .get(&second_key)
+                .unwrap()
+                .lease_timeout
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn put_end_quota_failure_does_not_publish_projected_object_state() {
+        let policy_uri = tempfile::NamedTempFile::new()
+            .unwrap()
+            .path()
+            .to_string_lossy()
+            .into_owned();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_tenant_quota: true,
+            tenant_quota_connector_uri: policy_uri,
+            ..Default::default()
+        });
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+        let key = tenant_id.make_scoped_key("quota-atomic");
+        let client_id = Uuid::new_v4();
+        {
+            let mut quotas = service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 100, 100).unwrap();
+            quotas.register_object(&tenant_id);
+            quotas.reserve(&tenant_id, 50).unwrap();
+        }
+        service.state.objects.insert(
+            key.clone(),
+            ObjectEntry {
+                replicas: vec![ReplicaDescriptor {
+                    segment_id: Uuid::new_v4(),
+                    segment_name: "memory".into(),
+                    offset: 0,
+                    size: 100,
+                    status: ReplicaStatus::Allocating,
+                    replica_type: ReplicaType::Memory,
+                    holder_client_id: Some(client_id),
+                    local_disk_storage_id: None,
+                    local_disk_generation_id: None,
+                    refcnt: 0,
+                    handle_valid: true,
+                    base_addr: 0,
+                    protocol: String::new(),
+                }],
+                size: 100,
+                last_access: SystemTime::now(),
+                hard_pinned: false,
+                data_type: Default::default(),
+                client_id,
+                put_start_time: Some(SystemTime::now()),
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: tenant_id.clone(),
+                group_id: String::new(),
+                quota_committed: false,
+                reserved_quota_charge_bytes: 100,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes: 0,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: "quota-atomic".into(),
+            },
+        );
+        service.state.processing_keys.insert(key.clone(), ());
+
+        assert!(
+            service
+                .apply_put_end_for_key(&key, client_id, ReplicaType::Memory)
+                .is_err()
+        );
+
+        let object = service.state.objects.get(&key).unwrap();
+        assert_eq!(object.replicas[0].status, ReplicaStatus::Allocating);
+        assert!(!object.quota_committed);
+        assert_eq!(object.reserved_quota_charge_bytes, 100);
+        assert!(object.lease_timeout.is_none());
+        assert!(!object.memory_cache_total_accounted);
+        drop(object);
+        let quota = service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(quota.reserved_bytes, 50);
+        assert_eq!(quota.used_bytes, 0);
+        assert!(service.state.processing_keys.contains_key(&key));
+    }
+
+    #[test]
+    fn in_place_upsert_put_end_preserves_committed_charge_and_closes_generation() {
+        let service = MasterServiceImpl::default();
+        let tenant_id = TenantId::default();
+        let key = tenant_id.make_scoped_key("in-place-put-end");
+        let client_id = Uuid::new_v4();
+        service.state.objects.insert(
+            key.clone(),
+            ObjectEntry {
+                replicas: vec![ReplicaDescriptor {
+                    segment_id: Uuid::new_v4(),
+                    segment_name: "memory".into(),
+                    offset: 0,
+                    size: 100,
+                    status: ReplicaStatus::Allocating,
+                    replica_type: ReplicaType::Memory,
+                    holder_client_id: Some(client_id),
+                    local_disk_storage_id: None,
+                    local_disk_generation_id: None,
+                    refcnt: 0,
+                    handle_valid: true,
+                    base_addr: 0,
+                    protocol: String::new(),
+                }],
+                size: 100,
+                last_access: SystemTime::now(),
+                hard_pinned: false,
+                data_type: Default::default(),
+                client_id,
+                put_start_time: Some(SystemTime::now()),
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id,
+                group_id: String::new(),
+                quota_committed: true,
+                reserved_quota_charge_bytes: 0,
+                committed_quota_charge_bytes: 100,
+                pending_replaced_quota_charge_bytes: 0,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: "in-place-put-end".into(),
+            },
+        );
+        service.state.processing_keys.insert(key.clone(), ());
+
+        service
+            .apply_put_end_for_key(&key, client_id, ReplicaType::Memory)
+            .expect("in-place Upsert completion must produce a valid durable image");
+
+        let object = service.state.objects.get(&key).unwrap();
+        assert_eq!(object.replicas[0].status, ReplicaStatus::Complete);
+        assert!(object.quota_committed);
+        assert_eq!(object.committed_quota_charge_bytes, 100);
+        assert!(object.put_start_time.is_none());
+        assert!(!service.state.processing_keys.contains_key(&key));
+        assert!(!service.is_service_fenced());
     }
 }

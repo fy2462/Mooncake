@@ -32,6 +32,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PingRequest>,
     ) -> Result<Response<proto::PingResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::ping_impl(self, request).await
     }
 
@@ -39,6 +40,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MountSegmentRequest>,
     ) -> Result<Response<proto::MountSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::mount_segment_impl(self, request).await
     }
 
@@ -46,6 +48,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MountNoFSegmentRequest>,
     ) -> Result<Response<proto::MountNoFSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::mount_nof_segment_impl(self, request).await
     }
 
@@ -53,6 +56,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::UnmountSegmentRequest>,
     ) -> Result<Response<proto::UnmountSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::unmount_segment_impl(self, request).await
     }
 
@@ -60,6 +64,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::UnmountNoFSegmentRequest>,
     ) -> Result<Response<proto::UnmountNoFSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::unmount_nof_segment_impl(self, request).await
     }
 
@@ -67,6 +72,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GracefulUnmountSegmentRequest>,
     ) -> Result<Response<proto::GracefulUnmountSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::graceful_unmount_segment_impl(self, request).await
     }
 
@@ -74,6 +80,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ReMountSegmentRequest>,
     ) -> Result<Response<proto::ReMountSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::re_mount_segment_impl(self, request).await
     }
 
@@ -81,6 +88,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ReMountNoFSegmentRequest>,
     ) -> Result<Response<proto::ReMountNoFSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::re_mount_nof_segment_impl(self, request).await
     }
 
@@ -88,6 +96,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MountLocalDiskSegmentRequest>,
     ) -> Result<Response<proto::MountLocalDiskSegmentResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::mount_local_disk_segment_impl(self, request).await
     }
 
@@ -95,6 +104,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::OffloadObjectHeartbeatRequest>,
     ) -> Result<Response<proto::OffloadObjectHeartbeatResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::offload_object_heartbeat_impl(self, request).await
     }
 
@@ -102,6 +112,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ReportSsdCapacityRequest>,
     ) -> Result<Response<proto::ReportSsdCapacityResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::report_ssd_capacity_impl(self, request).await
     }
 
@@ -109,6 +120,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::NotifyOffloadSuccessRequest>,
     ) -> Result<Response<proto::NotifyOffloadSuccessResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::notify_offload_success_impl(self, request).await
     }
 
@@ -116,6 +128,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PromotionObjectHeartbeatRequest>,
     ) -> Result<Response<proto::PromotionObjectHeartbeatResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::promotion_object_heartbeat_impl(self, request).await
     }
 
@@ -123,6 +136,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PromotionAllocStartRequest>,
     ) -> Result<Response<proto::PromotionAllocStartResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::promotion_alloc_start_impl(self, request).await
     }
 
@@ -130,6 +144,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::NotifyPromotionSuccessRequest>,
     ) -> Result<Response<proto::NotifyPromotionSuccessResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::notify_promotion_success_impl(self, request).await
     }
 
@@ -137,6 +152,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::NotifyPromotionFailureRequest>,
     ) -> Result<Response<proto::NotifyPromotionFailureResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::notify_promotion_failure_impl(self, request).await
     }
 
@@ -147,6 +163,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ExistKeyRequest>,
     ) -> Result<Response<proto::ExistKeyResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::exist_key_impl(self, request).await
     }
 
@@ -154,6 +171,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetAllKeysRequest>,
     ) -> Result<Response<proto::GetAllKeysResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_all_keys_impl(self, request).await
     }
 
@@ -161,6 +179,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetAllSegmentsRequest>,
     ) -> Result<Response<proto::GetAllSegmentsResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_all_segments_impl(self, request).await
     }
 
@@ -168,6 +187,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetAllNoFSegmentsRequest>,
     ) -> Result<Response<proto::GetAllNoFSegmentsResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_all_nof_segments_impl(self, request).await
     }
 
@@ -175,6 +195,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetNoFSegmentsByNameRequest>,
     ) -> Result<Response<proto::GetNoFSegmentsByNameResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_nof_segments_by_name_impl(self, request).await
     }
 
@@ -182,6 +203,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetSegmentsDetailRequest>,
     ) -> Result<Response<proto::GetSegmentsDetailResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_segments_detail_impl(self, request).await
     }
 
@@ -189,6 +211,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ServiceReadyRequest>,
     ) -> Result<Response<proto::ServiceReadyResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::service_ready_impl(self, request).await
     }
 
@@ -196,6 +219,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetAllKeysForAdminRequest>,
     ) -> Result<Response<proto::GetAllKeysForAdminResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_all_keys_for_admin_impl(self, request).await
     }
 
@@ -203,6 +227,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetAllSegmentsForAdminRequest>,
     ) -> Result<Response<proto::GetAllSegmentsForAdminResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_all_segments_for_admin_impl(self, request).await
     }
 
@@ -210,6 +235,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QuerySegmentsRequest>,
     ) -> Result<Response<proto::QuerySegmentsResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_segment_for_admin_impl(self, request).await
     }
 
@@ -217,6 +243,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CalcCacheStatsRequest>,
     ) -> Result<Response<proto::CalcCacheStatsResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::calc_cache_stats_impl(self, request).await
     }
 
@@ -224,6 +251,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PutStartRequest>,
     ) -> Result<Response<proto::PutStartResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::put_start_impl(self, request).await
     }
 
@@ -231,6 +259,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PutEndRequest>,
     ) -> Result<Response<proto::PutEndResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::put_end_impl(self, request).await
     }
 
@@ -238,6 +267,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PutRevokeRequest>,
     ) -> Result<Response<proto::PutRevokeResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::put_revoke_impl(self, request).await
     }
 
@@ -245,6 +275,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::AddReplicaRequest>,
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::add_replica_impl(self, request).await
     }
 
@@ -252,6 +283,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetReplicaListRequest>,
     ) -> Result<Response<proto::GetReplicaListResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_replica_list_impl(self, request).await
     }
 
@@ -259,6 +291,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchGetReplicaListRequest>,
     ) -> Result<Response<proto::BatchGetReplicaListResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_get_replica_list_impl(self, request).await
     }
 
@@ -266,6 +299,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetReplicaListByRegexRequest>,
     ) -> Result<Response<proto::GetReplicaListByRegexResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_replica_list_by_regex_impl(self, request).await
     }
 
@@ -273,6 +307,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::remove_impl(self, request).await
     }
 
@@ -280,6 +315,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::RemoveByRegexRequest>,
     ) -> Result<Response<proto::RemoveByRegexResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::remove_by_regex_impl(self, request).await
     }
 
@@ -287,6 +323,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::remove_all_impl(self, request).await
     }
 
@@ -297,6 +334,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchExistKeyRequest>,
     ) -> Result<Response<proto::BatchExistKeyResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_exist_key_impl(self, request).await
     }
 
@@ -304,6 +342,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchQueryIpRequest>,
     ) -> Result<Response<proto::BatchQueryIpResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_query_ip_impl(self, request).await
     }
 
@@ -311,6 +350,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchReplicaClearRequest>,
     ) -> Result<Response<proto::BatchReplicaClearResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_replica_clear_impl(self, request).await
     }
 
@@ -318,6 +358,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QueryByRegexRequest>,
     ) -> Result<Response<proto::QueryByRegexResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_by_regex_impl(self, request).await
     }
 
@@ -325,6 +366,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QuerySegmentsRequest>,
     ) -> Result<Response<proto::QuerySegmentsResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_segments_impl(self, request).await
     }
 
@@ -332,6 +374,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QueryIpRequest>,
     ) -> Result<Response<proto::QueryIpResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_ip_impl(self, request).await
     }
 
@@ -339,6 +382,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetStorageConfigRequest>,
     ) -> Result<Response<proto::GetStorageConfigResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_storage_config_impl(self, request).await
     }
 
@@ -346,6 +390,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::UpsertRequest>,
     ) -> Result<Response<proto::UpsertResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::upsert_impl(self, request).await
     }
 
@@ -353,6 +398,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchUpsertStartRequest>,
     ) -> Result<Response<proto::BatchUpsertStartResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_upsert_start_impl(self, request).await
     }
 
@@ -363,6 +409,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CopyStartRequest>,
     ) -> Result<Response<proto::CopyStartResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::copy_start_impl(self, request).await
     }
 
@@ -370,6 +417,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CopyEndRequest>,
     ) -> Result<Response<proto::CopyEndResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::copy_end_impl(self, request).await
     }
 
@@ -377,6 +425,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CopyRevokeRequest>,
     ) -> Result<Response<proto::CopyRevokeResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::copy_revoke_impl(self, request).await
     }
 
@@ -384,6 +433,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MoveStartRequest>,
     ) -> Result<Response<proto::MoveStartResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::move_start_impl(self, request).await
     }
 
@@ -391,6 +441,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MoveEndRequest>,
     ) -> Result<Response<proto::MoveEndResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::move_end_impl(self, request).await
     }
 
@@ -398,6 +449,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MoveRevokeRequest>,
     ) -> Result<Response<proto::MoveRevokeResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::move_revoke_impl(self, request).await
     }
 
@@ -408,6 +460,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CreateCopyTaskRequest>,
     ) -> Result<Response<proto::CreateCopyTaskResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::create_copy_task_impl(self, request).await
     }
 
@@ -415,6 +468,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CreateMoveTaskRequest>,
     ) -> Result<Response<proto::CreateMoveTaskResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::create_move_task_impl(self, request).await
     }
 
@@ -422,6 +476,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QueryTaskRequest>,
     ) -> Result<Response<proto::QueryTaskResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_task_impl(self, request).await
     }
 
@@ -429,6 +484,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::FetchTasksRequest>,
     ) -> Result<Response<proto::FetchTasksResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::fetch_tasks_impl(self, request).await
     }
 
@@ -436,6 +492,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MarkTaskToCompleteRequest>,
     ) -> Result<Response<proto::MarkTaskToCompleteResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::mark_task_to_complete_impl(self, request).await
     }
 
@@ -446,6 +503,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchPutEndRequest>,
     ) -> Result<Response<proto::BatchPutEndResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_put_end_impl(self, request).await
     }
 
@@ -453,6 +511,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchPutRevokeRequest>,
     ) -> Result<Response<proto::BatchPutRevokeResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_put_revoke_impl(self, request).await
     }
 
@@ -460,6 +519,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchRemoveRequest>,
     ) -> Result<Response<proto::BatchRemoveResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_remove_impl(self, request).await
     }
 
@@ -467,6 +527,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchUpsertEndRequest>,
     ) -> Result<Response<proto::BatchUpsertEndResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_upsert_end_impl(self, request).await
     }
 
@@ -474,6 +535,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchUpsertRevokeRequest>,
     ) -> Result<Response<proto::BatchUpsertRevokeResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_upsert_revoke_impl(self, request).await
     }
 
@@ -481,6 +543,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchPutStartRequest>,
     ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_put_start_impl(self, request).await
     }
 
@@ -488,6 +551,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::EvictDiskReplicaRequest>,
     ) -> Result<Response<proto::EvictDiskReplicaResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::evict_disk_replica_impl(self, request).await
     }
 
@@ -495,6 +559,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::BatchEvictDiskReplicaRequest>,
     ) -> Result<Response<proto::BatchEvictDiskReplicaResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::batch_evict_disk_replica_impl(self, request).await
     }
 
@@ -505,6 +570,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QuerySegmentStatusRequest>,
     ) -> Result<Response<proto::QuerySegmentStatusResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_segment_status_impl(self, request).await
     }
 
@@ -512,6 +578,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QuerySegmentStatusByIdRequest>,
     ) -> Result<Response<proto::QuerySegmentStatusByIdResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_segment_status_by_id_impl(self, request).await
     }
 
@@ -519,6 +586,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CreateDrainJobRequest>,
     ) -> Result<Response<proto::CreateDrainJobResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::create_drain_job_impl(self, request).await
     }
 
@@ -526,6 +594,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::QueryDrainJobRequest>,
     ) -> Result<Response<proto::QueryDrainJobResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::query_drain_job_impl(self, request).await
     }
 
@@ -533,6 +602,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CancelDrainJobRequest>,
     ) -> Result<Response<proto::CancelDrainJobResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::cancel_drain_job_impl(self, request).await
     }
 
@@ -540,6 +610,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetFsdirRequest>,
     ) -> Result<Response<proto::GetFsdirResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::get_fsdir_impl(self, request).await
     }
 
@@ -550,6 +621,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::AcquireRemotePullRequest>,
     ) -> Result<Response<proto::AcquireRemotePullResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::acquire_remote_pull_impl(self, request).await
     }
 
@@ -557,6 +629,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::CompleteRemotePullRequest>,
     ) -> Result<Response<proto::CompleteRemotePullResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::complete_remote_pull_impl(self, request).await
     }
 
@@ -564,6 +637,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ReleaseRemotePullRequest>,
     ) -> Result<Response<proto::ReleaseRemotePullResponse>, Status> {
+        let _foreground_request_guard = self.begin_foreground_request()?;
         MasterServiceImpl::release_remote_pull_impl(self, request).await
     }
 }

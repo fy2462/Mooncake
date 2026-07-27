@@ -41,7 +41,9 @@ service MasterService {
   rpc PutStart(PutStartRequest) returns (PutStartResponse);
   rpc PutEnd(PutEndRequest) returns (PutEndResponse);
   rpc PutRevoke(PutRevokeRequest) returns (PutRevokeResponse);
-  rpc AddReplica(AddReplicaRequest) returns (AddReplicaResponse);
+  rpc AddReplica(AddReplicaRequest) returns (AddReplicaResponse) {
+    option deprecated = true;
+  }
 
   // Get workflow: get replica list → client reads data from peers
   rpc GetReplicaList(GetReplicaListRequest) returns (GetReplicaListResponse);

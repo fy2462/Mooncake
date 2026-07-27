@@ -1,18 +1,26 @@
 mod common;
 use common::proto_uuid;
+use mooncake_store_master::oplog::{InMemoryOpLog, OpLogManager};
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Barrier;
 use tonic::Request;
 use uuid::Uuid;
 
 #[tokio::test]
 async fn test_batch_replica_clear_respects_client_and_segment_name() {
-    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
-        lease_ttl: Duration::ZERO,
-        ..Default::default()
-    });
+    let service = MasterServiceImpl::new_with_runtime_config_and_oplog(
+        None,
+        None,
+        MasterRuntimeConfig {
+            lease_ttl: Duration::ZERO,
+            ..Default::default()
+        },
+        Some(OpLogManager::new(Some(Box::new(InMemoryOpLog::new(64))), 0)),
+    );
     let client_id = Uuid::new_v4();
     let other_client_id = Uuid::new_v4();
 
@@ -26,6 +34,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
@@ -50,6 +59,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -79,11 +89,13 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
     .unwrap();
 
+    let sequence_before_clear = service.oplog_manager().lock().latest_sequence();
     let cleared = MasterService::batch_replica_clear(
         &service,
         Request::new(proto::BatchReplicaClearRequest {
@@ -97,6 +109,11 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
     .unwrap()
     .into_inner();
     assert_eq!(cleared.cleared_keys, vec!["batch-clear-key".to_string()]);
+    assert_eq!(
+        service.oplog_manager().lock().latest_sequence(),
+        sequence_before_clear + 1,
+        "successful replica clear must publish one durable object image"
+    );
 
     let replicas = MasterService::get_replica_list(
         &service,
@@ -142,6 +159,185 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
 }
 
 #[tokio::test]
+async fn test_timed_out_put_start_releases_dashmap_guard_before_remove() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        put_start_discard_timeout: Duration::ZERO,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "stale-put:1".into(),
+            size: 1024,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let request = || {
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "stale-put-key".into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "stale-put:1".into(),
+                ..Default::default()
+            }),
+        })
+    };
+    MasterService::put_start(&service, request()).await.unwrap();
+
+    let replacement = tokio::time::timeout(
+        Duration::from_secs(1),
+        MasterService::put_start(&service, request()),
+    )
+    .await
+    .expect("stale PutStart cleanup must not deadlock")
+    .unwrap()
+    .into_inner();
+    assert_eq!(replacement.replicas.len(), 1);
+}
+
+#[tokio::test]
+async fn test_concurrent_initial_put_start_has_single_winner() {
+    const WRITERS: usize = 32;
+
+    let service = Arc::new(MasterServiceImpl::default());
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        service.as_ref(),
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "concurrent-put:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let barrier = Arc::new(Barrier::new(WRITERS));
+    let mut writers = Vec::with_capacity(WRITERS);
+    for _ in 0..WRITERS {
+        let service = Arc::clone(&service);
+        let barrier = Arc::clone(&barrier);
+        writers.push(tokio::spawn(async move {
+            barrier.wait().await;
+            MasterService::put_start(
+                service.as_ref(),
+                Request::new(proto::PutStartRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    key: "single-winner".into(),
+                    slice_length: 128,
+                    tenant_id: String::new(),
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: 1,
+                        preferred_segment: "concurrent-put:1".into(),
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut already_exists = 0;
+    for writer in writers {
+        match writer.await.unwrap() {
+            Ok(response) => {
+                successes += 1;
+                assert_eq!(response.into_inner().replicas.len(), 1);
+            }
+            Err(status) => {
+                assert_eq!(status.code(), tonic::Code::AlreadyExists);
+                already_exists += 1;
+            }
+        }
+    }
+    assert_eq!(successes, 1);
+    assert_eq!(already_exists, WRITERS - 1);
+}
+
+#[tokio::test]
+async fn test_overlapping_batch_put_start_uses_stable_lock_order() {
+    let service = Arc::new(MasterServiceImpl::default());
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        service.as_ref(),
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "batch-lock-order:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let mut batches = Vec::new();
+    for keys in [
+        vec!["batch-a".to_string(), "batch-b".to_string()],
+        vec!["batch-b".to_string(), "batch-a".to_string()],
+    ] {
+        let service = Arc::clone(&service);
+        let barrier = Arc::clone(&barrier);
+        batches.push(tokio::spawn(async move {
+            barrier.wait().await;
+            MasterService::batch_put_start(
+                service.as_ref(),
+                Request::new(proto::BatchPutStartRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    keys,
+                    slice_lengths: vec![128, 128],
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: 1,
+                        preferred_segment: "batch-lock-order:1".into(),
+                        ..Default::default()
+                    }),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+        }));
+    }
+
+    let responses = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut responses = Vec::new();
+        for batch in batches {
+            responses.push(batch.await.unwrap());
+        }
+        responses
+    })
+    .await
+    .expect("overlapping batches must not deadlock");
+
+    let statuses = responses
+        .iter()
+        .flat_map(|response| response.results.iter().map(|result| result.status))
+        .collect::<Vec<_>>();
+    assert_eq!(statuses.iter().filter(|&&status| status == 0).count(), 2);
+    assert_eq!(statuses.iter().filter(|&&status| status == -7).count(), 2);
+}
+
+#[tokio::test]
 async fn test_hard_pinned_object_survives_eviction_cycle() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         lease_ttl: Duration::ZERO,
@@ -158,6 +354,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -182,6 +379,7 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
                     preferred_nof_segments: vec![],
                     data_type: proto::ObjectDataType::Unknown as i32,
                     group_ids: vec![],
+                    host_id: String::new(),
                 }),
             }),
         )
@@ -241,6 +439,7 @@ async fn test_copy_move_and_revoke_workflow() {
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
@@ -265,6 +464,7 @@ async fn test_copy_move_and_revoke_workflow() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -439,6 +639,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
             base_addr: 0x100000000,
             te_endpoint: String::new(),
             protocol: String::new(),
+            host_id: String::new(),
         }),
     )
     .await
@@ -463,6 +664,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                     preferred_nof_segments: vec![],
                     data_type: proto::ObjectDataType::Unknown as i32,
                     group_ids: vec![],
+                    host_id: String::new(),
                 }),
             }),
         )
@@ -499,6 +701,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -535,6 +738,7 @@ async fn test_put_revoke_remove_all_and_storage_config() {
                 preferred_nof_segments: vec![],
                 data_type: proto::ObjectDataType::Unknown as i32,
                 group_ids: vec![],
+                host_id: String::new(),
             }),
         }),
     )
@@ -597,4 +801,119 @@ async fn test_put_revoke_remove_all_and_storage_config() {
     assert_eq!(storage.fs_dir, "/tmp/mooncake-root/cluster-a");
     assert!(storage.enable_disk_eviction);
     assert_eq!(storage.quota_bytes, 4096);
+    assert!(!storage.enable_tenant_scope);
+    assert_eq!(storage.memory_allocator, "offset");
+    assert_eq!(storage.memory_segment_alignment, 1);
+}
+
+#[tokio::test]
+async fn test_global_disk_only_put_lifecycle_uses_shared_file_descriptor() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "cluster-disk".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+
+    let start = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "disk-only".into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 0,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: String::new(),
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
+                host_id: String::new(),
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(start.replicas.len(), 1);
+    let disk = &start.replicas[0];
+    assert_eq!(
+        disk.replica_type,
+        proto::replica_descriptor::ReplicaType::Disk as i32
+    );
+    assert_eq!(disk.file_path, disk.segment_name);
+    assert!(
+        std::path::Path::new(&disk.file_path)
+            .starts_with(root.path().join("cluster-disk/global-disk"))
+    );
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk-only".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "disk-only".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let complete = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "disk-only".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(complete.replicas.len(), 1);
+    assert_eq!(
+        complete.replicas[0].status,
+        proto::replica_descriptor::ReplicaStatus::Complete as i32
+    );
+
+    let eviction = MasterService::batch_evict_disk_replica(
+        &service,
+        Request::new(proto::BatchEvictDiskReplicaRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["disk-only".into(), "already-missing".into()],
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(eviction.statuses, [0, -1]);
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk-only".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
 }

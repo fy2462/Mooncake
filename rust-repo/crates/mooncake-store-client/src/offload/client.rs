@@ -14,6 +14,7 @@ pub struct BatchOffloadResult {
     pub pointers: Vec<u64>,
     pub transfer_engine_addr: String,
     pub batch_id: u64,
+    pub gc_ttl_ms: u64,
 }
 
 /// Call a peer's OffloadReadService to read offloaded objects.
@@ -25,6 +26,35 @@ pub async fn batch_get_offload_objects(
     sizes: &[i64],
     tenant_ids: &[String],
 ) -> Result<BatchOffloadResult, String> {
+    if peer_addr.is_empty() {
+        return Err("peer address must not be empty".to_string());
+    }
+    if keys.is_empty() {
+        return Err("offload request must contain at least one key".to_string());
+    }
+    if keys.len() != sizes.len() {
+        return Err(format!(
+            "sizes length {} does not match keys length {}",
+            sizes.len(),
+            keys.len()
+        ));
+    }
+    if !tenant_ids.is_empty() && tenant_ids.len() != keys.len() {
+        return Err(format!(
+            "tenant_ids length {} does not match keys length {}",
+            tenant_ids.len(),
+            keys.len()
+        ));
+    }
+    for (key, size) in keys.iter().zip(sizes) {
+        if key.is_empty() {
+            return Err("offload request keys must not be empty".to_string());
+        }
+        if *size <= 0 {
+            return Err(format!("offload size for key {key} must be positive"));
+        }
+    }
+
     let url = format!("http://{peer_addr}");
     let channel = Channel::from_shared(url)
         .map_err(|e| format!("invalid peer address {peer_addr}: {e}"))?
@@ -45,11 +75,28 @@ pub async fn batch_get_offload_objects(
         .await
         .map_err(|e| format!("batch_get_offload_object RPC to {peer_addr}: {e}"))?
         .into_inner();
+    if response.batch_id == 0 {
+        return Err("peer returned invalid offload batch id 0".to_string());
+    }
+    if response.pointers.len() != keys.len() {
+        return Err(format!(
+            "peer returned {} pointers for {} offload keys",
+            response.pointers.len(),
+            keys.len()
+        ));
+    }
+    if response.transfer_engine_addr.is_empty() {
+        return Err("peer returned an empty Transfer Engine endpoint".to_string());
+    }
+    if response.gc_ttl_ms == 0 {
+        return Err("peer returned an invalid zero offload GC TTL".to_string());
+    }
 
     Ok(BatchOffloadResult {
         pointers: response.pointers,
         transfer_engine_addr: response.transfer_engine_addr,
         batch_id: response.batch_id,
+        gc_ttl_ms: response.gc_ttl_ms,
     })
 }
 

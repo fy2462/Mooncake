@@ -58,7 +58,7 @@ async def basic_kv_example():
     ok = await client.exists("greeting")
     print(f"exists? → greeting (after remove): {ok}")
 
-    client.close()
+    await client.close()
     print("\n✓ basic_kv_example done")
 
 
@@ -85,7 +85,7 @@ async def replication_example():
     assert data == b"critical data with 3 replicas"
     print("✓ replication_example done")
 
-    client.close()
+    await client.close()
 
 
 async def dict_storage_example():
@@ -116,7 +116,7 @@ async def dict_storage_example():
     print(f"dict    → {restored}")
     print("✓ dict_storage_example done")
 
-    client.close()
+    await client.close()
 
 
 async def main():

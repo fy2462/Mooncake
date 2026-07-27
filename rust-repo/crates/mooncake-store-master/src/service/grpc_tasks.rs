@@ -51,6 +51,9 @@ impl MasterServiceImpl {
         if req.targets.is_empty() {
             return Err(Status::invalid_argument("missing targets"));
         }
+        // C++ TaskManager write access serializes capacity admission, UUID
+        // selection, and insertion globally.
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
 
         // Look up the object to find its source replica.
         // 查找对象以找到其源副本。
@@ -63,28 +66,58 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition("object has no source replicas"));
         }
 
-        // Verify all target segments are mounted (known to the master).
-        // 验证所有目标 segment 已挂载（master 已知）。
+        // Resolve every legacy name-only target to one exact active allocation
+        // domain. Rust permits same-name segment mounts, so ambiguity must not
+        // be delegated to the worker.
         for target in &req.targets {
-            let Some(_) = client_id_by_segment_name(&self.state, target) else {
-                return Err(Status::invalid_argument(format!(
-                    "target segment not mounted: {target}"
+            let Some((target_segment_id, target_replica_type)) =
+                unique_active_replica_segment_identity(&self.state, target)
+            else {
+                return Err(Status::failed_precondition(format!(
+                    "target segment is missing, inactive, or ambiguous: {target}"
                 )));
             };
-            let allocatable = self.state.segments.iter().any(|entry| {
-                entry.segment.name == *target && entry.status == proto::SegmentStatus::Active
-            });
-            if !allocatable {
+            if object.replicas.iter().any(|replica| {
+                replica.segment_name == *target
+                    && (replica.segment_id != target_segment_id
+                        || replica.replica_type != target_replica_type)
+            }) {
                 return Err(Status::failed_precondition(format!(
-                    "target segment not allocatable: {target}"
+                    "same-name target replica does not match the unique active target: {target}"
                 )));
             }
         }
 
-        // The source is the first replica's segment.
-        // 源是第一个副本所在的 segment。
-        let source_segment = object.replicas[0].segment_name.clone();
-        let assigned_client = client_id_by_segment_name(&self.state, &source_segment)
+        // Choose a routable Memory/NoF source whose name is unique within the
+        // object. The worker wire still carries a name, so serializing an
+        // ambiguous source would make the later CopyStart nondeterministic.
+        let source_candidates = object
+            .replicas
+            .iter()
+            .filter(|replica| {
+                replica.handle_valid
+                    && matches!(
+                        replica.replica_type,
+                        ReplicaType::Memory | ReplicaType::NoFSsd
+                    )
+                    && client_id_by_exact_replica_segment(&self.state, replica).is_some()
+            })
+            .collect::<Vec<_>>();
+        let source = source_candidates
+            .iter()
+            .copied()
+            .find(|candidate| {
+                source_candidates
+                    .iter()
+                    .filter(|replica| replica.segment_name == candidate.segment_name)
+                    .count()
+                    == 1
+            })
+            .ok_or(Status::failed_precondition(
+                "object has no unambiguous routable source replica",
+            ))?;
+        let source_segment = source.segment_name.clone();
+        let assigned_client = client_id_by_exact_replica_segment(&self.state, source)
             .ok_or(Status::failed_precondition("source segment missing"))?;
 
         // Serialise the task payload — JSON string sent to the worker.
@@ -110,7 +143,7 @@ impl MasterServiceImpl {
 
         // Create and store the task entry.
         // 创建并存储任务条目。
-        let task_id = Uuid::new_v4();
+        let task_id = unique_task_id(&self.state);
         let now = Utc::now();
         self.state.tasks.insert(
             task_id,
@@ -122,13 +155,18 @@ impl MasterServiceImpl {
                     created_at: now,
                     last_updated_at: now,
                     assigned_client: Some(assigned_client),
-                    message: format!("copy {} to {} target(s)", scoped_key, req.targets.len()),
+                    message: String::new(),
                 },
                 key: task_key,
                 payload: task_payload,
                 max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
             },
         );
+        self.state
+            .persist_task_state_batch_or_fence(&[task_id], &[], "create_copy_task")
+            .map_err(|error| {
+                Status::unavailable(format!("failed to persist create_copy_task: {error}"))
+            })?;
         Ok(Response::new(proto::CreateCopyTaskResponse {
             task_id: Some(uuid_to_proto(task_id)),
         }))
@@ -162,6 +200,9 @@ impl MasterServiceImpl {
         if req.source == req.target {
             return Err(Status::invalid_argument("source and target must differ"));
         }
+        // C++ TaskManager write access serializes capacity admission, UUID
+        // selection, and insertion globally.
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
 
         // Verify the object exists and has a replica on the source segment.
         // 验证对象存在且在源 segment 上有副本。
@@ -170,27 +211,47 @@ impl MasterServiceImpl {
             .objects
             .get(&scoped_key)
             .ok_or(Status::not_found("key not found"))?;
-        if !object
+        let source_candidates = object
             .replicas
             .iter()
-            .any(|replica| replica.segment_name == req.source)
-        {
-            return Err(Status::invalid_argument("source segment not found"));
-        }
+            .filter(|replica| {
+                replica.segment_name == req.source
+                    && replica.handle_valid
+                    && matches!(
+                        replica.replica_type,
+                        ReplicaType::Memory | ReplicaType::NoFSsd
+                    )
+                    && client_id_by_exact_replica_segment(&self.state, replica).is_some()
+            })
+            .collect::<Vec<_>>();
+        let source = match source_candidates.as_slice() {
+            [source] => *source,
+            [] => return Err(Status::invalid_argument("source segment not found")),
+            _ => {
+                return Err(Status::failed_precondition(
+                    "source segment name is ambiguous",
+                ));
+            }
+        };
 
         // The task is assigned to the client that owns the source segment.
         // 任务分配给拥有源 segment 的客户端。
-        let assigned_client = client_id_by_segment_name(&self.state, &req.source)
+        let assigned_client = client_id_by_exact_replica_segment(&self.state, source)
             .ok_or(Status::failed_precondition("source segment missing"))?;
-        if client_id_by_segment_name(&self.state, &req.target).is_none() {
-            return Err(Status::invalid_argument("target segment not mounted"));
-        }
-        let target_allocatable = self.state.segments.iter().any(|entry| {
-            entry.segment.name == req.target && entry.status == proto::SegmentStatus::Active
-        });
-        if !target_allocatable {
+        let Some((target_segment_id, target_replica_type)) =
+            unique_active_replica_segment_identity(&self.state, &req.target)
+        else {
             return Err(Status::failed_precondition(
-                "target segment not allocatable",
+                "target segment is missing, inactive, or ambiguous",
+            ));
+        };
+        if object.replicas.iter().any(|replica| {
+            replica.segment_name == req.target
+                && (replica.segment_id != target_segment_id
+                    || replica.replica_type != target_replica_type)
+        }) {
+            return Err(Status::failed_precondition(
+                "same-name target replica does not match the unique active target",
             ));
         }
 
@@ -210,7 +271,7 @@ impl MasterServiceImpl {
         }
 
         // Create and store the move task. / 创建并存储移动任务。
-        let task_id = Uuid::new_v4();
+        let task_id = unique_task_id(&self.state);
         let now = Utc::now();
         self.state.tasks.insert(
             task_id,
@@ -222,13 +283,18 @@ impl MasterServiceImpl {
                     created_at: now,
                     last_updated_at: now,
                     assigned_client: Some(assigned_client),
-                    message: format!("move {} from {} to {}", scoped_key, req.source, req.target),
+                    message: String::new(),
                 },
                 key: task_key,
                 payload: task_payload,
                 max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
             },
         );
+        self.state
+            .persist_task_state_batch_or_fence(&[task_id], &[], "create_move_task")
+            .map_err(|error| {
+                Status::unavailable(format!("failed to persist create_move_task: {error}"))
+            })?;
         Ok(Response::new(proto::CreateMoveTaskResponse {
             task_id: Some(uuid_to_proto(task_id)),
         }))
@@ -283,10 +349,9 @@ impl MasterServiceImpl {
     //   3. Takes up to batch_size tasks / 取最多 batch_size 个任务
     //   4. Transitions each to Processing status / 将每个任务状态转换为 Processing
     //
-    // A batch_size of 0 means "unlimited" — the worker will receive all
-    // pending tasks assigned to it.
-    //
-    // batch_size 为 0 表示"无限制" —— worker 将收到分配给它的所有待处理任务。
+    // As in C++ ScopedTaskWriteAccess::pop_tasks, batch_size == 0 returns no
+    // assignments because the queue loop is bounded by result.size() <
+    // batch_size.
     //
     // C++ equivalent: MasterServiceImpl::FetchTasks()
     // -----------------------------------------------------------------------
@@ -300,14 +365,9 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
 
-        // batch_size == 0 → unlimited. / batch_size == 0 → 无限制。
-        let requested_batch_size = if req.batch_size == 0 {
-            usize::MAX
-        } else {
-            req.batch_size as usize
-        };
-        let batch_size = requested_batch_size.min(processing_task_capacity(&self.state));
+        let batch_size = (req.batch_size as usize).min(processing_task_capacity(&self.state));
 
         // Collect pending tasks for this client, sorted by creation time (FIFO).
         // 收集此客户端的待处理任务，按创建时间排序（FIFO）。
@@ -326,10 +386,12 @@ impl MasterServiceImpl {
         // Claim tasks: transition Pending → Processing, build response.
         // 认领任务：Pending → Processing，构建响应。
         let mut tasks = Vec::new();
+        let mut claimed_ids = Vec::new();
         for (task_id, _) in pending.into_iter().take(batch_size) {
             if let Some(mut task) = self.state.tasks.get_mut(&task_id) {
                 task.info.status = TaskStatus::Processing;
                 task.info.last_updated_at = Utc::now();
+                claimed_ids.push(task_id);
                 tasks.push(proto::TaskAssignment {
                     id: Some(uuid_to_proto(task.info.id)),
                     r#type: task_type_to_proto(task.info.task_type),
@@ -338,6 +400,13 @@ impl MasterServiceImpl {
                     max_retry_attempts: task.max_retry_attempts,
                 });
             }
+        }
+        if !claimed_ids.is_empty() {
+            self.state
+                .persist_task_state_batch_or_fence(&claimed_ids, &[], "fetch_tasks_claim")
+                .map_err(|error| {
+                    Status::unavailable(format!("failed to persist task claims: {error}"))
+                })?;
         }
 
         Ok(Response::new(proto::FetchTasksResponse { tasks }))
@@ -383,6 +452,7 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing task id"))?,
         );
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
 
         // Look up the task and verify ownership. / 查找任务并验证所有权。
         let mut task = self
@@ -402,15 +472,28 @@ impl MasterServiceImpl {
         //
         // 更新状态和消息。实际的副作用（例如成功移动后的副本列表更新）
         // 由 workers.rs 中的后台任务完成 worker 处理。
-        let status = task_status_from_proto(task_req.status);
+        let status = request_task_status_from_i32(task_req.status)?;
         if !matches!(status, TaskStatus::Success | TaskStatus::Failed) {
             return Err(Status::invalid_argument(
                 "task completion status must be success or failed",
             ));
         }
+        if matches!(task.info.status, TaskStatus::Success | TaskStatus::Failed) {
+            // C++ ScopedTaskWriteAccess::complete_task treats every retry
+            // after the first terminal transition as successful, regardless
+            // of the repeated status/message, while preserving the original
+            // terminal result.
+            return Ok(Response::new(proto::MarkTaskToCompleteResponse {}));
+        }
         task.info.status = status;
         task.info.message = task_req.message.clone();
         task.info.last_updated_at = Utc::now();
+        drop(task);
+        self.state
+            .persist_task_state_batch_or_fence(&[task_id], &[], "complete_task")
+            .map_err(|error| {
+                Status::unavailable(format!("failed to persist task completion: {error}"))
+            })?;
         Ok(Response::new(proto::MarkTaskToCompleteResponse {}))
     }
 }

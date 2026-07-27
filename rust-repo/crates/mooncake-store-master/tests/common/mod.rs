@@ -28,6 +28,7 @@ pub fn make_seg(name: &str, size: u64) -> Segment {
         base: 0,
         te_endpoint: String::new(),
         protocol: "tcp".to_string(),
+        host_id: String::new(),
     }
 }
 

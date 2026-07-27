@@ -4071,10 +4071,13 @@ class _MooncakePayloadTransport:
                 raise RuntimeError(
                     "structured tensor payload does not support get_tensor_into"
                 )
+            if destination.owner is None:
+                raise ValueError(
+                    "structured tensor get_into requires an owner-bearing destination buffer"
+                )
             result = get_tensor_into(
-                payload_spec["key"], destination.ptr, destination.size
+                payload_spec["key"], destination.owner, destination.size
             )
-            _ = destination.owner
             return result
         expected_bytes = int(payload_spec["bytes"])
         if destination.size < expected_bytes:
@@ -4204,7 +4207,12 @@ class _MooncakePayloadTransport:
             raise RuntimeError("put_from is unavailable")
         _check_status(
             _put_from_with_optional_config(
-                self._store, key, value.ptr, value.size, config
+                self._store,
+                key,
+                value.ptr,
+                value.size,
+                config,
+                owner=value.owner,
             ),
             "put_from",
             key,
@@ -4259,11 +4267,14 @@ class _MooncakePayloadTransport:
             view[: len(metadata)] = metadata
             if tensor_nbytes:
                 ctypes.memmove(lease.ptr + len(metadata), data_ptr, tensor_nbytes)
-            view.release()
-            view = None
             _check_status(
                 _put_from_with_optional_config(
-                    self._store, key, lease.ptr, total_bytes, config
+                    self._store,
+                    key,
+                    lease.ptr,
+                    total_bytes,
+                    config,
+                    owner=view,
                 ),
                 "put_from",
                 key,
@@ -4328,7 +4339,11 @@ class _MooncakePayloadTransport:
         buffer_ptrs = [ptr for _owner, ptr, _size in prepared_chunks]
         sizes = [size for _owner, _ptr, size in prepared_chunks]
         registered_ptrs = self._register_buffers(
-            buffer_ptrs, sizes, pre_registered, "bundle source payload"
+            buffer_ptrs,
+            sizes,
+            pre_registered,
+            "bundle source payload",
+            owners=[owner for owner, _ptr, _size in prepared_chunks],
         )
         try:
             results = _batch_put_from_with_optional_config(
@@ -4777,6 +4792,7 @@ class _MooncakePayloadTransport:
         sizes: Sequence[int],
         pre_registered: bool,
         label: str,
+        owners: Sequence[Any] | None = None,
     ) -> list[int]:
         register_buffer = self._register_buffer
         unregister_buffer = self._unregister_buffer
@@ -4784,12 +4800,21 @@ class _MooncakePayloadTransport:
             return []
         if not (callable(register_buffer) and callable(unregister_buffer)):
             raise RuntimeError(f"register_buffer APIs are unavailable for {label}")
+        if owners is None:
+            raise ValueError("an allocation owner is required for every buffer registration")
+        if len(owners) != len(buffer_ptrs):
+            raise ValueError("buffer owners and pointers must have the same length")
         registered_ptrs: list[int] = []
         try:
-            for ptr, size in zip(buffer_ptrs, sizes):
+            for index, (ptr, size) in enumerate(zip(buffer_ptrs, sizes)):
                 if size == 0:
                     continue
-                register_status = register_buffer(ptr, size)
+                owner = owners[index]
+                if owner is None:
+                    raise ValueError(
+                        f"allocation owner is missing for buffer {index} in {label}"
+                    )
+                register_status = register_buffer(ptr, size, owner=owner)
                 if register_status == 0:
                     registered_ptrs.append(ptr)
                     continue
@@ -4819,7 +4844,11 @@ class _MooncakePayloadTransport:
             yield base_ptr
             return
         registered_ptrs = self._register_buffers(
-            [base_ptr], [_buffer_nbytes(destination)], False, label
+            [base_ptr],
+            [_buffer_nbytes(destination)],
+            False,
+            label,
+            owners=[destination],
         )
         if not registered_ptrs:
             yield base_ptr
@@ -5400,11 +5429,19 @@ def _put_with_optional_config(
 
 
 def _put_from_with_optional_config(
-    store: BundleStore, key: str, ptr: int, size: int, config: Any = None
+    store: BundleStore,
+    key: str,
+    ptr: int,
+    size: int,
+    config: Any = None,
+    *,
+    owner: Any = None,
 ) -> int:
     put_tensor_from = getattr(store, "put_tensor_from", None)
     if config is None and callable(put_tensor_from):
-        return put_tensor_from(key, ptr, size)
+        if owner is None:
+            raise ValueError("put_tensor_from requires an owner-bearing buffer")
+        return put_tensor_from(key, owner, size)
     put_from = getattr(store, "put_from", None)
     if callable(put_from):
         return _call_write_with_optional_config(put_from, key, ptr, size, config=config)

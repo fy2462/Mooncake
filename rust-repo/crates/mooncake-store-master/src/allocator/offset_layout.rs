@@ -24,23 +24,56 @@ impl SegmentState {
         match &mut self.layout {
             SegmentLayout::Offset(offset) => {
                 let start = reserve_range(&mut offset.free_ranges, size)?;
+                if offset.allocations.insert(start, size).is_some() {
+                    insert_free_range(&mut offset.free_ranges, start, size);
+                    return None;
+                }
                 Some((start, size))
             }
             SegmentLayout::Cachelib(cachelib) => allocate_cachelib(cachelib, size),
         }
     }
 
+    pub(super) fn validate_release(&self, replica: &ReplicaDescriptor) -> Result<u64, String> {
+        if replica.size == 0 {
+            return Err("cannot release a zero-sized allocation".to_string());
+        }
+        match &self.layout {
+            SegmentLayout::Offset(offset) => match offset.allocations.get(&replica.offset) {
+                Some(size) if *size == replica.size => Ok(*size),
+                Some(size) => Err(format!(
+                    "offset allocation size mismatch at {}: descriptor={}, allocator={size}",
+                    replica.offset, replica.size
+                )),
+                None => Err(format!(
+                    "offset allocation is not live at {}",
+                    replica.offset
+                )),
+            },
+            SegmentLayout::Cachelib(cachelib) => {
+                let allocation = cachelib.allocations.get(&replica.offset).ok_or_else(|| {
+                    format!("cachelib allocation is not live at {}", replica.offset)
+                })?;
+                if allocation.requested_size != replica.size {
+                    return Err(format!(
+                        "cachelib allocation size mismatch at {}: descriptor={}, allocator={}",
+                        replica.offset, replica.size, allocation.requested_size
+                    ));
+                }
+                Ok(allocation.class_size)
+            }
+        }
+    }
+
     /// Release the space occupied by a replica.
     /// 释放副本占用的空间。
     pub(super) fn release(&mut self, replica: &ReplicaDescriptor) -> Option<u64> {
+        self.validate_release(replica).ok()?;
         match &mut self.layout {
             SegmentLayout::Offset(offset) => {
-                if replica.size == 0 || replica.offset >= self.segment.size {
-                    return None;
-                }
-                let releasable = replica.size.min(self.segment.size - replica.offset);
-                insert_free_range(&mut offset.free_ranges, replica.offset, releasable);
-                Some(releasable)
+                let released_size = offset.allocations.remove(&replica.offset)?;
+                insert_free_range(&mut offset.free_ranges, replica.offset, released_size);
+                Some(released_size)
             }
             SegmentLayout::Cachelib(cachelib) => release_cachelib(cachelib, replica.offset),
         }

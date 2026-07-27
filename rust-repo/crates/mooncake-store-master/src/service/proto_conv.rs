@@ -16,10 +16,15 @@ use mooncake_store_core::{
 };
 use uuid::Uuid;
 
-/// 将 proto 的 replica_type (i32) 转为内部 ReplicaType，未知值回退为 Memory。
-/// Convert proto replica_type (i32) to internal ReplicaType; unknown values fall back to Memory.
-pub(crate) fn replica_type_from_i32(v: i32) -> ReplicaType {
-    ReplicaType::try_from(v).unwrap_or(ReplicaType::Memory)
+/// Decode a replica-type selector supplied by a client request.
+///
+/// Replica descriptors retain their historical compatibility fallback in
+/// `ReplicaType::from_replica_wire`, but a mutation selector must fail closed:
+/// treating an unknown value as Memory could complete, revoke, or evict the
+/// wrong physical replica.
+pub(crate) fn request_replica_type_from_i32(v: i32) -> Result<ReplicaType, tonic::Status> {
+    ReplicaType::try_from(v)
+        .map_err(|_| tonic::Status::invalid_argument(format!("invalid replica_type: {v}")))
 }
 
 /// 将 proto 的 data_type (i32) 转为内部 ObjectDataType，未知值回退为 Unknown。
@@ -54,11 +59,17 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         size: r.size,
         holder_client_id: r.holder_client_id.map(uuid_to_proto),
         transport_endpoint: r.segment_name.clone(),
-        file_path: String::new(),
+        file_path: if r.replica_type == ReplicaType::Disk {
+            r.segment_name.clone()
+        } else {
+            String::new()
+        },
         object_size: r.size,
         local_disk_client_id: r.holder_client_id.map(uuid_to_proto),
         base_addr: r.base_addr,
         protocol: r.protocol.clone(),
+        local_disk_storage_id: r.local_disk_storage_id.map(uuid_to_proto),
+        local_disk_generation_id: r.local_disk_generation_id.map(uuid_to_proto),
     }
 }
 
@@ -71,7 +82,13 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
         refcnt: 0,
         handle_valid: true,
         segment_id: p.segment_id.as_ref().map_or(Uuid::nil(), uuid_from_proto),
-        segment_name: p.segment_name.clone(),
+        segment_name: if ReplicaType::from_replica_wire(p.replica_type) == ReplicaType::Disk
+            && !p.file_path.is_empty()
+        {
+            p.file_path.clone()
+        } else {
+            p.segment_name.clone()
+        },
         offset: p.offset,
         size: p.size,
         base_addr: p.base_addr,
@@ -79,6 +96,8 @@ pub(crate) fn replica_from_proto(p: &proto::ReplicaDescriptor) -> ReplicaDescrip
         status: ReplicaStatus::from_replica_wire(p.status),
         replica_type: ReplicaType::from_replica_wire(p.replica_type),
         holder_client_id: p.holder_client_id.as_ref().map(uuid_from_proto),
+        local_disk_storage_id: p.local_disk_storage_id.as_ref().map(uuid_from_proto),
+        local_disk_generation_id: p.local_disk_generation_id.as_ref().map(uuid_from_proto),
     }
 }
 
@@ -105,6 +124,7 @@ pub(crate) fn config_from_proto(c: &proto::ReplicateConfig) -> ReplicateConfig {
         preferred_nof_segments: c.preferred_nof_segments.clone(),
         prefer_alloc_in_same_node: c.prefer_alloc_in_same_node,
         data_type: object_data_type_from_i32(c.data_type),
+        host_id: c.host_id.clone(),
         group_ids: c.group_ids.clone(),
     }
 }
@@ -122,11 +142,12 @@ pub(crate) fn nof_segment_to_proto(segment: &NoFSegment) -> proto::NoFSegment {
     }
 }
 
-/// 从 proto 反序列化 NoFSegment，UUID 缺省时生成新 UUID（新挂载场景）。
-/// Deserialize NoFSegment from proto. Generates a new UUID if missing (new mount scenario).
+/// 从 proto 反序列化 NoFSegment；缺失 UUID 保留为 nil，由 ReMount 边界拒绝。
+/// Deserialize NoFSegment. A missing UUID remains nil so the ReMount boundary
+/// can reject the request instead of inventing a non-durable identity.
 pub(crate) fn nof_segment_from_proto(segment: &proto::NoFSegment) -> NoFSegment {
     NoFSegment {
-        id: segment.id.as_ref().map_or(Uuid::new_v4(), uuid_from_proto),
+        id: segment.id.as_ref().map_or(Uuid::nil(), uuid_from_proto),
         name: segment.name.clone(),
         base: segment.base,
         size: segment.size,
@@ -161,17 +182,20 @@ pub(crate) fn task_status_to_proto(status: TaskStatus) -> i32 {
     status.into()
 }
 
-/// 从 proto i32 还原 TaskStatus，未知值回退为 Pending。
-/// Restore TaskStatus from proto i32; unknown values fall back to Pending.
-pub(crate) fn task_status_from_proto(status: i32) -> TaskStatus {
-    TaskStatus::try_from(status).unwrap_or(TaskStatus::Pending)
+/// Decode a task status supplied by a client mutation request.
+pub(crate) fn request_task_status_from_i32(status: i32) -> Result<TaskStatus, tonic::Status> {
+    TaskStatus::try_from(status)
+        .map_err(|_| tonic::Status::invalid_argument(format!("invalid task status: {status}")))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{replica_from_proto, replica_to_proto};
+    use super::{
+        nof_segment_from_proto, replica_from_proto, replica_to_proto,
+        request_replica_type_from_i32, request_task_status_from_i32,
+    };
     use crate::proto;
-    use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType};
+    use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, TaskStatus};
     use uuid::Uuid;
 
     fn wire_replica(status: i32, replica_type: i32) -> proto::ReplicaDescriptor {
@@ -187,6 +211,38 @@ mod tests {
             holder_client_id: Some(proto::Uuid { high: 23, low: 29 }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn nof_segment_conversion_does_not_invent_missing_remount_identity() {
+        let segment = nof_segment_from_proto(&proto::NoFSegment {
+            name: "nof-a".to_string(),
+            size: 4096,
+            te_endpoint: "tcp://127.0.0.1:4420".to_string(),
+            ..Default::default()
+        });
+
+        assert!(segment.id.is_nil());
+    }
+
+    #[test]
+    fn request_replica_type_rejects_unknown_mutation_selector() {
+        assert_eq!(
+            request_replica_type_from_i32(ReplicaType::NoFSsd as i32).unwrap(),
+            ReplicaType::NoFSsd
+        );
+        let error = request_replica_type_from_i32(99).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn request_task_status_rejects_unknown_mutation_value() {
+        assert_eq!(
+            request_task_status_from_i32(TaskStatus::Success as i32).unwrap(),
+            TaskStatus::Success
+        );
+        let error = request_task_status_from_i32(99).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
@@ -237,6 +293,8 @@ mod tests {
             status: ReplicaStatus::Complete,
             replica_type: ReplicaType::Memory,
             holder_client_id: Some(holder),
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
             refcnt: 0,
             handle_valid: true,
             base_addr: 59,
@@ -260,7 +318,40 @@ mod tests {
         assert_eq!(round_trip.status, replica.status);
         assert_eq!(round_trip.replica_type, replica.replica_type);
         assert_eq!(round_trip.holder_client_id, replica.holder_client_id);
+        assert_eq!(
+            round_trip.local_disk_storage_id,
+            replica.local_disk_storage_id
+        );
         assert_eq!(round_trip.base_addr, replica.base_addr);
         assert_eq!(round_trip.protocol, replica.protocol);
+    }
+
+    #[test]
+    fn disk_replica_round_trip_uses_file_path_as_authoritative_location() {
+        let mut replica = ReplicaDescriptor {
+            segment_id: Uuid::nil(),
+            segment_name: "/shared/cluster/global-disk/aa/bb/object.data".to_string(),
+            offset: 0,
+            size: 64,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Disk,
+            holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+            protocol: String::new(),
+        };
+        let wire = replica_to_proto(&replica);
+        assert_eq!(wire.file_path, replica.segment_name);
+
+        replica.segment_name = "/must/not/be/used".to_string();
+        let mut wire_with_alias = replica_to_proto(&replica);
+        wire_with_alias.segment_name = "legacy-segment-alias".to_string();
+        assert_eq!(
+            replica_from_proto(&wire_with_alias).segment_name,
+            wire_with_alias.file_path
+        );
     }
 }

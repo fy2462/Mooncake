@@ -72,6 +72,7 @@ mod ffi {
 mod accelerator;
 mod error;
 mod nic_stats;
+mod registered_memory;
 mod segment;
 mod tent;
 mod transfer;
@@ -80,18 +81,27 @@ mod transport_hint;
 pub use accelerator::{PointerMemoryType, classify_pointer, copy_from_host, copy_to_host};
 pub use error::{TransferEngineError, TransferEngineResult};
 pub use nic_stats::NicLoadStats;
+pub use registered_memory::{
+    ReadableRegisteredMemoryRegion, RegisteredMemory, RegisteredMemoryAccess, RegisteredMemoryId,
+    RegisteredSubmitOutcome, RegisteredTransferRequest, StableMemoryOwner,
+    SubmittedRegisteredBatch, WritableRegisteredMemoryRegion,
+};
 pub use segment::{SegmentDesc, SegmentId};
 pub use tent::{
     TentEngine, TentIntent, TentMetricsStatus, TentPriority, TentRequestOptions,
     TentTransferRequest, TentTransport,
 };
 pub use transfer::{
-    BatchId, NotifyMsg, NotifyMsgBuf, Opcode, TransferRequest, TransferStatus, TransferStatusEnum,
+    BatchId, NotifyMsg, NotifyMsgBuf, Opcode, OwnedBatchId, TransferRequest, TransferStatus,
+    TransferStatusEnum,
 };
 pub use transport_hint::{HintedTransferRequest, TransportHint};
 
 use std::ffi::{CStr, CString, c_void};
 use std::ptr::NonNull;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicU64;
+use transfer::next_engine_instance_id;
 
 // ---------------------------------------------------------------------------
 // TransferEngine — owning handle
@@ -124,6 +134,24 @@ use std::ptr::NonNull;
 #[derive(Debug)]
 pub struct TransferEngine {
     handle: NonNull<c_void>,
+    instance_id: u64,
+    memory_registrations: Mutex<registered_memory::RegistrationRegistry>,
+    next_memory_registration_generation: AtomicU64,
+}
+
+struct NativeNotifyBuffer {
+    raw: *mut ffi::notify_msg_t,
+    count: i32,
+}
+
+impl Drop for NativeNotifyBuffer {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                ffi::freeNotifsMsgBuf(self.raw, self.count.max(0));
+            }
+        }
+    }
 }
 
 // SAFETY: The C++ TransferEngine uses internal locking for thread safety.
@@ -178,7 +206,12 @@ impl TransferEngine {
         };
 
         let handle = NonNull::new(handle).ok_or(TransferEngineError::NullHandle)?;
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            instance_id: next_engine_instance_id(),
+            memory_registrations: Mutex::new(registered_memory::RegistrationRegistry::new()),
+            next_memory_registration_generation: AtomicU64::new(1),
+        })
     }
 
     /// Install a transport protocol (e.g. `"tcp"` or `"rdma"`).
@@ -562,6 +595,106 @@ impl TransferEngine {
     // 3. get_transfer_status — 轮询每个请求直到终态
     // 4. free_batch_id — 释放批次槽位
 
+    /// Allocate a legacy copyable batch token.
+    ///
+    /// This API is retained only for callers outside the Rust Store
+    /// replacement. Store code must use [`Self::allocate_owned_batch_id`].
+    pub fn allocate_batch_id(&self, batch_size: usize) -> TransferEngineResult<BatchId> {
+        let id = unsafe { ffi::allocateBatchID(self.handle.as_ptr(), batch_size) };
+        if id == u64::MAX {
+            return Err(TransferEngineError::OperationFailed(-1));
+        }
+        Ok(BatchId(id))
+    }
+
+    /// Submit requests through the legacy copyable batch-token API.
+    ///
+    /// This preserves the pre-existing interface for out-of-scope consumers.
+    /// It cannot express payload lifetime or aliasing in the type system; Rust
+    /// Store callers must use the owned API through their safe adapter.
+    pub fn submit_transfer(
+        &self,
+        batch_id: BatchId,
+        requests: &[TransferRequest],
+    ) -> TransferEngineResult<()> {
+        let mut ffi_requests = requests
+            .iter()
+            .map(|request| ffi::transfer_request_t {
+                opcode: request.opcode as i32,
+                source: request.source,
+                target_id: request.target_id.0,
+                target_offset: request.target_offset,
+                length: request.length,
+            })
+            .collect::<Vec<_>>();
+        let rc = unsafe {
+            ffi::submitTransfer(
+                self.handle.as_ptr(),
+                batch_id.0,
+                ffi_requests.as_mut_ptr(),
+                ffi_requests.len(),
+            )
+        };
+        if rc != 0 {
+            return Err(TransferEngineError::OperationFailed(rc));
+        }
+        Ok(())
+    }
+
+    /// Poll one task through the legacy copyable batch-token API.
+    pub fn get_transfer_status(
+        &self,
+        batch_id: BatchId,
+        task_id: usize,
+    ) -> TransferEngineResult<TransferStatus> {
+        let mut status = ffi::transfer_status_t {
+            status: 0,
+            transferred_bytes: 0,
+        };
+        let rc = unsafe {
+            ffi::getTransferStatus(self.handle.as_ptr(), batch_id.0, task_id, &mut status)
+        };
+        if rc != 0 {
+            return Err(TransferEngineError::OperationFailed(rc));
+        }
+        Ok(TransferStatus {
+            status: TransferStatusEnum::from_i32(status.status),
+            transferred_bytes: status.transferred_bytes,
+        })
+    }
+
+    /// Poll aggregate status through the legacy copyable batch-token API.
+    pub fn get_batch_transfer_status(
+        &self,
+        batch_id: BatchId,
+    ) -> TransferEngineResult<TransferStatus> {
+        let mut status = ffi::transfer_status_t {
+            status: 0,
+            transferred_bytes: 0,
+        };
+        let rc =
+            unsafe { ffi::getBatchTransferStatus(self.handle.as_ptr(), batch_id.0, &mut status) };
+        if rc != 0 {
+            return Err(TransferEngineError::OperationFailed(rc));
+        }
+        Ok(TransferStatus {
+            status: TransferStatusEnum::from_i32(status.status),
+            transferred_bytes: status.transferred_bytes,
+        })
+    }
+
+    /// Release a legacy copyable batch token.
+    pub fn free_batch_id(&self, batch_id: BatchId) -> TransferEngineResult<()> {
+        let rc = unsafe { ffi::freeBatchID(self.handle.as_ptr(), batch_id.0) };
+        if matches!(rc, 4 | -4) {
+            return Err(TransferEngineError::BatchBusy);
+        }
+        if rc != 0 {
+            return Err(TransferEngineError::OperationFailed(rc));
+        }
+        Ok(())
+    }
+
     /// Allocate a batch ID for submitting a group of transfer requests.
     /// 分配批次 ID，用于提交一组传输请求。
     ///
@@ -572,7 +705,7 @@ impl TransferEngine {
     ///
     /// `batch_size` should match the number of requests you plan to submit.
     /// `batch_size` 应与你计划提交的请求数量匹配。
-    pub fn allocate_batch_id(&self, batch_size: usize) -> TransferEngineResult<BatchId> {
+    pub fn allocate_owned_batch_id(&self, batch_size: usize) -> TransferEngineResult<OwnedBatchId> {
         tracing::info!(target: "te_debug", batch_size, "allocate_batch_id: calling C API");
         let id = unsafe { ffi::allocateBatchID(self.handle.as_ptr(), batch_size) };
         tracing::info!(target: "te_debug", batch_size, batch_id = id, "allocate_batch_id: C API returned");
@@ -580,7 +713,7 @@ impl TransferEngine {
             tracing::error!(target: "te_debug", batch_size, "allocate_batch_id: INVALID_BATCH");
             return Err(TransferEngineError::OperationFailed(-1));
         }
-        Ok(BatchId(id))
+        Ok(OwnedBatchId::allocated(id, self.instance_id))
     }
 
     /// Submit a batch of transfer requests.
@@ -591,14 +724,21 @@ impl TransferEngine {
     /// a batch are submitted atomically to the transport layer.
     /// 每个请求指定操作码（读/写）、源缓冲区、目标段 ID、
     /// 目标偏移量和长度。批次中的所有请求原子性地提交到传输层。
-    pub fn submit_transfer(
+    /// # Safety
+    ///
+    /// Every request's `source` range must be valid and registered for the
+    /// requested access, and must remain alive and unavailable for conflicting
+    /// Rust access until every submitted task is quiescent in the native
+    /// engine. Returning from this function does not end native access.
+    pub unsafe fn submit_owned_transfer(
         &self,
-        batch_id: BatchId,
+        batch_id: &OwnedBatchId,
         requests: &[TransferRequest],
     ) -> TransferEngineResult<()> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
         tracing::info!(
             target: "te_debug",
-            batch_id = batch_id.0,
+            batch_id = raw_batch_id,
             req_count = requests.len(),
             "submit_transfer: calling C API"
         );
@@ -610,7 +750,7 @@ impl TransferEngine {
             .map(|(i, r)| {
                 tracing::info!(
                     target: "te_debug",
-                    batch_id = batch_id.0,
+                    batch_id = raw_batch_id,
                     idx = i,
                     opcode = r.opcode as i32,
                     src = ?r.source,
@@ -632,14 +772,14 @@ impl TransferEngine {
         let rc = unsafe {
             ffi::submitTransfer(
                 self.handle.as_ptr(),
-                batch_id.0,
+                raw_batch_id,
                 ffi_requests.as_mut_ptr(),
                 ffi_requests.len(),
             )
         };
-        tracing::info!(target: "te_debug", batch_id = batch_id.0, rc, "submit_transfer: C API returned");
+        tracing::info!(target: "te_debug", batch_id = raw_batch_id, rc, "submit_transfer: C API returned");
         if rc != 0 {
-            tracing::error!(target: "te_debug", batch_id = batch_id.0, rc, "submit_transfer: FAILED");
+            tracing::error!(target: "te_debug", batch_id = raw_batch_id, rc, "submit_transfer: FAILED");
             return Err(TransferEngineError::OperationFailed(rc));
         }
         Ok(())
@@ -663,22 +803,23 @@ impl TransferEngine {
     /// 调用 `submit_transfer` 后，调用者应轮询每个任务直到其状态变为终态
     /// （`Completed`、`Failed`、`Canceled` 或 `Timeout`）。
     /// 非终态（`Waiting`、`Pending`）表示传输仍在进行中。
-    pub fn get_transfer_status(
+    pub fn get_owned_transfer_status(
         &self,
-        batch_id: BatchId,
+        batch_id: &OwnedBatchId,
         task_id: usize,
     ) -> TransferEngineResult<TransferStatus> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
         let mut status = ffi::transfer_status_t {
             status: 0,
             transferred_bytes: 0,
         };
         let rc = unsafe {
-            ffi::getTransferStatus(self.handle.as_ptr(), batch_id.0, task_id, &mut status)
+            ffi::getTransferStatus(self.handle.as_ptr(), raw_batch_id, task_id, &mut status)
         };
         if rc != 0 {
             tracing::error!(
                 target: "te_debug",
-                batch_id = batch_id.0,
+                batch_id = raw_batch_id,
                 task_id,
                 rc,
                 "get_transfer_status: FAILED"
@@ -693,16 +834,17 @@ impl TransferEngine {
 
     /// Poll the aggregate status of a batch.
     /// 轮询整个批次的聚合传输状态。
-    pub fn get_batch_transfer_status(
+    pub fn get_owned_batch_transfer_status(
         &self,
-        batch_id: BatchId,
+        batch_id: &OwnedBatchId,
     ) -> TransferEngineResult<TransferStatus> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
         let mut status = ffi::transfer_status_t {
             status: 0,
             transferred_bytes: 0,
         };
         let rc =
-            unsafe { ffi::getBatchTransferStatus(self.handle.as_ptr(), batch_id.0, &mut status) };
+            unsafe { ffi::getBatchTransferStatus(self.handle.as_ptr(), raw_batch_id, &mut status) };
         if rc != 0 {
             return Err(TransferEngineError::OperationFailed(rc));
         }
@@ -719,14 +861,21 @@ impl TransferEngine {
     /// state. Failing to free a batch leaks resources in the C++ engine.
     /// 必须在批次中所有任务达到终态后调用。
     /// 未能释放批次会导致 C++ 引擎中的资源泄漏。
-    pub fn free_batch_id(&self, batch_id: BatchId) -> TransferEngineResult<()> {
-        tracing::info!(target: "te_debug", batch_id = batch_id.0, "free_batch_id: calling C API");
-        let rc = unsafe { ffi::freeBatchID(self.handle.as_ptr(), batch_id.0) };
-        tracing::info!(target: "te_debug", batch_id = batch_id.0, rc, "free_batch_id: C API returned");
+    pub fn free_owned_batch_id(&self, batch_id: &mut OwnedBatchId) -> TransferEngineResult<()> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
+        tracing::info!(target: "te_debug", batch_id = raw_batch_id, "free_batch_id: calling C API");
+        let rc = unsafe { ffi::freeBatchID(self.handle.as_ptr(), raw_batch_id) };
+        tracing::info!(target: "te_debug", batch_id = raw_batch_id, rc, "free_batch_id: C API returned");
+        // The current Status C API returns the positive enum value (4);
+        // older error.h-based adapters used -4.
+        if matches!(rc, 4 | -4) {
+            return Err(TransferEngineError::BatchBusy);
+        }
         if rc != 0 {
-            tracing::error!(target: "te_debug", batch_id = batch_id.0, rc, "free_batch_id: FAILED");
+            tracing::error!(target: "te_debug", batch_id = raw_batch_id, rc, "free_batch_id: FAILED");
             return Err(TransferEngineError::OperationFailed(rc));
         }
+        batch_id.mark_released();
         Ok(())
     }
 
@@ -745,12 +894,17 @@ impl TransferEngine {
     /// The `notify_msg` contains a target name and a message string. The
     /// notification is delivered asynchronously to the target peer.
     /// `notify_msg` 包含目标名称和消息字符串。通知异步传递给目标节点。
-    pub fn submit_transfer_with_notify(
+    /// # Safety
+    ///
+    /// The same payload lifetime, registration, bounds, and aliasing
+    /// requirements as [`Self::submit_owned_transfer`] apply.
+    pub unsafe fn submit_owned_transfer_with_notify(
         &self,
-        batch_id: BatchId,
+        batch_id: &OwnedBatchId,
         requests: &[TransferRequest],
         notify_msg: &NotifyMsg,
     ) -> TransferEngineResult<()> {
+        let raw_batch_id = batch_id.validate_for(self.instance_id)?;
         let mut ffi_requests: Vec<ffi::transfer_request_t> = requests
             .iter()
             .map(|r| ffi::transfer_request_t {
@@ -772,7 +926,7 @@ impl TransferEngine {
         let rc = unsafe {
             ffi::submitTransferWithNotify(
                 self.handle.as_ptr(),
-                batch_id.0,
+                raw_batch_id,
                 ffi_requests.as_mut_ptr(),
                 ffi_requests.len(),
                 ffi_notify,
@@ -854,19 +1008,34 @@ impl TransferEngine {
     pub fn get_notifs_from_engine(&self) -> TransferEngineResult<Vec<NotifyMsg>> {
         let mut size: i32 = 0;
         let raw = unsafe { ffi::getNotifsFromEngine(self.handle.as_ptr(), &mut size) };
-        if raw.is_null() && size > 0 {
-            return Err(TransferEngineError::OperationFailed(-1));
+        if size < 0 {
+            let _guard = NativeNotifyBuffer { raw, count: size };
+            return Err(TransferEngineError::InvalidNotificationBuffer(
+                "negative entry count",
+            ));
         }
-        let count = size as usize;
+        if raw.is_null() {
+            return if size == 0 {
+                Ok(Vec::new())
+            } else {
+                Err(TransferEngineError::InvalidNotificationBuffer(
+                    "null entries with non-zero count",
+                ))
+            };
+        }
+        let guard = NativeNotifyBuffer { raw, count: size };
+        let count = usize::try_from(size)?;
         let mut out = Vec::with_capacity(count);
         for i in 0..count {
-            let entry = unsafe { &*raw.add(i) };
+            let entry = unsafe { &*guard.raw.add(i) };
+            if entry.name.is_null() || entry.msg.is_null() {
+                return Err(TransferEngineError::InvalidNotificationBuffer(
+                    "null entry string",
+                ));
+            }
             let name = unsafe { CStr::from_ptr(entry.name) }.to_str()?.to_string();
             let msg = unsafe { CStr::from_ptr(entry.msg) }.to_str()?.to_string();
             out.push(NotifyMsg { name, msg });
-        }
-        if count > 0 {
-            unsafe { ffi::freeNotifsMsgBuf(raw, size) };
         }
         Ok(out)
     }

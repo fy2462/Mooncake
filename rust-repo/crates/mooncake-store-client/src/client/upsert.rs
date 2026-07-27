@@ -38,10 +38,184 @@ use super::{
     finalize::{ReplicaFinalizeDecision, ReplicaTransferSummary, determine_finalize_decision},
 };
 use crate::client::batch_types::BatchUpsertEntry;
+use crate::local_storage_backend::local_storage_key;
 use crate::proto;
 
 impl MooncakeClient {
-    async unsafe fn batch_upsert_from_internal(
+    pub async fn upsert(
+        &mut self,
+        key: &str,
+        value: &[u8],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let started_at = std::time::Instant::now();
+        let result = self.upsert_internal(key, value, config).await;
+        if result.is_ok()
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "upsert",
+                value.len() as u64,
+                started_at.elapsed(),
+            );
+        }
+        result
+    }
+
+    /// Batch upsert from owned byte slices using the same multi-key
+    /// start/finalize state machine as [`batch_upsert_from`](Self::batch_upsert_from).
+    ///
+    /// The payloads are ordinary borrowed Rust slices, so this path copies
+    /// through the Client's existing write helpers instead of accepting raw
+    /// pointers or manufacturing ownerless FFI registrations.
+    pub async fn batch_upsert(
+        &mut self,
+        keys: &[String],
+        values: &[&[u8]],
+        config: Option<ReplicateConfig>,
+    ) -> StoreResult<Vec<i32>> {
+        let started_at = std::time::Instant::now();
+        if keys.len() != values.len() {
+            return Err(StoreError::InvalidParams(
+                "keys and values length mismatch".to_string(),
+            ));
+        }
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let cfg = config.unwrap_or_default();
+        let tenant_id = self.tenant_id.clone();
+        self.invalidate_hot_cache_keys_for_tenant(keys, &tenant_id);
+        let slice_lengths = values
+            .iter()
+            .map(|value| value.len() as u64)
+            .collect::<Vec<_>>();
+        let start_results = match self
+            .batch_upsert_start_results(keys, &slice_lengths, &cfg, &tenant_id)
+            .await
+        {
+            Ok(results) => results,
+            Err(_) => return Ok(vec![-1; keys.len()]),
+        };
+        if start_results.len() != keys.len() {
+            return Ok(vec![-1; keys.len()]);
+        }
+
+        let mut statuses = vec![-1_i32; keys.len()];
+        let mut descriptors = vec![Vec::new(); keys.len()];
+        let mut decisions = Vec::new();
+
+        for (index, start_result) in start_results.iter().enumerate() {
+            if start_result.status != 0 || start_result.replicas.is_empty() {
+                statuses[index] = start_result.status;
+                continue;
+            }
+
+            let mut transfer_summary =
+                ReplicaTransferSummary::from_replicas(&start_result.replicas);
+            for replica in &start_result.replicas {
+                if replica.replica_type == ReplicaType::Disk {
+                    match self
+                        .write_global_disk_replica(&keys[index], &tenant_id, replica, values[index])
+                        .await
+                    {
+                        Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                        Err(_) => transfer_summary.record_failure(ReplicaType::Disk),
+                    }
+                    continue;
+                }
+                if !matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd
+                ) {
+                    continue;
+                }
+                match self.write_to_replica(replica, values[index]).await {
+                    Ok(()) => transfer_summary.record_success(replica.replica_type),
+                    Err(_) => transfer_summary.record_failure(replica.replica_type),
+                }
+            }
+
+            let decision = determine_finalize_decision(&cfg, &transfer_summary);
+            let disk_finalized = self
+                .finalize_global_disk_for_key(&keys[index], &transfer_summary, &tenant_id)
+                .await
+                .is_ok();
+            if decision.success && disk_finalized {
+                statuses[index] = 0;
+                descriptors[index] = start_result.replicas.clone();
+            }
+            decisions.push((index, decision));
+        }
+
+        self.finalize_batch_upsert_groups(
+            keys,
+            &cfg,
+            &decisions,
+            &mut statuses,
+            &mut descriptors,
+            &tenant_id,
+        )
+        .await;
+        for (key, status) in keys.iter().zip(&statuses) {
+            if *status == 0 {
+                self.remove_stale_local_disk_after_upsert(key, &tenant_id)
+                    .await;
+                self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
+            }
+        }
+        if let Some(metrics) = &self.metrics {
+            let bytes = statuses
+                .iter()
+                .zip(values)
+                .filter(|(status, _)| **status == 0)
+                .fold(0_u64, |total, (_, value)| {
+                    total.saturating_add(value.len() as u64)
+                });
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "batch_upsert",
+                bytes,
+                started_at.elapsed(),
+            );
+        }
+        Ok(statuses)
+    }
+
+    async fn remove_stale_local_disk_after_upsert(&self, key: &str, tenant_id: &str) {
+        let Some(storage) = self.local_storage.as_ref().cloned() else {
+            return;
+        };
+        let storage_key = local_storage_key(tenant_id, key);
+        let cleanup_key = storage_key.clone();
+        match tokio::task::spawn_blocking(move || storage.delete_object(&cleanup_key)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    target: "storage_debug",
+                    %tenant_id,
+                    %key,
+                    %storage_key,
+                    %error,
+                    "upsert committed but stale LocalDisk payload cleanup failed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "storage_debug",
+                    %tenant_id,
+                    %key,
+                    %storage_key,
+                    %error,
+                    "upsert committed but stale LocalDisk cleanup task failed"
+                );
+            }
+        }
+    }
+
+    async fn batch_upsert_from_internal(
         &mut self,
         keys: &[String],
         buffers: &[*mut c_void],
@@ -59,11 +233,12 @@ impl MooncakeClient {
         let regions = buffers
             .iter()
             .zip(sizes)
-            .map(|(&buffer, &size)| self.resolve_writable_buffer_region(buffer, size))
+            .map(|(&buffer, &size)| self.resolve_readable_buffer_region(buffer, size))
             .collect::<StoreResult<Vec<_>>>()?;
 
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
+        self.invalidate_hot_cache_keys_for_tenant(keys, &tenant_id);
         let slice_lengths: Vec<u64> = sizes.iter().map(|&size| size as u64).collect();
         let start_results = match self
             .batch_upsert_start_results(keys, &slice_lengths, &cfg, &tenant_id)
@@ -89,13 +264,33 @@ impl MooncakeClient {
             let mut transfer_summary =
                 ReplicaTransferSummary::from_replicas(&start_result.replicas);
             for replica in &start_result.replicas {
+                if replica.replica_type == ReplicaType::Disk {
+                    match self
+                        .write_global_disk_parts(
+                            &keys[idx],
+                            &tenant_id,
+                            replica,
+                            &[regions[idx].clone()],
+                            &[sizes[idx]],
+                        )
+                        .await
+                    {
+                        Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                        Err(_) => transfer_summary.record_failure(ReplicaType::Disk),
+                    }
+                    continue;
+                }
                 if !matches!(
                     replica.replica_type,
                     ReplicaType::Memory | ReplicaType::NoFSsd
                 ) {
                     continue;
                 }
-                if self.zero_copy_write(replica, regions[idx]).await.is_err() {
+                if self
+                    .zero_copy_write(replica, regions[idx].clone())
+                    .await
+                    .is_err()
+                {
                     transfer_summary.record_failure(replica.replica_type);
                 } else {
                     transfer_summary.record_success(replica.replica_type);
@@ -103,7 +298,11 @@ impl MooncakeClient {
             }
 
             let decision = determine_finalize_decision(&cfg, &transfer_summary);
-            if decision.success {
+            let disk_finalized = self
+                .finalize_global_disk_for_key(&keys[idx], &transfer_summary, &tenant_id)
+                .await
+                .is_ok();
+            if decision.success && disk_finalized {
                 statuses[idx] = 0;
                 descriptors[idx] = start_result.replicas.clone();
             }
@@ -119,6 +318,13 @@ impl MooncakeClient {
             &tenant_id,
         )
         .await;
+        for (key, status) in keys.iter().zip(statuses.iter()) {
+            if *status == 0 {
+                self.remove_stale_local_disk_after_upsert(key, tenant_id)
+                    .await;
+                self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
+            }
+        }
 
         Ok((statuses, descriptors))
     }
@@ -237,7 +443,7 @@ impl MooncakeClient {
     /// propagated immediately (same pattern as put).
     ///
     /// 如果任何副本写入失败，调用 PutRevoke 并立即传播错误（与 put 相同的模式）。
-    pub async fn upsert(
+    async fn upsert_internal(
         &mut self,
         key: &str,
         value: &[u8],
@@ -245,6 +451,7 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
+        self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
 
         // Phase 1: request master to upsert (allocates or updates replicas).
         // 阶段 1：请求 master 进行 upsert（分配或更新副本）。
@@ -252,18 +459,7 @@ impl MooncakeClient {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
             slice_length: value.len() as u64,
-            config: Some(proto::ReplicateConfig {
-                replica_num: cfg.replica_num,
-                nof_replica_num: cfg.nof_replica_num,
-                with_soft_pin: cfg.with_soft_pin,
-                with_hard_pin: cfg.with_hard_pin,
-                preferred_segment: cfg.preferred_segment.clone(),
-                prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
-                preferred_segments: cfg.preferred_segments.clone(),
-                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
-                data_type: cfg.data_type as i32,
-                group_ids: cfg.group_ids.clone(),
-            }),
+            config: Some(self.replicate_config_to_proto(&cfg)),
             tenant_id: tenant_id.clone(),
         };
 
@@ -277,39 +473,70 @@ impl MooncakeClient {
 
         // Phase 2: write data to each allocated replica.
         // 阶段 2：向每个已分配副本写入数据。
+        let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
+        let mut first_error = None;
         for replica in &replicas {
-            if let Err(e) = self.write_to_replica(replica, value).await {
-                // On failure: revoke all allocations. / 失败时：撤销所有分配。
-                // C++ 写失败时调用 PutRevoke 撤销已分配的资源
-                let revoke_req = proto::PutRevokeRequest {
-                    client_id: Some(self.client_id_proto()),
-                    key: key.to_string(),
-                    replica_type: 0,
-                    tenant_id: tenant_id.clone(),
-                };
-                let _ = self.master.put_revoke(self.rpc_request(revoke_req)).await;
-                return Err(e);
+            if replica.replica_type == ReplicaType::Disk {
+                match self
+                    .write_global_disk_replica(key, &tenant_id, replica, value)
+                    .await
+                {
+                    Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                    Err(error) => {
+                        transfer_summary.record_failure(ReplicaType::Disk);
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                continue;
+            }
+            if !matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) {
+                continue;
+            }
+            match self.write_to_replica(replica, value).await {
+                Ok(()) => transfer_summary.record_success(replica.replica_type),
+                Err(error) => {
+                    transfer_summary.record_failure(replica.replica_type);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
 
-        // Phase 3: commit via BatchUpsertEnd.
-        // 阶段 3：通过 BatchUpsertEnd 提交。
-        // Note: Upsert uses BatchUpsertEnd (not PutEnd) because the protocol
-        // supports batching multiple upsert entries in a single commit.
-        // 注意：Upsert 使用 BatchUpsertEnd（而非 PutEnd），因为协议支持在
-        // 单次提交中批量处理多个 upsert 条目。
-        let end_request = proto::BatchUpsertEndRequest {
-            entries: vec![proto::PutEndEntry {
-                client_id: Some(self.client_id_proto()),
-                key: key.to_string(),
-                replica_type: 0, // MEMORY
-                tenant_id: tenant_id.clone(),
-            }],
-        };
-        self.master
-            .batch_upsert_end(self.rpc_request(end_request))
+        // Phase 3: use the same Memory/NoF finalize policy as batch upsert.
+        let decision = determine_finalize_decision(&cfg, &transfer_summary);
+        let disk_finalized = self
+            .finalize_global_disk_for_key(key, &transfer_summary, &tenant_id)
             .await
-            .map_err(Self::rpc_status_to_error)?;
+            .is_ok();
+        let keys = vec![key.to_string()];
+        let mut statuses = vec![if decision.success && disk_finalized {
+            0
+        } else {
+            -1
+        }];
+        let mut descriptors = vec![replicas.clone()];
+        self.finalize_batch_upsert_groups(
+            &keys,
+            &cfg,
+            &[(0, decision)],
+            &mut statuses,
+            &mut descriptors,
+            &tenant_id,
+        )
+        .await;
+        if statuses[0] != 0 || !decision.success {
+            return Err(first_error
+                .unwrap_or_else(|| StoreError::Internal("failed to finalize upsert".to_string())));
+        }
+        self.remove_stale_local_disk_after_upsert(key, &tenant_id)
+            .await;
+        self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
 
         Ok(replicas)
     }
@@ -325,39 +552,30 @@ impl MooncakeClient {
     /// 语义与 upsert 相同，但使用 zero_copy_write 直接从调用者预先注册的缓冲区
     /// 传输数据，避免拷贝到 local_buffer。
     ///
-    /// # Safety
-    /// `buffer` must be pre-registered with the TE via
-    /// [`register_buffer`](Self::register_buffer).
+    /// `buffer` must resolve to a live owner-bearing readable registration
+    /// created through [`register_owned_buffer`](Self::register_owned_buffer).
     ///
-    /// buffer 必须通过 register_buffer 预先向 TE 注册。
+    /// buffer 必须解析为通过 register_owned_buffer 创建且仍存活的可读注册。
     /// C++ equivalent: `Client::UpsertFrom(key, buffer, size, config)`
-    pub async unsafe fn upsert_from(
+    pub async fn upsert_from(
         &mut self,
         key: &str,
         buffer: *mut c_void,
         size: usize,
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let started_at = std::time::Instant::now();
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
+        let buffer = self.resolve_readable_buffer_region(buffer, size)?;
+        self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
 
         // Phase 1: upsert start. / 阶段 1：upsert 开始。
         let request = proto::UpsertRequest {
             client_id: Some(self.client_id_proto()),
             key: key.to_string(),
             slice_length: size as u64,
-            config: Some(proto::ReplicateConfig {
-                replica_num: cfg.replica_num,
-                nof_replica_num: cfg.nof_replica_num,
-                with_soft_pin: cfg.with_soft_pin,
-                with_hard_pin: cfg.with_hard_pin,
-                preferred_segment: cfg.preferred_segment.clone(),
-                prefer_alloc_in_same_node: cfg.prefer_alloc_in_same_node,
-                preferred_segments: cfg.preferred_segments.clone(),
-                preferred_nof_segments: cfg.preferred_nof_segments.clone(),
-                data_type: cfg.data_type as i32,
-                group_ids: cfg.group_ids.clone(),
-            }),
+            config: Some(self.replicate_config_to_proto(&cfg)),
             tenant_id: tenant_id.clone(),
         };
 
@@ -368,38 +586,82 @@ impl MooncakeClient {
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
-        let buffer = self.resolve_writable_buffer_region(buffer, size)?;
 
         // Phase 2: zero-copy write to each replica. / 阶段 2：零拷贝写入每个副本。
+        let mut transfer_summary = ReplicaTransferSummary::from_replicas(&replicas);
+        let mut first_error = None;
         for replica in &replicas {
-            if let Err(e) = self.zero_copy_write(replica, buffer).await {
-                // On failure: revoke. / 失败时：撤销。
-                // C++ 写失败时调用 PutRevoke 撤销已分配的资源
-                let revoke_req = proto::PutRevokeRequest {
-                    client_id: Some(self.client_id_proto()),
-                    key: key.to_string(),
-                    replica_type: 0,
-                    tenant_id: tenant_id.clone(),
-                };
-                let _ = self.master.put_revoke(self.rpc_request(revoke_req)).await;
-                return Err(e);
+            if replica.replica_type == ReplicaType::Disk {
+                match self
+                    .write_global_disk_parts(key, &tenant_id, replica, &[buffer.clone()], &[size])
+                    .await
+                {
+                    Ok(()) => transfer_summary.record_success(ReplicaType::Disk),
+                    Err(error) => {
+                        transfer_summary.record_failure(ReplicaType::Disk);
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+                continue;
+            }
+            if !matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) {
+                continue;
+            }
+            match self.zero_copy_write(replica, buffer.clone()).await {
+                Ok(()) => transfer_summary.record_success(replica.replica_type),
+                Err(error) => {
+                    transfer_summary.record_failure(replica.replica_type);
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
 
-        // Phase 3: commit. / 阶段 3：提交。
-        let end_request = proto::BatchUpsertEndRequest {
-            entries: vec![proto::PutEndEntry {
-                client_id: Some(self.client_id_proto()),
-                key: key.to_string(),
-                replica_type: 0, // MEMORY
-                tenant_id: tenant_id.clone(),
-            }],
-        };
-        self.master
-            .batch_upsert_end(self.rpc_request(end_request))
+        // Phase 3: use the same Memory/NoF finalize policy as batch upsert.
+        let decision = determine_finalize_decision(&cfg, &transfer_summary);
+        let disk_finalized = self
+            .finalize_global_disk_for_key(key, &transfer_summary, &tenant_id)
             .await
-            .map_err(Self::rpc_status_to_error)?;
+            .is_ok();
+        let keys = vec![key.to_string()];
+        let mut statuses = vec![if decision.success && disk_finalized {
+            0
+        } else {
+            -1
+        }];
+        let mut descriptors = vec![replicas.clone()];
+        self.finalize_batch_upsert_groups(
+            &keys,
+            &cfg,
+            &[(0, decision)],
+            &mut statuses,
+            &mut descriptors,
+            &tenant_id,
+        )
+        .await;
+        if statuses[0] != 0 || !decision.success {
+            return Err(first_error.unwrap_or_else(|| {
+                StoreError::Internal("failed to finalize zero-copy upsert".to_string())
+            }));
+        }
+        self.remove_stale_local_disk_after_upsert(key, &tenant_id)
+            .await;
+        self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
 
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "upsert_from",
+                size as u64,
+                started_at.elapsed(),
+            );
+        }
         Ok(replicas)
     }
 
@@ -419,21 +681,30 @@ impl MooncakeClient {
     /// 这是因为 upsert 返回每个 key 的已分配副本，部分结果会导致调用者
     /// 视图不一致。
     ///
-    /// # Safety
-    /// All `buffers[i]` must be pre-registered with the TE.
-    ///
-    /// 所有 buffers[i] 必须预先向 TE 注册。
-    pub async unsafe fn batch_upsert_from(
+    /// Every input range is validated against a live owner-bearing readable
+    /// registration.
+    pub async fn batch_upsert_from(
         &mut self,
         keys: &[String],
         buffers: &[*mut c_void],
         sizes: &[usize],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<Vec<ReplicaDescriptor>>> {
-        let (_statuses, descriptors) = unsafe {
-            self.batch_upsert_from_internal(keys, buffers, sizes, config)
-                .await?
-        };
+        let started_at = std::time::Instant::now();
+        let (_statuses, descriptors) = self
+            .batch_upsert_from_internal(keys, buffers, sizes, config)
+            .await?;
+        if let Some(metrics) = &self.metrics {
+            let bytes = sizes
+                .iter()
+                .fold(0_u64, |total, size| total.saturating_add(*size as u64));
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "batch_upsert_from",
+                bytes,
+                started_at.elapsed(),
+            );
+        }
         Ok(descriptors)
     }
 
@@ -441,17 +712,30 @@ impl MooncakeClient {
     ///
     /// Returns one status per key (`0` on success, negative on failure), matching
     /// `RealClient::batch_upsert_from`.
-    pub async unsafe fn batch_upsert_from_statuses(
+    pub async fn batch_upsert_from_statuses(
         &mut self,
         keys: &[String],
         buffers: &[*mut c_void],
         sizes: &[usize],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<i32>> {
-        let (statuses, _descriptors) = unsafe {
-            self.batch_upsert_from_internal(keys, buffers, sizes, config)
-                .await?
-        };
+        let started_at = std::time::Instant::now();
+        let (statuses, _descriptors) = self
+            .batch_upsert_from_internal(keys, buffers, sizes, config)
+            .await?;
+        if let Some(metrics) = &self.metrics {
+            let bytes = statuses
+                .iter()
+                .zip(sizes)
+                .filter(|(status, _)| **status == 0)
+                .fold(0_u64, |total, (_, size)| total.saturating_add(*size as u64));
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "batch_upsert_from",
+                bytes,
+                started_at.elapsed(),
+            );
+        }
         Ok(statuses)
     }
 
@@ -467,11 +751,23 @@ impl MooncakeClient {
         values: &[&[u8]],
         config: Option<ReplicateConfig>,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        let started_at = std::time::Instant::now();
         let total_len: usize = values.iter().map(|v| v.len()).sum();
         let mut concatenated = Vec::with_capacity(total_len);
         for v in values {
             concatenated.extend_from_slice(v);
         }
-        self.upsert(key, &concatenated, config).await
+        let result = self.upsert_internal(key, &concatenated, config).await;
+        if result.is_ok()
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Write,
+                "upsert_parts",
+                total_len as u64,
+                started_at.elapsed(),
+            );
+        }
+        result
     }
 }

@@ -6,8 +6,9 @@
 
 ## 本章目标
 
-能逐项说明 `TransferEngine`、`SegmentId`、`BatchId` 和 `TransferRequest` 的所有权，
-并识别 safe wrapper 无法替调用者证明的内存生命周期。
+能逐项说明 `TransferEngine`、`SegmentId`、legacy `BatchId`、Store 使用的
+`OwnedBatchId` 和 `TransferRequest` 的所有权，并识别 safe wrapper 无法替调用者
+证明的内存生命周期。
 
 ## 调用层次
 
@@ -19,7 +20,8 @@ null 会转成 `NullHandle`，整数返回码转成 `TransferEngineError`。
 | --- | --- | --- |
 | `TransferEngine` | 引擎 handle | 是；Drop destroy |
 | `SegmentId` | 已打开远端 Segment | 否；需显式 close |
-| `BatchId` | native batch slot | 否；需显式 free |
+| `BatchId` | 范围外 caller 的 legacy copyable batch token | 否；需显式 free |
+| `OwnedBatchId` | Store 使用的 engine-bound batch allocation | 是；需显式 free，成功后 token 失效 |
 | `TransferRequest` | 指针与传输描述 | 否；不拥有 source buffer |
 | `TransferStatus` | 状态快照 | 否 |
 
@@ -64,7 +66,8 @@ handle。`TentTransferRequest` 的 Send/Sync 前提仍是调用者保持 source 
 ## 自检问题
 
 1. `NonNull` 能证明指向的 C++ 对象仍存活吗？
-2. `BatchId` 离开 Rust 作用域时为什么不会自动 free？
+2. `OwnedBatchId` 为什么仍要求 reaper 显式证明 quiescence 后 free，而不能在
+   普通 Drop 中直接释放？
 3. `TransferRequest: Send` 为什么不代表 source buffer 可提前释放？
 
 ## 下一步

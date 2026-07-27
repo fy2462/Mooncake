@@ -138,13 +138,18 @@ class InMemoryStore:
             results.append(self.put(key, data, config=config))
         return results
 
-    def put_tensor_from(self, key: str, buffer_ptr: int, size: int) -> int:
+    def put_tensor_from(self, key: str, buffer: Any, size: int) -> int:
         self.put_tensor_from_calls += 1
+        buffer_ptr = (
+            buffer
+            if isinstance(buffer, int)
+            else ctypes.addressof(ctypes.c_char.from_buffer(buffer))
+        )
         if buffer_ptr not in self.registered:
             return -1
         return self.put(key, ctypes.string_at(buffer_ptr, size))
 
-    def register_buffer(self, buffer_ptr: int, size: int) -> int:
+    def register_buffer(self, buffer_ptr: int, size: int, owner=None) -> int:
         self.register_buffer_calls += 1
         self.registered.add(buffer_ptr)
         return 0
@@ -370,10 +375,10 @@ class TransientBatchRemoveStore(InMemoryStore):
 
 
 class StrictRegisterStore(InMemoryStore):
-    def register_buffer(self, buffer_ptr: int, size: int) -> int:
+    def register_buffer(self, buffer_ptr: int, size: int, owner=None) -> int:
         if buffer_ptr in self.registered:
             return -600
-        return super().register_buffer(buffer_ptr, size)
+        return super().register_buffer(buffer_ptr, size, owner=owner)
 
 
 class FailingRegisterStore(InMemoryStore):
@@ -382,11 +387,11 @@ class FailingRegisterStore(InMemoryStore):
         self.register_count = 0
         self.fail_on_register = fail_on_register
 
-    def register_buffer(self, buffer_ptr: int, size: int) -> int:
+    def register_buffer(self, buffer_ptr: int, size: int, owner=None) -> int:
         self.register_count += 1
         if self.register_count == self.fail_on_register:
             return -1
-        return super().register_buffer(buffer_ptr, size)
+        return super().register_buffer(buffer_ptr, size, owner=owner)
 
 
 def make_transfer(
@@ -759,24 +764,10 @@ def test_structured_object_ndarray_read_can_use_buffer_pool() -> None:
     assert pool.release_count == 1
 
 
-def test_structured_object_ndarray_read_uses_real_rust_buffer_pool() -> None:
+def test_rust_buffer_pool_requires_store_owner() -> None:
     rust_binding = pytest.importorskip("mooncake_store._mooncake_store")
-    pool = rust_binding.BufferPool(1024 * 1024)
-    store, transfer = make_transfer(buffer_pool=pool)
-    array = np.arange(64, dtype=np.int16).reshape(8, 8)
-
-    ref = transfer.put_structured_object(
-        structured_payload(weights=array), chunk_bytes=32
-    )
-    result = transfer.materialize(transfer.read_spec(ref))
-
-    assert np.array_equal(result.objects["weights"], array)
-    assert hasattr(result.objects["weights"], "_mooncake_pool_owner")
-    assert pool.borrowed_bytes > 0
-    MooncakeBundleTransfer.release_result(result.objects)
-    assert pool.borrowed_bytes == 0
-    MooncakeBundleTransfer.release_result(result.objects)
-    assert pool.borrowed_bytes == 0
+    with pytest.raises(RuntimeError, match="store parameter"):
+        rust_binding.BufferPool(1024 * 1024)
 
 
 def test_structured_object_multi_buffer_payload_uses_pool_batch_put() -> None:

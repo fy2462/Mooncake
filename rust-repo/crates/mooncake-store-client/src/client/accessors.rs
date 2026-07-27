@@ -1,11 +1,46 @@
 use super::MooncakeClient;
 use crate::proto;
-use mooncake_store_core::ReplicaDescriptor;
 use mooncake_store_core::error::StoreResult;
-use std::ffi::c_void;
+use mooncake_store_core::{ReplicaDescriptor, StoreError};
+use std::collections::HashMap;
 use uuid::Uuid;
 
+fn expected_query_tenant(enable_tenant_scope: bool, configured_tenant: &str) -> &str {
+    if !enable_tenant_scope || configured_tenant.is_empty() {
+        "default"
+    } else {
+        configured_tenant
+    }
+}
+
+fn validate_regex_identity(
+    expected_tenant: &str,
+    scoped_key: &str,
+    tenant_id: &str,
+    user_key: &str,
+) -> StoreResult<()> {
+    if tenant_id != expected_tenant || user_key.is_empty() {
+        return Err(StoreError::Internal(format!(
+            "QueryByRegex returned invalid identity: tenant={tenant_id:?}, user_key={user_key:?}"
+        )));
+    }
+    let expected_scoped_key = format!("{tenant_id}\0{user_key}");
+    if scoped_key != expected_scoped_key {
+        return Err(StoreError::Internal(format!(
+            "QueryByRegex returned inconsistent scoped identity: key={scoped_key:?}, expected={expected_scoped_key:?}"
+        )));
+    }
+    Ok(())
+}
+
 impl MooncakeClient {
+    /// Capacity of the TE-registered scratch allocation configured at Client
+    /// creation. Buffer-pool adapters use this only to match the C++ default
+    /// capacity policy; they never suballocate from the scratch lease.
+    pub fn local_buffer_capacity(&self) -> usize {
+        self.local_buffer.len()
+    }
+
     /// Configure remote MEMORY selection while building a client value.
     pub fn with_replica_selection_policy(mut self, policy: super::ReplicaSelectionPolicy) -> Self {
         self.replica_selection_policy = policy;
@@ -29,6 +64,21 @@ impl MooncakeClient {
         self.fetch_replicas(key).await
     }
 
+    /// Query one object's placement metadata while preserving its lease TTL
+    /// and per-key status.
+    ///
+    /// C++ equivalent: `Client::Query`.
+    pub async fn query(&mut self, key: &str) -> StoreResult<super::CachedQueryResultResponse> {
+        let mut results = self.fetch_batch_query_responses(&[key.to_string()]).await?;
+        if results.len() != 1 {
+            return Err(StoreError::Internal(format!(
+                "single-key Query returned {} results",
+                results.len()
+            )));
+        }
+        Ok(results.remove(0))
+    }
+
     /// Query replica lists for multiple keys using one BatchGetReplicaList RPC.
     pub async fn batch_get_replica_list(
         &mut self,
@@ -48,6 +98,54 @@ impl MooncakeClient {
         keys: &[String],
     ) -> StoreResult<Vec<super::CachedQueryResultResponse>> {
         self.fetch_batch_query_responses(keys).await
+    }
+
+    /// C++-named alias for batch placement queries with per-key status and
+    /// lease TTL.
+    pub async fn batch_query(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<super::CachedQueryResultResponse>> {
+        self.batch_get_query_results(keys).await
+    }
+
+    /// Query routable objects whose user keys match a regular expression.
+    ///
+    /// This deliberately uses `GetReplicaListByRegex`, not the diagnostic
+    /// `QueryByRegex` RPC: C++ `Client::QueryByRegex` returns only Complete,
+    /// routable replicas and refreshes their leases.
+    pub async fn query_by_regex(
+        &mut self,
+        pattern: &str,
+    ) -> StoreResult<HashMap<String, Vec<ReplicaDescriptor>>> {
+        let tenant_id = self.tenant_id.clone();
+        let expected_tenant = expected_query_tenant(self.enable_tenant_scope, &tenant_id);
+        let response = self
+            .master
+            .get_replica_list_by_regex(self.rpc_request(proto::GetReplicaListByRegexRequest {
+                key_regex: pattern.to_string(),
+                tenant_id: tenant_id.clone(),
+            }))
+            .await
+            .map_err(Self::rpc_status_to_error)?
+            .into_inner();
+        let mut matches = HashMap::with_capacity(response.entries.len());
+        for entry in response.entries {
+            validate_regex_identity(
+                expected_tenant,
+                &entry.key,
+                &entry.tenant_id,
+                &entry.user_key,
+            )?;
+            let user_key = entry.user_key;
+            let replicas = self.replicas_from_proto(&entry.replicas);
+            if matches.insert(user_key.clone(), replicas).is_some() {
+                return Err(StoreError::Internal(format!(
+                    "QueryByRegex returned duplicate key {user_key:?}"
+                )));
+            }
+        }
+        Ok(matches)
     }
 
     /// Returns `true` if the client has been torn down. / 如果客户端已关闭则返回 true。
@@ -70,6 +168,31 @@ impl MooncakeClient {
         self.client_http_server_state.port()
     }
 
+    /// Serialize this client's persistent Prometheus registry.
+    ///
+    /// Matches C++ `Client::SerializeMetrics`; when
+    /// `MC_STORE_CLIENT_METRIC=0`, metrics are intentionally unavailable.
+    pub fn serialize_metrics(&self) -> StoreResult<String> {
+        let metrics = self
+            .metrics
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidParams("client metrics are disabled".to_string()))?;
+        let body = metrics.render_prometheus(
+            self.health_state.is_healthy(),
+            self.shutdown_state.is_closed(),
+        )?;
+        String::from_utf8(body)
+            .map_err(|error| StoreError::Internal(format!("invalid metrics UTF-8: {error}")))
+    }
+
+    /// Return the human-readable metrics summary exposed by C++ clients.
+    pub fn summary_metrics(&self) -> StoreResult<String> {
+        self.metrics
+            .as_ref()
+            .map(|metrics| metrics.summary())
+            .ok_or_else(|| StoreError::InvalidParams("client metrics are disabled".to_string()))
+    }
+
     /// Tear down the client: set the shutdown flag, unregister the local buffer
     /// and all user-registered buffers from the TransferEngine.
     ///
@@ -84,64 +207,140 @@ impl MooncakeClient {
         // Stop offload RPC server if running.
         self.offload_server_state.stop();
         self.client_http_server_state.stop();
+        self.metrics_reporter_state.stop();
 
-        // Stop publishing/using the Store segment before releasing its CUDA
-        // registration and backing allocation.
-        if !self.segment_name.is_empty() {
-            let segment_id = {
-                self.mounted_segment_ids
-                    .read()
-                    .get(&self.segment_name)
-                    .copied()
-            };
-            if let Some(segment_id) = segment_id {
-                let result = self
-                    .master
-                    .unmount_segment(self.rpc_request(proto::UnmountSegmentRequest {
-                        segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
-                        client_id: Some(self.client_id_proto()),
-                    }))
-                    .await;
-                if let Err(error) = result {
-                    tracing::warn!(%error, "failed to unmount Store segment during teardown");
-                }
+        // Stop publishing every UUID before releasing any backing allocation.
+        let mounted_segments = self
+            .mounted_segment_ids
+            .read()
+            .iter()
+            .map(|(id, name)| (*id, name.clone()))
+            .collect::<Vec<_>>();
+        let mut failed_segment_ids = std::collections::HashSet::new();
+        let mut failed_segment_names = std::collections::HashSet::new();
+        for (segment_id, segment_name) in &mounted_segments {
+            let result = self
+                .master
+                .unmount_segment(self.rpc_request(proto::UnmountSegmentRequest {
+                    segment_id: Some(Self::uuid_to_proto_uuid(*segment_id)),
+                    client_id: Some(self.client_id_proto()),
+                }))
+                .await;
+            if let Err(error) = result {
+                failed_segment_ids.insert(*segment_id);
+                failed_segment_names.insert(segment_name.clone());
+                tracing::warn!(
+                    %error,
+                    %segment_id,
+                    %segment_name,
+                    "failed to unmount Store segment during teardown"
+                );
             }
-            if let Err(error) = self.engine.remove_local_segment(&self.segment_name) {
-                tracing::warn!(%error, "failed to remove local Transfer Engine segment");
+        }
+        let segment_names = self
+            .owned_store_segments
+            .iter()
+            .map(|segment| segment.segment_name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for segment_name in segment_names {
+            if failed_segment_names.contains(&segment_name) {
+                tracing::error!(
+                    %segment_name,
+                    "retaining local Transfer Engine segment because Master unmount was not proven"
+                );
+                continue;
+            }
+            if let Err(error) = self.engine.remove_local_segment(&segment_name) {
+                tracing::warn!(
+                    %error,
+                    %segment_name,
+                    "failed to remove local Transfer Engine segment"
+                );
+            }
+        }
+        self.mounted_segment_ids.write().clear();
+        self.mounted_external_segments.write().clear();
+
+        if let Some(registration) = self.cxl_segment_registration.take() {
+            if failed_segment_names.contains(&self.local_hostname) {
+                tracing::error!(
+                    "leaking native CXL registration because Master unmount was not proven"
+                );
+                std::mem::forget(registration);
+            } else if let Ok(engine) = self.engine.required_arc()
+                && let Err(error) =
+                    crate::memory_ffi::unregister_cxl_segment(&engine, &registration)
+            {
+                tracing::error!(%error, "failed to unregister native CXL segment");
             }
         }
 
-        if let Some(mut segment_buffer) = self.segment_buffer.take() {
-            let te_unregistered = unsafe {
-                self.engine
-                    .unregister_local_memory(segment_buffer.as_ptr() as *mut c_void)
+        for mut segment in std::mem::take(&mut self.owned_store_segments) {
+            if failed_segment_ids.contains(&segment.segment_id) {
+                tracing::error!(
+                    segment_id = %segment.segment_id,
+                    "leaking Store segment because Master unmount was not proven"
+                );
+                std::mem::forget(segment);
+                continue;
+            }
+            let te_unregistered: StoreResult<()> = match self.engine.required_arc() {
+                Ok(engine) => crate::memory_ffi::unregister_local_memory(&engine, &segment.buffer),
+                Err(error) => Err(StoreError::from(error)),
             };
             if let Err(error) = te_unregistered {
                 tracing::error!(
                     %error,
+                    segment_id = %segment.segment_id,
                     "leaking Store segment because Transfer Engine unregister failed"
                 );
-                std::mem::forget(segment_buffer);
-            } else if !segment_buffer.release() {
+                std::mem::forget(segment);
+            } else if !segment.buffer.release() {
                 tracing::error!("leaking Store segment because CUDA host unregister failed");
             }
         }
 
         // unregister local buffer / 取消注册本地缓冲区
-        unsafe {
-            let _ = self
-                .engine
-                .unregister_local_memory(self.local_buffer.as_ptr() as *mut c_void);
+        self.local_buffer.wait_until_available().await;
+        if let Some(mut registration) = self.local_buffer.take_registration() {
+            if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                tracing::error!(
+                    %error,
+                    "typed staging-buffer teardown failed; RAII will retain or leak its owner safely"
+                );
+            }
         }
 
         // unregister all user-registered buffers / 取消注册所有用户注册的缓冲区
-        let ptrs: Vec<usize> = self.registered_buffers.read().keys().copied().collect();
-        for ptr in &ptrs {
-            unsafe {
-                let _ = self.engine.unregister_local_memory(*ptr as *mut c_void);
+        let registrations = std::mem::take(&mut *self.registered_buffers.write());
+        for mut registration in registrations.into_values() {
+            if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                tracing::error!(
+                    %error,
+                    registration = ?registration,
+                    "typed registered-memory teardown failed; RAII will retain or leak its owner safely"
+                );
             }
         }
-        self.registered_buffers.write().clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expected_query_tenant, validate_regex_identity};
+
+    #[test]
+    fn query_tenant_matches_master_normalization() {
+        assert_eq!(expected_query_tenant(false, "tenant-a"), "default");
+        assert_eq!(expected_query_tenant(true, ""), "default");
+        assert_eq!(expected_query_tenant(true, "tenant-a"), "tenant-a");
+    }
+
+    #[test]
+    fn regex_identity_requires_matching_tenant_and_scoped_key() {
+        validate_regex_identity("tenant-a", "tenant-a\0key", "tenant-a", "key").unwrap();
+        assert!(validate_regex_identity("tenant-a", "tenant-b\0key", "tenant-b", "key").is_err());
+        assert!(validate_regex_identity("tenant-a", "tenant-a\0other", "tenant-a", "key").is_err());
     }
 }

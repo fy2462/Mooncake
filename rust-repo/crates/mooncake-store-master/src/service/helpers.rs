@@ -17,13 +17,17 @@
 //! - View version management
 
 use crate::allocator::{AllocationStrategy, SsdUsageMetrics};
+use crate::ha::HaError;
 use crate::http_metadata::MetadataState;
 use crate::metrics;
 use crate::tenant_id::TenantId;
+use crate::tenant_quota::{TenantQuotaError, TenantQuotaTable};
 use chrono::Utc;
+use dashmap::DashMap;
 use mooncake_store_core::{
     ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, TaskStatus,
 };
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::SystemTime;
@@ -31,7 +35,9 @@ use tonic::Status;
 use uuid::Uuid;
 
 use super::background_ops::{clear_offloading_task, clear_promotion_task};
-use super::state::{ClientEntry, MasterRuntimeConfig, MasterState, ObjectEntry};
+use super::state::{
+    ClientEntry, DelayedReplicaReleaseEntry, MasterRuntimeConfig, MasterState, ObjectEntry,
+};
 
 /// 递增全局 view_version，触发所有客户端感知拓扑变更并重新拉取最新视图。
 /// Increment global view_version, triggering all clients to detect topology changes and re-fetch.
@@ -46,35 +52,124 @@ pub(crate) fn bump_view_version(state: &MasterState) -> i64 {
 /// for ordinary hostnames, preserve raw IPv6 literals, and ignore loopback or
 /// wildcard endpoints because they are not stable cross-node identities.
 pub(crate) fn host_from_segment_name(name: &str) -> String {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let host = if let Some(rest) = trimmed.strip_prefix('[') {
-        rest.find(']')
-            .map(|end| &trimmed[..=end + 1])
-            .unwrap_or(trimmed)
-    } else if trimmed == "::1" || trimmed == "::" || trimmed.matches(':').count() > 1 {
-        trimmed
-    } else {
-        trimmed.split(':').next().unwrap_or(trimmed).trim()
-    };
-
-    match host.to_ascii_lowercase().as_str() {
-        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]" | "::" | "[::]" => String::new(),
-        _ => host.to_string(),
-    }
+    mooncake_store_core::resolve_host_id(name)
 }
 
 pub(crate) fn storage_fs_dir_for_client(config: &MasterRuntimeConfig) -> String {
     if config.storage_fs_dir.trim().is_empty() || config.cluster_id.trim().is_empty() {
         return String::new();
     }
-    std::path::Path::new(&config.storage_fs_dir)
-        .join(config.cluster_id.trim())
-        .to_string_lossy()
-        .into_owned()
+    let root = std::path::Path::new(&config.storage_fs_dir).join(config.cluster_id.trim());
+    let root = if root.is_absolute() {
+        root
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
+            .join(root)
+    };
+    root.to_string_lossy().into_owned()
+}
+
+/// Build the durable shared-filesystem descriptor used by the global DISK
+/// tier. The digest is computed from the tenant-scoped key so equal user keys
+/// in different tenants can never alias the same path.
+pub(crate) fn global_disk_replica(
+    state: &MasterState,
+    scoped_key: &str,
+    size: u64,
+) -> Option<ReplicaDescriptor> {
+    let root = storage_fs_dir_for_client(&state.runtime_config);
+    if root.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(scoped_key.as_bytes());
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let path = std::path::Path::new(&root)
+        .join("global-disk")
+        .join(&digest[..2])
+        .join(&digest[2..4])
+        .join(format!("{digest}.data"));
+    Some(ReplicaDescriptor {
+        segment_id: Uuid::nil(),
+        segment_name: path.to_string_lossy().into_owned(),
+        offset: 0,
+        size,
+        status: ReplicaStatus::Allocating,
+        replica_type: ReplicaType::Disk,
+        holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
+        refcnt: 0,
+        handle_valid: true,
+        base_addr: 0,
+        protocol: String::new(),
+    })
+}
+
+/// Return whether a completed replica is safe to expose on the data path.
+///
+/// LocalDisk descriptors remain durable while their process is offline, so
+/// `Complete` alone is insufficient: the storage namespace must have a Ready
+/// active session and the descriptor must point at that exact session.
+pub(crate) fn replica_is_routable(state: &MasterState, replica: &ReplicaDescriptor) -> bool {
+    if replica.status != ReplicaStatus::Complete {
+        return false;
+    }
+    match replica.replica_type {
+        ReplicaType::Memory | ReplicaType::NoFSsd => return replica.handle_valid,
+        ReplicaType::Disk => return true,
+        ReplicaType::All => return false,
+        ReplicaType::LocalDisk => {}
+    }
+    if !replica.handle_valid {
+        return false;
+    }
+    let (Some(storage_id), Some(holder_client_id), Some(_generation_id)) = (
+        replica.local_disk_storage_id,
+        replica.holder_client_id,
+        replica.local_disk_generation_id,
+    ) else {
+        return false;
+    };
+    let session_matches = state
+        .local_disk_client_sessions
+        .get(&holder_client_id)
+        .is_some_and(|bound_storage_id| *bound_storage_id == storage_id);
+    session_matches
+        && state
+            .local_disk_segments
+            .get(&storage_id)
+            .is_some_and(|entry| {
+                entry.recovery_complete && entry.active_client_id == Some(holder_client_id)
+            })
+}
+
+/// Resolve a process session to its durable LocalDisk namespace only after the
+/// current inventory transaction has committed.
+pub(crate) fn ready_local_disk_storage_for_client(
+    state: &MasterState,
+    client_id: Uuid,
+) -> Result<Uuid, Status> {
+    let storage_id = state
+        .local_disk_client_sessions
+        .get(&client_id)
+        .map(|entry| *entry)
+        .ok_or(Status::permission_denied(
+            "client has no active LocalDisk storage session",
+        ))?;
+    let ready = state
+        .local_disk_segments
+        .get(&storage_id)
+        .is_some_and(|entry| entry.recovery_complete && entry.active_client_id == Some(client_id));
+    if !ready {
+        return Err(Status::failed_precondition(
+            "local disk inventory recovery is not complete",
+        ));
+    }
+    Ok(storage_id)
 }
 
 /// Build per-client local SSD usage metrics from reported capacity and LocalDisk replicas.
@@ -83,14 +178,19 @@ pub(crate) fn local_ssd_usage_metrics(state: &MasterState) -> HashMap<Uuid, SsdU
     let mut metrics = state
         .local_disk_segments
         .iter()
-        .map(|entry| {
-            (
-                *entry.key(),
-                SsdUsageMetrics {
-                    total_capacity_bytes: entry.value().ssd_total_capacity_bytes.max(0) as u64,
-                    used_bytes: 0,
-                },
-            )
+        .filter_map(|entry| {
+            if !entry.recovery_complete {
+                return None;
+            }
+            entry.active_client_id.map(|client_id| {
+                (
+                    client_id,
+                    SsdUsageMetrics {
+                        total_capacity_bytes: entry.value().ssd_total_capacity_bytes.max(0) as u64,
+                        used_bytes: 0,
+                    },
+                )
+            })
         })
         .collect::<HashMap<_, _>>();
 
@@ -99,7 +199,20 @@ pub(crate) fn local_ssd_usage_metrics(state: &MasterState) -> HashMap<Uuid, SsdU
             if replica.replica_type != ReplicaType::LocalDisk {
                 continue;
             }
-            let Some(client_id) = replica.holder_client_id else {
+            let Some(storage_id) = replica.local_disk_storage_id else {
+                continue;
+            };
+            let Some(client_id) = state
+                .local_disk_segments
+                .get(&storage_id)
+                .and_then(|entry| {
+                    if entry.recovery_complete {
+                        entry.active_client_id
+                    } else {
+                        None
+                    }
+                })
+            else {
                 continue;
             };
             let entry = metrics.entry(client_id).or_insert(SsdUsageMetrics {
@@ -122,28 +235,54 @@ pub(crate) fn allocate_memory_replicas(
     count: usize,
     config: &ReplicateConfig,
 ) -> Vec<ReplicaDescriptor> {
+    let excluded_segments = state
+        .segments
+        .iter()
+        .filter(|entry| entry.status != crate::proto::SegmentStatus::Active)
+        .map(|entry| entry.segment.name.clone())
+        .collect::<Vec<_>>();
     let use_ssd_metrics =
         state.allocator.read().allocation_strategy() == AllocationStrategy::SsdFreeRatioFirst;
     if use_ssd_metrics {
         let ssd_metrics = local_ssd_usage_metrics(state);
-        state
-            .allocator
-            .write()
-            .allocate_for_client_with_ssd_metrics(key, client_id, size, count, config, &ssd_metrics)
+        state.allocator.write().allocate_for_client_with_exclusions(
+            key,
+            client_id,
+            size,
+            count,
+            config,
+            &excluded_segments,
+            Some(&ssd_metrics),
+        )
     } else {
-        state
-            .allocator
-            .write()
-            .allocate_for_client(key, client_id, size, count, config)
+        state.allocator.write().allocate_for_client_with_exclusions(
+            key,
+            client_id,
+            size,
+            count,
+            config,
+            &excluded_segments,
+            None,
+        )
     }
 }
 
 /// 从 segment 名称中提取端口号，解析失败返回 0。
 /// Extract port from segment name; returns 0 on parse failure.
 pub(crate) fn port_from_segment_name(name: &str) -> u16 {
-    name.split(':')
-        .nth(1)
-        .and_then(|part| part.parse::<u16>().ok())
+    let name = name.trim();
+    if let Some(bracketed) = name.strip_prefix('[') {
+        return bracketed
+            .find(']')
+            .and_then(|closing| bracketed[closing + 1..].strip_prefix(':'))
+            .and_then(|port| port.parse::<u16>().ok())
+            .unwrap_or(0);
+    }
+    if name.bytes().filter(|byte| *byte == b':').count() != 1 {
+        return 0;
+    }
+    name.rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
         .unwrap_or(0)
 }
 
@@ -228,16 +367,6 @@ pub(crate) async fn register_metadata_segments(
     }
 }
 
-/// 按 segment 名称查找所属客户端 UUID（仅 Memory segment）。
-/// Look up owning client UUID by Memory segment name.
-pub(crate) fn client_id_by_segment_name(state: &MasterState, segment_name: &str) -> Option<Uuid> {
-    state
-        .segments
-        .iter()
-        .find(|entry| entry.segment.name == segment_name)
-        .map(|entry| entry.client_id)
-}
-
 /// 获取对象的 owner client_id：优先使用对象记录的写入客户端；旧快照中该字段为 nil 时，
 /// fallback 到 replica holder 或 segment 所属客户端。
 /// Get an object's owner client ID from its recorded writer. For legacy snapshots
@@ -249,31 +378,47 @@ pub(crate) fn object_owner_client_id(state: &MasterState, object: &ObjectEntry) 
     object.replicas.iter().find_map(|replica| {
         replica
             .holder_client_id
-            .or_else(|| client_id_by_replica_segment_name(state, &replica.segment_name))
+            .or_else(|| client_id_by_exact_replica_segment(state, replica))
     })
 }
 
-/// 按 NoF segment 名称查找所属客户端 UUID。
-/// Look up owning client UUID by NoF segment name.
-pub(crate) fn client_id_by_nof_segment_name(
+/// Resolve the exact owner of a Memory/NoF replica by durable segment UUID.
+/// Drain uses this instead of a name lookup because Rust permits same-name
+/// segments and NoF sources do not live in the Memory segment table.
+pub(crate) fn client_id_by_replica_segment_id(
     state: &MasterState,
-    segment_name: &str,
+    segment_id: Uuid,
+    replica_type: ReplicaType,
 ) -> Option<Uuid> {
-    state
-        .nof_segments
-        .iter()
-        .find(|entry| entry.segment.name == segment_name)
-        .map(|entry| entry.segment.client_id)
+    match replica_type {
+        ReplicaType::Memory => state.segments.get(&segment_id).map(|entry| entry.client_id),
+        ReplicaType::NoFSsd => state
+            .nof_segments
+            .get(&segment_id)
+            .map(|entry| entry.segment.client_id),
+        ReplicaType::Disk | ReplicaType::LocalDisk | ReplicaType::All => None,
+    }
 }
 
-/// 按 segment 名称查找客户端（先查 Memory 再查 NoF）。
-/// Look up client by segment name (Memory first, then NoF).
-pub(crate) fn client_id_by_replica_segment_name(
+/// Resolve the owner only when a replica's durable UUID, type, and name all
+/// identify the same mounted Memory/NoF segment.
+pub(crate) fn client_id_by_exact_replica_segment(
     state: &MasterState,
-    segment_name: &str,
+    replica: &ReplicaDescriptor,
 ) -> Option<Uuid> {
-    client_id_by_segment_name(state, segment_name)
-        .or_else(|| client_id_by_nof_segment_name(state, segment_name))
+    match replica.replica_type {
+        ReplicaType::Memory => state
+            .segments
+            .get(&replica.segment_id)
+            .filter(|entry| entry.segment.name == replica.segment_name)
+            .map(|entry| entry.client_id),
+        ReplicaType::NoFSsd => state
+            .nof_segments
+            .get(&replica.segment_id)
+            .filter(|entry| entry.segment.name == replica.segment_name)
+            .map(|entry| entry.segment.client_id),
+        ReplicaType::Disk | ReplicaType::LocalDisk | ReplicaType::All => None,
+    }
 }
 
 pub(crate) fn default_drain_target_segments(
@@ -309,14 +454,15 @@ pub(crate) fn choose_drain_target_segment(
                 .any(|replica| replica.segment_name == **target)
         })
         .filter_map(|target| {
-            state
-                .segments
-                .iter()
-                .find(|entry| {
-                    entry.segment.name == *target
-                        && entry.status == crate::proto::SegmentStatus::Active
-                })
-                .map(|entry| (target.clone(), entry.used, entry.segment.size))
+            let mut matches = state.segments.iter().filter(|entry| {
+                entry.segment.name == *target && entry.status == crate::proto::SegmentStatus::Active
+            });
+            let entry = matches.next()?;
+            let candidate = (target.clone(), entry.used, entry.segment.size);
+            if matches.next().is_some() {
+                return None;
+            }
+            Some(candidate)
         })
         .min_by(|(_, used_a, size_a), (_, used_b, size_b)| {
             ((*used_a as u128) * (*size_b as u128)).cmp(&((*used_b as u128) * (*size_a as u128)))
@@ -324,12 +470,97 @@ pub(crate) fn choose_drain_target_segment(
         .map(|(target, _, _)| target)
 }
 
+/// Resolve one active Memory segment name to its exact durable identity.
+///
+/// Returning `None` for zero or multiple matches keeps legacy name-based
+/// scheduling fail closed.
+pub(crate) fn unique_active_memory_segment_id(
+    state: &MasterState,
+    segment_name: &str,
+) -> Option<Uuid> {
+    let mut matches = state.segments.iter().filter(|entry| {
+        entry.segment.name == segment_name && entry.status == crate::proto::SegmentStatus::Active
+    });
+    let segment_id = matches.next()?.segment.id;
+    matches.next().is_none().then_some(segment_id)
+}
+
+/// Resolve a legacy name-only target to one exact active Memory/NoF segment.
+///
+/// Rust permits same-name segments, so callers must fail closed unless the
+/// name identifies exactly one physical allocation domain across both tables.
+pub(crate) fn unique_active_replica_segment_identity(
+    state: &MasterState,
+    segment_name: &str,
+) -> Option<(Uuid, ReplicaType)> {
+    let memory = state
+        .segments
+        .iter()
+        .filter(|entry| {
+            entry.segment.name == segment_name
+                && entry.status == crate::proto::SegmentStatus::Active
+        })
+        .map(|entry| (entry.segment.id, ReplicaType::Memory));
+    let nof = state
+        .nof_segments
+        .iter()
+        .filter(|entry| {
+            entry.segment.name == segment_name
+                && entry.status == crate::proto::SegmentStatus::Active
+        })
+        .map(|entry| (entry.segment.id, ReplicaType::NoFSsd));
+    let mut matches = memory.chain(nof);
+    let identity = matches.next()?;
+    matches.next().is_none().then_some(identity)
+}
+
 /// 卸载客户端拥有的 Memory segment，校验所有权后从 segments 表和 allocator 移除。
 /// 返回 true 表示成功移除。
 ///
 /// Unmount a client-owned Memory segment: verify ownership, then remove from
 /// segments table and allocator. Returns true on successful removal.
-pub(crate) fn unmount_segment_owned(
+pub(crate) fn unmount_segment_owned_durable_locked(
+    state: &MasterState,
+    segment_id: Uuid,
+    client_id: Uuid,
+    operation: &str,
+) -> Result<bool, Status> {
+    let Some(segment) = state.segments.get(&segment_id) else {
+        return Ok(false);
+    };
+    if segment.client_id != client_id {
+        return Ok(false);
+    }
+    let segment_name = segment.segment.name.clone();
+    drop(segment);
+
+    if let Err(error) = state
+        .oplog_manager
+        .lock()
+        .record_unmount_segment_durable(&segment_name, segment_id)
+    {
+        state.fence_after_durability_failure(operation, &error);
+        return Err(Status::unavailable(
+            "failed to persist segment unmount; segment remains mounted",
+        ));
+    }
+    if !unmount_segment_owned_locked(state, segment_id, client_id) {
+        state.fence_after_invariant_failure(
+            operation,
+            &format!(
+                "durable Memory segment unmount could not be applied locally: \
+                 segment_id={segment_id} client_id={client_id}"
+            ),
+        );
+        return Err(Status::unavailable(
+            "persisted segment unmount could not be applied locally",
+        ));
+    }
+    bump_view_version(state);
+    Ok(true)
+}
+
+pub(crate) fn unmount_segment_owned_locked(
     state: &MasterState,
     segment_id: Uuid,
     client_id: Uuid,
@@ -344,11 +575,17 @@ pub(crate) fn unmount_segment_owned(
     }
 
     let invalidated = HashSet::from([segment_id]);
-    invalidate_replicas_on_segments(state, &invalidated);
+    invalidate_replicas_on_segments_locked(state, &invalidated, ReplicaType::Memory);
+    prune_delayed_replicas_on_segment(
+        &state.delayed_replica_releases,
+        segment_id,
+        ReplicaType::Memory,
+    );
     state.segments.remove(&segment_id);
+    state.graceful_unmounts.remove(&segment_id);
     state.allocator.write().remove_segment(&segment_id);
     let alive_clients = get_alive_clients_snapshot(state);
-    clear_invalid_handles(state, &alive_clients);
+    clear_invalid_handles_locked(state, &alive_clients);
     sync_client_segments(state, client_id);
     metrics::SEGMENT_COUNT.set(state.segments.len() as i64);
     true
@@ -356,7 +593,58 @@ pub(crate) fn unmount_segment_owned(
 
 /// 卸载客户端拥有的 NoF segment，同时从 nof_segments 表和 nof_allocator 移除。
 /// Unmount a client-owned NoF segment: remove from nof_segments table and nof_allocator.
-pub(crate) fn unmount_nof_segment_owned(
+pub(crate) fn unmount_nof_segment_owned_durable(
+    state: &MasterState,
+    segment_id: Uuid,
+    client_id: Uuid,
+    operation: &str,
+) -> Result<bool, Status> {
+    let _global_mutation_guard = state.key_mutations.lock_snapshot();
+    unmount_nof_segment_owned_durable_locked(state, segment_id, client_id, operation)
+}
+
+pub(crate) fn unmount_nof_segment_owned_durable_locked(
+    state: &MasterState,
+    segment_id: Uuid,
+    client_id: Uuid,
+    operation: &str,
+) -> Result<bool, Status> {
+    let Some(segment) = state.nof_segments.get(&segment_id) else {
+        return Ok(false);
+    };
+    if segment.segment.client_id != client_id {
+        return Ok(false);
+    }
+    let segment_name = segment.segment.name.clone();
+    drop(segment);
+
+    if let Err(error) = state
+        .oplog_manager
+        .lock()
+        .record_unmount_nof_segment_durable(&segment_name, segment_id)
+    {
+        state.fence_after_durability_failure(operation, &error);
+        return Err(Status::unavailable(
+            "failed to persist NoF segment unmount; segment remains mounted",
+        ));
+    }
+    if !unmount_nof_segment_owned_locked(state, segment_id, client_id) {
+        state.fence_after_invariant_failure(
+            operation,
+            &format!(
+                "durable NoF segment unmount could not be applied locally: \
+                 segment_id={segment_id} client_id={client_id}"
+            ),
+        );
+        return Err(Status::unavailable(
+            "persisted NoF segment unmount could not be applied locally",
+        ));
+    }
+    bump_view_version(state);
+    Ok(true)
+}
+
+pub(crate) fn unmount_nof_segment_owned_locked(
     state: &MasterState,
     segment_id: Uuid,
     client_id: Uuid,
@@ -371,13 +659,31 @@ pub(crate) fn unmount_nof_segment_owned(
     }
 
     let invalidated = HashSet::from([segment_id]);
-    invalidate_replicas_on_segments(state, &invalidated);
+    invalidate_replicas_on_segments_locked(state, &invalidated, ReplicaType::NoFSsd);
+    prune_delayed_replicas_on_segment(
+        &state.delayed_replica_releases,
+        segment_id,
+        ReplicaType::NoFSsd,
+    );
     state.nof_segments.remove(&segment_id);
     state.nof_allocator.write().remove_segment(&segment_id);
     state.nof_heartbeat_states.remove(&segment_id);
     let alive_clients = get_alive_clients_snapshot(state);
-    clear_invalid_handles(state, &alive_clients);
+    clear_invalid_handles_locked(state, &alive_clients);
     true
+}
+
+fn prune_delayed_replicas_on_segment(
+    delayed_releases: &DashMap<Uuid, DelayedReplicaReleaseEntry>,
+    segment_id: Uuid,
+    replica_type: ReplicaType,
+) {
+    delayed_releases.retain(|_, entry| {
+        entry.replicas.retain(|replica| {
+            replica.replica_type != replica_type || replica.segment_id != segment_id
+        });
+        !entry.replicas.is_empty()
+    });
 }
 
 /// 获取客户端的地址列表：优先使用 clients 表的 addresses，fallback 到 segment host 名。
@@ -435,28 +741,45 @@ pub(crate) fn sync_nof_segment_usage(
 /// 释放副本 back 到 allocator：按类型分拣 Memory 和 NoF 副本各自释放，并同步 usage。
 /// Release replicas back to allocator: separate Memory and NoF replicas by type,
 /// release each to the appropriate allocator, and sync usage.
-pub(crate) fn release_replicas(state: &MasterState, replicas: &[ReplicaDescriptor]) {
+pub(crate) fn release_replicas(
+    state: &MasterState,
+    replicas: &[ReplicaDescriptor],
+) -> Result<(), Status> {
     let memory = replicas
         .iter()
         .filter(|r| r.replica_type == ReplicaType::Memory)
         .cloned()
         .collect::<Vec<_>>();
-    if !memory.is_empty() {
-        let segment_ids = memory.iter().map(|r| r.segment_id).collect::<Vec<_>>();
-        state.allocator.write().release(&memory);
-        sync_segment_usage(state, segment_ids);
-    }
-
     let nof = replicas
         .iter()
         .filter(|r| r.replica_type == ReplicaType::NoFSsd)
         .cloned()
         .collect::<Vec<_>>();
-    if !nof.is_empty() {
-        let segment_ids = nof.iter().map(|r| r.segment_id).collect::<Vec<_>>();
-        state.nof_allocator.write().release(&nof);
-        sync_nof_segment_usage(state, segment_ids);
+    let memory_segment_ids = memory.iter().map(|r| r.segment_id).collect::<Vec<_>>();
+    let nof_segment_ids = nof.iter().map(|r| r.segment_id).collect::<Vec<_>>();
+    let release_result = {
+        // Use one fixed lock order and validate both allocators before either
+        // is mutated, so a mixed Memory/NoF batch cannot be half-released.
+        let mut memory_allocator = state.allocator.write();
+        let mut nof_allocator = state.nof_allocator.write();
+        memory_allocator
+            .validate_release(&memory)
+            .and_then(|_| nof_allocator.validate_release(&nof))
+            .and_then(|_| memory_allocator.release(&memory))
+            .and_then(|_| nof_allocator.release(&nof))
+    };
+    if let Err(error) = release_result {
+        state.fence_after_invariant_failure(
+            "release_replicas",
+            &format!("allocator rejected authoritative replica release: {error}"),
+        );
+        return Err(Status::unavailable(
+            "allocator release invariant failed; master is fenced",
+        ));
     }
+    sync_segment_usage(state, memory_segment_ids);
+    sync_nof_segment_usage(state, nof_segment_ids);
+    Ok(())
 }
 
 /// 分配 NoF 副本：逐个分配（每次 1 个），避免一次分配多个错过同 host 优化。
@@ -486,12 +809,34 @@ pub(crate) fn allocate_nof_replicas(
     let mut replicas = state
         .nof_allocator
         .write()
-        .allocate(key, size, count, &config);
+        .allocate_for_client_with_exclusions(
+            key,
+            None,
+            size,
+            count,
+            &config,
+            &state
+                .nof_segments
+                .iter()
+                .filter(|entry| entry.status != crate::proto::SegmentStatus::Active)
+                .map(|entry| entry.segment.name.clone())
+                .collect::<Vec<_>>(),
+            None,
+        );
     if replicas.len() != count {
         let allocated = replicas.len();
         let segment_ids = replicas.iter().map(|r| r.segment_id).collect::<Vec<_>>();
-        state.nof_allocator.write().release(&replicas);
+        if let Err(error) = state.nof_allocator.write().release(&replicas) {
+            state.fence_after_invariant_failure(
+                "allocate_nof_replicas_rollback",
+                &format!("fresh NoF allocation could not be released: {error}"),
+            );
+            return Err(Status::unavailable(
+                "NoF allocator rollback invariant failed; master is fenced",
+            ));
+        }
         sync_nof_segment_usage(state, segment_ids);
+        state.nof_eviction_requested.store(true, Ordering::Release);
         return Err(Status::resource_exhausted(format!(
             "failed to allocate {count} NoF replica(s), allocated {allocated}"
         )));
@@ -513,9 +858,13 @@ pub(crate) fn memory_usage_ratio(state: &MasterState) -> f64 {
     used_bytes as f64 / total_bytes as f64
 }
 
-/// 立即释放副本（非延迟）/ Immediately release replicas (non-delayed).
-pub(crate) fn release_replicas_scheduled(state: &MasterState, replicas: Vec<ReplicaDescriptor>) {
-    release_replicas(state, &replicas);
+/// Compute current NoF usage independently from Memory pressure.
+pub(crate) fn nof_usage_ratio(state: &MasterState) -> f64 {
+    let (total_bytes, used_bytes) = state.nof_allocator.read().usage_totals();
+    if total_bytes == 0 {
+        return 0.0;
+    }
+    used_bytes as f64 / total_bytes as f64
 }
 
 /// Helper: 释放对象副本并同时清理关联的 offload/promotion 任务。
@@ -524,13 +873,18 @@ pub(crate) fn release_object_replicas(
     state: &MasterState,
     key: &str,
     replicas: &[ReplicaDescriptor],
-) {
+) -> Result<(), Status> {
     if replicas.is_empty() {
-        return;
+        return Ok(());
     }
+    // Validate and release allocator ownership before deleting auxiliary task
+    // state. If the authoritative descriptor is inconsistent, the helper
+    // fences the Master and leaves those task records available for diagnosis
+    // and restart reconstruction.
+    release_replicas(state, replicas)?;
     clear_offloading_task(state, key);
     clear_promotion_task(state, key);
-    release_replicas(state, replicas);
+    Ok(())
 }
 
 fn has_completed_memory_cache_replica(object: &ObjectEntry) -> bool {
@@ -578,27 +932,280 @@ pub(crate) fn account_cache_total_removal(object: &mut ObjectEntry) {
     }
 }
 
-pub(crate) fn account_removed_object_quota(state: &MasterState, object: &ObjectEntry) {
+pub(crate) fn requested_memory_quota_charge(size: u64, replica_count: usize) -> u64 {
+    checked_requested_memory_quota_charge(size, replica_count).unwrap_or(u64::MAX)
+}
+
+/// Calculate a physical-Memory quota charge for untrusted request or durable
+/// input. Callers must reject overflow before allocating replicas or replacing
+/// live state; saturating would silently admit an under-specified ledger.
+pub(crate) fn checked_requested_memory_quota_charge(
+    size: u64,
+    replica_count: usize,
+) -> Result<u64, TenantQuotaError> {
+    let replica_count =
+        u64::try_from(replica_count).map_err(|_| TenantQuotaError::InvalidArgument)?;
+    size.checked_mul(replica_count)
+        .ok_or(TenantQuotaError::InvalidArgument)
+}
+
+pub(crate) fn completed_memory_quota_charge(object: &ObjectEntry) -> u64 {
+    checked_completed_memory_quota_charge(object).unwrap_or(u64::MAX)
+}
+
+pub(crate) fn checked_completed_memory_quota_charge(
+    object: &ObjectEntry,
+) -> Result<u64, TenantQuotaError> {
+    let completed_memory_replicas = object
+        .replicas
+        .iter()
+        .filter(|replica| {
+            replica.replica_type == ReplicaType::Memory && replica.status == ReplicaStatus::Complete
+        })
+        .count();
+    checked_requested_memory_quota_charge(object.size, completed_memory_replicas)
+}
+
+/// Whether an object image represents a Put/Upsert generation that has not
+/// reached a terminal set of write targets yet.
+///
+/// `quota_committed` cannot answer this by itself: an in-place same-size
+/// Upsert keeps the already occupied Memory bytes committed while those same
+/// descriptors temporarily move from Complete back to Allocating.
+pub(crate) fn object_has_inflight_write(object: &ObjectEntry) -> bool {
+    object.put_start_time.is_some()
+        && (!object.quota_committed
+            || object.replicas.iter().any(|replica| {
+                matches!(
+                    replica.replica_type,
+                    ReplicaType::Memory | ReplicaType::NoFSsd | ReplicaType::Disk
+                ) && replica.status != ReplicaStatus::Complete
+            }))
+}
+
+/// Reconstruct the committed physical-Memory charge represented by a durable
+/// object image.
+///
+/// During an in-place Upsert, Allocating Memory descriptors are not additional
+/// reservations: they are the same already charged physical allocations whose
+/// contents are being replaced. Copy/Move targets have no PutStart timestamp
+/// and remain accounted by their replication-task reservation instead.
+pub(crate) fn checked_durable_committed_memory_quota_charge(
+    object: &ObjectEntry,
+) -> Result<u64, TenantQuotaError> {
+    let include_inflight_allocations = object_has_inflight_write(object);
+    let committed_memory_replicas = object
+        .replicas
+        .iter()
+        .filter(|replica| {
+            replica.replica_type == ReplicaType::Memory
+                && (replica.status == ReplicaStatus::Complete
+                    || (include_inflight_allocations
+                        && replica.status == ReplicaStatus::Allocating))
+        })
+        .count();
+    checked_requested_memory_quota_charge(object.size, committed_memory_replicas)
+}
+
+pub(crate) fn allocating_memory_quota_charge(object: &ObjectEntry) -> u64 {
+    checked_allocating_memory_quota_charge(object).unwrap_or(u64::MAX)
+}
+
+pub(crate) fn checked_allocating_memory_quota_charge(
+    object: &ObjectEntry,
+) -> Result<u64, TenantQuotaError> {
+    let allocating_memory_replicas = object
+        .replicas
+        .iter()
+        .filter(|replica| {
+            replica.replica_type == ReplicaType::Memory
+                && replica.status == ReplicaStatus::Allocating
+        })
+        .count();
+    checked_requested_memory_quota_charge(object.size, allocating_memory_replicas)
+}
+
+pub(crate) fn settle_additional_memory_quota_charge(
+    state: &MasterState,
+    object: &mut ObjectEntry,
+    known_committed_bytes: u64,
+    reserved_bytes: u64,
+    committed_bytes: u64,
+    register_committed_charge: bool,
+) -> Result<(), TenantQuotaError> {
+    let total_committed_bytes = known_committed_bytes
+        .checked_add(committed_bytes)
+        .ok_or(TenantQuotaError::AccountingMismatch)?;
+    if state.runtime_config.enable_tenant_quota {
+        state.tenant_quotas.write().settle(
+            &object.tenant_id,
+            reserved_bytes,
+            committed_bytes,
+            register_committed_charge,
+        )?;
+    }
+    object.committed_quota_charge_bytes = total_committed_bytes;
+    Ok(())
+}
+
+pub(crate) fn release_committed_memory_quota_charge(
+    state: &MasterState,
+    object: &mut ObjectEntry,
+    bytes: u64,
+) -> Result<u64, TenantQuotaError> {
+    let known_charge = if object.committed_quota_charge_bytes == 0 && object.quota_committed {
+        completed_memory_quota_charge(object)
+    } else {
+        object.committed_quota_charge_bytes
+    };
+    if bytes > known_charge {
+        return Err(TenantQuotaError::AccountingMismatch);
+    }
+    let released = bytes;
+    if state.runtime_config.enable_tenant_quota {
+        let mut quotas = state.tenant_quotas.write();
+        if released != 0 && released == known_charge {
+            quotas.release(&object.tenant_id, released)?;
+        } else {
+            quotas.release_bytes(&object.tenant_id, released)?;
+        }
+    }
+    object.committed_quota_charge_bytes = known_charge - released;
+    Ok(released)
+}
+
+pub(crate) fn settle_and_release_memory_quota_charge(
+    state: &MasterState,
+    object: &mut ObjectEntry,
+    known_committed_bytes: u64,
+    reserved_bytes: u64,
+    newly_committed_bytes: u64,
+    release_bytes: u64,
+) -> Result<u64, TenantQuotaError> {
+    let total_committed_bytes = known_committed_bytes
+        .checked_add(newly_committed_bytes)
+        .ok_or(TenantQuotaError::AccountingMismatch)?;
+    if release_bytes > total_committed_bytes {
+        return Err(TenantQuotaError::AccountingMismatch);
+    }
+    let released = release_bytes;
+    if state.runtime_config.enable_tenant_quota {
+        // Move changes the reservation and committed ledgers together. Apply
+        // both operations to a projected table so a failure in the release
+        // half cannot leave the settle half committed.
+        let mut quotas = state.tenant_quotas.write();
+        let mut projected = quotas.clone();
+        projected.settle(
+            &object.tenant_id,
+            reserved_bytes,
+            newly_committed_bytes,
+            known_committed_bytes == 0 && newly_committed_bytes != 0,
+        )?;
+        if released != 0 && released == total_committed_bytes {
+            projected.release(&object.tenant_id, released)?;
+        } else {
+            projected.release_bytes(&object.tenant_id, released)?;
+        }
+        *quotas = projected;
+    }
+    object.committed_quota_charge_bytes = total_committed_bytes - released;
+    Ok(released)
+}
+
+pub(crate) fn account_removed_object_quota(
+    state: &MasterState,
+    object: &ObjectEntry,
+) -> Result<(), TenantQuotaError> {
     let mut object = object.clone();
     account_cache_total_removal(&mut object);
 
     if !state.runtime_config.enable_tenant_quota {
-        return;
+        return Ok(());
     }
     let mut quotas = state.tenant_quotas.write();
-    let result = if object.quota_committed {
-        quotas.release(&object.tenant_id, object.size)
-    } else {
-        quotas.abort(&object.tenant_id, object.size)
-    };
+    let mut projected = quotas.clone();
+    let result = remove_object_from_quota_projection(&mut projected, &object);
     if let Err(error) = result {
         tracing::warn!(
             tenant_id = %object.tenant_id,
             size = object.size,
             quota_committed = object.quota_committed,
+            reserved_charge = object.reserved_quota_charge_bytes,
+            committed_charge = object.committed_quota_charge_bytes,
             ?error,
             "tenant quota accounting failed while removing object"
         );
+        state.fence_after_invariant_failure(
+            "remove_object_quota",
+            &format!(
+                "tenant={} key={} error={error:?}",
+                object.tenant_id, object.user_key
+            ),
+        );
+        Err(error)
+    } else {
+        *quotas = projected;
+        Ok(())
+    }
+}
+
+/// Clone an authoritative object for an in-memory transactional projection.
+///
+/// `ReplicaDescriptor::clone` deliberately clears `refcnt` because descriptors
+/// copied into responses, tasks, and durable images must not inherit runtime
+/// pins. A transactional object projection is different: it will be written
+/// back into the live object table, so every unrelated in-flight pin must
+/// survive the clone/validate/commit sequence.
+pub(crate) fn clone_object_for_mutation(object: &ObjectEntry) -> ObjectEntry {
+    let mut projected = object.clone();
+    debug_assert_eq!(projected.replicas.len(), object.replicas.len());
+    for (projected_replica, live_replica) in projected.replicas.iter_mut().zip(&object.replicas) {
+        projected_replica.refcnt = live_replica.refcnt;
+    }
+    projected
+}
+
+pub(crate) fn remove_object_from_quota_projection(
+    quotas: &mut TenantQuotaTable,
+    object: &ObjectEntry,
+) -> Result<(), TenantQuotaError> {
+    if object.quota_committed {
+        let charge = if object.committed_quota_charge_bytes == 0 {
+            completed_memory_quota_charge(object)
+        } else {
+            object.committed_quota_charge_bytes
+        };
+        quotas
+            .remove_object(&object.tenant_id, charge)
+            .and_then(|()| {
+                if object.pending_replaced_quota_charge_bytes == 0 {
+                    Ok(())
+                } else {
+                    quotas.release(
+                        &object.tenant_id,
+                        object.pending_replaced_quota_charge_bytes,
+                    )
+                }
+            })
+    } else {
+        let charge = if object.reserved_quota_charge_bytes == 0 {
+            allocating_memory_quota_charge(&object)
+        } else {
+            object.reserved_quota_charge_bytes
+        };
+        quotas
+            .abort(&object.tenant_id, charge)
+            .and_then(|()| {
+                if object.pending_replaced_quota_charge_bytes == 0 {
+                    Ok(())
+                } else {
+                    quotas.release(
+                        &object.tenant_id,
+                        object.pending_replaced_quota_charge_bytes,
+                    )
+                }
+            })
+            .and_then(|()| quotas.unregister_object(&object.tenant_id))
     }
 }
 
@@ -658,12 +1265,21 @@ pub(crate) fn cleanup_stale_handles(
 ) -> bool {
     let original_len = entry.replicas.len();
 
-    entry.replicas.retain(|r| {
+    entry.replicas.retain_mut(|r| {
         if r.status != mooncake_store_core::ReplicaStatus::Complete {
             return true; // 保留非 Complete 状态的副本 / Retain non-Complete replicas
         }
         let is_stale = match r.replica_type {
             ReplicaType::Memory | ReplicaType::NoFSsd => !r.handle_valid,
+            ReplicaType::LocalDisk if r.local_disk_storage_id.is_some() => {
+                if r.holder_client_id
+                    .is_none_or(|cid| !alive_clients.contains(&cid))
+                {
+                    r.holder_client_id = None;
+                    r.handle_valid = false;
+                }
+                false
+            }
             ReplicaType::LocalDisk => r
                 .holder_client_id
                 .is_some_and(|cid| !alive_clients.contains(&cid)),
@@ -683,46 +1299,152 @@ pub(crate) fn cleanup_stale_handles(
     entry.replicas.len() != original_len && !has_completed
 }
 
-/// Mark complete Memory/NoF replicas on the provided segments invalid.
-/// This mirrors the C++ prepare-unmount phase, after which ClearInvalidHandles
-/// removes the invalid metadata.
-pub(crate) fn invalidate_replicas_on_segments(state: &MasterState, segment_ids: &HashSet<Uuid>) {
+/// Mark Memory/NoF replicas invalid while the caller holds the global snapshot
+/// mutation guard. ClearInvalidHandles then removes the invalid metadata.
+fn invalidate_replicas_on_segments_locked(
+    state: &MasterState,
+    segment_ids: &HashSet<Uuid>,
+    replica_type: ReplicaType,
+) {
     if segment_ids.is_empty() {
         return;
     }
-    for mut object in state.objects.iter_mut() {
-        for replica in &mut object.replicas {
-            if matches!(
-                replica.replica_type,
-                ReplicaType::Memory | ReplicaType::NoFSsd
-            ) && segment_ids.contains(&replica.segment_id)
-            {
-                replica.handle_valid = false;
+    let keys = state
+        .objects
+        .iter()
+        .map(|object| object.key().clone())
+        .collect::<Vec<_>>();
+    invalidate_replicas_on_segments_for_keys(state, segment_ids, replica_type, &keys);
+}
+
+fn invalidate_replicas_on_segments_for_keys(
+    state: &MasterState,
+    segment_ids: &HashSet<Uuid>,
+    replica_type: ReplicaType,
+    keys: &[String],
+) {
+    for key in keys {
+        if let Some(mut object) = state.objects.get_mut(key) {
+            for replica in &mut object.replicas {
+                if replica.replica_type == replica_type && segment_ids.contains(&replica.segment_id)
+                {
+                    replica.handle_valid = false;
+                }
             }
         }
     }
 }
 
-/// Sweep all metadata and drop stale handles, cleaning per-key task state when
-/// no valid complete replica remains.
-pub(crate) fn clear_invalid_handles(state: &MasterState, alive_clients: &HashSet<Uuid>) {
-    let mut remove_keys = Vec::new();
-    for mut object in state.objects.iter_mut() {
-        if cleanup_stale_handles(&mut object, alive_clients) {
-            remove_keys.push(object.key().clone());
-        }
-    }
+/// Sweep metadata while the caller holds the global snapshot mutation guard.
+pub(crate) fn clear_invalid_handles_locked(state: &MasterState, alive_clients: &HashSet<Uuid>) {
+    let keys = state
+        .objects
+        .iter()
+        .map(|object| object.key().clone())
+        .collect::<Vec<_>>();
+    clear_invalid_handles_for_keys(state, alive_clients, &keys);
+}
 
-    for key in remove_keys {
-        if let Some((_, object)) = state.objects.remove(&key) {
-            account_removed_object_quota(state, &object);
+/// Clean one key while the caller holds its mutation guard.
+///
+/// PutStart/UpsertStart use this after acquiring the tenant-scoped mutation
+/// stripe. Partial stale-replica cleanup therefore updates quota and
+/// durability in the same per-key mutation epoch as start-state revalidation.
+pub(crate) fn clear_invalid_handles_for_key_locked(
+    state: &MasterState,
+    alive_clients: &HashSet<Uuid>,
+    key: &String,
+) -> Result<(), HaError> {
+    clear_invalid_handles_for_keys(state, alive_clients, std::slice::from_ref(key));
+    if state.service_fenced.load(Ordering::Acquire) {
+        return Err(HaError::Snapshot(format!(
+            "master fenced while clearing invalid handles for key {key:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn clear_invalid_handles_for_keys(
+    state: &MasterState,
+    alive_clients: &HashSet<Uuid>,
+    keys: &[String],
+) {
+    for key in keys {
+        let mut should_remove = false;
+        let mut object_changed = false;
+        if let Some(mut object) = state.objects.get_mut(key) {
+            let mut projected = clone_object_for_mutation(&object);
+            let before_replica_state = projected
+                .replicas
+                .iter()
+                .map(|replica| {
+                    (
+                        replica.segment_id,
+                        replica.offset,
+                        replica.replica_type,
+                        replica.holder_client_id,
+                        replica.handle_valid,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let before_charge = completed_memory_quota_charge(&projected);
+            should_remove = cleanup_stale_handles(&mut projected, alive_clients);
+            object_changed = before_replica_state
+                != projected
+                    .replicas
+                    .iter()
+                    .map(|replica| {
+                        (
+                            replica.segment_id,
+                            replica.offset,
+                            replica.replica_type,
+                            replica.holder_client_id,
+                            replica.handle_valid,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+            let after_charge = completed_memory_quota_charge(&projected);
+            if before_charge > after_charge {
+                if let Err(error) = release_committed_memory_quota_charge(
+                    state,
+                    &mut projected,
+                    before_charge - after_charge,
+                ) {
+                    drop(object);
+                    state.fence_after_invariant_failure(
+                        "clear_invalid_handles",
+                        &format!("key={key:?} error={error:?}"),
+                    );
+                    return;
+                }
+            }
+            sync_cache_total_accounting(&mut projected);
+            *object = projected;
         }
-        state.processing_keys.remove(&key);
-        state.replication_tasks.remove(&key);
-        clear_offloading_task(state, &key);
-        clear_promotion_task(state, &key);
-        for mut entry in state.client_objects.iter_mut() {
-            entry.value_mut().remove(&key);
+        if should_remove {
+            if let Some((_, object)) = state.objects.remove(key) {
+                if account_removed_object_quota(state, &object).is_err() {
+                    return;
+                }
+            }
+            state.processing_keys.remove(key);
+            state.replication_tasks.remove(key);
+            clear_offloading_task(state, key);
+            clear_promotion_task(state, key);
+            for mut entry in state.client_objects.iter_mut() {
+                entry.value_mut().remove(key);
+            }
+        }
+        if state.service_fenced.load(Ordering::Acquire) {
+            return;
+        }
+        if object_changed {
+            if state
+                .persist_object_image_or_remove_or_fence(key, "clear_invalid_handles")
+                .is_err()
+            {
+                return;
+            }
         }
     }
 }
@@ -775,6 +1497,20 @@ pub(crate) fn processing_task_capacity(state: &MasterState) -> usize {
         .saturating_sub(task_count_with_status(state, TaskStatus::Processing))
 }
 
+/// Generate a task identity that is not present in the authoritative task map.
+///
+/// The caller must hold the global mutation barrier across this check and the
+/// following insertion. This mirrors C++ TaskManager::submit_task, which
+/// retries UUID generation while holding its write access.
+pub(crate) fn unique_task_id(state: &MasterState) -> Uuid {
+    loop {
+        let task_id = Uuid::new_v4();
+        if !state.tasks.contains_key(&task_id) {
+            return task_id;
+        }
+    }
+}
+
 /// Validate that a user key does not contain the tenant scope delimiter.
 /// Returns Ok(()) if valid, Err(Status) with invalid_argument if it contains '\0'.
 /// 验证用户 key 不包含租户作用域分隔符。
@@ -792,6 +1528,131 @@ pub fn validate_user_key(key: &str) -> Result<(), Status> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::MasterServiceImpl;
+    use crate::service::state::LocalDiskSegmentEntry;
+
+    #[test]
+    fn mutation_projection_preserves_runtime_replica_refcounts() {
+        let replica = ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: "memory:1".into(),
+            offset: 64,
+            size: 128,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: Some(Uuid::new_v4()),
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 3,
+            handle_valid: true,
+            base_addr: 0x1000,
+            protocol: "tcp".into(),
+        };
+        let object = ObjectEntry {
+            replicas: vec![replica],
+            size: 128,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::default(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 128,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        assert_eq!(object.clone().replicas[0].refcnt, 0);
+        assert_eq!(
+            clone_object_for_mutation(&object).replicas[0].refcnt,
+            object.replicas[0].refcnt
+        );
+    }
+
+    #[test]
+    fn checked_memory_quota_charge_rejects_multiplication_overflow() {
+        assert_eq!(
+            checked_requested_memory_quota_charge(u64::MAX / 2 + 1, 2),
+            Err(TenantQuotaError::InvalidArgument)
+        );
+        assert_eq!(
+            checked_requested_memory_quota_charge(u64::MAX / 2, 2),
+            Ok(u64::MAX - 1)
+        );
+    }
+
+    #[test]
+    fn durable_committed_charge_distinguishes_in_place_upsert_from_copy_target() {
+        let replica = ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: "memory:1".into(),
+            offset: 0,
+            size: 128,
+            status: ReplicaStatus::Allocating,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: Some(Uuid::new_v4()),
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0x1000,
+            protocol: "tcp".into(),
+        };
+        let mut object = ObjectEntry {
+            replicas: vec![replica],
+            size: 128,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: Some(SystemTime::now()),
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::default(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 128,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        assert!(object_has_inflight_write(&object));
+        assert_eq!(checked_completed_memory_quota_charge(&object), Ok(0));
+        assert_eq!(
+            checked_durable_committed_memory_quota_charge(&object),
+            Ok(128)
+        );
+
+        object.put_start_time = None;
+        assert!(!object_has_inflight_write(&object));
+        assert_eq!(
+            checked_durable_committed_memory_quota_charge(&object),
+            Ok(0)
+        );
+    }
+
+    fn quota_enabled_service() -> MasterServiceImpl {
+        let policy_uri = tempfile::NamedTempFile::new()
+            .unwrap()
+            .path()
+            .to_string_lossy()
+            .into_owned();
+        MasterServiceImpl::with_runtime_config(crate::service::state::MasterRuntimeConfig {
+            enable_tenant_quota: true,
+            tenant_quota_connector_uri: policy_uri,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn object_owner_prefers_explicit_writer_without_replicas() {
@@ -810,6 +1671,9 @@ mod tests {
             tenant_id: TenantId::default(),
             group_id: String::new(),
             quota_committed: false,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
             user_key: "key".to_string(),
@@ -819,14 +1683,329 @@ mod tests {
     }
 
     #[test]
+    fn move_quota_transaction_rolls_back_when_release_half_fails() {
+        let service = quota_enabled_service();
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+        {
+            let mut quotas = service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.restore_object_checked(&tenant_id, 60).unwrap();
+            quotas.reserve(&tenant_id, 50).unwrap();
+        }
+        let mut object = ObjectEntry {
+            replicas: Vec::new(),
+            size: 100,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: tenant_id.clone(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 100,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        let error =
+            settle_and_release_memory_quota_charge(&service.state, &mut object, 100, 50, 50, 150)
+                .unwrap_err();
+
+        assert_eq!(error, TenantQuotaError::AccountingMismatch);
+        assert_eq!(object.committed_quota_charge_bytes, 100);
+        let quota = service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(quota.used_bytes, 60);
+        assert_eq!(quota.reserved_bytes, 50);
+        assert_eq!(quota.committed_count, 1);
+    }
+
+    #[test]
+    fn quota_release_rejects_amounts_above_the_authoritative_charge() {
+        let service = quota_enabled_service();
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+        {
+            let mut quotas = service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.restore_object_checked(&tenant_id, 100).unwrap();
+            quotas.reserve(&tenant_id, 50).unwrap();
+        }
+        let mut object = ObjectEntry {
+            replicas: Vec::new(),
+            size: 100,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: tenant_id.clone(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 100,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        assert_eq!(
+            release_committed_memory_quota_charge(&service.state, &mut object, 101),
+            Err(TenantQuotaError::AccountingMismatch)
+        );
+        assert_eq!(
+            settle_and_release_memory_quota_charge(&service.state, &mut object, 100, 50, 50, 151,),
+            Err(TenantQuotaError::AccountingMismatch)
+        );
+
+        assert_eq!(object.committed_quota_charge_bytes, 100);
+        let quota = service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(quota.used_bytes, 100);
+        assert_eq!(quota.reserved_bytes, 50);
+        assert_eq!(quota.committed_count, 1);
+        assert_eq!(quota.metadata_object_count, 1);
+    }
+
+    #[test]
+    fn replacement_quota_settle_and_revoke_release_the_old_physical_charge() {
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+
+        let settled_service = quota_enabled_service();
+        {
+            let mut quotas = settled_service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.restore_object_checked(&tenant_id, 100).unwrap();
+            quotas.reserve(&tenant_id, 150).unwrap();
+        }
+        settled_service
+            .settle_tenant_quota(&tenant_id, 150, 150, true, 100)
+            .unwrap();
+        let settled = settled_service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(settled.used_bytes, 150);
+        assert_eq!(settled.reserved_bytes, 0);
+        assert_eq!(settled.committed_count, 1);
+        assert_eq!(settled.metadata_object_count, 1);
+
+        let revoked_service = quota_enabled_service();
+        {
+            let mut quotas = revoked_service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.restore_object_checked(&tenant_id, 100).unwrap();
+            quotas.reserve(&tenant_id, 150).unwrap();
+        }
+        let replacement = ObjectEntry {
+            replicas: Vec::new(),
+            size: 150,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: tenant_id.clone(),
+            group_id: String::new(),
+            quota_committed: false,
+            reserved_quota_charge_bytes: 150,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 100,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+        account_removed_object_quota(&revoked_service.state, &replacement).unwrap();
+        let revoked = revoked_service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(revoked.used_bytes, 0);
+        assert_eq!(revoked.reserved_bytes, 0);
+        assert_eq!(revoked.committed_count, 0);
+        assert_eq!(revoked.metadata_object_count, 0);
+    }
+
+    #[test]
+    fn move_quota_registers_first_memory_charge_for_nof_only_object() {
+        let service = quota_enabled_service();
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+        {
+            let mut quotas = service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 100, 100).unwrap();
+            quotas.register_object(&tenant_id);
+            quotas.reserve(&tenant_id, 100).unwrap();
+        }
+        let mut object = ObjectEntry {
+            replicas: Vec::new(),
+            size: 100,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: tenant_id.clone(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        settle_and_release_memory_quota_charge(&service.state, &mut object, 0, 100, 100, 0)
+            .unwrap();
+
+        assert_eq!(object.committed_quota_charge_bytes, 100);
+        let quota = service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(quota.used_bytes, 100);
+        assert_eq!(quota.reserved_bytes, 0);
+        assert_eq!(quota.committed_count, 1);
+    }
+
+    #[test]
+    fn authoritative_remove_quota_mismatch_fences_service() {
+        let service = quota_enabled_service();
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+        service
+            .state
+            .tenant_quotas
+            .write()
+            .upsert_policy(&tenant_id, 100, 100)
+            .unwrap();
+        let object = ObjectEntry {
+            replicas: Vec::new(),
+            size: 100,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id,
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 100,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        let result = account_removed_object_quota(&service.state, &object);
+
+        assert_eq!(result, Err(TenantQuotaError::AccountingMismatch));
+        assert!(service.state.service_fenced.load(Ordering::Acquire));
+        assert!(!service.state.service_available.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn partial_stale_memory_cleanup_reconciles_physical_quota_before_revalidation() {
+        let service = quota_enabled_service();
+        let tenant_id = TenantId::new("tenant-a".into()).unwrap();
+        let key = tenant_id.make_scoped_key("partial-stale");
+        {
+            let mut quotas = service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 400, 400).unwrap();
+            quotas.restore_object_checked(&tenant_id, 200).unwrap();
+        }
+        let replica = |handle_valid| ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: "memory".into(),
+            offset: 0,
+            size: 100,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid,
+            base_addr: 0,
+            protocol: String::new(),
+        };
+        service.state.objects.insert(
+            key.clone(),
+            ObjectEntry {
+                replicas: vec![replica(false), replica(true)],
+                size: 100,
+                last_access: SystemTime::now(),
+                hard_pinned: false,
+                data_type: Default::default(),
+                client_id: Uuid::new_v4(),
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: tenant_id.clone(),
+                group_id: String::new(),
+                quota_committed: true,
+                reserved_quota_charge_bytes: 0,
+                committed_quota_charge_bytes: 200,
+                pending_replaced_quota_charge_bytes: 0,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                user_key: "partial-stale".into(),
+            },
+        );
+
+        let _mutation = service.state.key_mutations.lock(&key);
+        clear_invalid_handles_for_key_locked(&service.state, &HashSet::new(), &key).unwrap();
+
+        let object = service.state.objects.get(&key).unwrap();
+        assert_eq!(object.replicas.len(), 1);
+        assert!(object.replicas[0].handle_valid);
+        assert_eq!(object.committed_quota_charge_bytes, 100);
+        drop(object);
+        let quota = service
+            .state
+            .tenant_quotas
+            .read()
+            .get_snapshot(&tenant_id)
+            .unwrap();
+        assert_eq!(quota.used_bytes, 100);
+        assert_eq!(quota.committed_count, 1);
+        assert_eq!(quota.metadata_object_count, 1);
+    }
+
+    #[test]
     fn host_from_segment_name_matches_cpp_host_id_rules() {
         assert_eq!(host_from_segment_name(" node-a:1234 "), "node-a");
         assert_eq!(host_from_segment_name("node-a"), "node-a");
         assert_eq!(host_from_segment_name("2001:db8::1"), "2001:db8::1");
-        assert_eq!(
-            host_from_segment_name("[2001:db8::1]:1234"),
-            "[2001:db8::1]"
-        );
+        assert_eq!(host_from_segment_name("[2001:db8::1]:1234"), "2001:db8::1");
 
         for local in [
             "localhost:1234",
@@ -839,5 +2018,131 @@ mod tests {
         ] {
             assert_eq!(host_from_segment_name(local), "");
         }
+    }
+
+    #[test]
+    fn port_from_segment_name_handles_ipv4_hostname_and_ipv6() {
+        assert_eq!(port_from_segment_name("node-a:1234"), 1234);
+        assert_eq!(port_from_segment_name("10.0.0.1:2345"), 2345);
+        assert_eq!(port_from_segment_name("[2001:db8::1]:3456"), 3456);
+        assert_eq!(port_from_segment_name("2001:db8::1"), 0);
+        assert_eq!(port_from_segment_name("[2001:db8::1]"), 0);
+        assert_eq!(port_from_segment_name("node-a"), 0);
+        assert_eq!(port_from_segment_name("node-a:invalid"), 0);
+    }
+
+    #[test]
+    fn routable_replica_rejects_invalid_memory_handle() {
+        let state = MasterState::empty();
+        let mut replica = ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: "memory".to_string(),
+            offset: 0,
+            size: 1,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+            protocol: String::new(),
+        };
+
+        assert!(replica_is_routable(&state, &replica));
+        replica.handle_valid = false;
+        assert!(!replica_is_routable(&state, &replica));
+    }
+
+    #[test]
+    fn routable_local_disk_requires_ready_exact_session() {
+        let state = MasterState::empty();
+        let storage_id = Uuid::new_v4();
+        let holder_client_id = Uuid::new_v4();
+        let mut replica = ReplicaDescriptor {
+            segment_id: Uuid::nil(),
+            segment_name: "127.0.0.1:4321".to_string(),
+            offset: 0,
+            size: 1,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::LocalDisk,
+            holder_client_id: Some(holder_client_id),
+            local_disk_storage_id: Some(storage_id),
+            local_disk_generation_id: Some(Uuid::new_v4()),
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+            protocol: String::new(),
+        };
+
+        state
+            .local_disk_client_sessions
+            .insert(holder_client_id, storage_id);
+        state.local_disk_segments.insert(
+            storage_id,
+            LocalDiskSegmentEntry {
+                active_client_id: Some(holder_client_id),
+                recovery_complete: false,
+                recovery_session_id: Some(Uuid::new_v4()),
+                recovered_objects: HashSet::new(),
+                enable_offloading: false,
+                offloading_objects: HashMap::new(),
+                promotion_objects: HashMap::new(),
+                ssd_total_capacity_bytes: 0,
+            },
+        );
+
+        assert!(!replica_is_routable(&state, &replica));
+        state
+            .local_disk_segments
+            .get_mut(&storage_id)
+            .unwrap()
+            .recovery_complete = true;
+        assert!(replica_is_routable(&state, &replica));
+
+        replica.local_disk_generation_id = None;
+        assert!(
+            !replica_is_routable(&state, &replica),
+            "a Ready LocalDisk session must not make legacy generation-less bytes routable"
+        );
+        replica.local_disk_generation_id = Some(Uuid::new_v4());
+
+        state
+            .local_disk_client_sessions
+            .insert(holder_client_id, Uuid::new_v4());
+        assert!(!replica_is_routable(&state, &replica));
+    }
+
+    #[test]
+    fn authoritative_release_mismatch_fences_without_freeing_live_range() {
+        let state = MasterState::empty();
+        let segment_id = Uuid::new_v4();
+        state.allocator.write().add_segment(
+            mooncake_store_core::Segment {
+                id: segment_id,
+                name: "release-invariant:1".to_string(),
+                base: 0,
+                size: 200,
+                te_endpoint: String::new(),
+                protocol: "tcp".to_string(),
+                host_id: String::new(),
+            },
+            0,
+            Uuid::new_v4(),
+        );
+        let mut replicas = state.allocator.write().allocate(
+            "tenant-a\0release-invariant",
+            100,
+            1,
+            &ReplicateConfig::default(),
+        );
+        replicas[0].size = 99;
+
+        let error = release_replicas(&state, &replicas).unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(state.service_fenced.load(Ordering::Acquire));
+        assert_eq!(state.allocator.read().used_bytes(&segment_id), Some(100));
     }
 }

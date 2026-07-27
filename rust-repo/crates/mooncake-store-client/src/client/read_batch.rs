@@ -2,7 +2,7 @@ use super::{MooncakeClient, read::scoped_cache_key};
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use std::ffi::c_void;
-use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
+use transfer_engine_ffi::{RegisteredSubmitOutcome, RegisteredTransferRequest, TransferStatusEnum};
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------
@@ -26,6 +26,7 @@ impl MooncakeClient {
     /// 对应位置为 None，成功的位置包含 Some(data)。
     ///
     pub async fn batch_get(&mut self, keys: &[String]) -> StoreResult<Vec<Option<Vec<u8>>>> {
+        let started_at = std::time::Instant::now();
         tracing::info!(target: "te_debug", key_count = keys.len(), "batch_get: ENTER");
         let tenant_id = self.tenant_id.clone();
         let mut results = vec![None; keys.len()];
@@ -63,7 +64,14 @@ impl MooncakeClient {
             tracing::info!(target: "te_debug", index = i, total = keys.len(), %key, "batch_get: processing key");
             let data_result = match replica_result {
                 Ok(replicas) => match self.select_best_replica(&replicas) {
-                    Some(replica) => self.read_from_replica(&key, replica).await,
+                    Some(replica) => {
+                        let result = self.read_from_replica(&key, replica).await;
+                        if let Ok(data) = &result {
+                            let cache_key = scoped_cache_key(&tenant_id, &key);
+                            self.cache_replica_value_if_admitted(cache_key.as_ref(), data, replica);
+                        }
+                        result
+                    }
                     None => Err(StoreError::KeyNotFound(key.clone())),
                 },
                 Err(err) => Err(err),
@@ -72,10 +80,6 @@ impl MooncakeClient {
             match data_result {
                 Ok(data) => {
                     tracing::info!(target: "te_debug", index = i, %key, data_len = data.len(), "batch_get: key OK");
-                    if let Some(ref cache) = self.hot_cache {
-                        let cache_key = scoped_cache_key(&tenant_id, &key);
-                        cache.put(cache_key.as_ref(), &data);
-                    }
                     results[i] = Some(data);
                 }
                 Err(e) => {
@@ -83,10 +87,8 @@ impl MooncakeClient {
                     if let Some(ref handler) = self.miss_handler {
                         if handler.is_enabled() {
                             if let Ok(data) = handler.handle_miss(&key).await {
-                                if let Some(ref cache) = self.hot_cache {
-                                    let cache_key = scoped_cache_key(&tenant_id, &key);
-                                    cache.put(cache_key.as_ref(), &data);
-                                }
+                                let cache_key = scoped_cache_key(&tenant_id, &key);
+                                self.cache_value_if_admitted(cache_key.as_ref(), &data);
                                 results[i] = Some(data);
                             }
                         }
@@ -96,6 +98,14 @@ impl MooncakeClient {
         }
         let ok_count = results.iter().filter(|r| r.is_some()).count();
         tracing::info!(target: "te_debug", total = keys.len(), ok = ok_count, "batch_get: EXIT");
+        if let Some(metrics) = &self.metrics {
+            let bytes = results
+                .iter()
+                .filter_map(Option::as_ref)
+                .try_fold(0_u64, |total, data| total.checked_add(data.len() as u64))
+                .unwrap_or(u64::MAX);
+            metrics.observe_batch_get(bytes, started_at.elapsed());
+        }
         Ok(results)
     }
 
@@ -107,15 +117,49 @@ impl MooncakeClient {
     /// 每个 key 通过 RDMA 直接读入 buffers[i]，绕过内部 local_buffer。
     /// 失败时对应的 key 结果为 -1。
     ///
-    /// # Safety
-    /// All `buffers[i]` must be pre-registered with the TE and be at least
-    /// `sizes[i]` bytes. / 所有 buffers[i] 必须预先向 TE 注册，且至少 sizes[i] 字节。
-    pub async unsafe fn batch_get_into(
+    /// Every address/range is resolved to a live owner-bearing writable
+    /// registration before it can be used.
+    pub async fn batch_get_into(
         &mut self,
         keys: &[String],
         buffers: &[*mut c_void],
         sizes: &[usize],
     ) -> StoreResult<Vec<i64>> {
+        let started_at = std::time::Instant::now();
+        let results = self
+            .batch_get_into_results(keys, buffers, sizes)
+            .await?
+            .into_iter()
+            .map(|result| result.map(|bytes| bytes as i64).unwrap_or(-1))
+            .collect::<Vec<_>>();
+        if let Some(metrics) = &self.metrics {
+            let bytes = results
+                .iter()
+                .filter_map(|result| u64::try_from(*result).ok())
+                .fold(0_u64, u64::saturating_add);
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Read,
+                "batch_get_into",
+                bytes,
+                started_at.elapsed(),
+            );
+        }
+        Ok(results)
+    }
+
+    /// Batch zero-copy read preserving each key's structured error.
+    ///
+    /// Compatibility layers should use this method when they must translate
+    /// per-key failures into a stable external error-code namespace. The
+    /// legacy [`batch_get_into`](Self::batch_get_into) method intentionally
+    /// retains its historical `-1` failure collapse.
+    ///
+    pub async fn batch_get_into_results(
+        &mut self,
+        keys: &[String],
+        buffers: &[*mut c_void],
+        sizes: &[usize],
+    ) -> StoreResult<Vec<StoreResult<usize>>> {
         if keys.len() != buffers.len() || keys.len() != sizes.len() {
             return Err(StoreError::InvalidParams(
                 "keys, buffers, and sizes length mismatch".to_string(),
@@ -132,8 +176,8 @@ impl MooncakeClient {
         let mut results = Vec::with_capacity(keys.len());
         for (i, key) in keys.iter().enumerate() {
             match self.get_into_registered(key, buffers[i], sizes[i]).await {
-                Ok(n) => results.push(n as i64),
-                Err(_) => results.push(-1), // per-key error tolerance / 按 key 容错
+                Ok(n) => results.push(Ok(n)),
+                Err(error) => results.push(Err(error)),
             }
         }
         Ok(results)
@@ -151,36 +195,46 @@ impl MooncakeClient {
     /// 对于每个 key，将多次 RDMA 读分发到一组预注册的缓冲区中。
     /// 这是最通用的形式：一个 key 可以分散到 N 个目标缓冲区，各有不同的大小。
     ///
-    /// # Safety
-    /// All buffers in `all_buffers` must be pre-registered with the TE.
-    /// all_buffers 中的所有缓冲区必须预先向 TE 注册。
-    pub async unsafe fn batch_get_into_multi_buffers(
+    /// All ranges are checked against live owner-bearing registrations before
+    /// any transfer is submitted.
+    pub async fn batch_get_into_multi_buffers(
         &mut self,
         keys: &[String],
         all_buffers: &[Vec<*mut c_void>],
         all_sizes: &[Vec<usize>],
         prefer_same_node: bool,
     ) -> StoreResult<Vec<i64>> {
+        let started_at = std::time::Instant::now();
         if keys.len() != all_buffers.len() || keys.len() != all_sizes.len() {
             return Err(StoreError::InvalidParams(
                 "keys, all_buffers, and all_sizes length mismatch".to_string(),
             ));
         }
-        for (idx, (buffers, sizes)) in all_buffers.iter().zip(all_sizes.iter()).enumerate() {
-            if buffers.len() != sizes.len() {
-                return Err(StoreError::InvalidParams(format!(
-                    "buffers and sizes length mismatch for key index {idx}"
-                )));
-            }
-            for (buffer_idx, (&buffer, &size)) in buffers.iter().zip(sizes.iter()).enumerate() {
-                self.resolve_writable_buffer_region(buffer, size)
-                    .map_err(|err| {
-                        StoreError::InvalidParams(format!(
-                            "invalid writable buffer for key index {idx}, buffer index {buffer_idx}: {err}"
-                        ))
-                    })?;
-            }
-        }
+        let all_regions = all_buffers
+            .iter()
+            .zip(all_sizes.iter())
+            .enumerate()
+            .map(|(idx, (buffers, sizes))| {
+                if buffers.len() != sizes.len() {
+                    return Err(StoreError::InvalidParams(format!(
+                        "buffers and sizes length mismatch for key index {idx}"
+                    )));
+                }
+                buffers
+                    .iter()
+                    .zip(sizes.iter())
+                    .enumerate()
+                    .map(|(buffer_idx, (&buffer, &size))| {
+                        self.resolve_writable_buffer_region(buffer, size)
+                            .map_err(|err| {
+                                StoreError::InvalidParams(format!(
+                                    "invalid writable buffer for key index {idx}, buffer index {buffer_idx}: {err}"
+                                ))
+                            })
+                    })
+                    .collect::<StoreResult<Vec<_>>>()
+            })
+            .collect::<StoreResult<Vec<_>>>()?;
 
         let mut results = vec![];
         for (key_idx, key) in keys.iter().enumerate() {
@@ -210,9 +264,59 @@ impl MooncakeClient {
                     continue;
                 }
             };
-            let total_capacity = all_sizes[key_idx].iter().sum::<usize>();
-            if total_capacity < replica.size as usize {
+            let object_size = match usize::try_from(replica.size) {
+                Ok(size) => size,
+                Err(_) => {
+                    results.push(-1);
+                    continue;
+                }
+            };
+            let total_capacity = match all_sizes[key_idx]
+                .iter()
+                .try_fold(0usize, |total, size| total.checked_add(*size))
+            {
+                Some(capacity) => capacity,
+                None => {
+                    results.push(-1);
+                    continue;
+                }
+            };
+            if total_capacity < object_size {
                 results.push(-1);
+                continue;
+            }
+
+            if replica.replica_type == mooncake_store_core::ReplicaType::Disk {
+                let data = match self.read_from_replica(key, replica).await {
+                    Ok(data) => data,
+                    Err(_) => {
+                        results.push(-1);
+                        continue;
+                    }
+                };
+                let mut source_offset = 0usize;
+                let mut failed = false;
+                for (region, capacity) in all_regions[key_idx].iter().zip(all_sizes[key_idx].iter())
+                {
+                    if source_offset == data.len() {
+                        break;
+                    }
+                    let end = source_offset.saturating_add(*capacity).min(data.len());
+                    if self
+                        .accelerator
+                        .copy_from_host(region.foreign_region(), &data[source_offset..end])
+                        .is_err()
+                    {
+                        failed = true;
+                        break;
+                    }
+                    source_offset = end;
+                }
+                results.push(if failed {
+                    -1
+                } else {
+                    i64::try_from(data.len()).unwrap_or(-1)
+                });
                 continue;
             }
 
@@ -221,7 +325,7 @@ impl MooncakeClient {
             let count = all_buffers[key_idx].len();
             let request_count = all_sizes[key_idx]
                 .iter()
-                .scan(replica.size as usize, |remaining, &size| {
+                .scan(object_size, |remaining, &size| {
                     if *remaining == 0 {
                         Some(false)
                     } else {
@@ -236,67 +340,93 @@ impl MooncakeClient {
                 results.push(0);
                 continue;
             }
-            let batch_id = match self.engine.allocate_batch_id(request_count) {
-                Ok(id) => id,
-                Err(e) => {
-                    let _ = self.engine.close_segment(seg);
-                    return Err(e.into());
-                }
-            };
-
-            let mut remaining = replica.size as usize;
+            let mut remaining = object_size;
             let mut source_offset = 0usize;
-            let mut request_to_buffer = Vec::with_capacity(request_count);
-            let mut reqs = Vec::with_capacity(request_count);
-            for i in 0..count {
-                if remaining == 0 {
-                    break;
-                }
-                let read_len = remaining.min(all_sizes[key_idx][i]);
-                remaining -= read_len;
-                reqs.push(TransferRequest {
-                    opcode: Opcode::Read,
-                    source: all_buffers[key_idx][i],
-                    target_id: seg,
-                    target_offset: replica.base_addr + replica.offset + source_offset as u64,
-                    length: read_len as u64,
-                });
-                request_to_buffer.push(i);
-                source_offset += read_len;
-            }
+            let mut request_lengths = Vec::with_capacity(request_count);
+            let reqs = self.close_segment_on_prepare_error(
+                seg,
+                (|| -> StoreResult<_> {
+                    let mut reqs = Vec::with_capacity(request_count);
+                    for i in 0..count {
+                        if remaining == 0 {
+                            break;
+                        }
+                        let read_len = remaining.min(all_sizes[key_idx][i]);
+                        remaining -= read_len;
+                        reqs.push(RegisteredTransferRequest::read(
+                            all_regions[key_idx][i].registered_region(),
+                            seg,
+                            Self::checked_replica_target_offset(replica, source_offset)?,
+                            read_len,
+                        )?);
+                        request_lengths.push(read_len as u64);
+                        source_offset += read_len;
+                    }
+                    Ok(reqs)
+                })(),
+            )?;
 
-            if let Err(e) = self.engine.submit_transfer(batch_id, &reqs) {
-                let _ = self.engine.free_batch_id(batch_id);
-                let _ = self.engine.close_segment(seg);
-                return Err(e.into());
-            }
-
-            let statuses = match self
-                .wait_for_transfer_batch_terminal(
-                    batch_id,
-                    request_to_buffer.len(),
-                    tokio::time::Duration::from_secs(10),
-                )
-                .await
-            {
-                Ok(statuses) => statuses,
-                Err(e) => {
-                    let _ = self.engine.free_batch_id(batch_id);
+            let payload_regions = all_regions[key_idx].clone();
+            let outcome = match self.engine.submit_transfer(reqs) {
+                Ok(outcome) => outcome,
+                Err(error) => {
                     let _ = self.engine.close_segment(seg);
-                    return Err(e);
+                    return Err(error.into());
                 }
             };
-            let failed = statuses
-                .iter()
-                .any(|status| status.status != TransferStatusEnum::Completed);
-            let total_transferred = statuses
+            let batch = match outcome {
+                RegisteredSubmitOutcome::Submitted(batch) => batch,
+                RegisteredSubmitOutcome::NativeRejected { error, batch } => {
+                    let _completion = self
+                        .release_failed_submission_owned(
+                            batch,
+                            seg,
+                            std::time::Duration::from_secs(10),
+                            payload_regions,
+                        )
+                        .await?;
+                    return Err(error.into());
+                }
+            };
+
+            let completion = self
+                .wait_for_transfer_batch_terminal_owned(
+                    batch,
+                    seg,
+                    std::time::Duration::from_secs(10),
+                    payload_regions,
+                )
+                .await?;
+            let failed = !super::transfer::transfer_statuses_match_lengths(
+                &completion.statuses,
+                request_lengths,
+            );
+            let total_transferred = completion
+                .statuses
                 .iter()
                 .filter(|status| status.status == TransferStatusEnum::Completed)
                 .map(|status| status.transferred_bytes as i64)
                 .sum();
-            self.engine.free_batch_id(batch_id)?;
-            self.engine.close_segment(seg)?;
+            drop(completion);
+            if !failed && let Some(metrics) = &self.metrics {
+                metrics.observe_transfer_bytes(
+                    super::metrics::TransferOperationKind::Read,
+                    u64::try_from(total_transferred).unwrap_or(u64::MAX),
+                );
+            }
             results.push(if failed { -1 } else { total_transferred });
+        }
+        if let Some(metrics) = &self.metrics {
+            let bytes = results
+                .iter()
+                .filter_map(|result| u64::try_from(*result).ok())
+                .fold(0_u64, u64::saturating_add);
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Read,
+                "batch_get_into_multi_buffers",
+                bytes,
+                started_at.elapsed(),
+            );
         }
         Ok(results)
     }

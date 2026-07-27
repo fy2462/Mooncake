@@ -100,6 +100,9 @@ class RustStoreAdapter:
     def close(self) -> None:
         if self._closed:
             return
+        # Complete the Rust Store teardown on the adapter's owned event loop
+        # before stopping that loop.
+        self._call("close")
         self._closed = True
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join()
@@ -126,6 +129,7 @@ class RustBufferLease:
     def __init__(self, pool: Any, owner: bytearray, size: int) -> None:
         self._pool = pool
         self.owner = owner
+        self.size = size
         self.buffer = memoryview(owner)[:size]
         self.ptr = ctypes.addressof(ctypes.c_ubyte.from_buffer(owner))
         self._released = False
@@ -158,8 +162,14 @@ class RustBufferPoolAdapter:
 
     def acquire(
         self, size: int, block: bool = True, timeout: float | None = None
-    ) -> RustBufferLease:
+    ) -> Any:
         owner = self._pool.acquire(size, block, timeout)
+        if (
+            hasattr(owner, "release")
+            and hasattr(owner, "ptr")
+            and hasattr(owner, "size")
+        ):
+            return owner
         return RustBufferLease(self._pool, owner, size)
 
     def __getattr__(self, name: str) -> Any:

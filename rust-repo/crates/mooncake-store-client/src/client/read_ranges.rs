@@ -4,9 +4,101 @@ use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use transfer_engine_ffi::{Opcode, TransferRequest, TransferStatusEnum};
+use transfer_engine_ffi::{RegisteredSubmitOutcome, RegisteredTransferRequest, TransferStatusEnum};
+
+fn successful_range_bytes(results: &[Vec<Vec<i64>>]) -> u64 {
+    results
+        .iter()
+        .flatten()
+        .flatten()
+        .filter_map(|result| u64::try_from(*result).ok())
+        .fold(0_u64, u64::saturating_add)
+}
 
 impl MooncakeClient {
+    /// Safe copy-based multi-range read.
+    ///
+    /// This variant accepts ordinary mutable slices and never registers or
+    /// exposes caller pointers. It fetches each object through the safe Store
+    /// path, then copies validated ranges into the destination buffers.
+    pub async fn get_into_ranges_copy(
+        &mut self,
+        buffers: &mut [&mut [u8]],
+        keys: &[Vec<String>],
+        dst_offsets: &[Vec<Vec<usize>>],
+        src_offsets: &[Vec<Vec<usize>>],
+        sizes: &[Vec<Vec<usize>>],
+    ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
+        if buffers.len() != keys.len()
+            || buffers.len() != dst_offsets.len()
+            || buffers.len() != src_offsets.len()
+            || buffers.len() != sizes.len()
+        {
+            return Err(StoreError::InvalidParams(
+                "buffers, keys, dst_offsets, src_offsets, and sizes length mismatch".to_string(),
+            ));
+        }
+
+        let mut results = Vec::with_capacity(buffers.len());
+        for buf_idx in 0..buffers.len() {
+            let key_count = keys[buf_idx].len();
+            if dst_offsets[buf_idx].len() != key_count
+                || src_offsets[buf_idx].len() != key_count
+                || sizes[buf_idx].len() != key_count
+            {
+                return Err(StoreError::InvalidParams(format!(
+                    "range matrix key dimension mismatch at buffer index {buf_idx}"
+                )));
+            }
+
+            let mut buffer_results = Vec::with_capacity(key_count);
+            for key_idx in 0..key_count {
+                let range_count = sizes[buf_idx][key_idx].len();
+                if dst_offsets[buf_idx][key_idx].len() != range_count
+                    || src_offsets[buf_idx][key_idx].len() != range_count
+                {
+                    return Err(StoreError::InvalidParams(format!(
+                        "range dimension mismatch at buffer index {buf_idx}, key index {key_idx}"
+                    )));
+                }
+
+                let value = match self.get(&keys[buf_idx][key_idx]).await {
+                    Ok(value) => value,
+                    Err(StoreError::KeyNotFound(_)) => {
+                        buffer_results.push(vec![-1; range_count]);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let mut range_results = vec![-1; range_count];
+                for range_idx in 0..range_count {
+                    let size = sizes[buf_idx][key_idx][range_idx];
+                    let source_offset = src_offsets[buf_idx][key_idx][range_idx];
+                    let destination_offset = dst_offsets[buf_idx][key_idx][range_idx];
+                    let Some(source_end) = source_offset.checked_add(size) else {
+                        continue;
+                    };
+                    let Some(destination_end) = destination_offset.checked_add(size) else {
+                        continue;
+                    };
+                    let Some(source) = value.get(source_offset..source_end) else {
+                        continue;
+                    };
+                    let Some(destination) =
+                        buffers[buf_idx].get_mut(destination_offset..destination_end)
+                    else {
+                        continue;
+                    };
+                    destination.copy_from_slice(source);
+                    range_results[range_idx] = i64::try_from(size).unwrap_or(-1);
+                }
+                buffer_results.push(range_results);
+            }
+            results.push(buffer_results);
+        }
+        Ok(results)
+    }
+
     // -----------------------------------------------------------------------
     // Get into ranges (zero-copy multi-range read)
     // 多范围零拷贝读取：对多个 key 的多个偏移范围执行批量 RDMA 读
@@ -34,10 +126,9 @@ impl MooncakeClient {
     /// error / timeout.
     /// 三维结果矩阵：results[bi][ki][ri] = 传输字节数，错误/超时时为 -1。
     ///
-    /// # Safety
-    /// All buffers must be registered and live for the duration.
-    /// 所有缓冲区必须已注册并在传输期间保持存活。
-    pub async unsafe fn get_into_ranges(
+    /// Every destination range is resolved to a live owner-bearing writable
+    /// registration before use.
+    pub async fn get_into_ranges(
         &mut self,
         buffers: &[*mut c_void],
         keys: &[Vec<String>],
@@ -45,15 +136,28 @@ impl MooncakeClient {
         src_offsets: &[Vec<Vec<usize>>],
         sizes: &[Vec<Vec<usize>>],
     ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
-        self.get_into_ranges_internal(buffers, keys, dst_offsets, src_offsets, sizes, None)
-            .await
+        let started_at = std::time::Instant::now();
+        let result = self
+            .get_into_ranges_internal(buffers, keys, dst_offsets, src_offsets, sizes, None)
+            .await;
+        if let Ok(results) = &result
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Read,
+                "get_into_ranges",
+                successful_range_bytes(results),
+                started_at.elapsed(),
+            );
+        }
+        result
     }
 
     /// Same as [`get_into_ranges`](Self::get_into_ranges), but reuses cached
     /// query results produced by [`batch_get_query_results`](Self::batch_get_query_results).
     ///
     /// C++ equivalent: `RealClient::get_into_ranges(..., QueryResultCache*)`.
-    pub async unsafe fn get_into_ranges_with_query_cache(
+    pub async fn get_into_ranges_with_query_cache(
         &mut self,
         buffers: &[*mut c_void],
         keys: &[Vec<String>],
@@ -62,15 +166,28 @@ impl MooncakeClient {
         sizes: &[Vec<Vec<usize>>],
         query_result_cache: &HashMap<String, CachedQueryResultResponse>,
     ) -> StoreResult<Vec<Vec<Vec<i64>>>> {
-        self.get_into_ranges_internal(
-            buffers,
-            keys,
-            dst_offsets,
-            src_offsets,
-            sizes,
-            Some(query_result_cache),
-        )
-        .await
+        let started_at = std::time::Instant::now();
+        let result = self
+            .get_into_ranges_internal(
+                buffers,
+                keys,
+                dst_offsets,
+                src_offsets,
+                sizes,
+                Some(query_result_cache),
+            )
+            .await;
+        if let Ok(results) = &result
+            && let Some(metrics) = &self.metrics
+        {
+            metrics.observe_operation(
+                super::metrics::TransferOperationKind::Read,
+                "get_into_ranges",
+                successful_range_bytes(results),
+                started_at.elapsed(),
+            );
+        }
+        result
     }
 
     async fn get_into_ranges_internal(
@@ -185,72 +302,161 @@ impl MooncakeClient {
                     continue;
                 }
 
+                if replica.replica_type == mooncake_store_core::ReplicaType::Disk {
+                    let Some(storage) = self.global_disk.as_ref() else {
+                        buf_results.push(range_results);
+                        continue;
+                    };
+                    for (range_idx, region, _) in &valid_ranges {
+                        let source_offset = src_offsets[buf_idx][key_idx][*range_idx] as u64;
+                        let size = sizes[buf_idx][key_idx][*range_idx];
+                        if let Ok(data) = storage
+                            .read_range(
+                                replica.segment_name.clone(),
+                                replica.size,
+                                source_offset,
+                                size,
+                            )
+                            .await
+                        {
+                            if self
+                                .accelerator
+                                .copy_from_host(region.foreign_region(), &data)
+                                .is_ok()
+                            {
+                                range_results[*range_idx] = size as i64;
+                            }
+                        }
+                    }
+                    buf_results.push(range_results);
+                    continue;
+                }
+
+                let staging_lease = if staging_offset != 0 {
+                    self.local_buffer.wait_until_available().await;
+                    Some(self.local_buffer.lease()?)
+                } else {
+                    None
+                };
+
                 // Open the target segment on the TransferEngine.
                 // 在 TransferEngine 上打开目标 segment。
                 let seg = self.engine.open_segment(&replica.segment_name)?;
 
-                // Allocate a batch_id for this key's range group.
-                // 为此 key 的范围组分配 batch_id。
-                let batch_id = match self.engine.allocate_batch_id(valid_ranges.len()) {
-                    Ok(id) => id,
-                    Err(e) => {
-                        let _ = self.engine.close_segment(seg);
-                        return Err(e.into());
-                    }
-                };
-
                 // Build TransferRequests: one per range, all in the same batch.
                 // 构建传输请求：每个范围一个，全部在同一批次中。
-                let reqs: Vec<TransferRequest> = valid_ranges
-                    .iter()
-                    .map(|&(ri, region, range_staging_offset)| {
-                        let sz = sizes[buf_idx][key_idx][ri];
-                        TransferRequest {
-                            opcode: Opcode::Read,
-                            source: range_staging_offset.map_or_else(
-                                || region.as_mut_ptr(),
-                                |offset| self.local_buffer[offset..].as_mut_ptr().cast(),
-                            ),
-                            target_id: seg,
-                            target_offset: replica.base_addr
-                                + replica.offset
-                                + src_offsets[buf_idx][key_idx][ri] as u64,
-                            length: sz as u64,
+                let mut request_lengths = Vec::with_capacity(valid_ranges.len());
+                let reqs = self.close_segment_on_prepare_error(
+                    seg,
+                    (|| -> StoreResult<_> {
+                        let mut reqs = Vec::with_capacity(valid_ranges.len());
+                        for (ri, region, range_staging_offset) in &valid_ranges {
+                            let sz = sizes[buf_idx][key_idx][*ri];
+                            let local = match *range_staging_offset {
+                                Some(offset) => self.local_buffer.writable_region(
+                                    staging_lease
+                                        .as_ref()
+                                        .expect("device range has a staging lease"),
+                                    offset,
+                                    sz,
+                                )?,
+                                None => region.registered_region(),
+                            };
+                            reqs.push(RegisteredTransferRequest::read(
+                                local,
+                                seg,
+                                Self::checked_replica_target_offset(
+                                    replica,
+                                    src_offsets[buf_idx][key_idx][*ri],
+                                )?,
+                                sz,
+                            )?);
+                            request_lengths.push(sz as u64);
                         }
-                    })
-                    .collect();
+                        Ok(reqs)
+                    })(),
+                )?;
 
-                if let Err(e) = self.engine.submit_transfer(batch_id, &reqs) {
-                    let _ = self.engine.free_batch_id(batch_id);
-                    let _ = self.engine.close_segment(seg);
-                    return Err(e.into());
-                }
-
-                let statuses = match self
-                    .wait_for_transfer_batch_terminal(
-                        batch_id,
-                        valid_ranges.len(),
-                        tokio::time::Duration::from_secs(10),
-                    )
-                    .await
-                {
-                    Ok(statuses) => statuses,
-                    Err(e) => {
-                        let _ = self.engine.free_batch_id(batch_id);
+                let outcome = match self.engine.submit_transfer(reqs) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
                         let _ = self.engine.close_segment(seg);
-                        return Err(e);
+                        return Err(error.into());
                     }
                 };
-                for (status, &(range_idx, region, range_staging_offset)) in
-                    statuses.iter().zip(valid_ranges.iter())
+                let batch = match outcome {
+                    RegisteredSubmitOutcome::Submitted(batch) => batch,
+                    RegisteredSubmitOutcome::NativeRejected { error, batch } => {
+                        let _completion = self
+                            .release_failed_submission_owned(
+                                batch,
+                                seg,
+                                std::time::Duration::from_secs(10),
+                                (valid_ranges, staging_lease, request_lengths),
+                            )
+                            .await?;
+                        return Err(error.into());
+                    }
+                };
+
+                let completion = self
+                    .wait_for_transfer_batch_terminal_owned(
+                        batch,
+                        seg,
+                        std::time::Duration::from_secs(10),
+                        (valid_ranges, staging_lease, request_lengths),
+                    )
+                    .await?;
+                let statuses = completion.statuses;
+                let (valid_ranges, staging_lease, request_lengths) = completion.payload;
+                let completed_bytes = statuses
+                    .iter()
+                    .zip(request_lengths.iter())
+                    .filter(|(status, request_length)| {
+                        status.status == TransferStatusEnum::Completed
+                            && status.transferred_bytes == **request_length
+                    })
+                    .fold(0_u64, |total, (status, _)| {
+                        total.saturating_add(status.transferred_bytes)
+                    });
+                for ((status, (range_idx, region, range_staging_offset)), request_length) in
+                    statuses
+                        .iter()
+                        .zip(valid_ranges.iter())
+                        .zip(request_lengths.iter())
                 {
-                    range_results[range_idx] = if status.status == TransferStatusEnum::Completed {
-                        if let Some(offset) = range_staging_offset {
-                            let transferred = status.transferred_bytes as usize;
+                    range_results[*range_idx] = if status.status == TransferStatusEnum::Completed
+                        && status.transferred_bytes == *request_length
+                    {
+                        if let Some(offset) = *range_staging_offset {
+                            let transferred =
+                                usize::try_from(status.transferred_bytes).map_err(|_| {
+                                    StoreError::Internal(
+                                        "range transfer byte count cannot fit usize".to_string(),
+                                    )
+                                })?;
+                            let end = offset.checked_add(transferred).ok_or_else(|| {
+                                StoreError::Internal(
+                                    "range staging result overflows usize".to_string(),
+                                )
+                            })?;
+                            if end > self.local_buffer.len() {
+                                return Err(StoreError::Internal(
+                                    "range transfer exceeded staging buffer".to_string(),
+                                ));
+                            }
                             crate::data_plane_ffi::scatter_host_to_device(
                                 self.accelerator.as_ref(),
                                 region.foreign_region(),
-                                &self.local_buffer[offset..offset + transferred],
+                                &self.local_buffer.copy_to_vec(
+                                    staging_lease.as_ref().ok_or_else(|| {
+                                        StoreError::Internal(
+                                            "device range lost its staging lease".to_string(),
+                                        )
+                                    })?,
+                                    offset,
+                                    transferred,
+                                )?,
                             )?;
                         }
                         status.transferred_bytes as i64
@@ -258,8 +464,13 @@ impl MooncakeClient {
                         -1
                     };
                 }
-                self.engine.free_batch_id(batch_id)?;
-                self.engine.close_segment(seg)?;
+                if let Some(metrics) = &self.metrics {
+                    metrics.observe_transfer_bytes(
+                        super::metrics::TransferOperationKind::Read,
+                        completed_bytes,
+                    );
+                }
+                drop(staging_lease);
                 buf_results.push(range_results);
             }
             results.push(buf_results);

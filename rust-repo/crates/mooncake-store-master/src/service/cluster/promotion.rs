@@ -14,11 +14,22 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        let storage_id = self
+            .state
+            .local_disk_client_sessions
+            .get(&client_id)
+            .map(|entry| *entry)
+            .ok_or(Status::not_found("local disk session not found"))?;
         let mut entry = self
             .state
             .local_disk_segments
-            .get_mut(&client_id)
+            .get_mut(&storage_id)
             .ok_or(Status::not_found("local disk segment not found"))?;
+        if entry.active_client_id != Some(client_id) || !entry.recovery_complete {
+            return Err(Status::failed_precondition(
+                "local disk inventory recovery is not complete",
+            ));
+        }
         let mut objects = HashMap::new();
         let mut tasks = Vec::new();
         while tasks.len() < self.state.runtime_config.promotion_max_per_heartbeat {
@@ -61,6 +72,7 @@ impl MasterServiceImpl {
         let req = request.into_inner();
         let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -76,13 +88,30 @@ impl MasterServiceImpl {
                 "promotion task assigned to different client",
             ));
         }
+        if self
+            .state
+            .local_disk_client_sessions
+            .get(&client_id)
+            .is_none_or(|storage_id| *storage_id != task.storage_id)
+        {
+            return Err(Status::permission_denied(
+                "promotion task belongs to a stale LocalDisk session",
+            ));
+        }
         if task.object_size != req.size {
             return Err(Status::invalid_argument("size mismatch"));
+        }
+        if task.staged_segment_id.is_some() || task.reserved_quota_charge_bytes != 0 {
+            return Err(Status::failed_precondition(
+                "promotion buffer already allocated",
+            ));
         }
         let object_exists = self.state.objects.contains_key(&scoped_key);
         if !object_exists {
             return Err(Status::not_found("key not found"));
         }
+        let reserved_quota_charge = req.size;
+        self.reserve_tenant_quota(&tenant_id, reserved_quota_charge)?;
 
         let mut config = ReplicateConfig::default();
         if let Some(preferred) = req.preferred_segments.first() {
@@ -98,18 +127,35 @@ impl MasterServiceImpl {
             &config,
         );
         let Some(mut staged) = replicas.into_iter().next() else {
+            self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
             return Err(Status::resource_exhausted("no available memory segment"));
         };
         sync_segment_usage(&self.state, [staged.segment_id]);
         let staged_segment_id = staged.segment_id;
         let staged_offset = staged.offset;
         staged.status = ReplicaStatus::Allocating;
-        if let Some(mut object) = self.state.objects.get_mut(&scoped_key) {
-            object.replicas.push(staged.clone());
-        }
+        let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
+            release_replicas(&self.state, std::slice::from_ref(&staged))?;
+            self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
+            self.state.fence_after_invariant_failure(
+                "promotion_alloc_start_object",
+                &format!("key={scoped_key:?} disappeared under its mutation guard"),
+            );
+            return Err(Status::internal(
+                "promotion object disappeared during allocation",
+            ));
+        };
+        object.replicas.push(staged.clone());
+        drop(object);
         task.staged_segment_id = Some(staged_segment_id);
         task.staged_offset = Some(staged_offset);
+        task.reserved_quota_charge_bytes = reserved_quota_charge;
         task.start_time = std::time::Instant::now();
+        drop(task);
+        // The promotion task itself is transient, but the writable descriptor
+        // is not: once returned, a failed-over leader must keep its range
+        // reserved until orphan cleanup durably retires it.
+        self.persist_object_image_or_remove(&scoped_key, "promotion_alloc_start")?;
         Ok(Response::new(proto::PromotionAllocStartResponse {
             memory_descriptor: Some(replica_to_proto(&staged)),
         }))
@@ -131,6 +177,7 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -163,6 +210,12 @@ impl MasterServiceImpl {
             .objects
             .get_mut(&scoped_key)
             .ok_or(Status::not_found("key not found"))?;
+        let known_committed_charge =
+            if object.committed_quota_charge_bytes == 0 && object.quota_committed {
+                completed_memory_quota_charge(&object)
+            } else {
+                object.committed_quota_charge_bytes
+            };
         if let Some(replica) = object.replicas.iter_mut().find(|replica| {
             replica.replica_type == ReplicaType::Memory
                 && replica.segment_id == segment_id
@@ -172,15 +225,37 @@ impl MasterServiceImpl {
             replica.status = ReplicaStatus::Complete;
             committed = true;
         }
+        if committed {
+            if let Err(error) = settle_additional_memory_quota_charge(
+                &self.state,
+                &mut object,
+                known_committed_charge,
+                task.reserved_quota_charge_bytes,
+                task.object_size,
+                known_committed_charge == 0,
+            ) {
+                if let Some(replica) = object.replicas.iter_mut().find(|replica| {
+                    replica.replica_type == ReplicaType::Memory
+                        && replica.segment_id == segment_id
+                        && replica.offset == offset
+                }) {
+                    replica.status = ReplicaStatus::Allocating;
+                }
+                return Err(self.tenant_quota_mutation_status("promotion_success_quota", error));
+            }
+        } else {
+            self.abort_tenant_quota(&tenant_id, task.reserved_quota_charge_bytes)?;
+        }
         sync_cache_total_accounting(&mut object);
         drop(object);
         clear_promotion_task(&self.state, &scoped_key);
-        if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&client_id) {
+        if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&task.storage_id) {
             local_disk.promotion_objects.remove(&scoped_key);
         }
         if !committed {
             return Err(Status::failed_precondition("promotion replica not ready"));
         }
+        self.persist_object_image_or_remove(&scoped_key, "promotion_success")?;
         Ok(Response::new(proto::NotifyPromotionSuccessResponse {}))
     }
 
@@ -200,6 +275,7 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -218,13 +294,33 @@ impl MasterServiceImpl {
                 "promotion task assigned to different client",
             ));
         }
-        if let (Some(segment_id), Some(offset)) = (task.staged_segment_id, task.staged_offset) {
-            release_staged_promotion_replica(&self.state, &scoped_key, segment_id, offset);
+        if self
+            .state
+            .local_disk_client_sessions
+            .get(&client_id)
+            .is_none_or(|storage_id| *storage_id != task.storage_id)
+        {
+            return Err(Status::permission_denied(
+                "promotion task belongs to a stale LocalDisk session",
+            ));
+        }
+        self.abort_tenant_quota(&tenant_id, task.reserved_quota_charge_bytes)?;
+        if self.state.service_fenced.load(Ordering::Acquire) {
+            return Err(Status::unavailable(
+                "tenant quota invariant failed while revoking promotion",
+            ));
         }
         clear_promotion_task(&self.state, &scoped_key);
-        if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&client_id) {
+        let removed = match (task.staged_segment_id, task.staged_offset) {
+            (Some(segment_id), Some(offset)) => {
+                detach_staged_promotion_replica(&self.state, &scoped_key, segment_id, offset)
+            }
+            _ => Vec::new(),
+        };
+        if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&task.storage_id) {
             local_disk.promotion_objects.remove(&scoped_key);
         }
+        self.persist_detached_allocator_replicas(&scoped_key, removed, "promotion_failure")?;
         Ok(Response::new(proto::NotifyPromotionFailureResponse {}))
     }
 }

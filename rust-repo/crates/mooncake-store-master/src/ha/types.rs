@@ -98,6 +98,38 @@ impl HABackendType {
             Self::K8s => "k8s",
         }
     }
+
+    /// Capabilities implemented by the Rust HA runtime for this backend.
+    pub const fn capabilities(self) -> HABackendCapabilities {
+        match self {
+            Self::Etcd => HABackendCapabilities {
+                discovery: true,
+                leader_election: true,
+                shared_oplog: true,
+            },
+            Self::Redis | Self::K8s => HABackendCapabilities {
+                discovery: true,
+                leader_election: true,
+                shared_oplog: false,
+            },
+            Self::Unknown => HABackendCapabilities {
+                discovery: false,
+                leader_election: false,
+                shared_oplog: false,
+            },
+        }
+    }
+}
+
+/// Production HA requires all three capabilities from one coherently
+/// configured backend. Redis and Kubernetes currently implement discovery and
+/// election, but do not provide the shared ordered oplog required for standby
+/// replay and safe promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HABackendCapabilities {
+    pub discovery: bool,
+    pub leader_election: bool,
+    pub shared_oplog: bool,
 }
 
 /// Parse a backend type string from configuration. / 从配置字符串解析后端类型。

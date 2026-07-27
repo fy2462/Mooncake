@@ -19,8 +19,10 @@
 // 非 Send 的 future（跨 await 点捕获裸指针）。待 trait 重构后再添加。
 
 use super::to_py_err;
-use crate::client::PythonMooncakeClient;
-use mooncake_store_client::{EngramStore, EngramStoreConfig, MooncakeClient};
+use crate::client::{PythonBufferRegistration, PythonMooncakeClient, try_client_slot};
+use mooncake_store_client::{
+    ClientBackgroundConfig, EngramStore, EngramStoreConfig, MooncakeClient,
+};
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -106,9 +108,9 @@ impl EngramStoreConfigPy {
 ///   1. Create a PythonMooncakeClient (connected)
 ///   2. Create an EngramStorePy from config + client
 ///      -> Transfers MooncakeClient ownership INTO EngramStore
-///      -> Source client's registered_py_buffers is cleared (client consumed)
+///      -> Transfers registered Python buffer identities with the client
 ///      -> 将 MooncakeClient 的所有权转移到 EngramStore 内部
-///      -> 源 client 的 registered_py_buffers 被清除（client 已消费）
+///      -> 已注册 Python buffer 的 identity 随 client 一起转移
 ///   3. Use EngramStore... (currently only accessors exposed)
 ///   4. Call into_inner() to extract MooncakeClient back (EngramStore consumed)
 ///      -> 调用 into_inner() 取出 MooncakeClient（EngramStore 被消费）
@@ -119,6 +121,9 @@ impl EngramStoreConfigPy {
 #[pyclass(name = "EngramStore")]
 pub(crate) struct EngramStorePy {
     inner: Arc<Mutex<Option<EngramStore<MooncakeClient>>>>,
+    /// Python lookup identities; the real foreign-memory owners already live
+    /// in FFI registration handles inside the MooncakeClient.
+    registered_py_buffers: Arc<Mutex<Vec<PythonBufferRegistration>>>,
     /// Number of embedding table shards (heads). 嵌入表分片数。
     num_heads: usize,
     /// Dimensionality of each embedding vector. 嵌入向量维度。
@@ -133,10 +138,10 @@ impl EngramStorePy {
     ///
     /// 创建新的 EngramStore，消费 MooncakeClient。
     /// After this call, the Python MooncakeClient object is marked as "consumed"
-    /// (its inner is None and buffers are cleared).  You can recover the client
-    /// later via into_inner().
+    /// (its inner is None and registered buffer identities move into this
+    /// object). You can recover both later via into_inner().
     /// 调用后，Python MooncakeClient 对象被标记为"已消费"（inner 为 None，
-    /// buffers 被清除）。之后可通过 into_inner() 恢复客户端。
+    /// 已注册 buffer identity 被移入本对象）。之后可通过 into_inner() 恢复。
     #[staticmethod]
     #[pyo3(signature = (layer_id, config, client))]
     fn new(
@@ -147,12 +152,22 @@ impl EngramStorePy {
         let cfg = config.borrow().to_core();
         // Take the MooncakeClient out of its Python wrapper.
         // 从 Python 封装中取出 MooncakeClient。
-        let inner_client = {
+        let (inner_client, registered_py_buffers) = {
             let client_ref = client.borrow();
-            let mut guard = client_ref.inner.lock();
-            guard
+            let mut background = client_ref
+                .background
+                .try_lock()
+                .map_err(|_| to_py_err("MooncakeClient background lifecycle is busy"))?;
+            if let Some(handle) = background.take() {
+                handle.request_shutdown();
+            }
+            let mut inner = try_client_slot(&client_ref.inner)?;
+            let inner_client = inner
                 .take()
-                .ok_or_else(|| to_py_err("MooncakeClient already closed or consumed"))?
+                .ok_or_else(|| to_py_err("MooncakeClient already closed or consumed"))?;
+            let registered_py_buffers =
+                std::mem::take(&mut *client_ref.registered_py_buffers.lock());
+            (inner_client, registered_py_buffers)
         };
         let num_heads = cfg.table_vocab_sizes.len();
         let embedding_dim = cfg.embedding_dim;
@@ -160,12 +175,9 @@ impl EngramStorePy {
         let store = EngramStore::new(layer_id, cfg, inner_client).map_err(to_py_err)?;
         let embed_keys = store.get_store_keys().to_vec();
 
-        // Mark the source client as consumed — no more ops through it.
-        // 标记源客户端已消费 —— 不能再通过它操作。
-        client.borrow().registered_py_buffers.lock().clear();
-
         Ok(Self {
             inner: Arc::new(Mutex::new(Some(store))),
+            registered_py_buffers: Arc::new(Mutex::new(registered_py_buffers)),
             num_heads,
             embedding_dim,
             embed_keys,
@@ -184,9 +196,16 @@ impl EngramStorePy {
             .take()
             .ok_or_else(|| to_py_err("EngramStore already closed"))?;
         let client = store.into_inner();
+        let registered_py_buffers = std::mem::take(&mut *self.registered_py_buffers.lock());
+        let inner = Arc::new(tokio::sync::Mutex::new(Some(client)));
+        let background_handle = MooncakeClient::start_background_workers(
+            Arc::clone(&inner),
+            ClientBackgroundConfig::default(),
+        );
         Ok(PythonMooncakeClient {
-            inner: Arc::new(Mutex::new(Some(client))),
-            registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+            inner,
+            background: Arc::new(tokio::sync::Mutex::new(Some(background_handle))),
+            registered_py_buffers: Arc::new(Mutex::new(registered_py_buffers)),
         })
     }
 

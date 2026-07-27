@@ -26,6 +26,9 @@ class AsyncStore:
         for key in keys:
             self.objects.pop(key, None)
 
+    async def close(self) -> None:
+        await asyncio.sleep(0)
+
 
 class ByteArrayPool:
     def __init__(self) -> None:

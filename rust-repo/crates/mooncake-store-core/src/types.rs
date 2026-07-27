@@ -13,6 +13,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,69 @@ pub struct Segment {
     /// Transport protocol identifier (e.g. "rdma", "tcp").
     /// 传输协议标识符（例如 "rdma"、"tcp"）。
     pub protocol: String,
+    /// Stable physical-host identity used for same-node placement.
+    ///
+    /// This is intentionally separate from `name` and `te_endpoint`: both may
+    /// contain ports, aliases, or transport-only addresses. Older Rust
+    /// snapshots omit the field and restore it as empty.
+    #[serde(default)]
+    pub host_id: String,
+}
+
+/// Stable identity for one client-owned Memory segment mount request.
+///
+/// The identity is shared by Client cleanup, Master publication, and HA replay
+/// so an ambiguous RPC response cannot create an unaddressable duplicate.
+pub fn stable_memory_segment_id(
+    client_id: Uuid,
+    segment_name: &str,
+    base: u64,
+    size: u64,
+    te_endpoint: &str,
+    protocol: &str,
+    host_id: &str,
+) -> Uuid {
+    let mut digest = Sha256::new();
+    digest.update(b"mooncake-rust-memory-segment-v1");
+    digest.update(client_id.as_bytes());
+    digest.update(base.to_le_bytes());
+    digest.update(size.to_le_bytes());
+    for value in [segment_name, te_endpoint, protocol, host_id] {
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    let hash = digest.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hash[..16]);
+    // Mark the opaque deterministic namespace key as a name-based UUID.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+/// Resolve the stable host identity used by the C++ Store.
+///
+/// Ordinary `host:port` endpoints lose their port, raw IPv6 literals remain
+/// intact, and loopback/wildcard endpoints return an empty identity because
+/// they cannot identify a physical node across the cluster.
+pub fn resolve_host_id(local_hostname: &str) -> String {
+    let trimmed = local_hostname.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let host = if let Some(rest) = trimmed.strip_prefix('[') {
+        rest.find(']').map(|end| &rest[..end]).unwrap_or(trimmed)
+    } else if trimmed == "::1" || trimmed == "::" || trimmed.matches(':').count() > 1 {
+        trimmed
+    } else {
+        trimmed.split(':').next().unwrap_or(trimmed).trim()
+    };
+
+    match host.to_ascii_lowercase().as_str() {
+        "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "[::1]" | "::" | "[::]" => String::new(),
+        _ => host.to_string(),
+    }
 }
 
 /// A segment backed by NoF (NVMe-over-Fabric) instead of regular memory/disk.
@@ -327,6 +391,19 @@ pub struct ReplicaDescriptor {
     /// The client that currently holds (owns) this replica, if any.
     /// 当前持有（拥有）此 replica 的客户端（如果有）。
     pub holder_client_id: Option<Uuid>,
+    /// Durable identity of the LocalDisk storage namespace.
+    ///
+    /// This is independent from `holder_client_id`, which identifies the
+    /// currently active process. It is `None` for non-LocalDisk replicas and
+    /// legacy snapshots that predate restart-safe LocalDisk ownership.
+    #[serde(default)]
+    pub local_disk_storage_id: Option<Uuid>,
+    /// Identity of the exact durable LocalDisk record generation.
+    ///
+    /// Unlike the namespace storage ID, this changes for every admitted
+    /// overwrite and prevents an older same-size record from reattaching.
+    #[serde(default)]
+    pub local_disk_generation_id: Option<Uuid>,
     /// Reference count — tracks in-flight operations (copy/move/promotion).
     /// Eviction and release MUST check `is_busy()` before freeing.
     /// 引用计数——跟踪正在进行的操作（copy/move/promotion）。
@@ -383,6 +460,8 @@ impl Clone for ReplicaDescriptor {
             status: self.status,
             replica_type: self.replica_type,
             holder_client_id: self.holder_client_id,
+            local_disk_storage_id: self.local_disk_storage_id,
+            local_disk_generation_id: self.local_disk_generation_id,
             refcnt: 0,
             handle_valid: self.handle_valid,
             base_addr: self.base_addr,
@@ -415,6 +494,23 @@ impl ReplicaDescriptor {
     pub fn dec_refcnt(&mut self) {
         self.refcnt = self.refcnt.saturating_sub(1);
     }
+}
+
+/// Deterministic generation used only while importing a pre-generation
+/// LocalDisk record/snapshot. Every newly admitted offload uses a random
+/// Master-issued generation instead.
+pub fn legacy_local_disk_generation_id(storage_id: Uuid, scoped_key: &str) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mooncake-localdisk-legacy-generation-v1\0");
+    hasher.update(storage_id.as_bytes());
+    hasher.update(scoped_key.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // Mark the deterministic value as an RFC 4122 variant, version 8 UUID.
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +553,13 @@ pub struct ReplicateConfig {
     /// Semantic data type — affects placement heuristics.
     /// 语义数据类型——影响放置启发式算法。
     pub data_type: ObjectDataType,
+    /// Stable writer host identity for LocalFirst placement.
+    ///
+    /// A normal Store client overwrites this with its own resolved host id,
+    /// matching C++ `Client::AttachHostId`. RPC-only callers may set it
+    /// explicitly.
+    #[serde(default)]
+    pub host_id: String,
     /// Optional group id per key. Grouped objects share lease refresh semantics.
     /// 每个 key 可选的 group id。分组对象共享租约刷新语义。
     pub group_ids: Vec<String>,
@@ -499,6 +602,7 @@ impl Default for ReplicateConfig {
             preferred_nof_segments: vec![],
             prefer_alloc_in_same_node: false,
             data_type: ObjectDataType::Unknown,
+            host_id: String::new(),
             group_ids: vec![],
         }
     }

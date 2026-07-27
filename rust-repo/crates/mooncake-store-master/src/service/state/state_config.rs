@@ -20,6 +20,12 @@ pub struct MasterRuntimeConfig {
     /// 段内内存分配器：Offset（简单连续分配）或 CachelibLike（slab + class 分配）。
     /// Memory allocator within segment: Offset (simple sequential) or CachelibLike (slab + class).
     pub memory_allocator_kind: MemoryAllocatorKind,
+    /// Enable the single shared CXL allocator and CXL-only segment aliases.
+    pub enable_cxl: bool,
+    /// DAX device identity used by CXL clients and deployment validation.
+    pub cxl_path: String,
+    /// Capacity of the single shared CXL allocator.
+    pub cxl_size: u64,
     /// 是否开启 promotion-on-hit：读磁盘副本时自动将热点对象提升到内存。
     /// Whether promotion-on-hit is enabled: auto-promote hot objects from disk to memory on read.
     pub promotion_on_hit: bool,
@@ -44,6 +50,10 @@ pub struct MasterRuntimeConfig {
     /// 每次淘汰尝试释放的内存比例（0.0 ~ 1.0）。
     /// Fraction of memory to free per eviction cycle (0.0 ~ 1.0).
     pub eviction_ratio: f64,
+    /// NoF usage high watermark, independent from Memory pressure.
+    pub nof_eviction_high_watermark_ratio: f64,
+    /// Target object fraction for each NoF eviction cycle.
+    pub nof_eviction_ratio: f64,
     /// 软锁定（soft pin）对象的租约时长，过期后软锁定失效但仍优先保留。
     /// Soft-pin TTL: after expiry the soft pin is released but the object is still preferred.
     pub soft_pin_ttl: Duration,
@@ -59,8 +69,12 @@ pub struct MasterRuntimeConfig {
     /// 淘汰时是否触发 offload（将内存副本写入本地磁盘）。
     /// Whether to trigger offload (write memory replicas to local disk) on eviction.
     pub offload_on_evict: bool,
-    /// 淘汰时是否强制驱逐（即使有 soft_pin 也驱逐）。
-    /// Whether to force eviction even for soft-pinned objects.
+    /// Whether a second eviction pass may select objects whose soft pin is
+    /// still active. This is independent from forcing eviction when offload
+    /// admission fails or reaches its cap.
+    pub allow_evict_soft_pinned_objects: bool,
+    /// offload 无法入队时是否强制驱逐 Memory 副本。
+    /// Whether to force Memory eviction when offload cannot be queued.
     pub offload_force_evict: bool,
     /// Maximum pending offload objects per local disk segment.
     pub offloading_queue_limit: usize,
@@ -135,19 +149,25 @@ impl Default for MasterRuntimeConfig {
             put_start_release_timeout: Duration::from_secs(600),
             allocation_strategy: AllocationStrategy::Random,
             memory_allocator_kind: MemoryAllocatorKind::Offset,
-            promotion_on_hit: true,
-            promotion_admission_threshold: 1,
-            promotion_queue_limit: 1024,
+            enable_cxl: false,
+            cxl_path: "/dev/dax0.0".to_string(),
+            cxl_size: 8 * 1024 * 1024 * 1024,
+            promotion_on_hit: false,
+            promotion_admission_threshold: 2,
+            promotion_queue_limit: 50_000,
             promotion_max_per_heartbeat: 1,
             reaper_interval: Duration::from_millis(100),
             eviction_interval: Duration::from_millis(100),
             eviction_high_watermark_ratio: 0.95,
             eviction_ratio: 0.05,
+            nof_eviction_high_watermark_ratio: 0.90,
+            nof_eviction_ratio: 0.05,
             soft_pin_ttl: Duration::from_secs(1800),
             lease_ttl: Duration::from_secs(3600),
             enable_offload: false,
             enable_nof: true,
             offload_on_evict: false,
+            allow_evict_soft_pinned_objects: true,
             offload_force_evict: false,
             offloading_queue_limit: 50_000,
             offload_cap_ratio: 0.5,

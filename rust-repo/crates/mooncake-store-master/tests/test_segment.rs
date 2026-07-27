@@ -17,6 +17,7 @@ fn make_test_seg(id: Uuid, name: &str, size: u64) -> Segment {
         base: 0,
         te_endpoint: String::new(),
         protocol: "tcp".into(),
+        host_id: String::new(),
     }
 }
 
@@ -132,6 +133,8 @@ fn test_replica_descriptor_full() {
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         protocol: "rdma".into(),
     };
 
@@ -155,6 +158,8 @@ fn test_replica_descriptor_clone() {
         status: ReplicaStatus::Allocating,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         protocol: "tcp".into(),
     };
     let cloned = rd.clone();
@@ -205,6 +210,8 @@ fn test_object_entry_creation() {
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
                 protocol: "rdma".into(),
             },
             ReplicaDescriptor {
@@ -218,6 +225,8 @@ fn test_object_entry_creation() {
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
                 protocol: "tcp".into(),
             },
         ],
@@ -233,6 +242,9 @@ fn test_object_entry_creation() {
         user_key: String::new(),
         group_id: String::new(),
         quota_committed: false,
+        reserved_quota_charge_bytes: 0,
+        committed_quota_charge_bytes: 0,
+        pending_replaced_quota_charge_bytes: 0,
         memory_cache_total_accounted: false,
         disk_cache_total_accounted: false,
     };

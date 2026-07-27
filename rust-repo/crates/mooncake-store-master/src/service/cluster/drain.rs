@@ -33,46 +33,110 @@ impl MasterServiceImpl {
                 "target_segments cannot include draining segments",
             ));
         }
-        // Validate that all source segments exist and are in ACTIVE state
-        // 校验所有源 segment 存在且处于 Active 状态
+        // Source/target validation and the transition to DRAINING must share
+        // one mutation epoch. Otherwise two concurrent CreateDrainJob calls
+        // can both observe ACTIVE and install overlapping jobs.
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
+        // Validate that every name resolves to exactly one source. Rust permits
+        // same-name segments with different UUIDs, while this legacy Drain API
+        // carries names only; ambiguity must fail closed.
+        let mut resolved_sources = Vec::with_capacity(req.segments.len());
         for seg_name in &req.segments {
-            let found =
-                self.state.segments.iter().any(|e| {
-                    e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
-                }) || self.state.nof_segments.iter().any(|e| {
-                    e.segment.name == *seg_name && e.status == proto::SegmentStatus::Active
-                });
-            if !found {
+            let memory = self
+                .state
+                .segments
+                .iter()
+                .filter(|entry| entry.segment.name == *seg_name)
+                .map(|entry| (entry.segment.id, false, entry.status))
+                .collect::<Vec<_>>();
+            let nof = self
+                .state
+                .nof_segments
+                .iter()
+                .filter(|entry| entry.segment.name == *seg_name)
+                .map(|entry| (entry.segment.id, true, entry.status))
+                .collect::<Vec<_>>();
+            if memory.len() + nof.len() != 1 {
                 return Err(Status::failed_precondition(format!(
-                    "segment not found or not active: {seg_name}"
+                    "source segment name must resolve to exactly one segment: {seg_name}"
                 )));
             }
+            let source = memory
+                .into_iter()
+                .chain(nof.into_iter())
+                .next()
+                .expect("exactly one source was validated");
+            if source.2 != proto::SegmentStatus::Active {
+                return Err(Status::failed_precondition(format!(
+                    "segment not active: {seg_name}"
+                )));
+            }
+            resolved_sources.push(DrainSourceSegment {
+                id: source.0,
+                replica_type: if source.1 {
+                    ReplicaType::NoFSsd
+                } else {
+                    ReplicaType::Memory
+                },
+                name: seg_name.clone(),
+            });
         }
         // Validate that all target segments exist
         // 校验所有目标 segment 存在且处于 Active 状态
         for tgt_name in &req.target_segments {
-            let found =
-                self.state.segments.iter().any(|e| {
-                    e.segment.name == *tgt_name && e.status == proto::SegmentStatus::Active
-                });
-            if !found {
+            let memory = self
+                .state
+                .segments
+                .iter()
+                .filter(|entry| entry.segment.name == *tgt_name)
+                .map(|entry| entry.status)
+                .collect::<Vec<_>>();
+            let nof_count = self
+                .state
+                .nof_segments
+                .iter()
+                .filter(|entry| entry.segment.name == *tgt_name)
+                .count();
+            if memory.len() != 1 || nof_count != 0 || memory[0] != proto::SegmentStatus::Active {
                 return Err(Status::failed_precondition(format!(
-                    "target segment not found or not active: {tgt_name}"
+                    "target segment name must resolve to one active Memory segment: {tgt_name}"
                 )));
             }
         }
+        let durable_statuses = resolved_sources
+            .iter()
+            .map(|source| {
+                (
+                    source.id,
+                    source.replica_type == ReplicaType::NoFSsd,
+                    proto::SegmentStatus::Draining as i32,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.state
+            .oplog_manager
+            .lock()
+            .record_segment_status_batch_durable(&durable_statuses)
+            .map_err(|error| {
+                Status::unavailable(format!(
+                    "failed to persist drain source transition: {error}"
+                ))
+            })?;
         // Transition source segments to DRAINING
         // 将源 segment 转为 Draining 状态
-        for seg_name in &req.segments {
-            for mut entry in self.state.segments.iter_mut() {
-                if entry.segment.name == *seg_name {
-                    entry.status = proto::SegmentStatus::Draining;
-                }
-            }
-            for mut entry in self.state.nof_segments.iter_mut() {
-                if entry.segment.name == *seg_name {
-                    entry.status = proto::SegmentStatus::Draining;
-                }
+        for source in &resolved_sources {
+            if source.replica_type == ReplicaType::NoFSsd {
+                self.state
+                    .nof_segments
+                    .get_mut(&source.id)
+                    .expect("validated NoF source disappeared inside mutation epoch")
+                    .status = proto::SegmentStatus::Draining;
+            } else {
+                self.state
+                    .segments
+                    .get_mut(&source.id)
+                    .expect("validated Memory source disappeared inside mutation epoch")
+                    .status = proto::SegmentStatus::Draining;
             }
         }
         let job_id = Uuid::new_v4();
@@ -83,11 +147,12 @@ impl MasterServiceImpl {
                 id: job_id,
                 status: proto::JobStatus::Created,
                 segments: req.segments.clone(),
+                source_segments: resolved_sources,
                 target_segments: req.target_segments.clone(),
                 max_concurrency: req.max_concurrency.max(1),
                 created_at: now,
                 last_updated_at: now,
-                message: String::new(),
+                message: "Drain job created".into(),
                 succeeded_units: 0,
                 failed_units: 0,
                 blocked_units: 0,
@@ -104,6 +169,11 @@ impl MasterServiceImpl {
             job.status = proto::JobStatus::Planning;
         }
         self.schedule_drain_job_tasks(job_id);
+        if self.is_service_fenced() {
+            return Err(Status::unavailable(
+                "master fenced while persisting drain task scheduling",
+            ));
+        }
         tracing::info!(
             "Drain job created: id={}, segments={:?}, targets={:?}",
             job_id,
@@ -173,6 +243,7 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing job_id"))?,
         );
+        let _global_mutation_guard = self.state.key_mutations.lock_snapshot();
         let mut job = self
             .state
             .drain_jobs
@@ -181,28 +252,77 @@ impl MasterServiceImpl {
         if job.status == proto::JobStatus::Succeeded
             || job.status == proto::JobStatus::Failed
             || job.status == proto::JobStatus::Canceled
+            || !job.active_tasks.is_empty()
         {
             return Err(Status::failed_precondition(
-                "drain job already in terminal state",
+                "drain job is terminal or still has active move tasks",
             ));
         }
+        for source in &job.source_segments {
+            let current = match source.replica_type {
+                ReplicaType::Memory => self
+                    .state
+                    .segments
+                    .get(&source.id)
+                    .map(|entry| (entry.segment.name.clone(), entry.status)),
+                ReplicaType::NoFSsd => self
+                    .state
+                    .nof_segments
+                    .get(&source.id)
+                    .map(|entry| (entry.segment.name.clone(), entry.status)),
+                _ => None,
+            };
+            let Some((name, status)) = current else {
+                return Err(Status::failed_precondition(format!(
+                    "drain source segment disappeared: {}",
+                    source.id
+                )));
+            };
+            if name != source.name || status != proto::SegmentStatus::Draining {
+                return Err(Status::failed_precondition(format!(
+                    "drain source identity or status changed: {}",
+                    source.id
+                )));
+            }
+        }
+        let durable_statuses = job
+            .source_segments
+            .iter()
+            .map(|source| {
+                (
+                    source.id,
+                    source.replica_type == ReplicaType::NoFSsd,
+                    proto::SegmentStatus::Active as i32,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.state
+            .oplog_manager
+            .lock()
+            .record_segment_status_batch_durable(&durable_statuses)
+            .map_err(|error| {
+                Status::unavailable(format!("failed to persist drain cancellation: {error}"))
+            })?;
         // Restore draining segments back to ACTIVE
         // 将 draining segment 恢复为 Active
-        for seg_name in &job.segments {
-            for mut entry in self.state.segments.iter_mut() {
-                if entry.segment.name == *seg_name {
-                    entry.status = proto::SegmentStatus::Active;
-                }
-            }
-            for mut entry in self.state.nof_segments.iter_mut() {
-                if entry.segment.name == *seg_name {
-                    entry.status = proto::SegmentStatus::Active;
-                }
+        for source in &job.source_segments {
+            if source.replica_type == ReplicaType::NoFSsd {
+                self.state
+                    .nof_segments
+                    .get_mut(&source.id)
+                    .expect("validated NoF source disappeared inside mutation epoch")
+                    .status = proto::SegmentStatus::Active;
+            } else {
+                self.state
+                    .segments
+                    .get_mut(&source.id)
+                    .expect("validated Memory source disappeared inside mutation epoch")
+                    .status = proto::SegmentStatus::Active;
             }
         }
         job.status = proto::JobStatus::Canceled;
         job.last_updated_at = SystemTime::now();
-        job.message = "job canceled".into();
+        job.message = "Drain job canceled".into();
         tracing::info!("Drain job canceled: id={}", job_id);
         Ok(Response::new(proto::CancelDrainJobResponse {}))
     }
@@ -224,10 +344,15 @@ impl MasterServiceImpl {
             job.target_segments.clone()
         };
         let max_concurrency = job.max_concurrency as usize;
+        let draining_segment_ids = job
+            .source_segments
+            .iter()
+            .map(|source| (source.id, source.replica_type))
+            .collect::<HashSet<_>>();
 
         // Find objects with replicas on draining segments
         // 查找在 draining segment 上有副本的对象
-        let mut units: Vec<(TenantId, String, String, String, u64)> = Vec::new();
+        let mut units: Vec<(TenantId, String, String, Uuid, ReplicaType, String, u64)> = Vec::new();
         let mut blocked_unit_keys = HashSet::new();
         for entry in self.state.objects.iter() {
             let scoped_key = entry.key().clone();
@@ -240,10 +365,11 @@ impl MasterServiceImpl {
                 || self.state.replication_tasks.contains_key(entry.key())
             {
                 for replica in &entry.replicas {
-                    if draining_segments.contains(&replica.segment_name) {
+                    if draining_segment_ids.contains(&(replica.segment_id, replica.replica_type)) {
                         blocked_unit_keys.insert(ActiveDrainTask::unit_key_for(
                             entry.key(),
-                            &replica.segment_name,
+                            replica.segment_id,
+                            replica.replica_type,
                         ));
                     }
                 }
@@ -251,14 +377,16 @@ impl MasterServiceImpl {
             }
             let mut seen_source_segments = HashSet::new();
             for replica in &entry.replicas {
-                if draining_segments.contains(&replica.segment_name)
+                if draining_segment_ids.contains(&(replica.segment_id, replica.replica_type))
                     && replica.status == ReplicaStatus::Complete
-                    && seen_source_segments.insert(replica.segment_name.clone())
+                    && seen_source_segments.insert((replica.segment_id, replica.replica_type))
                 {
                     units.push((
                         entry.tenant_id.clone(),
                         entry.user_key.clone(),
                         scoped_key.clone(),
+                        replica.segment_id,
+                        replica.replica_type,
                         replica.segment_name.clone(),
                         replica.size,
                     ));
@@ -266,11 +394,22 @@ impl MasterServiceImpl {
             }
         }
 
-        for (tenant_id, user_key, scoped_key, source_seg, bytes) in units {
+        let mut scheduled_task_ids = Vec::new();
+        for (
+            tenant_id,
+            user_key,
+            scoped_key,
+            source_segment_id,
+            source_replica_type,
+            source_seg,
+            bytes,
+        ) in units
+        {
             if job.active_tasks.len() >= max_concurrency {
                 break;
             }
-            let unit_key = ActiveDrainTask::unit_key_for(&scoped_key, &source_seg);
+            let unit_key =
+                ActiveDrainTask::unit_key_for(&scoped_key, source_segment_id, source_replica_type);
             if job.completed_unit_keys.contains(&unit_key)
                 || job.terminal_failed_unit_keys.contains(&unit_key)
             {
@@ -285,33 +424,57 @@ impl MasterServiceImpl {
                 blocked_unit_keys.insert(unit_key.clone());
                 continue;
             };
+            let Some(target_segment_id) = unique_active_memory_segment_id(&self.state, &target_seg)
+            else {
+                blocked_unit_keys.insert(unit_key.clone());
+                continue;
+            };
             drop(object);
             if !has_pending_task_capacity(&self.state) {
                 break;
             }
-            let unit_key = ActiveDrainTask::unit_key_for(&scoped_key, &source_seg);
-            let task_id = Uuid::new_v4();
+            let Some(assigned_client) = client_id_by_replica_segment_id(
+                &self.state,
+                source_segment_id,
+                source_replica_type,
+            ) else {
+                blocked_unit_keys.insert(unit_key);
+                continue;
+            };
+            let payload = match serde_json::to_string(&ReplicaMovePayload {
+                tenant_id: &tenant_id,
+                key: &user_key,
+                source: &source_seg,
+                target: &target_seg,
+            }) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        key = %scoped_key,
+                        source = %source_seg,
+                        target = %target_seg,
+                        "failed to serialize drain move task"
+                    );
+                    blocked_unit_keys.insert(unit_key);
+                    continue;
+                }
+            };
+            let task_id = unique_task_id(&self.state);
             job.active_tasks.insert(
                 task_id,
                 ActiveDrainTask {
+                    source_segment_id,
+                    source_replica_type,
                     source_segment: source_seg.clone(),
                     target_segment: target_seg.clone(),
+                    target_segment_id,
+                    target_replica_type: ReplicaType::Memory,
                     bytes,
                     unit_key: unit_key.clone(),
                 },
             );
-            let task = job.active_tasks.get(&task_id).unwrap();
-
-            // Create a move task for this drain unit.
-            let payload = serde_json::to_string(&ReplicaMovePayload {
-                tenant_id: &tenant_id,
-                key: &user_key,
-                source: &task.source_segment,
-                target: &task.target_segment,
-            })
-            .unwrap_or_default();
             let now = Utc::now();
-            let assigned = client_id_by_segment_name(&self.state, &task.source_segment);
             self.state.tasks.insert(
                 task_id,
                 TaskEntry {
@@ -321,26 +484,33 @@ impl MasterServiceImpl {
                         status: TaskStatus::Pending,
                         created_at: now,
                         last_updated_at: now,
-                        assigned_client: assigned,
-                        message: format!(
-                            "drain {} from {} to {}",
-                            scoped_key, task.source_segment, task.target_segment,
-                        ),
+                        assigned_client: Some(assigned_client),
+                        message: String::new(),
                     },
                     key: scoped_key.clone(),
                     payload,
                     max_retry_attempts: self.state.runtime_config.max_task_retry_attempts,
                 },
             );
+            scheduled_task_ids.push(task_id);
+        }
+        if !scheduled_task_ids.is_empty()
+            && self
+                .state
+                .persist_task_state_batch_or_fence(&scheduled_task_ids, &[], "drain_schedule_tasks")
+                .is_err()
+        {
+            return;
         }
         job.blocked_units = blocked_unit_keys.len() as u64;
 
-        job.status = if job.active_tasks.is_empty() {
-            proto::JobStatus::Succeeded
-        } else {
-            proto::JobStatus::Running
-        };
+        // Scheduling alone cannot prove completion: the source may still
+        // contain blocked replicas or replicas without an eligible target.
+        // The background completion pass is the single authority that checks
+        // the live object catalog before assigning a terminal job status.
+        job.status = proto::JobStatus::Running;
         job.last_updated_at = SystemTime::now();
+        job.message = "Drain job running".into();
     }
 
     // ---- GetFsdir ----

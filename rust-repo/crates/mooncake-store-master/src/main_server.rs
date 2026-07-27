@@ -10,21 +10,7 @@ pub(super) async fn run_standalone(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // --- Master gRPC service ---
     // 构建 Master gRPC 服务
-    let snapshot_backend_type = args.snapshot_backend_type.as_deref().and_then(|s| {
-        if s == "local-disk" {
-            Some(mooncake_store_master::storage_backend::StorageBackendType::LocalDisk)
-        } else if s == "hf3fs" {
-            Some(mooncake_store_master::storage_backend::StorageBackendType::Hf3fs)
-        } else if s == "distributed" {
-            Some(mooncake_store_master::storage_backend::StorageBackendType::Distributed)
-        } else {
-            None
-        }
-    });
-    let snapshot_dir = args
-        .snapshot_backup_dir
-        .clone()
-        .map(std::path::PathBuf::from);
+    let (snapshot_backend_type, snapshot_dir) = parse_snapshot_config(&args)?;
 
     let rpc_addr = SocketAddr::new(args.rpc_address.parse()?, args.rpc_port);
     let metadata_addr = SocketAddr::new(
@@ -34,12 +20,14 @@ pub(super) async fn run_standalone(
     let metadata_listener = bind_metadata_listener(metadata_addr).await?;
 
     let runtime_config = build_runtime_config(&args)?;
-    let service = MasterServiceImpl::new_with_runtime_config(
+    let service = MasterServiceImpl::try_new_with_runtime_config(
         snapshot_backend_type,
         snapshot_dir,
         runtime_config,
-    );
+    )?;
     let service_arc = std::sync::Arc::new(service);
+    let catalog_publisher =
+        preflight_snapshot_pipeline(&args, &resolve_cluster_id(&args), &service_arc)?;
     let metrics_addr = SocketAddr::new(args.rpc_address.parse()?, args.metrics_port);
     tokio::spawn(metrics::serve_metrics_http_with_admin(
         metrics_addr,
@@ -52,8 +40,15 @@ pub(super) async fn run_standalone(
 
     // 启动 HTTP metadata 服务
     let metadata_state = service_arc.metadata_state();
+    let metadata_service = service_arc.clone();
     tokio::spawn(async move {
-        if let Err(error) = serve_metadata_listener(metadata_listener, metadata_state).await {
+        if let Err(error) = serve_metadata_listener_with_service_gate(
+            metadata_listener,
+            metadata_state,
+            metadata_service,
+        )
+        .await
+        {
             error!("HTTP metadata server stopped: {error}");
         }
     });
@@ -62,8 +57,6 @@ pub(super) async fn run_standalone(
         let svc = service_arc.clone();
         let interval = args.snapshot_interval_seconds;
         let mut snapshot_shutdown_rx = shutdown_rx.clone();
-        let catalog_publisher =
-            build_catalog_snapshot_publisher(&args, &resolve_cluster_id(&args))?;
         let retention_count = args.snapshot_retention_count as usize;
         tokio::spawn(async move {
             loop {
@@ -86,6 +79,7 @@ pub(super) async fn run_standalone(
 
     info!("Mooncake Master starting on {}", rpc_addr);
     ensure_supported_rpc_protocol()?;
+    let shutdown_service = service_arc.clone();
     // 启动 gRPC server，阻塞直到服务停止
     tonic::transport::Server::builder()
         .add_service(
@@ -93,16 +87,10 @@ pub(super) async fn run_standalone(
                 service_arc,
             ),
         )
-        .serve_with_shutdown(rpc_addr, async move {
-            if *shutdown_rx.borrow() {
-                return;
-            }
-            while shutdown_rx.changed().await.is_ok() {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
-            }
-        })
+        .serve_with_shutdown(
+            rpc_addr,
+            wait_for_server_shutdown(shutdown_rx, shutdown_service),
+        )
         .await?;
 
     Ok(())
@@ -118,6 +106,7 @@ pub(super) async fn run_leader_server(
     args: &Args,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     leader_view: Option<MasterView>,
+    catalog_publisher: Option<CatalogBackedSnapshotProvider>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut background_tasks = Vec::new();
     let producer_view_version = leader_view
@@ -145,8 +134,15 @@ pub(super) async fn run_leader_server(
         .await;
 
     let metadata_state = service_arc.metadata_state();
+    let metadata_service = service_arc.clone();
     background_tasks.push(tokio::spawn(async move {
-        if let Err(error) = serve_metadata_listener(metadata_listener, metadata_state).await {
+        if let Err(error) = serve_metadata_listener_with_service_gate(
+            metadata_listener,
+            metadata_state,
+            metadata_service,
+        )
+        .await
+        {
             error!("HTTP metadata server stopped: {error}");
         }
     }));
@@ -155,20 +151,26 @@ pub(super) async fn run_leader_server(
         let svc = service_arc.clone();
         let interval = args.snapshot_interval_seconds;
         let mut snapshot_shutdown_rx = shutdown_rx.clone();
-        let catalog_publisher = build_catalog_snapshot_publisher(args, &resolve_cluster_id(args))?;
         let retention_count = args.snapshot_retention_count as usize;
         background_tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
-                        svc.save_snapshot();
-                        if let Some(ref publisher) = catalog_publisher {
-                            publish_catalog_snapshot(&svc, publisher, producer_view_version, retention_count);
-                        }
-                    }
+                    biased;
                     changed = snapshot_shutdown_rx.changed() => {
                         if changed.is_err() || *snapshot_shutdown_rx.borrow() {
                             break;
+                        }
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
+                        if !svc.is_service_available() {
+                            tracing::debug!(
+                                "Skipping scheduled HA snapshot because this master is not serving"
+                            );
+                            continue;
+                        }
+                        svc.save_snapshot();
+                        if let Some(ref publisher) = catalog_publisher {
+                            publish_catalog_snapshot(&svc, publisher, producer_view_version, retention_count);
                         }
                     }
                 }
@@ -180,6 +182,7 @@ pub(super) async fn run_leader_server(
     ensure_supported_rpc_protocol()?;
 
     let gate = service_arc.clone();
+    let shutdown_service = service_arc.clone();
     let master_service =
         mooncake_store_master::proto::master_service_server::MasterServiceServer::from_arc(
             service_arc,
@@ -197,15 +200,10 @@ pub(super) async fn run_leader_server(
     // C++ equivalent: LeadershipMonitor callback calls server.stop().
     let serve_future = tonic::transport::Server::builder()
         .add_service(master_service)
-        .serve_with_shutdown(rpc_addr, async move {
-            loop {
-                if shutdown_rx.changed().await.is_err() || *shutdown_rx.borrow() {
-                    info!("Shutdown signal received, stopping gRPC server");
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
+        .serve_with_shutdown(
+            rpc_addr,
+            wait_for_server_shutdown(shutdown_rx, shutdown_service),
+        );
 
     let result = serve_future.await;
     for task in background_tasks {
@@ -213,4 +211,55 @@ pub(super) async fn run_leader_server(
     }
     result?;
     Ok(())
+}
+
+async fn wait_for_server_shutdown(
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    service: Arc<MasterServiceImpl>,
+) {
+    loop {
+        if should_stop_server(*shutdown_rx.borrow(), service.is_service_fenced()) {
+            if service.is_service_fenced() {
+                service.set_service_available(false);
+                error!("Master durability fence raised, stopping gRPC server");
+            } else {
+                info!("Shutdown signal received, stopping gRPC server");
+            }
+            return;
+        }
+        tokio::select! {
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || should_stop_server(
+                    *shutdown_rx.borrow(),
+                    service.is_service_fenced(),
+                ) {
+                    if service.is_service_fenced() {
+                        service.set_service_available(false);
+                        error!("Master durability fence raised, stopping gRPC server");
+                    } else {
+                        info!("Shutdown signal received, stopping gRPC server");
+                    }
+                    return;
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+    }
+}
+
+fn should_stop_server(process_shutdown: bool, service_fenced: bool) -> bool {
+    process_shutdown || service_fenced
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_stop_server;
+
+    #[test]
+    fn server_shutdown_predicate_includes_irreversible_service_fence() {
+        assert!(!should_stop_server(false, false));
+        assert!(should_stop_server(true, false));
+        assert!(should_stop_server(false, true));
+        assert!(should_stop_server(true, true));
+    }
 }

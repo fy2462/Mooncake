@@ -51,17 +51,26 @@ impl MooncakeClient {
         keys: &[String],
         replica_type: i32,
         tenant_id: &str,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<Vec<i32>> {
         let request = proto::BatchEvictDiskReplicaRequest {
             client_id: Some(self.client_id_proto()),
             keys: keys.to_vec(),
             replica_type,
             tenant_id: tenant_id.to_string(),
         };
-        self.master
+        let response = self
+            .master
             .batch_evict_disk_replica(self.rpc_request(request))
             .await
-            .map_err(Self::rpc_status_to_error)?;
-        Ok(())
+            .map_err(Self::rpc_status_to_error)?
+            .into_inner();
+        if response.statuses.len() != keys.len() {
+            return Err(mooncake_store_core::StoreError::Internal(format!(
+                "BatchEvictDiskReplica returned {} statuses for {} keys",
+                response.statuses.len(),
+                keys.len()
+            )));
+        }
+        Ok(response.statuses)
     }
 }

@@ -1,37 +1,42 @@
 use super::{
-    OffsetAllocatorConfig, OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
+    AtomicWriteFailure, LocalStorageRecordMetadata, OffsetAllocatorConfig, OffsetEvictionPolicy,
+    OffsetPersistMode, OffsetPersistenceConfig, STORAGE_ID_FILE, write_file_atomically,
 };
 use fs2::FileExt;
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use uuid::Uuid;
 
-const RECORD_HEADER_SIZE: usize = 24;
+pub(super) const RECORD_HEADER_SIZE: usize = 24;
 const RECORD_HEADER_PREFIX_SIZE: usize = 20;
 const RECORD_FLAG_HAS_CRC: u32 = 1;
 const RECORD_KNOWN_FLAGS: u32 = RECORD_FLAG_HAS_CRC;
 const RECORD_VALUE_ALIGNMENT: u64 = 4096;
 const MAX_KEY_LEN: usize = 1024 * 1024;
 const OWNER_LOCK_FILE: &str = ".offset_allocator.lock";
+const CPP_OFFSET_DATA_FILE: &str = "kv_cache.data";
+const CPP_OFFSET_META_FILE: &str = "kv_cache.meta";
+const STORAGE_ID_TEMP_DIRECTORY: &str = ".mooncake-storage-id-tmp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RecordHeader {
-    key_len: u32,
-    value_len: u32,
-    write_seq: u64,
+pub(super) struct RecordHeader {
+    pub(super) key_len: u32,
+    pub(super) value_len: u32,
+    pub(super) write_seq: u64,
     flags: u32,
     crc32: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RecordFormatError(&'static str);
+pub(super) struct RecordFormatError(pub(super) &'static str);
 
 impl RecordHeader {
     fn encode_prefix(&self) -> [u8; RECORD_HEADER_PREFIX_SIZE] {
@@ -50,7 +55,7 @@ impl RecordHeader {
         encoded
     }
 
-    fn decode(encoded: &[u8]) -> Result<Self, RecordFormatError> {
+    pub(super) fn decode(encoded: &[u8]) -> Result<Self, RecordFormatError> {
         if encoded.len() < RECORD_HEADER_SIZE {
             return Err(RecordFormatError("truncated record header"));
         }
@@ -83,7 +88,7 @@ impl RecordHeader {
         Ok((RECORD_VALUE_ALIGNMENT - head % RECORD_VALUE_ALIGNMENT) % RECORD_VALUE_ALIGNMENT)
     }
 
-    fn value_offset(key_len: u64) -> Result<u64, RecordFormatError> {
+    pub(super) fn value_offset(key_len: u64) -> Result<u64, RecordFormatError> {
         let padding = Self::value_padding(key_len)?;
         (RECORD_HEADER_SIZE as u64)
             .checked_add(key_len)
@@ -91,7 +96,7 @@ impl RecordHeader {
             .ok_or(RecordFormatError("record size overflow"))
     }
 
-    fn record_size(key_len: u64, value_len: u64) -> Result<u64, RecordFormatError> {
+    pub(super) fn record_size(key_len: u64, value_len: u64) -> Result<u64, RecordFormatError> {
         if value_len > u32::MAX.into() {
             return Err(RecordFormatError("record value length exceeds u32"));
         }
@@ -104,7 +109,7 @@ impl RecordHeader {
         Ok(record_size)
     }
 
-    fn checked_record_size(&self) -> Result<u64, RecordFormatError> {
+    pub(super) fn checked_record_size(&self) -> Result<u64, RecordFormatError> {
         Self::record_size(self.key_len.into(), self.value_len.into())
     }
 
@@ -118,8 +123,7 @@ impl RecordHeader {
         Ok(())
     }
 
-    #[cfg(test)]
-    fn verify_crc(&self, key: &[u8], value: &[u8]) -> Result<(), RecordFormatError> {
+    pub(super) fn verify_crc(&self, key: &[u8], value: &[u8]) -> Result<(), RecordFormatError> {
         if key.len() != self.key_len as usize || value.len() != self.value_len as usize {
             return Err(RecordFormatError("record lengths do not match header"));
         }
@@ -129,6 +133,10 @@ impl RecordHeader {
             return Err(RecordFormatError("record CRC-32C mismatch"));
         }
         Ok(())
+    }
+
+    pub(super) fn has_crc(&self) -> bool {
+        self.flags & RECORD_FLAG_HAS_CRC != 0
     }
 }
 
@@ -176,6 +184,7 @@ enum OffsetEntryFormat {
     #[default]
     LegacyRaw,
     V3,
+    V4,
     #[serde(other)]
     Unknown,
 }
@@ -202,6 +211,9 @@ struct OffsetEntry {
     /// Expected on-disk record flags, authenticated by the checkpoint envelope.
     #[serde(default)]
     record_flags: u32,
+    /// Master-issued durable record generation. Absent in v1-v3 checkpoints.
+    #[serde(default)]
+    generation_id: Option<Uuid>,
 }
 
 impl OffsetEntry {
@@ -216,13 +228,14 @@ impl OffsetEntry {
             value_len: 0,
             write_seq: 0,
             record_flags: 0,
+            generation_id: None,
         }
     }
 
     fn value_len(&self) -> u64 {
         match self.format {
             OffsetEntryFormat::LegacyRaw => self.len,
-            OffsetEntryFormat::V3 => self.value_len,
+            OffsetEntryFormat::V3 | OffsetEntryFormat::V4 => self.value_len,
             OffsetEntryFormat::Unknown => 0,
         }
     }
@@ -243,7 +256,7 @@ struct PersistedIndex {
 }
 
 const CHECKPOINT_FORMAT: &str = "mooncake-offset-allocator-checkpoint";
-const CHECKPOINT_VERSION: u32 = 3;
+const CHECKPOINT_VERSION: u32 = 4;
 const MIN_SUPPORTED_CHECKPOINT_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -359,14 +372,94 @@ struct LoadedCheckpoint {
     recovered_checkpoint: bool,
 }
 
+#[derive(Debug)]
+struct OffsetMutationReservation {
+    token: u64,
+    active: Arc<Mutex<Option<u64>>>,
+}
+
+impl Drop for OffsetMutationReservation {
+    fn drop(&mut self) {
+        let mut active = self.active.lock();
+        if *active == Some(self.token) {
+            *active = None;
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct PendingOffsetEviction {
     victims: Vec<(String, OffsetEntry)>,
+    write_key: Option<String>,
+    expected_record_size: Option<u64>,
+    replaced: Option<OffsetEntry>,
+    reservation: Option<Arc<OffsetMutationReservation>>,
 }
 
 impl PendingOffsetEviction {
     pub fn keys(&self) -> Vec<String> {
         self.victims.iter().map(|(key, _)| key.clone()).collect()
+    }
+
+    pub(crate) fn partition_accepted(
+        self,
+        accepted_keys: &HashSet<String>,
+    ) -> (PendingOffsetEviction, PendingOffsetEviction) {
+        let PendingOffsetEviction {
+            victims,
+            write_key: _,
+            expected_record_size: _,
+            replaced: _,
+            reservation,
+        } = self;
+        let (accepted, unaccepted) = victims
+            .into_iter()
+            .partition(|(key, _)| accepted_keys.contains(key));
+        (
+            PendingOffsetEviction {
+                victims: accepted,
+                write_key: None,
+                expected_record_size: None,
+                replaced: None,
+                reservation: reservation.clone(),
+            },
+            PendingOffsetEviction {
+                victims: unaccepted,
+                write_key: None,
+                expected_record_size: None,
+                replaced: None,
+                reservation,
+            },
+        )
+    }
+
+    fn token(&self) -> Option<u64> {
+        self.reservation
+            .as_ref()
+            .map(|reservation| reservation.token)
+    }
+}
+
+#[cfg(test)]
+mod pending_offset_eviction_tests {
+    use super::{OffsetEntry, PendingOffsetEviction};
+    use std::collections::HashSet;
+
+    #[test]
+    fn partition_accepted_keeps_only_acknowledged_victims() {
+        let pending = PendingOffsetEviction {
+            victims: vec![
+                ("tenant-a/key-a".to_string(), OffsetEntry::legacy(0, 8, 1)),
+                ("tenant-b/key-b".to_string(), OffsetEntry::legacy(8, 8, 2)),
+            ],
+            ..Default::default()
+        };
+
+        let (accepted, unaccepted) =
+            pending.partition_accepted(&HashSet::from(["tenant-a/key-a".to_string()]));
+
+        assert_eq!(accepted.keys(), ["tenant-a/key-a"]);
+        assert_eq!(unaccepted.keys(), ["tenant-b/key-b"]);
     }
 }
 
@@ -426,10 +519,13 @@ fn write_zero_padding(writer: &mut impl Write, mut len: u64) -> StoreResult<()> 
 pub struct OffsetAllocatorStorageBackend {
     config: OffsetAllocatorConfig,
     persistence: OffsetPersistenceConfig,
+    storage_id: Mutex<Option<Uuid>>,
     state: Mutex<OffsetState>,
     init_lock: Mutex<()>,
     owner_lock: Mutex<Option<std::fs::File>>,
     initialized: AtomicBool,
+    next_reservation: AtomicU64,
+    active_reservation: Arc<Mutex<Option<u64>>>,
     clock: Arc<dyn Fn() -> Duration + Send + Sync>,
 }
 
@@ -446,10 +542,13 @@ impl OffsetAllocatorStorageBackend {
         Self {
             config,
             persistence,
+            storage_id: Mutex::new(None),
             state: Mutex::new(OffsetState::default()),
             init_lock: Mutex::new(()),
             owner_lock: Mutex::new(None),
             initialized: AtomicBool::new(false),
+            next_reservation: AtomicU64::new(1),
+            active_reservation: Arc::new(Mutex::new(None)),
             clock: Arc::new(move || started.elapsed()),
         }
     }
@@ -470,6 +569,14 @@ impl OffsetAllocatorStorageBackend {
         self.data_dir().join(OWNER_LOCK_FILE)
     }
 
+    fn storage_id_path(&self) -> PathBuf {
+        self.data_dir().join(STORAGE_ID_FILE)
+    }
+
+    fn storage_id_temp_dir(&self) -> PathBuf {
+        self.data_dir().join(STORAGE_ID_TEMP_DIRECTORY)
+    }
+
     pub fn init(&self) -> StoreResult<()> {
         let _init_guard = self.init_lock.lock();
         if self.initialized.load(Ordering::Acquire) {
@@ -480,6 +587,7 @@ impl OffsetAllocatorStorageBackend {
             .validate()
             .map_err(StoreError::InvalidParams)?;
         std::fs::create_dir_all(self.data_dir())?;
+        self.reject_foreign_cpp_layout()?;
 
         // Take ownership before inspecting or mutating any persistent file.
         // The open descriptor holds the advisory lock for this backend's full
@@ -498,13 +606,92 @@ impl OffsetAllocatorStorageBackend {
         })?;
         *self.owner_lock.lock() = Some(owner_file);
 
-        let result = self.init_owned_directory();
-        if result.is_err()
-            && let Some(file) = self.owner_lock.lock().take()
-        {
-            let _ = FileExt::unlock(&file);
+        let result = self.init_owned_directory().and_then(|()| {
+            let regenerate = self.persistence.persist_mode == OffsetPersistMode::Disabled;
+            let storage_id = self.load_or_create_storage_id(regenerate)?;
+            *self.storage_id.lock() = Some(storage_id);
+            Ok(())
+        });
+        if result.is_err() {
+            self.initialized.store(false, Ordering::Release);
+            *self.storage_id.lock() = None;
+            if let Some(file) = self.owner_lock.lock().take() {
+                let _ = FileExt::unlock(&file);
+            }
         }
         result
+    }
+
+    /// Return the storage namespace identity used for LocalDisk ownership.
+    pub fn storage_id(&self) -> StoreResult<Uuid> {
+        self.ensure_init()?;
+        self.storage_id.lock().as_ref().copied().ok_or_else(|| {
+            StoreError::Internal(
+                "offset allocator storage identity was not initialized".to_string(),
+            )
+        })
+    }
+
+    fn load_or_create_storage_id(&self, regenerate: bool) -> StoreResult<Uuid> {
+        let path = self.storage_id_path();
+        if !regenerate && path.exists() {
+            return self.read_storage_id();
+        }
+        let storage_id = Uuid::new_v4();
+        let contents = format!("{storage_id}\n");
+        write_file_atomically(&path, contents.as_bytes(), &self.storage_id_temp_dir())
+            .map_err(|AtomicWriteFailure { error, .. }| error)?;
+        Ok(storage_id)
+    }
+
+    fn read_storage_id(&self) -> StoreResult<Uuid> {
+        let path = self.storage_id_path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            StoreError::InvalidParams(format!(
+                "offset allocator storage identity is missing ({}): {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(StoreError::InvalidParams(format!(
+                "offset allocator storage identity must be a regular file: {}",
+                path.display()
+            )));
+        }
+        let value = std::fs::read_to_string(&path)?;
+        let storage_id = Uuid::parse_str(value.trim()).map_err(|error| {
+            StoreError::InvalidParams(format!(
+                "offset allocator storage identity is invalid ({}): {error}",
+                path.display()
+            ))
+        })?;
+        if storage_id.is_nil() {
+            return Err(StoreError::InvalidParams(
+                "offset allocator storage identity must not be nil".to_string(),
+            ));
+        }
+        Ok(storage_id)
+    }
+
+    fn reject_foreign_cpp_layout(&self) -> StoreResult<()> {
+        let data_dir = self.data_dir();
+        let cpp_data = data_dir.join(CPP_OFFSET_DATA_FILE);
+        let cpp_meta = data_dir.join(CPP_OFFSET_META_FILE);
+        if !cpp_data.exists() && !cpp_meta.exists() {
+            return Ok(());
+        }
+
+        let rust_layout_exists = self.data_path().exists() || self.index_path().exists();
+        let layout = if rust_layout_exists {
+            "mixed C++ and Rust"
+        } else {
+            "C++"
+        };
+        Err(StoreError::InvalidParams(format!(
+            "OffsetAllocator refuses to open {layout} storage layout in {}; \
+             use an offline exporter/importer instead of sharing the directory",
+            data_dir.display()
+        )))
     }
 
     fn init_owned_directory(&self) -> StoreResult<()> {
@@ -600,6 +787,68 @@ impl OffsetAllocatorStorageBackend {
         }
     }
 
+    fn reserve_mutation(&self) -> StoreResult<Arc<OffsetMutationReservation>> {
+        let token = self
+            .next_reservation
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| {
+                StoreError::Internal("offset allocator mutation reservation exhausted".to_string())
+            })?;
+        let mut active = self.active_reservation.lock();
+        if let Some(owner) = *active {
+            return Err(StoreError::Internal(format!(
+                "offset allocator mutation is already pending under reservation {owner}"
+            )));
+        }
+        *active = Some(token);
+        drop(active);
+        Ok(Arc::new(OffsetMutationReservation {
+            token,
+            active: self.active_reservation.clone(),
+        }))
+    }
+
+    fn validate_pending_reservation(
+        &self,
+        pending: &PendingOffsetEviction,
+        required: bool,
+    ) -> StoreResult<()> {
+        let Some(token) = pending.token() else {
+            if required {
+                return Err(StoreError::Internal(
+                    "offset allocator pending mutation has no reservation".to_string(),
+                ));
+            }
+            return Ok(());
+        };
+        let reservation = pending
+            .reservation
+            .as_ref()
+            .expect("pending token is derived from its reservation");
+        if !Arc::ptr_eq(&reservation.active, &self.active_reservation) {
+            return Err(StoreError::Internal(
+                "offset allocator reservation belongs to another backend instance".to_string(),
+            ));
+        }
+        if *self.active_reservation.lock() != Some(token) {
+            return Err(StoreError::Internal(format!(
+                "offset allocator mutation reservation {token} is stale"
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_no_pending_mutation(&self) -> StoreResult<()> {
+        if let Some(token) = *self.active_reservation.lock() {
+            return Err(StoreError::Internal(format!(
+                "offset allocator mutation reservation {token} is still pending"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn write_object(&self, key: &str, data: &[u8]) -> StoreResult<Vec<String>> {
         let pending = self.prepare_write(key, data.len() as u64)?;
         let evicted = pending.keys();
@@ -609,6 +858,7 @@ impl OffsetAllocatorStorageBackend {
 
     pub fn prepare_write(&self, key: &str, required: u64) -> StoreResult<PendingOffsetEviction> {
         self.ensure_init()?;
+        let reservation = self.reserve_mutation()?;
         let required = RecordHeader::record_size(key.len() as u64, required)
             .map_err(record_format_store_error)?;
         let state = self.state.lock();
@@ -626,7 +876,13 @@ impl OffsetAllocatorStorageBackend {
             .saturating_add(required)
             > high;
         let over_keys = state.index.entries.len() > keys_high;
-        let mut pending = PendingOffsetEviction::default();
+        let mut pending = PendingOffsetEviction {
+            victims: Vec::new(),
+            write_key: Some(key.to_string()),
+            expected_record_size: Some(required),
+            replaced: replaced.clone(),
+            reservation: Some(reservation),
+        };
 
         if self.config.eviction_policy == OffsetEvictionPolicy::Fifo && (over_bytes || over_keys) {
             let minimum_victims = if over_keys {
@@ -655,6 +911,11 @@ impl OffsetAllocatorStorageBackend {
                             .iter()
                             .any(|(selected, _)| selected == *candidate)
                     })
+                    .filter(|(_, entry)| {
+                        !state
+                            .pinned_extents
+                            .contains_key(&ExtentIdentity::from(*entry))
+                    })
                     .min_by_key(|(_, entry)| entry.fifo_seq)
                     .map(|(candidate, entry)| (candidate.clone(), entry.clone()));
                 let Some((victim, entry)) = victim else {
@@ -663,6 +924,27 @@ impl OffsetAllocatorStorageBackend {
                 projected_used = projected_used.saturating_sub(entry.len);
                 projected_keys = projected_keys.saturating_sub(1);
                 pending.victims.push((victim, entry));
+            }
+        }
+        if !pending.victims.is_empty() {
+            let mut candidate_free = state.free_extents.clone();
+            for (_, entry) in &pending.victims {
+                if !state
+                    .pinned_extents
+                    .contains_key(&ExtentIdentity::from(entry))
+                {
+                    insert_free_extent(&mut candidate_free, entry.offset, entry.len);
+                }
+            }
+            if allocate_extent(
+                &mut candidate_free,
+                state.index.next_offset,
+                state.quota_bytes,
+                required,
+            )
+            .is_none()
+            {
+                return Err(StoreError::NoAvailableHandle);
             }
         }
         Ok(pending)
@@ -678,7 +960,22 @@ impl OffsetAllocatorStorageBackend {
         data: &[u8],
         pending: PendingOffsetEviction,
     ) -> StoreResult<()> {
-        self.commit_write_with_hook(key, data, pending, |_| Ok(()))
+        self.commit_write_with_generation(key, data, pending, Uuid::new_v4())
+    }
+
+    pub(crate) fn commit_write_with_generation(
+        &self,
+        key: &str,
+        data: &[u8],
+        pending: PendingOffsetEviction,
+        generation_id: Uuid,
+    ) -> StoreResult<()> {
+        if generation_id.is_nil() {
+            return Err(StoreError::InvalidParams(
+                "offset allocator generation must not be nil".to_string(),
+            ));
+        }
+        self.commit_write_with_hook(key, data, pending, generation_id, |_| Ok(()))
     }
 
     fn commit_write_with_hook(
@@ -686,18 +983,28 @@ impl OffsetAllocatorStorageBackend {
         key: &str,
         data: &[u8],
         pending: PendingOffsetEviction,
+        generation_id: Uuid,
         mut boundary_hook: impl FnMut(DurableWriteBoundary) -> StoreResult<()>,
     ) -> StoreResult<()> {
         self.ensure_init()?;
+        self.validate_pending_reservation(&pending, true)?;
         let required = RecordHeader::record_size(key.len() as u64, data.len() as u64)
             .map_err(record_format_store_error)?;
         let mut state = self.state.lock();
+        if pending.write_key.as_deref() != Some(key)
+            || pending.expected_record_size != Some(required)
+            || state.index.entries.get(key) != pending.replaced.as_ref()
+        {
+            return Err(StoreError::Internal(format!(
+                "offset allocator write reservation changed for key {key:?}"
+            )));
+        }
         let write_seq = state.next_write_seq;
         let next_write_seq = write_seq.checked_add(1).ok_or_else(|| {
             StoreError::Internal("offset allocator write sequence exhausted".to_string())
         })?;
         let replaced = state.index.entries.get(key).cloned();
-        let committed_victims = apply_pending_eviction(&mut state, pending);
+        let committed_victims = apply_pending_eviction(&mut state, &pending)?;
 
         let mut candidate_free = state.free_extents.clone();
         for (_, entry) in &committed_victims {
@@ -782,12 +1089,13 @@ impl OffsetAllocatorStorageBackend {
                 offset,
                 len: required,
                 fifo_seq,
-                format: OffsetEntryFormat::V3,
+                format: OffsetEntryFormat::V4,
                 value_offset: RecordHeader::value_offset(key.len() as u64)
                     .map_err(record_format_store_error)?,
                 value_len: data.len() as u64,
                 write_seq,
                 record_flags: header.flags,
+                generation_id: Some(generation_id),
             },
         );
         state.used_bytes = state.used_bytes.saturating_add(required);
@@ -881,6 +1189,44 @@ impl OffsetAllocatorStorageBackend {
         (state.used_bytes, state.quota_bytes)
     }
 
+    /// Return a consistent snapshot of all live `(storage_key, value_size)`
+    /// records recovered from the persistent index.
+    pub fn scan_meta(&self) -> StoreResult<Vec<(String, u64)>> {
+        Ok(self
+            .scan_records()?
+            .into_iter()
+            .map(|record| (record.storage_key, record.value_size))
+            .collect())
+    }
+
+    pub(crate) fn scan_records(&self) -> StoreResult<Vec<LocalStorageRecordMetadata>> {
+        self.ensure_init()?;
+        let storage_id = self.storage_id.lock().as_ref().copied().ok_or_else(|| {
+            StoreError::Internal(
+                "offset allocator storage identity was not initialized".to_string(),
+            )
+        })?;
+        let state = self.state.lock();
+        let mut records = Vec::with_capacity(state.index.entries.len());
+        for (key, entry) in &state.index.entries {
+            if entry.format == OffsetEntryFormat::Unknown {
+                return Err(StoreError::InvalidParams(format!(
+                    "offset allocator metadata for {key:?} has an unsupported entry format"
+                )));
+            }
+            let generation_id = entry.generation_id.unwrap_or_else(|| {
+                mooncake_store_core::legacy_local_disk_generation_id(storage_id, key)
+            });
+            records.push(LocalStorageRecordMetadata {
+                storage_key: key.clone(),
+                value_size: entry.value_len(),
+                generation_id,
+            });
+        }
+        records.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        Ok(records)
+    }
+
     pub fn prepare_watermark_eviction(
         &self,
         high_watermark_ratio: f64,
@@ -895,13 +1241,20 @@ impl OffsetAllocatorStorageBackend {
                 "watermarks must satisfy 0 < low < high <= 1".to_string(),
             ));
         }
+        let reservation = self.reserve_mutation()?;
         let state = self.state.lock();
         let high = (state.quota_bytes as f64 * high_watermark_ratio) as u64;
         if state.used_bytes <= high {
             return Ok(PendingOffsetEviction::default());
         }
         let low = (state.quota_bytes as f64 * low_watermark_ratio) as u64;
-        let mut pending = PendingOffsetEviction::default();
+        let mut pending = PendingOffsetEviction {
+            victims: Vec::new(),
+            write_key: None,
+            expected_record_size: None,
+            replaced: None,
+            reservation: Some(reservation),
+        };
         let mut projected_used = state.used_bytes;
         while projected_used > low && pending.victims.len() < self.config.max_evict_per_offload {
             let victim = state
@@ -927,13 +1280,15 @@ impl OffsetAllocatorStorageBackend {
 
     pub fn commit_eviction(&self, pending: PendingOffsetEviction) -> StoreResult<()> {
         self.ensure_init()?;
+        self.validate_pending_reservation(&pending, !pending.victims.is_empty())?;
         let mut state = self.state.lock();
-        let committed_victims = apply_pending_eviction(&mut state, pending);
+        let committed_victims = apply_pending_eviction(&mut state, &pending)?;
         self.finalize_evicted_entries(&mut state, committed_victims)
     }
 
     pub fn delete_object(&self, key: &str) -> StoreResult<()> {
         self.ensure_init()?;
+        self.ensure_no_pending_mutation()?;
         let mut state = self.state.lock();
         if let Some(entry) = state.index.entries.remove(key) {
             state.used_bytes = state.used_bytes.saturating_sub(entry.len);
@@ -949,8 +1304,48 @@ impl OffsetAllocatorStorageBackend {
         Ok(())
     }
 
+    pub(crate) fn delete_object_if_generation(
+        &self,
+        key: &str,
+        generation_id: Uuid,
+    ) -> StoreResult<bool> {
+        if generation_id.is_nil() {
+            return Err(StoreError::InvalidParams(
+                "offset allocator generation must not be nil".to_string(),
+            ));
+        }
+        self.ensure_init()?;
+        self.ensure_no_pending_mutation()?;
+        let storage_id = self.storage_id.lock().as_ref().copied().ok_or_else(|| {
+            StoreError::Internal(
+                "offset allocator storage identity was not initialized".to_string(),
+            )
+        })?;
+        let mut state = self.state.lock();
+        let Some(entry) = state.index.entries.get(key) else {
+            return Ok(false);
+        };
+        let effective_generation = entry.generation_id.unwrap_or_else(|| {
+            mooncake_store_core::legacy_local_disk_generation_id(storage_id, key)
+        });
+        if effective_generation != generation_id {
+            return Ok(false);
+        }
+        let entry = state
+            .index
+            .entries
+            .remove(key)
+            .expect("generation-checked offset entry remains under the state lock");
+        state.used_bytes = state.used_bytes.saturating_sub(entry.len);
+        retire_extent(&mut state, entry);
+        record_tombstone(&mut state, key);
+        self.after_mutation(&mut state)?;
+        Ok(true)
+    }
+
     pub fn remove_all(&self) -> StoreResult<usize> {
         self.ensure_init()?;
+        self.ensure_no_pending_mutation()?;
         let mut state = self.state.lock();
         let count = state.index.entries.len();
         let removed_keys: Vec<_> = state.index.entries.keys().cloned().collect();
@@ -1423,7 +1818,12 @@ fn recover_checkpoint_with_overlap_probe(
                     && entry.write_seq == 0
                     && (entry.len == 0 || arena.is_some())
             }
-            OffsetEntryFormat::V3 => {
+            OffsetEntryFormat::V3 | OffsetEntryFormat::V4 => {
+                if entry.format == OffsetEntryFormat::V4
+                    && entry.generation_id.is_none_or(|id| id.is_nil())
+                {
+                    continue;
+                }
                 let Some(file) = arena.as_mut() else {
                     continue;
                 };
@@ -1649,18 +2049,26 @@ fn allocate_extent(
 
 fn apply_pending_eviction(
     state: &mut OffsetState,
-    pending: PendingOffsetEviction,
-) -> Vec<(String, OffsetEntry)> {
-    let mut removed = Vec::with_capacity(pending.victims.len());
-    for (key, expected) in pending.victims {
-        if state.index.entries.get(&key) != Some(&expected) {
-            continue;
+    pending: &PendingOffsetEviction,
+) -> StoreResult<Vec<(String, OffsetEntry)>> {
+    for (key, expected) in &pending.victims {
+        if state.index.entries.get(key) != Some(expected) {
+            return Err(StoreError::Internal(format!(
+                "offset allocator pending victim changed before commit: {key:?}"
+            )));
         }
-        let entry = state.index.entries.remove(&key).unwrap();
-        state.used_bytes = state.used_bytes.saturating_sub(entry.len);
-        removed.push((key, entry));
     }
-    removed
+    let mut removed = Vec::with_capacity(pending.victims.len());
+    for (key, _) in &pending.victims {
+        let entry = state
+            .index
+            .entries
+            .remove(key)
+            .expect("pending offset victim was preflighted under the state lock");
+        state.used_bytes = state.used_bytes.saturating_sub(entry.len);
+        removed.push((key.clone(), entry));
+    }
+    Ok(removed)
 }
 
 fn defer_pinned_extents(state: &mut OffsetState, entries: &[(String, OffsetEntry)]) {
@@ -2368,6 +2776,7 @@ mod durable_recovery_tests {
                         value_len: 0,
                         write_seq: 0,
                         record_flags: 0,
+                        generation_id: None,
                         fifo_seq: offset,
                     },
                 )
@@ -2698,15 +3107,21 @@ mod durable_recovery_tests {
         let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
         let pending = backend.prepare_write("unsynced", 5).unwrap();
 
-        let result = backend.commit_write_with_hook("unsynced", b"value", pending, |boundary| {
-            if boundary == DurableWriteBoundary::DataSync {
-                Err(StoreError::Internal(
-                    "injected sync_data failure".to_string(),
-                ))
-            } else {
-                Ok(())
-            }
-        });
+        let result = backend.commit_write_with_hook(
+            "unsynced",
+            b"value",
+            pending,
+            Uuid::new_v4(),
+            |boundary| {
+                if boundary == DurableWriteBoundary::DataSync {
+                    Err(StoreError::Internal(
+                        "injected sync_data failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        );
 
         assert!(result.is_err());
         assert!(!backend.exists("unsynced"));
@@ -2723,16 +3138,22 @@ mod durable_recovery_tests {
         let pending = backend.prepare_write("ordered", 5).unwrap();
         let mut observed = Vec::new();
 
-        let result = backend.commit_write_with_hook("ordered", b"value", pending, |boundary| {
-            observed.push(boundary);
-            if boundary == DurableWriteBoundary::CheckpointPublish {
-                Err(StoreError::Internal(
-                    "injected before checkpoint publication".to_string(),
-                ))
-            } else {
-                Ok(())
-            }
-        });
+        let result = backend.commit_write_with_hook(
+            "ordered",
+            b"value",
+            pending,
+            Uuid::new_v4(),
+            |boundary| {
+                observed.push(boundary);
+                if boundary == DurableWriteBoundary::CheckpointPublish {
+                    Err(StoreError::Internal(
+                        "injected before checkpoint publication".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        );
 
         assert!(result.is_err());
         assert_eq!(
@@ -3149,6 +3570,26 @@ mod persistence_mode_tests {
     }
 
     #[test]
+    fn pending_prepare_reserves_the_offset_backend_until_commit_or_rollback() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = backend(temp.path(), OffsetPersistMode::Strict);
+
+        let pending = backend.prepare_write("first", 5).unwrap();
+        assert!(matches!(
+            backend.prepare_write("second", 5),
+            Err(StoreError::Internal(_))
+        ));
+        assert!(matches!(
+            backend.delete_object("first"),
+            Err(StoreError::Internal(_))
+        ));
+
+        backend.rollback_eviction(pending);
+        let retry = backend.prepare_write("second", 5).unwrap();
+        backend.rollback_eviction(retry);
+    }
+
+    #[test]
     fn disabled_init_discards_stale_checkpoint_and_arena_then_never_persists() {
         let temp = tempfile::tempdir().unwrap();
         {
@@ -3185,15 +3626,16 @@ mod persistence_mode_tests {
         let strict = backend(temp.path(), OffsetPersistMode::Strict);
         let pending = strict.prepare_write("first", 5).unwrap();
 
-        let result = strict.commit_write_with_hook("first", b"value", pending, |boundary| {
-            if boundary == DurableWriteBoundary::CheckpointPublish {
-                Err(StoreError::Internal(
-                    "injected checkpoint failure".to_string(),
-                ))
-            } else {
-                Ok(())
-            }
-        });
+        let result =
+            strict.commit_write_with_hook("first", b"value", pending, Uuid::new_v4(), |boundary| {
+                if boundary == DurableWriteBoundary::CheckpointPublish {
+                    Err(StoreError::Internal(
+                        "injected checkpoint failure".to_string(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
 
         assert!(result.is_err());
         assert!(strict.exists("first"));

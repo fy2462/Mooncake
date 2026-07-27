@@ -3,7 +3,9 @@
 //! This module owns offload/promotion queue bookkeeping and memory eviction.
 //! Reaper and drain processing live in sibling submodules.
 
+use crate::TenantId;
 use crate::eviction::EvictionManager;
+use crate::ha::HaError;
 use crate::metrics;
 use crate::proto;
 use dashmap::mapref::entry::Entry;
@@ -14,9 +16,11 @@ use std::time::{Instant, SystemTime};
 use uuid::Uuid;
 
 use super::helpers::{
-    account_removed_object_quota, choose_drain_target_segment, client_id_by_segment_name,
-    default_drain_target_segments, has_pending_task_capacity, is_lease_expired, memory_usage_ratio,
-    release_replicas, sync_cache_total_accounting,
+    account_removed_object_quota, choose_drain_target_segment, client_id_by_exact_replica_segment,
+    clone_object_for_mutation, completed_memory_quota_charge, default_drain_target_segments,
+    has_pending_task_capacity, is_lease_expired, memory_usage_ratio, nof_usage_ratio,
+    release_committed_memory_quota_charge, release_replicas, requested_memory_quota_charge,
+    sync_cache_total_accounting, unique_task_id,
 };
 use super::state::{
     MasterState, ObjectEntry, OffloadingTaskEntry, PromotionCandidate, PromotionCandidateReason,
@@ -24,6 +28,12 @@ use super::state::{
 };
 
 const PROMOTION_CANDIDATE_LIMIT: usize = 50_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TenantQuotaEvictionResult {
+    pub freed_bytes: u64,
+    pub evicted_objects: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PromotionQueueResult {
@@ -122,7 +132,7 @@ mod background_reaper;
 mod promotion_retry;
 pub(crate) use background_drain::process_drain_jobs;
 pub(crate) use background_reaper::{
-    reap_expired_background_tasks, release_staged_promotion_replica,
+    detach_staged_promotion_replica, reap_expired_background_tasks,
 };
 pub(crate) use promotion_retry::{
     run_default_promotion_candidate_retry, run_promotion_candidate_retry,
@@ -182,7 +192,7 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
                 replica.replica_type == ReplicaType::Memory
                     && replica.status == ReplicaStatus::Complete
                     && replica.handle_valid
-                    && client_id_by_segment_name(state, &replica.segment_name) == Some(client_id)
+                    && client_id_by_exact_replica_segment(state, replica) == Some(client_id)
             })
             .cloned()
         else {
@@ -190,11 +200,20 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
         };
         source
     };
+    let Some(storage_id) = state
+        .local_disk_client_sessions
+        .get(&client_id)
+        .map(|entry| *entry)
+    else {
+        return;
+    };
     let can_queue_offload = state
         .local_disk_segments
-        .get(&client_id)
+        .get(&storage_id)
         .is_some_and(|entry| {
-            entry.enable_offloading
+            entry.active_client_id == Some(client_id)
+                && entry.recovery_complete
+                && entry.enable_offloading
                 && entry.offloading_objects.len() < state.runtime_config.offloading_queue_limit
         });
     if !can_queue_offload {
@@ -203,9 +222,27 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
     if !inc_refcnt_for_replica(state, key, &source) {
         return;
     }
-    let queued = match state.local_disk_segments.get_mut(&client_id) {
+    let generation_id = Uuid::new_v4();
+    match state.offloading_tasks.entry(key.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(OffloadingTaskEntry {
+                client_id,
+                storage_id,
+                generation_id,
+                source: source.clone(),
+                start_time: Instant::now(),
+            });
+        }
+        Entry::Occupied(_) => {
+            dec_refcnt_for_replica(state, key, &source);
+            return;
+        }
+    }
+    let queued = match state.local_disk_segments.get_mut(&storage_id) {
         Some(mut local_disk) => {
-            if local_disk.enable_offloading
+            if local_disk.active_client_id == Some(client_id)
+                && local_disk.recovery_complete
+                && local_disk.enable_offloading
                 && local_disk.offloading_objects.len() < state.runtime_config.offloading_queue_limit
             {
                 local_disk
@@ -219,17 +256,9 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
         _ => false,
     };
     if !queued {
-        dec_refcnt_for_replica(state, key, &source);
+        clear_offloading_task(state, key);
         return;
     }
-    state.offloading_tasks.insert(
-        key.to_string(),
-        OffloadingTaskEntry {
-            client_id,
-            source,
-            start_time: Instant::now(),
-        },
-    );
 }
 
 /// 清理指定 key 的下沉任务，同时从 client 的 offloading_objects 中移除。
@@ -237,7 +266,7 @@ pub(crate) fn push_offloading_queue(state: &MasterState, client_id: Uuid, key: &
 pub(crate) fn clear_offloading_task(state: &MasterState, key: &str) {
     if let Some((_, task)) = state.offloading_tasks.remove(key) {
         dec_refcnt_for_replica(state, key, &task.source);
-        if let Some(mut local_disk) = state.local_disk_segments.get_mut(&task.client_id) {
+        if let Some(mut local_disk) = state.local_disk_segments.get_mut(&task.storage_id) {
             local_disk.offloading_objects.remove(key);
         }
     }
@@ -259,64 +288,7 @@ pub(crate) fn clear_promotion_task(state: &MasterState, key: &str) -> Option<Pro
     removed
 }
 
-/// 驱逐对象中的所有 Memory 类型副本（已完成的、未被占用的）。
-/// 用于彻底删除对象时的强制清理。
-///
-/// Evict all Memory-type replicas from an object (completed and not busy).
-/// Used for forced cleanup when fully deleting an object.
-fn evict_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescriptor> {
-    let mut removed = Vec::new();
-    object.replicas.retain(|replica| {
-        let should_remove = replica.replica_type == ReplicaType::Memory
-            && replica.status == ReplicaStatus::Complete
-            && !replica.is_busy(); // skip in-use replicas / 跳过正在使用中的副本
-        if should_remove {
-            removed.push(replica.clone());
-        }
-        !should_remove
-    });
-    sync_cache_total_accounting(object);
-    removed
-}
-
-/// 驱逐多余的 Memory 副本，但始终保留至少一份完整副本。
-/// 用于 offload 场景：数据已下沉到磁盘，内存中只需保留一份热副本即可。
-///
-/// Evict redundant Memory replicas but always keep at least one complete copy.
-/// Used in offload scenarios: data is already on disk, only one hot copy needed in memory.
-fn evict_redundant_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescriptor> {
-    let total_memory = object
-        .replicas
-        .iter()
-        .filter(|replica| {
-            replica.replica_type == ReplicaType::Memory && replica.status == ReplicaStatus::Complete
-        })
-        .count();
-    if total_memory <= 1 {
-        return Vec::new();
-    }
-
-    let mut remaining_memory = total_memory;
-    let mut removed = Vec::new();
-    object.replicas.retain(|replica| {
-        let is_memory_complete = replica.replica_type == ReplicaType::Memory
-            && replica.status == ReplicaStatus::Complete
-            && !replica.is_busy();
-        if !is_memory_complete {
-            return true;
-        }
-        if remaining_memory <= 1 {
-            return true; // 保留最后一份完整内存副本 / Keep the last complete memory copy
-        }
-        remaining_memory -= 1;
-        removed.push(replica.clone());
-        false
-    });
-    sync_cache_total_accounting(object);
-    removed
-}
-
-fn has_evictable_memory_replica(object: &ObjectEntry) -> bool {
+fn has_quota_evictable_memory_replica(object: &ObjectEntry) -> bool {
     object.replicas.iter().any(|replica| {
         replica.replica_type == ReplicaType::Memory
             && replica.status == ReplicaStatus::Complete
@@ -324,53 +296,319 @@ fn has_evictable_memory_replica(object: &ObjectEntry) -> bool {
     })
 }
 
-/// 执行一轮驱逐循环，使用 LRU 策略选出 target_count 个候选对象。
-/// 对于有本地磁盘副本的对象，优先触发 offload（下沉到磁盘），
-/// 避免直接删除数据；仅在没有磁盘兜底时才彻底驱逐内存副本。
-///
-/// Execute one eviction cycle using LRU strategy to select `target_count` candidate objects.
-/// For objects with local disk replicas, prefer triggering offload (flush to disk)
-/// instead of direct deletion; only fully evict memory replicas when no disk fallback exists.
-pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Vec<String> {
-    let manager = EvictionManager::new(
-        state.runtime_config.soft_pin_ttl,
-        state.runtime_config.lease_ttl,
-    );
-    // 收集驱逐候选：排除正在复制或正在 PutStart 的对象
-    // Collect eviction candidates: exclude objects being replicated or in PutStart
-    let mut candidates: Vec<(
-        String,
-        Option<SystemTime>,
-        bool,
-        Option<SystemTime>,
-        SystemTime,
-    )> = state
+fn evict_quota_memory_replicas(object: &mut ObjectEntry) -> Vec<ReplicaDescriptor> {
+    let mut removed = Vec::new();
+    object.replicas.retain(|replica| {
+        let should_remove = replica.replica_type == ReplicaType::Memory
+            && replica.status == ReplicaStatus::Complete
+            && !replica.is_busy();
+        if should_remove {
+            removed.push(replica.clone());
+        }
+        !should_remove
+    });
+    removed
+}
+
+fn has_active_soft_pin(object: &ObjectEntry, now: SystemTime) -> bool {
+    object.soft_pin_timeout.is_some_and(|timeout| now < timeout)
+}
+
+fn tenant_quota_candidate_keys(
+    state: &MasterState,
+    tenant_id: &TenantId,
+    protected_key: Option<&str>,
+    allow_soft_pinned: bool,
+    now: SystemTime,
+) -> Vec<String> {
+    let mut candidates = state
         .objects
         .iter()
         .filter(|entry| {
             let key = entry.key();
-            !state.replication_tasks.contains_key(key)
+            let object = entry.value();
+            protected_key != Some(key.as_str())
+                && object.tenant_id == *tenant_id
                 && !state.processing_keys.contains_key(key)
-                && has_evictable_memory_replica(entry.value())
+                && !state.replication_tasks.contains_key(key)
+                && !object.hard_pinned
+                && is_lease_expired(object)
+                && (allow_soft_pinned || !has_active_soft_pin(object, now))
+                && has_quota_evictable_memory_replica(object)
         })
-        .map(|entry| {
-            (
-                entry.key().clone(),
-                entry.soft_pin_timeout,
-                entry.hard_pinned,
-                entry.lease_timeout,
-                entry.last_access,
-            )
-        })
-        .collect();
-    // EvictionManager::select_for_eviction_with_hard_pin 永远不会选择 hard_pinned 对象
-    // 按 last_access LRU 排序，soft_pinned 对象在 TTL 过期前不会被选中
-    let selected = manager.select_for_eviction_with_lease_timeout_policy(
-        &mut candidates,
-        target_count,
-        state.runtime_config.offload_force_evict,
-    );
+        .map(|entry| (entry.key().clone(), entry.last_access))
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, last_access)| *last_access);
+    candidates.into_iter().map(|(key, _)| key).collect()
+}
 
+fn tenant_quota_group_keys(
+    state: &MasterState,
+    tenant_id: &TenantId,
+    key: &str,
+) -> (String, Vec<String>) {
+    let Some(object) = state.objects.get(key) else {
+        return (String::new(), Vec::new());
+    };
+    let group_id = object.group_id.clone();
+    drop(object);
+    if group_id.is_empty() {
+        return (String::new(), vec![key.to_string()]);
+    }
+    let mut keys = state
+        .objects
+        .iter()
+        .filter(|entry| {
+            entry.tenant_id == *tenant_id && entry.group_id.as_str() == group_id.as_str()
+        })
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    keys.sort();
+    (group_id, keys)
+}
+
+fn evict_memory_pressure_object(
+    state: &MasterState,
+    tenant_id: &TenantId,
+    key: &str,
+    allow_soft_pinned: bool,
+    now: SystemTime,
+    offload_cap: usize,
+    offload_enqueued: &mut usize,
+    operation: &str,
+) -> Result<u64, HaError> {
+    let (has_local_disk, owner_client, size) = {
+        let Some(object) = state.objects.get(key) else {
+            return Ok(0);
+        };
+        if object.tenant_id != *tenant_id
+            || state.processing_keys.contains_key(key)
+            || state.replication_tasks.contains_key(key)
+            || object.hard_pinned
+            || !is_lease_expired(&object)
+            || (!allow_soft_pinned && has_active_soft_pin(&object, now))
+            || !has_quota_evictable_memory_replica(&object)
+        {
+            return Ok(0);
+        }
+        (
+            object
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::LocalDisk),
+            object
+                .replicas
+                .iter()
+                .find(|replica| {
+                    replica.replica_type == ReplicaType::Memory
+                        && replica.status == ReplicaStatus::Complete
+                        && replica.handle_valid
+                        && !replica.is_busy()
+                })
+                .and_then(|replica| client_id_by_exact_replica_segment(state, replica)),
+            object.size,
+        )
+    };
+
+    let should_offload = state.runtime_config.offload_on_evict && !has_local_disk;
+    let mut queued_here = false;
+    if should_offload {
+        let force_without_offload =
+            state.runtime_config.offload_force_evict && *offload_enqueued >= offload_cap;
+        if !force_without_offload {
+            if let Some(owner_client) = owner_client {
+                let had_task = state.offloading_tasks.contains_key(key);
+                push_offloading_queue(state, owner_client, key, size);
+                queued_here = !had_task && state.offloading_tasks.contains_key(key);
+                if queued_here {
+                    *offload_enqueued = (*offload_enqueued).saturating_add(1);
+                }
+            }
+            if !state.offloading_tasks.contains_key(key)
+                && !state.runtime_config.offload_force_evict
+            {
+                return Ok(0);
+            }
+        }
+    }
+
+    let Some(mut object) = state.objects.get_mut(key) else {
+        if queued_here {
+            clear_offloading_task(state, key);
+        }
+        return Ok(0);
+    };
+    let mut projected = clone_object_for_mutation(&object);
+    // A successfully queued offload increments the source refcount first, so
+    // this removes only other unreferenced replicas and retains the source
+    // until offload completion. Forced/no-offload paths remove every eligible
+    // Memory replica.
+    let removed = evict_quota_memory_replicas(&mut projected);
+    let removed_memory_charge = requested_memory_quota_charge(
+        projected.size,
+        removed
+            .iter()
+            .filter(|replica| replica.replica_type == ReplicaType::Memory)
+            .count(),
+    );
+    if removed_memory_charge == 0 {
+        return Ok(0);
+    }
+    if let Err(error) =
+        release_committed_memory_quota_charge(state, &mut projected, removed_memory_charge)
+    {
+        drop(object);
+        if queued_here {
+            clear_offloading_task(state, key);
+        }
+        state.fence_after_invariant_failure(
+            operation,
+            &format!("tenant={tenant_id} key={key} error={error:?}"),
+        );
+        return Err(HaError::Snapshot(format!(
+            "tenant quota accounting invariant failed during {operation}: tenant={tenant_id} key={key}"
+        )));
+    }
+    sync_cache_total_accounting(&mut projected);
+    let event_user_key = projected.user_key_for_event(key).to_string();
+    let event_tenant_id = projected.tenant_id.clone();
+    let event_group_id = projected.group_id.clone();
+    let became_empty = projected.replicas.is_empty();
+    *object = projected;
+    drop(object);
+
+    let removed_object = if became_empty {
+        state.objects.remove(key).map(|(_, object)| object)
+    } else {
+        None
+    };
+    let mut quota_removal_failed = false;
+    if let Some(object) = &removed_object {
+        quota_removal_failed = account_removed_object_quota(state, object).is_err();
+        for mut entry in state.client_objects.iter_mut() {
+            entry.value_mut().remove(key);
+        }
+        clear_offloading_task(state, key);
+        clear_promotion_task(state, key);
+    }
+    if quota_removal_failed {
+        return Err(HaError::Snapshot(format!(
+            "tenant quota removal invariant failed during {operation}: tenant={tenant_id} key={key}"
+        )));
+    }
+    state.persist_object_image_or_remove_or_fence(key, operation)?;
+    release_replicas(state, &removed).map_err(|status| HaError::Snapshot(status.to_string()))?;
+    state.kv_event_publisher.publish_removed(
+        &event_user_key,
+        "cpu",
+        &event_tenant_id,
+        &event_group_id,
+    );
+    Ok(removed_memory_charge)
+}
+
+/// Release up to `target_bytes` of committed Memory charge from one tenant.
+///
+/// This is deliberately invoked only after the caller has released its
+/// tenant-scoped mutation guard. The exclusive coordinator barrier keeps group
+/// membership, object replicas, allocator usage and quota accounting in one
+/// snapshot-consistent mutation epoch without recursively acquiring a
+/// colliding key stripe.
+pub(crate) fn run_tenant_quota_eviction(
+    state: &MasterState,
+    tenant_id: &TenantId,
+    protected_key: Option<&str>,
+    target_bytes: u64,
+) -> Result<TenantQuotaEvictionResult, HaError> {
+    if !state.runtime_config.enable_tenant_quota || target_bytes == 0 {
+        return Ok(TenantQuotaEvictionResult::default());
+    }
+
+    let _global_mutation_guard = state.key_mutations.lock_snapshot();
+    let now = SystemTime::now();
+    let offload_cap = if state.runtime_config.offload_on_evict {
+        ((state.runtime_config.offloading_queue_limit as f64)
+            * state.runtime_config.offload_cap_ratio)
+            .floor() as usize
+    } else {
+        0
+    };
+    let mut offload_enqueued = 0usize;
+    let mut result = TenantQuotaEvictionResult::default();
+    let passes = if state.runtime_config.allow_evict_soft_pinned_objects {
+        [Some(false), Some(true)]
+    } else {
+        [Some(false), None]
+    };
+
+    for allow_soft_pinned in passes.into_iter().flatten() {
+        if result.freed_bytes >= target_bytes {
+            break;
+        }
+        let candidates =
+            tenant_quota_candidate_keys(state, tenant_id, protected_key, allow_soft_pinned, now);
+        let mut processed_groups = HashSet::new();
+        for key in candidates {
+            if result.freed_bytes >= target_bytes {
+                break;
+            }
+            let (group_id, group_keys) = tenant_quota_group_keys(state, tenant_id, &key);
+            if group_keys.is_empty() {
+                continue;
+            }
+            if !group_id.is_empty() && !processed_groups.insert(group_id) {
+                continue;
+            }
+            // C++ grouped eviction protects the whole group while any member
+            // has a live lease, even if the candidate member itself expired.
+            if group_keys.iter().any(|member_key| {
+                state
+                    .objects
+                    .get(member_key)
+                    .is_some_and(|object| !is_lease_expired(&object))
+            }) {
+                continue;
+            }
+            for member_key in &group_keys {
+                if protected_key == Some(member_key.as_str()) {
+                    continue;
+                }
+                let freed = evict_memory_pressure_object(
+                    state,
+                    tenant_id,
+                    member_key,
+                    allow_soft_pinned,
+                    now,
+                    offload_cap,
+                    &mut offload_enqueued,
+                    "tenant_quota_eviction",
+                )?;
+                if freed != 0 {
+                    result.freed_bytes = result.freed_bytes.saturating_add(freed);
+                    result.evicted_objects = result.evicted_objects.saturating_add(1);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// 执行一轮驱逐循环，使用 LRU 策略选出 target_count 个候选对象。
+/// 已有 LocalDisk 副本时直接释放 Memory；没有磁盘副本且启用
+/// offload-on-evict 时先固定一个 Memory source 并排队下沉。
+///
+/// Execute one eviction cycle using LRU strategy to select `target_count` candidate objects.
+/// Existing LocalDisk replicas allow immediate Memory release. Otherwise,
+/// offload-on-evict pins one Memory source before reclaiming redundant copies.
+pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Vec<String> {
+    if target_count == 0 {
+        return Vec::new();
+    }
+    let _global_mutation_guard = state.key_mutations.lock_snapshot();
+    let manager = EvictionManager::new(
+        state.runtime_config.soft_pin_ttl,
+        state.runtime_config.lease_ttl,
+    );
     let mut evicted = Vec::new();
     let offload_cap = if state.runtime_config.offload_on_evict {
         ((state.runtime_config.offloading_queue_limit as f64)
@@ -380,87 +618,94 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         0
     };
     let mut offload_enqueued = 0usize;
-    for key in selected {
-        let (user_key, has_local_disk, owner_client, size) = match state.objects.get(&key) {
-            Some(object) => {
-                let has_local_disk = object
-                    .replicas
-                    .iter()
-                    .any(|replica| replica.replica_type == ReplicaType::LocalDisk);
-                let owner_client = object
-                    .replicas
-                    .iter()
-                    .find(|replica| replica.replica_type == ReplicaType::Memory)
-                    .and_then(|replica| client_id_by_segment_name(state, &replica.segment_name));
+    let passes = if state.runtime_config.allow_evict_soft_pinned_objects {
+        [Some(false), Some(true)]
+    } else {
+        [Some(false), None]
+    };
+    for allow_soft_pinned in passes.into_iter().flatten() {
+        if evicted.len() >= target_count {
+            break;
+        }
+        let mut candidates = state
+            .objects
+            .iter()
+            .filter(|entry| {
+                let key = entry.key();
+                !state.replication_tasks.contains_key(key)
+                    && !state.processing_keys.contains_key(key)
+                    && has_quota_evictable_memory_replica(entry.value())
+            })
+            .map(|entry| {
                 (
-                    object.user_key.clone(),
-                    has_local_disk,
-                    owner_client,
-                    object.size,
+                    entry.key().clone(),
+                    entry.soft_pin_timeout,
+                    entry.hard_pinned,
+                    entry.lease_timeout,
+                    entry.last_access,
                 )
+            })
+            .collect::<Vec<_>>();
+        // Select the full ordered eligibility set. Revalidation, grouped live
+        // leases or offload deferral may skip early candidates; keep scanning
+        // until the requested number of objects is actually evicted.
+        let candidate_count = candidates.len();
+        let selected = manager.select_for_eviction_with_lease_timeout_policy(
+            &mut candidates,
+            candidate_count,
+            allow_soft_pinned,
+        );
+        let mut processed_groups = HashSet::new();
+        for key in selected {
+            if evicted.len() >= target_count {
+                break;
             }
-            None => continue,
-        };
-
-        // 如果开启了 offload_on_evict 且对象没有本地磁盘副本，
-        // 则先触发下沉（offload），等数据安全写入磁盘后再驱逐内存。
-        //
-        // If offload_on_evict is enabled and the object has no local disk replica,
-        // trigger offload first; evict memory only after data is safely written to disk.
-        let should_offload =
-            state.runtime_config.offload_on_evict && !has_local_disk && owner_client.is_some();
-        if should_offload {
-            if offload_enqueued < offload_cap {
-                let had_task = state.offloading_tasks.contains_key(&key);
-                push_offloading_queue(state, owner_client.unwrap(), &key, size);
-                if !had_task && state.offloading_tasks.contains_key(&key) {
-                    offload_enqueued += 1;
-                }
+            let Some(candidate) = state.objects.get(&key) else {
+                continue;
+            };
+            let tenant_id = candidate.tenant_id.clone();
+            drop(candidate);
+            let (group_id, group_keys) = tenant_quota_group_keys(state, &tenant_id, &key);
+            if group_keys.is_empty() {
+                continue;
             }
-            // 下沉任务未创建成功且非强制驱逐模式，则跳过本次驱逐。
-            // If no offload task exists (queue/cap/client disabled) and force eviction is disabled, skip.
-            if !state.offloading_tasks.contains_key(&key)
-                && !state.runtime_config.offload_force_evict
+            if !group_id.is_empty()
+                && !processed_groups.insert((tenant_id.clone(), group_id.clone()))
             {
                 continue;
             }
-        }
-
-        if let Some(mut object) = state.objects.get_mut(&key) {
-            // 下沉成功后仅移除冗余副本（保留一份），其他情况则清空所有 Memory 副本
-            // After offload: remove redundant replicas only (keep one). Otherwise: remove all Memory replicas.
-            let removed =
-                if should_offload && !has_local_disk && state.offloading_tasks.contains_key(&key) {
-                    evict_redundant_memory_replicas(&mut object)
-                } else {
-                    evict_memory_replicas(&mut object)
-                };
-            let became_empty = object.replicas.is_empty();
-            drop(object);
-            if !removed.is_empty() {
-                release_replicas(state, &removed);
-                evicted.push(user_key.clone());
+            if group_keys.iter().any(|member_key| {
+                state
+                    .objects
+                    .get(member_key)
+                    .is_some_and(|object| !is_lease_expired(&object))
+            }) {
+                continue;
             }
-            if became_empty {
-                if let Some((_, removed_object)) = state.objects.remove(&key) {
-                    state.kv_event_publisher.publish_removed(
-                        removed_object.user_key_for_event(&key),
-                        "cpu",
-                        &removed_object.tenant_id,
-                        &removed_object.group_id,
-                    );
-                    account_removed_object_quota(state, &removed_object);
+            for member_key in group_keys {
+                let user_key = state
+                    .objects
+                    .get(&member_key)
+                    .map(|object| object.user_key_for_event(&member_key).to_string());
+                let freed = match evict_memory_pressure_object(
+                    state,
+                    &tenant_id,
+                    &member_key,
+                    allow_soft_pinned,
+                    SystemTime::now(),
+                    offload_cap,
+                    &mut offload_enqueued,
+                    "automatic_eviction",
+                ) {
+                    Ok(freed) => freed,
+                    Err(_) => return evicted,
+                };
+                if freed != 0 {
+                    evicted.push(user_key.unwrap_or(member_key));
                 }
-                // Clean up per-client object index / 清理每个客户端的对象索引
-                for mut entry in state.client_objects.iter_mut() {
-                    entry.value_mut().remove(&key);
-                }
-                clear_offloading_task(state, &key);
-                clear_promotion_task(state, &key);
             }
         }
     }
-
     evicted
 }
 
@@ -479,7 +724,7 @@ fn automatic_eviction_target_count(state: &MasterState) -> usize {
     let evictable_object_count = state
         .objects
         .iter()
-        .filter(|entry| has_evictable_memory_replica(entry.value()))
+        .filter(|entry| has_quota_evictable_memory_replica(entry.value()))
         .count();
     if evictable_object_count == 0 {
         return 0;
@@ -504,6 +749,145 @@ pub(crate) fn run_automatic_eviction_once(state: &MasterState) -> Vec<String> {
         return Vec::new();
     }
     run_eviction_cycle(state, target_count)
+}
+
+fn has_evictable_nof_replica(object: &ObjectEntry) -> bool {
+    object.replicas.iter().any(|replica| {
+        replica.replica_type == ReplicaType::NoFSsd
+            && replica.status == ReplicaStatus::Complete
+            && replica.handle_valid
+            && !replica.is_busy()
+    })
+}
+
+/// Remove complete, unreferenced NoF replicas from up to `target_count`
+/// tenant-scoped objects. Hard pins, live leases, soft pins and in-flight
+/// object mutations use the same gates as C++ NoFBatchEvict.
+pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -> Vec<String> {
+    if target_count == 0 || !state.runtime_config.enable_nof {
+        return Vec::new();
+    }
+    let manager = EvictionManager::new(
+        state.runtime_config.soft_pin_ttl,
+        state.runtime_config.lease_ttl,
+    );
+    let mut candidates = state
+        .objects
+        .iter()
+        .filter(|entry| {
+            let key = entry.key();
+            !state.replication_tasks.contains_key(key)
+                && !state.processing_keys.contains_key(key)
+                && has_evictable_nof_replica(entry.value())
+        })
+        .map(|entry| {
+            (
+                entry.key().clone(),
+                entry.soft_pin_timeout,
+                entry.hard_pinned,
+                entry.lease_timeout,
+                entry.last_access,
+            )
+        })
+        .collect::<Vec<_>>();
+    let selected =
+        manager.select_for_eviction_with_lease_timeout_policy(&mut candidates, target_count, false);
+
+    let mut evicted = Vec::new();
+    for key in selected {
+        let _mutation_guard = state.key_mutations.lock(&key);
+        let Some(mut object) = state.objects.get_mut(&key) else {
+            continue;
+        };
+        let user_key = object.user_key_for_event(&key).to_string();
+        let tenant_id = object.tenant_id.clone();
+        let group_id = object.group_id.clone();
+        let mut removed = Vec::new();
+        object.replicas.retain(|replica| {
+            let should_remove = replica.replica_type == ReplicaType::NoFSsd
+                && replica.status == ReplicaStatus::Complete
+                && replica.handle_valid
+                && !replica.is_busy();
+            if should_remove {
+                removed.push(replica.clone());
+            }
+            !should_remove
+        });
+        if removed.is_empty() {
+            continue;
+        }
+        sync_cache_total_accounting(&mut object);
+        let became_empty = object.replicas.is_empty();
+        drop(object);
+
+        let removed_object = if became_empty {
+            state.objects.remove(&key).map(|(_, object)| object)
+        } else {
+            None
+        };
+        if let Some(object) = &removed_object {
+            if account_removed_object_quota(state, object).is_err() {
+                return evicted;
+            }
+            for mut entry in state.client_objects.iter_mut() {
+                entry.value_mut().remove(&key);
+            }
+            clear_offloading_task(state, &key);
+            clear_promotion_task(state, &key);
+        }
+        if state
+            .persist_object_image_or_remove_or_fence(&key, "automatic_nof_eviction")
+            .is_err()
+        {
+            return evicted;
+        }
+        if release_replicas(state, &removed).is_err() {
+            return evicted;
+        }
+        state
+            .kv_event_publisher
+            .publish_removed(&user_key, "disk", &tenant_id, &group_id);
+        evicted.push(user_key);
+    }
+
+    if !evicted.is_empty() || state.objects.is_empty() {
+        state
+            .nof_eviction_requested
+            .store(false, AtomicOrdering::Release);
+    }
+    evicted
+}
+
+fn automatic_nof_eviction_target_count(state: &MasterState) -> usize {
+    if !state.runtime_config.enable_nof {
+        return 0;
+    }
+    let used_ratio = nof_usage_ratio(state);
+    let allocation_pressure = state.nof_eviction_requested.load(AtomicOrdering::Acquire);
+    if used_ratio <= state.runtime_config.nof_eviction_high_watermark_ratio
+        && !(allocation_pressure && state.runtime_config.nof_eviction_ratio > 0.0)
+    {
+        return 0;
+    }
+    let object_count = state.objects.len();
+    if object_count == 0 {
+        state
+            .nof_eviction_requested
+            .store(false, AtomicOrdering::Release);
+        return 0;
+    }
+    let target_ratio = state.runtime_config.nof_eviction_ratio.max(
+        used_ratio - state.runtime_config.nof_eviction_high_watermark_ratio
+            + state.runtime_config.nof_eviction_ratio,
+    );
+    ((object_count as f64 * target_ratio).ceil() as usize).max(1)
+}
+
+/// Run one NoF-specific automatic eviction cycle. Its usage and pressure
+/// signal are independent from Memory eviction.
+pub(crate) fn run_automatic_nof_eviction_once(state: &MasterState) -> Vec<String> {
+    let target_count = automatic_nof_eviction_target_count(state);
+    run_nof_eviction_cycle(state, target_count)
 }
 
 /// 尝试将热 key 推入晋升队列（从本地磁盘提升到内存）。
@@ -543,13 +927,17 @@ pub(crate) fn try_push_promotion_queue(
         return PromotionQueueResult::WatermarkRejected;
     }
 
+    // Admission is a compound object/task mutation. Revalidate the source and
+    // publish its refcount plus task while holding the same tenant-scoped gate
+    // used by remove/upsert and background replica mutation paths.
+    let _mutation_guard = state.key_mutations.lock(key);
+
     // 检查对象状态：必须有完整 LocalDisk 副本且无 Memory 副本才有晋升价值
     // Check object state: must have a complete LocalDisk replica and no Memory replica to be worth promoting
-    let (holder_id, object_size, source) = match state.objects.get(key) {
+    let (storage_id, holder_id, object_size, source) = match state.objects.get(key) {
         Some(object) => {
             let any_memory = object.replicas.iter().any(|replica| {
-                replica.replica_type == ReplicaType::Memory
-                    && replica.status == ReplicaStatus::Complete
+                replica.replica_type == ReplicaType::Memory && replica_is_routable(state, replica)
             });
             if any_memory {
                 erase_promotion_candidate(state, key);
@@ -557,17 +945,31 @@ pub(crate) fn try_push_promotion_queue(
             }
             let Some(local_disk) = object.replicas.iter().find(|replica| {
                 replica.replica_type == ReplicaType::LocalDisk
-                    && replica.status == ReplicaStatus::Complete
-                    && replica.holder_client_id.is_some()
+                    && replica_is_routable(state, replica)
             }) else {
                 erase_promotion_candidate(state, key);
                 return PromotionQueueResult::NoLocalDiskSource;
             };
-            (
-                local_disk.holder_client_id.unwrap(),
-                local_disk.size,
-                local_disk.clone(),
-            )
+            let storage_id = local_disk.local_disk_storage_id.unwrap();
+            let Some(holder_id) = state
+                .local_disk_segments
+                .get(&storage_id)
+                .and_then(|entry| {
+                    if entry.recovery_complete {
+                        entry.active_client_id
+                    } else {
+                        None
+                    }
+                })
+            else {
+                erase_promotion_candidate(state, key);
+                return PromotionQueueResult::PushFailed;
+            };
+            if local_disk.holder_client_id != Some(holder_id) {
+                erase_promotion_candidate(state, key);
+                return PromotionQueueResult::PushFailed;
+            }
+            (storage_id, holder_id, local_disk.size, local_disk.clone())
         }
         None => {
             erase_promotion_candidate(state, key);
@@ -579,7 +981,7 @@ pub(crate) fn try_push_promotion_queue(
         erase_promotion_candidate(state, key);
         return PromotionQueueResult::AlreadyInFlight;
     }
-    if !state.local_disk_segments.contains_key(&holder_id) {
+    if !state.local_disk_segments.contains_key(&storage_id) {
         if record_candidate {
             record_or_refresh_candidate(
                 state,
@@ -612,14 +1014,14 @@ pub(crate) fn try_push_promotion_queue(
         }
         return PromotionQueueResult::QueueCapRejected;
     }
-    if let Some(mut local_disk) = state.local_disk_segments.get_mut(&holder_id) {
+    if let Some(mut local_disk) = state.local_disk_segments.get_mut(&storage_id) {
         local_disk
             .promotion_objects
             .entry(key.to_string())
             .or_insert(object_size as i64);
     }
     if !inc_refcnt_for_replica(state, key, &source) {
-        if let Some(mut local_disk) = state.local_disk_segments.get_mut(&holder_id) {
+        if let Some(mut local_disk) = state.local_disk_segments.get_mut(&storage_id) {
             local_disk.promotion_objects.remove(key);
         }
         state
@@ -640,13 +1042,75 @@ pub(crate) fn try_push_promotion_queue(
         key.to_string(),
         PromotionTaskEntry {
             holder_id,
+            storage_id,
             object_size,
             source,
             staged_segment_id: None,
             staged_offset: None,
+            reserved_quota_charge_bytes: 0,
             start_time: Instant::now(),
         },
     );
     erase_promotion_candidate(state, key);
     PromotionQueueResult::Queued
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory_replica(segment_name: &str, refcnt: u32) -> ReplicaDescriptor {
+        ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: segment_name.into(),
+            offset: 0,
+            size: 128,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: Some(Uuid::new_v4()),
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt,
+            handle_valid: true,
+            base_addr: 0x1000,
+            protocol: "tcp".into(),
+        }
+    }
+
+    #[test]
+    fn quota_eviction_projection_keeps_busy_replica_and_removes_idle_replica() {
+        let busy_segment_id = Uuid::new_v4();
+        let mut busy = memory_replica("busy:1", 2);
+        busy.segment_id = busy_segment_id;
+        let idle = memory_replica("idle:1", 0);
+        let object = ObjectEntry {
+            replicas: vec![busy, idle],
+            size: 128,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::new_v4(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::default(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 256,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: "key".into(),
+        };
+
+        let mut projected = clone_object_for_mutation(&object);
+        let removed = evict_quota_memory_replicas(&mut projected);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].segment_name, "idle:1");
+        assert_eq!(projected.replicas.len(), 1);
+        assert_eq!(projected.replicas[0].segment_id, busy_segment_id);
+        assert_eq!(projected.replicas[0].refcnt, 2);
+    }
 }

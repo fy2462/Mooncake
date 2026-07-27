@@ -28,6 +28,7 @@
 use parking_lot::Mutex;
 use regex::Regex;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// 默认热缓存大小: 256 MiB
 /// (Default hot cache size: 256 MiB)
@@ -35,6 +36,120 @@ const DEFAULT_HOT_CACHE_SIZE: usize = 256 * 1024 * 1024;
 /// 默认最大条目数: 10000
 /// (Default maximum number of entries: 10,000)
 const DEFAULT_MAX_ENTRIES: usize = 10000;
+pub(crate) const DEFAULT_HOT_CACHE_BLOCK_SIZE: usize = 16 * 1024 * 1024;
+const ADMISSION_SKETCH_WIDTH: usize = 4096;
+const ADMISSION_SKETCH_DEPTH: usize = 4;
+const DEFAULT_ADMISSION_THRESHOLD: u8 = 2;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalHotCacheSettings {
+    pub(crate) total_size: usize,
+    pub(crate) block_size: usize,
+    pub(crate) max_entries: usize,
+    pub(crate) admission_threshold: u8,
+}
+
+impl LocalHotCacheSettings {
+    pub(crate) fn from_environment() -> Result<Option<Self>, String> {
+        Self::from_values(
+            std::env::var("MC_STORE_LOCAL_HOT_CACHE_SIZE")
+                .ok()
+                .as_deref(),
+            std::env::var("MC_STORE_LOCAL_HOT_BLOCK_SIZE")
+                .ok()
+                .as_deref(),
+            std::env::var("MC_STORE_LOCAL_HOT_CACHE_USE_SHM")
+                .ok()
+                .as_deref(),
+            std::env::var("MC_STORE_LOCAL_HOT_ADMISSION_THRESHOLD")
+                .ok()
+                .as_deref(),
+        )
+    }
+
+    pub(crate) fn from_values(
+        total_size: Option<&str>,
+        block_size: Option<&str>,
+        use_shm: Option<&str>,
+        admission_threshold: Option<&str>,
+    ) -> Result<Option<Self>, String> {
+        let Some(total_size) = parse_positive_usize(total_size) else {
+            return Ok(None);
+        };
+        if use_shm == Some("1") {
+            return Err(
+                "MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1 is not supported by the Rust Store client"
+                    .to_string(),
+            );
+        }
+
+        let block_size = parse_positive_usize(block_size).unwrap_or(DEFAULT_HOT_CACHE_BLOCK_SIZE);
+        let max_entries = total_size / block_size;
+        if max_entries == 0 {
+            return Err(format!(
+                "local hot cache size {total_size} is smaller than block size {block_size}"
+            ));
+        }
+        let admission_threshold = admission_threshold
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_ADMISSION_THRESHOLD);
+
+        Ok(Some(Self {
+            total_size,
+            block_size,
+            max_entries,
+            admission_threshold,
+        }))
+    }
+}
+
+fn parse_positive_usize(value: Option<&str>) -> Option<usize> {
+    value?.parse::<usize>().ok().filter(|value| *value > 0)
+}
+
+/// Fixed-memory Count-Min Sketch used by the C++-compatible hot-cache
+/// frequency admission policy.
+pub(crate) struct HotCacheAdmission {
+    counters: Mutex<Vec<u8>>,
+    threshold: u8,
+}
+
+impl HotCacheAdmission {
+    pub(crate) fn new(threshold: u8) -> Self {
+        Self {
+            counters: Mutex::new(vec![0; ADMISSION_SKETCH_WIDTH * ADMISSION_SKETCH_DEPTH]),
+            threshold: threshold.max(1),
+        }
+    }
+
+    pub(crate) fn should_admit(&self, key: &str) -> bool {
+        let mut counters = self.counters.lock();
+        let mut estimate = u8::MAX;
+        for row in 0..ADMISSION_SKETCH_DEPTH {
+            let column = admission_column(key, row);
+            let counter = &mut counters[row * ADMISSION_SKETCH_WIDTH + column];
+            *counter = counter.saturating_add(1);
+            estimate = estimate.min(*counter);
+        }
+        estimate >= self.threshold
+    }
+
+    pub(crate) fn count(&self, key: &str) -> u8 {
+        let counters = self.counters.lock();
+        (0..ADMISSION_SKETCH_DEPTH)
+            .map(|row| counters[row * ADMISSION_SKETCH_WIDTH + admission_column(key, row)])
+            .min()
+            .unwrap_or(0)
+    }
+}
+
+fn admission_column(key: &str, row: usize) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    row.hash(&mut hasher);
+    key.hash(&mut hasher);
+    hasher.finish() as usize % ADMISSION_SKETCH_WIDTH
+}
 
 /// 本地热缓存，减少远程存储访问的延迟。
 /// (Local hot cache to reduce latency of remote storage accesses.)
@@ -53,6 +168,7 @@ pub struct LocalHotCache {
     /// key → (offset, len) 索引，用于 O(1) 查找 (key-to-location index)
     entries: Mutex<HashMap<String, (usize, usize)>>,
     max_size: usize,
+    max_value_size: usize,
     max_entries: usize,
 }
 
@@ -63,11 +179,21 @@ impl LocalHotCache {
     /// `max_size` 至少为 4096 字节（单页大小）。
     pub fn new(max_size: usize, max_entries: usize) -> Self {
         let size = max_size.max(4096);
+        Self::new_with_block_size(size, size, max_entries)
+    }
+
+    /// Create a cache whose individual values may not exceed `block_size`.
+    ///
+    /// The C++ cache allocates fixed-size physical blocks and therefore cannot
+    /// admit an object larger than one block.
+    pub fn new_with_block_size(max_size: usize, block_size: usize, max_entries: usize) -> Self {
+        let size = max_size.max(4096);
         Self {
             data: Mutex::new(vec![0u8; size]),
             tail: Mutex::new(0),
             entries: Mutex::new(HashMap::new()),
             max_size: size,
+            max_value_size: block_size.max(1).min(size),
             max_entries,
         }
     }
@@ -96,10 +222,7 @@ impl LocalHotCache {
     /// 3. 若写入位置 + value 超出缓冲区末尾，绕回到开头并清空所有条目
     /// 4. 将 value 拷贝到环形缓冲区，更新 entries 索引和 tail 指针
     pub fn put(&self, key: &str, value: &[u8]) {
-        // C++ LocalHotCache admits any value that fits the physical cache block.
-        // This ring-buffer variant has one physical buffer, so the hard limit is
-        // max_size rather than a conservative fraction of it.
-        if value.len() > self.max_size {
+        if value.len() > self.max_value_size {
             return;
         }
 
@@ -180,6 +303,10 @@ impl LocalHotCache {
         self.entries.lock().clear();
         *self.tail.lock() = 0;
     }
+
+    pub fn block_count(&self) -> usize {
+        self.max_size / self.max_value_size
+    }
 }
 
 impl Default for LocalHotCache {
@@ -187,5 +314,65 @@ impl Default for LocalHotCache {
     /// (Create cache with defaults: 256 MiB capacity, max 10,000 entries.)
     fn default() -> Self {
         Self::new(DEFAULT_HOT_CACHE_SIZE, DEFAULT_MAX_ENTRIES)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HotCacheAdmission, LocalHotCache, LocalHotCacheSettings};
+
+    #[test]
+    fn environment_settings_default_to_cpp_block_and_admission_values() {
+        let settings = LocalHotCacheSettings::from_values(Some("33554432"), None, None, None)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(settings.block_size, 16 * 1024 * 1024);
+        assert_eq!(settings.max_entries, 2);
+        assert_eq!(settings.admission_threshold, 2);
+    }
+
+    #[test]
+    fn invalid_or_missing_total_size_disables_cache() {
+        assert_eq!(
+            LocalHotCacheSettings::from_values(None, None, None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            LocalHotCacheSettings::from_values(Some("-1"), None, None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            LocalHotCacheSettings::from_values(Some("invalid"), None, None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn shared_memory_mode_fails_closed() {
+        let error = LocalHotCacheSettings::from_values(Some("33554432"), None, Some("1"), None)
+            .unwrap_err();
+        assert!(error.contains("not supported"));
+    }
+
+    #[test]
+    fn cache_rejects_values_larger_than_cpp_compatible_block() {
+        let cache = LocalHotCache::new_with_block_size(8192, 4096, 2);
+        cache.put("too-large", &[0; 4097]);
+        cache.put("fits", &[0; 4096]);
+
+        assert!(cache.get("too-large").is_none());
+        assert_eq!(cache.get("fits").unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn admission_uses_saturating_frequency_threshold() {
+        let admission = HotCacheAdmission::new(2);
+        assert_eq!(admission.count("key"), 0);
+        assert!(!admission.should_admit("key"));
+        assert_eq!(admission.count("key"), 1);
+        assert!(admission.should_admit("key"));
+        assert_eq!(admission.count("key"), 2);
+        assert!(admission.should_admit("key"));
     }
 }

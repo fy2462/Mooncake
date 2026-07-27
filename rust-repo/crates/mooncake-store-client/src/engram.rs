@@ -73,20 +73,11 @@ impl Default for EngramStoreConfig {
 /// [`EngramStore`] 的后端——目前仅有 [`MooncakeClient`] 的实现。
 ///
 /// ## 方法概览 (Method Overview)
-/// - `register_buffer` / `unregister_buffer`: RDMA 缓冲区注册/注销
 /// - `batch_is_exist`: 检查一组 key 是否存在
 /// - `batch_put_from`: 批量写入嵌入数据
 /// - `get_into_ranges`: 按 offset 范围读取嵌入数据（核心读取操作）
 /// - `remove`: 删除指定 key 的嵌入数据
 pub trait EngramClient {
-    /// 注册 RDMA 缓冲区，使其可被远程节点直接访问。
-    /// (Register an RDMA buffer so remote nodes can access it directly.)
-    fn register_buffer(&self, buffer: &[u8], location: &str) -> StoreResult<()>;
-
-    /// 注销 RDMA 缓冲区。
-    /// (Unregister an RDMA buffer.)
-    fn unregister_buffer(&self, buffer: &[u8]) -> StoreResult<()>;
-
     /// 检查多个 key 是否存在。
     /// (Check whether multiple keys exist in the store.)
     fn batch_is_exist<'a>(
@@ -127,20 +118,9 @@ pub trait EngramClient {
 /// (Adapter: implements EngramClient for MooncakeClient.)
 ///
 /// 将高层嵌入操作映射到 MooncakeClient 的底层 API：
-/// - `register_buffer`: 获取 buffer 的原始指针注册到 RDMA
-/// - `batch_put_from`: 转换 `&[&[u8]]` 为指针数组，调用 C FFI
-/// - `get_into_ranges`: 将 buffer 转换为原始指针后调用底层传输
+/// - `batch_put_from`: 使用安全 slice API 批量写入
+/// - `get_into_ranges`: 使用 copy-based 安全范围读取
 impl EngramClient for MooncakeClient {
-    fn register_buffer(&self, buffer: &[u8], location: &str) -> StoreResult<()> {
-        let ptr = buffer.as_ptr() as *mut std::ffi::c_void;
-        unsafe { MooncakeClient::register_buffer(self, ptr, buffer.len(), location) }
-    }
-
-    fn unregister_buffer(&self, buffer: &[u8]) -> StoreResult<()> {
-        let ptr = buffer.as_ptr() as *mut std::ffi::c_void;
-        unsafe { MooncakeClient::unregister_buffer(self, ptr) }
-    }
-
     fn batch_is_exist<'a>(
         &'a mut self,
         keys: &'a [String],
@@ -154,16 +134,7 @@ impl EngramClient for MooncakeClient {
         buffers: &'a [&'a [u8]],
         config: Option<ReplicateConfig>,
     ) -> ClientFuture<'a, StoreResult<Vec<i32>>> {
-        Box::pin(async move {
-            // 转换为原始指针数组给 C FFI 使用
-            // Convert to raw pointer arrays for C FFI
-            let ptrs: Vec<*mut std::ffi::c_void> = buffers
-                .iter()
-                .map(|b| b.as_ptr() as *mut std::ffi::c_void)
-                .collect();
-            let sizes: Vec<usize> = buffers.iter().map(|b| b.len()).collect();
-            unsafe { MooncakeClient::batch_put_from(self, keys, &ptrs, &sizes, config).await }
-        })
+        Box::pin(async move { MooncakeClient::batch_put(self, keys, buffers, config).await })
     }
 
     fn get_into_ranges<'a>(
@@ -174,12 +145,17 @@ impl EngramClient for MooncakeClient {
         src_offsets: &'a [Vec<Vec<usize>>],
         sizes: &'a [Vec<Vec<usize>>],
     ) -> ClientFuture<'a, StoreResult<Vec<Vec<Vec<i64>>>>> {
-        let ptr = buffer.as_mut_ptr() as *mut std::ffi::c_void;
         Box::pin(async move {
-            unsafe {
-                MooncakeClient::get_into_ranges(self, &[ptr], keys, dst_offsets, src_offsets, sizes)
-                    .await
-            }
+            let mut buffers = [buffer];
+            MooncakeClient::get_into_ranges_copy(
+                self,
+                &mut buffers,
+                keys,
+                dst_offsets,
+                src_offsets,
+                sizes,
+            )
+            .await
         })
     }
 
@@ -199,7 +175,6 @@ impl EngramClient for MooncakeClient {
 /// - `table_vocab_sizes`: 每个 head 的词汇表大小
 /// - `embedding_dim`: 嵌入向量维度
 /// - `embed_keys`: 自动生成的 key 列表 `["engram:l{layer}:h0", ...]`
-/// - `buffer_location`: RDMA 缓冲区位置
 pub struct EngramStore<C> {
     store: C,
     table_vocab_sizes: Vec<i64>,
@@ -207,7 +182,6 @@ pub struct EngramStore<C> {
     /// 自动生成的 key: `engram:l{layer_id}:h{head_id}`
     /// (Auto-generated store keys, one per head)
     embed_keys: Vec<String>,
-    buffer_location: String,
 }
 
 impl<C: EngramClient> EngramStore<C> {
@@ -247,7 +221,6 @@ impl<C: EngramClient> EngramStore<C> {
             table_vocab_sizes: config.table_vocab_sizes,
             embedding_dim: config.embedding_dim,
             embed_keys,
-            buffer_location: config.buffer_location,
         })
     }
 
@@ -424,15 +397,8 @@ impl<C: EngramClient> EngramStore<C> {
             }
         }
 
-        // 注册输出缓冲区到 RDMA (register output buffer for RDMA transfer)
-        self.store
-            .register_buffer(&output_buffer[..expected_size], &self.buffer_location)
-            .inspect_err(|_| {
-                output_buffer[..expected_size].fill(0);
-            })?;
-
         // 执行批量读取 (execute batch read)
-        let result = self
+        let results = self
             .store
             .get_into_ranges(
                 output_buffer,
@@ -441,18 +407,8 @@ impl<C: EngramClient> EngramStore<C> {
                 &all_src_offsets,
                 &all_sizes,
             )
-            .await;
-        let unregister_result = self
-            .store
-            .unregister_buffer(&output_buffer[..expected_size]);
-
-        let results = match result {
-            Ok(results) => results,
-            Err(err) => return fail_lookup(output_buffer, unregister_result.err().unwrap_or(err)),
-        };
-        if let Err(err) = unregister_result {
-            return fail_lookup(output_buffer, err);
-        }
+            .await
+            .inspect_err(|_| output_buffer[..expected_size].fill(0))?;
         // 验证返回结果形状 (validate result shape)
         if results.len() != 1 || results[0].len() != num_heads {
             return fail_lookup(

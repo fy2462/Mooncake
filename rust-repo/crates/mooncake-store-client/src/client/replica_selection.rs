@@ -167,6 +167,8 @@ mod tests {
             status: ReplicaStatus::Complete,
             replica_type: ReplicaType::Memory,
             holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
             refcnt: 0,
             handle_valid: true,
             base_addr: 0,

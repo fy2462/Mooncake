@@ -26,6 +26,9 @@ async-trait = "0.1"
 toml = "0.8"
 fs2 = "0.4"
 regex = { workspace = true }
+sha2 = "0.10"
+socket2 = "0.5"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 libc.workspace = true
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-config = { workspace = true, optional = true }
@@ -41,6 +44,7 @@ link-native = [
 ]
 
 [dev-dependencies]
+mooncake-store-master = { path = "../mooncake-store-master" }
 tempfile = "3"
 tokio-stream = { version = "0.1", features = ["net"] }
 

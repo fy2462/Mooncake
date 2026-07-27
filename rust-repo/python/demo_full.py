@@ -73,7 +73,7 @@ async def main():
     print(f"    exists('hello') after remove → {ok}")
 
     # -- Cleanup --
-    client.close()
+    await client.close()
     store_node.close()
 
     print("\n" + "=" * 60)

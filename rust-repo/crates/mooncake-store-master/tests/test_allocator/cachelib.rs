@@ -28,7 +28,7 @@ fn test_cachelib_like_allocator_reuses_freed_slot() {
     assert_eq!(second.len(), 1);
     assert_ne!(first[0].offset, second[0].offset);
 
-    a.release(&first);
+    a.release(&first).unwrap();
     let reused = a.allocate("k3", 128, 1, &ReplicateConfig::default());
     assert_eq!(reused.len(), 1);
     assert_eq!(reused[0].offset, first[0].offset);
@@ -96,7 +96,7 @@ fn test_cachelib_like_slab_release_resize_requires_freeing_active_allocations() 
     assert_eq!(ctx.active_offsets, vec![replica[0].offset]);
 
     assert!(a.complete_slab_release(&seg_id, &ctx).is_err());
-    a.release(&replica);
+    a.release(&replica).unwrap();
     a.complete_slab_release(&seg_id, &ctx).unwrap();
 
     assert!(
@@ -132,7 +132,7 @@ fn test_cachelib_like_slab_release_abort_restores_free_slots() {
             SlabReleaseMode::Resize,
         )
         .unwrap();
-    a.release(&replica);
+    a.release(&replica).unwrap();
     a.abort_slab_release(&seg_id, &ctx).unwrap();
 
     let reused = a.allocate("k2", 128, 1, &ReplicateConfig::default());
@@ -212,7 +212,7 @@ fn test_cachelib_like_release_helpers_and_rebalance() {
     .unwrap();
     assert!(callback_hit.get());
 
-    a.release(&replica);
+    a.release(&replica).unwrap();
     assert_eq!(
         a.is_alloc_freed(&seg_id, &ctx, replica[0].offset).unwrap(),
         true

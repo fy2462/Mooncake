@@ -62,6 +62,21 @@ fn test_parse_ha_backend_type() {
 }
 
 #[test]
+fn test_ha_backend_capability_matrix_requires_shared_oplog_for_full_ha() {
+    let etcd = HABackendType::Etcd.capabilities();
+    assert!(etcd.discovery);
+    assert!(etcd.leader_election);
+    assert!(etcd.shared_oplog);
+
+    for backend in [HABackendType::Redis, HABackendType::K8s] {
+        let capabilities = backend.capabilities();
+        assert!(capabilities.discovery);
+        assert!(capabilities.leader_election);
+        assert!(!capabilities.shared_oplog);
+    }
+}
+
+#[test]
 fn test_ha_error_fatal_matches_supervisor_policy() {
     assert!(HaError::InvalidParams("bad config".into()).is_fatal());
     assert!(HaError::UnavailableInCurrentMode("not built".into()).is_fatal());
@@ -122,6 +137,13 @@ async fn test_manual_acquire_returns_session_and_session_apis_work() {
     let session = acquired.session.as_ref().expect("leadership session");
     assert_eq!(session.view.leader_address, "127.0.0.1:50051");
     assert_eq!(session.owner_token, "manual");
+    coordinator.try_renew_leadership(session).await.unwrap();
+    assert!(matches!(
+        coordinator
+            .try_acquire_leadership("127.0.0.1:50052", 30)
+            .await,
+        Err(HaError::UnavailableInCurrentStatus)
+    ));
 
     let keepalive = coordinator
         .start_leadership_keepalive(session)
@@ -137,6 +159,19 @@ async fn test_manual_acquire_returns_session_and_session_apis_work() {
         coordinator.subscribe_role_for_session(&wrong_session),
         Err(HaError::UnavailableInCurrentStatus)
     ));
+    assert!(matches!(
+        coordinator.try_renew_leadership(&wrong_session).await,
+        Err(HaError::UnavailableInCurrentStatus)
+    ));
+    assert!(matches!(
+        coordinator.release_leadership(&wrong_session).await,
+        Err(HaError::InvalidParams(_))
+    ));
+    assert_eq!(
+        coordinator.wait_for_role().await.unwrap(),
+        LeaderRole::Leader,
+        "a stale session must not demote the active owner"
+    );
 
     coordinator.try_renew_leadership(session).await.unwrap();
     coordinator.release_leadership(session).await.unwrap();
@@ -179,6 +214,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
                 base: 0,
                 te_endpoint: String::new(),
                 protocol: "tcp".into(),
+                host_id: "physical-leader".into(),
             },
             used: 512,
             client_id,
@@ -205,6 +241,8 @@ fn test_local_snapshot_provider_loads_snapshot() {
                 status: ReplicaStatus::Complete,
                 replica_type: ReplicaType::Memory,
                 holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
                 protocol: "rdma".into(),
             }],
             size: 512,
@@ -217,6 +255,9 @@ fn test_local_snapshot_provider_loads_snapshot() {
             soft_pin_timeout: None,
             group_id: String::new(),
             quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
         },
@@ -231,6 +272,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
     assert_eq!(snapshot.segments[0].used, 512);
     assert_eq!(snapshot.segments[0].client_id, client_id);
     assert_eq!(snapshot.segments[0].segment.protocol, "tcp");
+    assert_eq!(snapshot.segments[0].segment.host_id, "physical-leader");
     assert!(snapshot.nof_segments.is_empty());
     assert_eq!(snapshot.objects.len(), 1);
     assert_eq!(snapshot.objects[0].0, "ha-key");
@@ -265,6 +307,9 @@ fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
             soft_pin_timeout: None,
             group_id: String::new(),
             quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
         },
@@ -327,10 +372,29 @@ fn test_snapshot_catalog_uses_object_store_abstraction() {
         .list_objects_with_prefix("mooncake_master_snapshot")
         .unwrap();
     assert!(listed.iter().any(|key| key == descriptor_key));
+    assert!(
+        listed.iter().all(|key| !key.ends_with(".tmp")),
+        "atomic local snapshot publication must not leave temp objects"
+    );
 }
 
 #[test]
-fn test_local_snapshot_provider_uses_catalog_sequence_id() {
+fn test_embedded_snapshot_catalog_rejects_empty_latest_marker() {
+    let root = temp_dir();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    object_store
+        .upload_string("mooncake_master_snapshot/latest.txt", "")
+        .unwrap();
+
+    let error = catalog
+        .get_latest()
+        .expect_err("an empty latest marker is corruption, not an empty catalog");
+    assert!(error.to_string().contains("latest marker is empty"));
+}
+
+#[test]
+fn test_local_snapshot_provider_does_not_borrow_catalog_sequence_id() {
     let root = temp_dir();
     let cluster_dir = root.join("cluster-c");
     let backend = StorageBackend::new(StorageBackendType::LocalDisk, &cluster_dir);
@@ -351,8 +415,11 @@ fn test_local_snapshot_provider_uses_catalog_sequence_id() {
     let provider = LocalSnapshotProvider::new(root, StorageBackendType::LocalDisk);
     let snapshot = provider.load_latest_snapshot("cluster-c").unwrap().unwrap();
 
-    assert_eq!(snapshot.snapshot_id, "20260603_120001_001");
-    assert_eq!(snapshot.snapshot_sequence_id, 99);
+    assert_ne!(snapshot.snapshot_id, "20260603_120001_001");
+    assert_eq!(
+        snapshot.snapshot_sequence_id, 0,
+        "legacy native payload has no proven baseline and must replay from zero"
+    );
 }
 
 #[test]

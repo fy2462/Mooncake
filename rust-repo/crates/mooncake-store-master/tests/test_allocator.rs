@@ -4,13 +4,209 @@ use std::collections::HashMap;
 mod common;
 use common::{make_seg, make_seg_with_usage};
 
-use mooncake_store_core::{ReplicateConfig, Segment};
+use mooncake_store_core::{
+    ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment,
+};
 use mooncake_store_master::allocator::{
     AllocationStrategy, CACHELIB_SLAB_SIZE, MemoryAllocatorKind, SegmentAllocationError,
     SegmentAllocator, SlabReleaseMode, SsdUsageMetrics, cachelib_allocation_class_id_for_request,
     cachelib_allocation_class_size_for_request,
 };
 use uuid::Uuid;
+
+fn restored_replica(segment: &Segment, offset: u64, size: u64) -> ReplicaDescriptor {
+    ReplicaDescriptor {
+        segment_id: segment.id,
+        segment_name: segment.name.clone(),
+        offset,
+        size,
+        status: ReplicaStatus::Complete,
+        replica_type: ReplicaType::Memory,
+        holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
+        refcnt: 0,
+        handle_valid: true,
+        base_addr: segment.base,
+        protocol: segment.protocol.clone(),
+    }
+}
+
+#[test]
+fn test_offset_restore_rebuilds_internal_holes_from_live_replicas() {
+    let segment = make_seg("restore-offset:1", 1_000);
+    let client_id = Uuid::new_v4();
+    let replicas = vec![
+        restored_replica(&segment, 0, 100),
+        restored_replica(&segment, 300, 100),
+    ];
+    let mut allocator = SegmentAllocator::new();
+    assert_eq!(
+        allocator
+            .restore_segment(segment.clone(), client_id, &replicas)
+            .unwrap(),
+        200
+    );
+
+    let restored = allocator.allocate("hole", 150, 1, &ReplicateConfig::default());
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].offset, 100);
+    let tail = allocator.allocate("tail", 250, 1, &ReplicateConfig::default());
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].offset, 400);
+}
+
+#[test]
+fn test_offset_restore_rejects_overlap_and_out_of_bounds() {
+    let segment = make_seg("restore-invalid:1", 1_000);
+    let client_id = Uuid::new_v4();
+    let mut overlap_allocator = SegmentAllocator::new();
+    let overlap = vec![
+        restored_replica(&segment, 100, 100),
+        restored_replica(&segment, 150, 100),
+    ];
+    assert!(
+        overlap_allocator
+            .restore_segment(segment.clone(), client_id, &overlap)
+            .unwrap_err()
+            .contains("overlapping")
+    );
+    assert!(
+        overlap_allocator
+            .allocate("missing", 1, 1, &ReplicateConfig::default())
+            .is_empty()
+    );
+
+    let mut bounds_allocator = SegmentAllocator::new();
+    let out_of_bounds = vec![restored_replica(&segment, 950, 100)];
+    assert!(
+        bounds_allocator
+            .restore_segment(segment, client_id, &out_of_bounds)
+            .unwrap_err()
+            .contains("exceeds")
+    );
+}
+
+#[test]
+fn restore_rejects_replica_segment_name_mismatch_before_installing_allocator() {
+    let segment = make_seg("restore-identity:1", 1_000);
+    let client_id = Uuid::new_v4();
+    let mut mismatched = restored_replica(&segment, 0, 100);
+    mismatched.segment_name = "other-segment:1".to_string();
+    let mut allocator = SegmentAllocator::new();
+
+    let error = allocator
+        .restore_segment(segment, client_id, &[mismatched])
+        .unwrap_err();
+    assert!(error.contains("segment name"));
+    assert!(
+        allocator
+            .allocate("must-not-install", 1, 1, &ReplicateConfig::default())
+            .is_empty()
+    );
+}
+
+#[test]
+fn offset_release_rejects_stale_or_mismatched_descriptor_without_freeing_space() {
+    let segment = make_seg("release-offset:1", 200);
+    let segment_id = segment.id;
+    let mut allocator = SegmentAllocator::new();
+    allocator.add_segment(segment, 0, Uuid::new_v4());
+    let allocation = allocator.allocate("first", 100, 1, &ReplicateConfig::default());
+    assert_eq!(allocator.used_bytes(&segment_id), Some(100));
+
+    let mut wrong_size = allocation[0].clone();
+    wrong_size.size = 99;
+    assert!(allocator.release(&[wrong_size]).is_err());
+    assert_eq!(allocator.used_bytes(&segment_id), Some(100));
+    assert!(
+        allocator
+            .allocate("must-not-overlap", 101, 1, &ReplicateConfig::default())
+            .is_empty()
+    );
+
+    allocator.release(&allocation).unwrap();
+    assert_eq!(allocator.used_bytes(&segment_id), Some(0));
+    assert!(allocator.release(&allocation).is_err());
+    assert_eq!(allocator.used_bytes(&segment_id), Some(0));
+}
+
+#[test]
+fn offset_release_batch_is_validated_before_any_range_is_freed() {
+    let segment = make_seg("release-batch:1", 200);
+    let segment_id = segment.id;
+    let mut allocator = SegmentAllocator::new();
+    allocator.add_segment(segment, 0, Uuid::new_v4());
+    let first = allocator.allocate("first", 100, 1, &ReplicateConfig::default());
+    let second = allocator.allocate("second", 100, 1, &ReplicateConfig::default());
+    let mut invalid_second = second[0].clone();
+    invalid_second.offset = first[0].offset;
+
+    assert!(
+        allocator
+            .release(&[first[0].clone(), invalid_second])
+            .is_err()
+    );
+    assert_eq!(allocator.used_bytes(&segment_id), Some(200));
+    assert!(
+        allocator
+            .allocate("still-full", 1, 1, &ReplicateConfig::default())
+            .is_empty()
+    );
+
+    allocator
+        .release(&[first[0].clone(), second[0].clone()])
+        .unwrap();
+    assert_eq!(allocator.used_bytes(&segment_id), Some(0));
+}
+
+#[test]
+fn test_cachelib_restore_rebuilds_slots_without_reusing_live_offset() {
+    let segment = make_seg("restore-cachelib:1", CACHELIB_SLAB_SIZE * 2);
+    let segment_id = segment.id;
+    let client_id = Uuid::new_v4();
+    let mut original =
+        SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
+    original.add_segment(segment.clone(), 0, client_id);
+    let first = original.allocate("first", 128, 1, &ReplicateConfig::default());
+    let second = original.allocate("second", 128, 1, &ReplicateConfig::default());
+    assert_eq!(first[0].offset, 0);
+    assert_ne!(second[0].offset, first[0].offset);
+
+    let mut restored =
+        SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
+    let rebuilt_used = restored
+        .restore_segment(segment, client_id, &second)
+        .unwrap();
+    assert_eq!(rebuilt_used, original.used_bytes(&segment_id).unwrap() / 2);
+    let reused_hole = restored.allocate("third", 128, 1, &ReplicateConfig::default());
+    assert_eq!(reused_hole.len(), 1);
+    assert_eq!(reused_hole[0].offset, first[0].offset);
+    assert_ne!(reused_hole[0].offset, second[0].offset);
+}
+
+#[test]
+fn cachelib_restore_rejects_capacity_outside_u32_slab_index_space() {
+    let oversized_capacity = (u64::from(u32::MAX) + 1)
+        .checked_mul(CACHELIB_SLAB_SIZE)
+        .unwrap();
+    let segment = make_seg("oversized-cachelib:1", oversized_capacity);
+    let mut allocator =
+        SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
+    let error = allocator
+        .restore_segment(segment, Uuid::new_v4(), &[])
+        .unwrap_err();
+    assert!(error.contains("u32 slab index space"));
+
+    let alias = cxl_alias("oversized-cxl:1", oversized_capacity);
+    let mut cxl = SegmentAllocator::new()
+        .with_strategy(AllocationStrategy::Cxl)
+        .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+        .with_cxl_capacity(oversized_capacity);
+    cxl.restore_cxl_alias(alias, Uuid::new_v4()).unwrap();
+    let error = cxl.restore_cxl_allocations(&[]).unwrap_err();
+    assert!(error.contains("u32 slab index space"));
+}
 
 #[test]
 fn test_single_segment_single_replica() {
@@ -20,6 +216,21 @@ fn test_single_segment_single_replica() {
     assert_eq!(repls.len(), 1);
     assert_eq!(repls[0].segment_name, "n:1");
     assert_eq!(repls[0].protocol, "tcp");
+}
+
+#[test]
+fn test_exact_segment_allocation_does_not_follow_same_name_peer() {
+    let mut allocator = SegmentAllocator::new();
+    let first = make_seg("same-name:1", 10_000);
+    let second = make_seg("same-name:1", 10_000);
+    assert_ne!(first.id, second.id);
+    allocator.add_segment(first.clone(), 0, Uuid::new_v4());
+    allocator.add_segment(second.clone(), 0, Uuid::new_v4());
+
+    let replica = allocator.allocate_from_segment_id(second.id, 100).unwrap();
+
+    assert_eq!(replica.segment_id, second.id);
+    assert_ne!(replica.segment_id, first.id);
 }
 
 #[test]
@@ -129,6 +340,7 @@ fn test_remove_segment_and_reallocate() {
             base: 0,
             te_endpoint: String::new(),
             protocol: "tcp".into(),
+            host_id: String::new(),
         },
         0,
         Uuid::new_v4(),
@@ -335,6 +547,26 @@ fn test_local_first_prefers_writer_client_host_for_single_replica() {
 }
 
 #[test]
+fn test_local_first_prefers_explicit_request_host_over_client_segment_name() {
+    let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::LocalFirst);
+    let mut host_a = make_seg("logical-segment-a", 1000);
+    host_a.host_id = "physical-a".to_string();
+    let mut host_b = make_seg("logical-segment-b", 1000);
+    host_b.host_id = "physical-b".to_string();
+    allocator.add_segment(host_a, 0, Uuid::new_v4());
+    allocator.add_segment(host_b, 0, Uuid::new_v4());
+
+    let config = ReplicateConfig {
+        host_id: "physical-b".to_string(),
+        ..Default::default()
+    };
+    let replicas = allocator.allocate_for_client("key", None, 100, 1, &config);
+
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].segment_name, "logical-segment-b");
+}
+
+#[test]
 fn test_local_first_falls_back_when_writer_host_is_full() {
     let mut a = SegmentAllocator::new().with_strategy(AllocationStrategy::LocalFirst);
     let writer = Uuid::new_v4();
@@ -347,4 +579,123 @@ fn test_local_first_falls_back_when_writer_host_is_full() {
 
     assert_eq!(repls.len(), 1);
     assert_ne!(repls[0].segment_name, "host-b:1");
+}
+
+fn cxl_alias(name: &str, size: u64) -> Segment {
+    let mut segment = make_seg(name, size);
+    segment.protocol = "cxl".to_string();
+    segment
+}
+
+#[test]
+fn test_cxl_aliases_share_one_global_capacity_and_require_preferred_alias() {
+    let capacity = CACHELIB_SLAB_SIZE * 2;
+    let mut allocator = SegmentAllocator::new()
+        .with_strategy(AllocationStrategy::Cxl)
+        .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+        .with_cxl_capacity(capacity);
+    let alias_a = cxl_alias("cxl-a:1", capacity);
+    let alias_b = cxl_alias("cxl-b:1", capacity);
+    allocator.add_segment(alias_a.clone(), 0, Uuid::new_v4());
+    allocator.add_segment(alias_b, 0, Uuid::new_v4());
+
+    assert_eq!(allocator.usage_totals(), (capacity, 0));
+    assert!(
+        allocator
+            .allocate("missing-preference", 128, 1, &ReplicateConfig::default())
+            .is_empty()
+    );
+
+    let config = ReplicateConfig {
+        preferred_segment: alias_a.name.clone(),
+        ..Default::default()
+    };
+    let replica = allocator.allocate("key", 128, 2, &config);
+    assert_eq!(replica.len(), 1);
+    assert_eq!(replica[0].segment_id, alias_a.id);
+    assert_eq!(replica[0].segment_name, alias_a.name);
+    assert_eq!(replica[0].base_addr, 0);
+    assert_eq!(replica[0].protocol, "cxl");
+    assert!(allocator.usage_totals().1 > 0);
+
+    let offset = replica[0].offset;
+    allocator.release(&replica).unwrap();
+    let reused = allocator.allocate("reused", 128, 1, &config);
+    assert_eq!(reused[0].offset, offset);
+}
+
+#[test]
+fn test_cxl_restore_rebuilds_global_layout_once_across_aliases() {
+    let capacity = CACHELIB_SLAB_SIZE * 2;
+    let alias_a = cxl_alias("restore-cxl-a:1", capacity);
+    let alias_b = cxl_alias("restore-cxl-b:1", capacity);
+    let mut original = SegmentAllocator::new()
+        .with_strategy(AllocationStrategy::Cxl)
+        .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+        .with_cxl_capacity(capacity);
+    original.add_segment(alias_a.clone(), 0, Uuid::new_v4());
+    original.add_segment(alias_b.clone(), 0, Uuid::new_v4());
+    let first = original.allocate(
+        "a",
+        128,
+        1,
+        &ReplicateConfig {
+            preferred_segment: alias_a.name.clone(),
+            ..Default::default()
+        },
+    );
+    let second = original.allocate(
+        "b",
+        128,
+        1,
+        &ReplicateConfig {
+            preferred_segment: alias_b.name.clone(),
+            ..Default::default()
+        },
+    );
+    let live = first.into_iter().chain(second).collect::<Vec<_>>();
+
+    let mut restored = SegmentAllocator::new()
+        .with_strategy(AllocationStrategy::Cxl)
+        .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+        .with_cxl_capacity(capacity);
+    restored
+        .restore_cxl_alias(alias_a.clone(), Uuid::new_v4())
+        .unwrap();
+    restored.restore_cxl_alias(alias_b, Uuid::new_v4()).unwrap();
+    let used = restored.restore_cxl_allocations(&live).unwrap();
+
+    assert_eq!(restored.usage_totals(), (capacity, used));
+    assert!(
+        restored
+            .allocate(
+                "before-remount",
+                128,
+                1,
+                &ReplicateConfig {
+                    preferred_segment: alias_a.name,
+                    ..Default::default()
+                },
+            )
+            .is_empty()
+    );
+}
+
+#[test]
+fn cxl_restore_rejects_replica_alias_identity_mismatch() {
+    let capacity = CACHELIB_SLAB_SIZE * 2;
+    let alias = cxl_alias("restore-cxl-identity:1", capacity);
+    let mut restored = SegmentAllocator::new()
+        .with_strategy(AllocationStrategy::Cxl)
+        .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+        .with_cxl_capacity(capacity);
+    restored
+        .restore_cxl_alias(alias.clone(), Uuid::new_v4())
+        .unwrap();
+
+    let mut replica = restored_replica(&alias, 0, 128);
+    replica.segment_name = "wrong-cxl-alias:1".to_string();
+    let error = restored.restore_cxl_allocations(&[replica]).unwrap_err();
+    assert!(error.contains("identity mismatch"));
+    assert_eq!(restored.usage_totals(), (capacity, 0));
 }

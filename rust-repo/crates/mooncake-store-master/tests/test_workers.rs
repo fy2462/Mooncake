@@ -30,6 +30,7 @@ fn nof_replicate_config(segment_name: &str) -> proto::ReplicateConfig {
         preferred_nof_segments: vec![segment_name.to_string()],
         data_type: proto::ObjectDataType::Unknown as i32,
         group_ids: vec![],
+        host_id: String::new(),
     }
 }
 

@@ -1,22 +1,51 @@
-use crate::client::{PythonMooncakeClient, take_client};
+use crate::client::{PythonMooncakeClient, SharedClient, take_client, try_client_slot};
 use crate::replicate_config::ReplicateConfigPy;
 use crate::to_py_err;
 use mooncake_store_client::{
-    DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, MooncakeClient,
+    BufferRegistrationId, DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID,
     ShmRegisterRequest,
 };
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::ffi::c_void;
+use std::fmt;
+use std::ptr::NonNull;
 use std::sync::Arc;
+use transfer_engine_ffi::StableMemoryOwner;
+
+struct DummyPoolOwner {
+    pool: Arc<DummyMemoryPool>,
+}
+
+impl fmt::Debug for DummyPoolOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DummyPoolOwner")
+            .field("base", &format_args!("{:#x}", self.pool.base_addr()))
+            .field("len", &self.pool.len())
+            .finish()
+    }
+}
+
+unsafe impl StableMemoryOwner for DummyPoolOwner {
+    // The Arc owns the non-resizing DummyMemoryPool allocation for the entire
+    // registration lifetime.
+    fn base_address(&self) -> NonNull<c_void> {
+        NonNull::new(self.pool.base_ptr()).expect("DummyMemoryPool has a non-null base")
+    }
+
+    fn length(&self) -> usize {
+        self.pool.len()
+    }
+}
 
 #[pyclass(name = "MooncakeDummyClient")]
 pub(crate) struct PythonMooncakeDummyClient {
-    inner: Arc<Mutex<Option<MooncakeClient>>>,
-    mem_pool: DummyMemoryPool,
+    inner: SharedClient,
+    mem_pool: Arc<DummyMemoryPool>,
     local_buffer_pool: Option<DummyMemoryPool>,
-    registered_pool: Mutex<bool>,
+    registered_pool: Mutex<Option<BufferRegistrationId>>,
 }
 
 impl PythonMooncakeDummyClient {
@@ -74,11 +103,11 @@ impl PythonMooncakeDummyClient {
         let _ = server_address;
         let inner = real_client.borrow().inner.clone();
         let use_ipc = !ipc_socket_path.is_empty();
-        let mem_pool = if use_ipc {
+        let mem_pool = Arc::new(if use_ipc {
             DummyMemoryPool::new_shared(mem_pool_size).map_err(to_py_err)?
         } else {
             DummyMemoryPool::new(mem_pool_size).map_err(to_py_err)?
-        };
+        });
         let local_buffer_pool = if use_ipc && local_buffer_size > 0 {
             Some(DummyMemoryPool::new_shared(local_buffer_size).map_err(to_py_err)?)
         } else {
@@ -88,11 +117,11 @@ impl PythonMooncakeDummyClient {
             inner,
             mem_pool,
             local_buffer_pool,
-            registered_pool: Mutex::new(false),
+            registered_pool: Mutex::new(None),
         };
 
         {
-            let guard = dummy.inner.lock();
+            let guard = try_client_slot(&dummy.inner)?;
             let client = guard
                 .as_ref()
                 .ok_or_else(|| to_py_err("client already closed"))?;
@@ -100,7 +129,7 @@ impl PythonMooncakeDummyClient {
                 let (client_id_first, client_id_second) = client.client_id().as_u64_pair();
                 Self::register_pool_via_ipc(
                     &ipc_socket_path,
-                    &dummy.mem_pool,
+                    dummy.mem_pool.as_ref(),
                     client_id_first,
                     client_id_second,
                     false,
@@ -115,12 +144,15 @@ impl PythonMooncakeDummyClient {
                     )?;
                 }
             } else {
-                unsafe {
-                    client
-                        .register_buffer(dummy.pool_ptr(), mem_pool_size, "cpu:0")
-                        .map_err(to_py_err)?;
-                }
-                *dummy.registered_pool.lock() = true;
+                let registration_id = client
+                    .register_owned_buffer(
+                        DummyPoolOwner {
+                            pool: Arc::clone(&dummy.mem_pool),
+                        },
+                        "cpu:0",
+                    )
+                    .map_err(to_py_err)?;
+                *dummy.registered_pool.lock() = Some(registration_id);
             }
         }
         Ok(dummy)
@@ -161,9 +193,8 @@ impl PythonMooncakeDummyClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.put(&key, &data, cfg).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -171,9 +202,8 @@ impl PythonMooncakeDummyClient {
     fn get<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.get(&key).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -190,10 +220,9 @@ impl PythonMooncakeDummyClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.batch_put(&keys, &slices, cfg).await;
-            *inner.lock() = Some(client);
             let statuses = result.map_err(to_py_err)?;
             Ok(statuses.into_iter().find(|status| *status < 0).unwrap_or(0))
         })
@@ -202,9 +231,8 @@ impl PythonMooncakeDummyClient {
     fn batch_get<'py>(&self, py: Python<'py>, keys: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_get(&keys).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -218,9 +246,8 @@ impl PythonMooncakeDummyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.remove(&key, force).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -228,9 +255,8 @@ impl PythonMooncakeDummyClient {
     fn exists<'py>(&self, py: Python<'py>, key: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.exists(&key).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -242,9 +268,8 @@ impl PythonMooncakeDummyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_is_exist(&keys).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -258,9 +283,8 @@ impl PythonMooncakeDummyClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.batch_remove(&keys, force).await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
@@ -277,9 +301,8 @@ impl PythonMooncakeDummyClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.put_from(&key, ptr, size, cfg) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.put_from(&key, ptr, size, cfg).await;
             result.map_err(to_py_err)
         })
     }
@@ -296,9 +319,8 @@ impl PythonMooncakeDummyClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.batch_put_from(&keys, &ptrs, &sizes, cfg) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_put_from(&keys, &ptrs, &sizes, cfg).await;
             result.map_err(to_py_err)
         })
     }
@@ -318,13 +340,10 @@ impl PythonMooncakeDummyClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe {
-                client
-                    .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
-                    .await
-            };
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -333,9 +352,8 @@ impl PythonMooncakeDummyClient {
         let ptr = self.checked_ptr(addr, size)?;
         let inner = self.inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.get_into(&key, ptr, size) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.get_into(&key, ptr, size).await;
             result.map_err(to_py_err)
         })
     }
@@ -349,9 +367,8 @@ impl PythonMooncakeDummyClient {
         let ptrs = self.checked_ptrs(&addrs, &sizes)?;
         let inner = self.inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe { client.batch_get_into(&keys, &ptrs, &sizes) }.await;
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
             result.map_err(to_py_err)
         })
     }
@@ -374,13 +391,10 @@ impl PythonMooncakeDummyClient {
             .collect::<PyResult<Vec<_>>>()?;
         let inner = self.inner.clone();
         tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner)?;
-            let result = unsafe {
-                client
-                    .batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
-                    .await
-            };
-            *inner.lock() = Some(client);
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
+                .await;
             result.map_err(to_py_err)
         })
     }
@@ -388,23 +402,25 @@ impl PythonMooncakeDummyClient {
     fn health_check<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut client = take_client(&inner)?;
+            let mut client = take_client(&inner).await?;
             let result = client.health_check().await;
-            *inner.lock() = Some(client);
             result.map_err(to_py_err)
         })
     }
 
     fn tear_down_all(&self) -> PyResult<()> {
-        if *self.registered_pool.lock() {
-            let guard = self.inner.lock();
-            if let Some(client) = guard.as_ref() {
-                unsafe {
-                    let _ = client.unregister_buffer(self.pool_ptr());
-                }
-            }
-            *self.registered_pool.lock() = false;
+        let mut registered_pool = self.registered_pool.lock();
+        if let Some(registration_id) = *registered_pool {
+            let guard = try_client_slot(&self.inner)?;
+            let client = guard
+                .as_ref()
+                .ok_or_else(|| to_py_err("client is closed or currently in use"))?;
+            client
+                .unregister_buffer_handle(registration_id)
+                .map_err(to_py_err)?;
+            *registered_pool = None;
         }
+        drop(registered_pool);
         self.mem_pool.reset();
         Ok(())
     }

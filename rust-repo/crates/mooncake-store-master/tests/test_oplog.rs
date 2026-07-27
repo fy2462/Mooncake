@@ -14,6 +14,38 @@ fn make_entry(seq: u64) -> OpLogRecord {
     }
 }
 
+fn write_legacy_segment(dir: &std::path::Path, start_seq: u64, entries: &[(u32, &str)]) {
+    let mut data = Vec::new();
+    for (seq, payload) in entries {
+        data.extend_from_slice(&seq.to_le_bytes());
+        data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        data.extend_from_slice(payload.as_bytes());
+    }
+    std::fs::write(dir.join(format!("oplog_{start_seq:020}.bin")), data).unwrap();
+}
+
+fn local_disk_replica(
+    holder_client_id: Uuid,
+    storage_id: Option<Uuid>,
+    generation_id: Option<Uuid>,
+) -> ReplicaDescriptor {
+    ReplicaDescriptor {
+        segment_id: Uuid::nil(),
+        segment_name: "local://disk-a".to_string(),
+        offset: 0,
+        size: 100,
+        status: mooncake_store_core::ReplicaStatus::Complete,
+        replica_type: mooncake_store_core::ReplicaType::LocalDisk,
+        holder_client_id: Some(holder_client_id),
+        local_disk_storage_id: storage_id,
+        local_disk_generation_id: generation_id,
+        refcnt: 0,
+        handle_valid: true,
+        base_addr: 0,
+        protocol: String::new(),
+    }
+}
+
 #[test]
 fn test_in_memory_append_and_poll() {
     let mut oplog = InMemoryOpLog::new(1000);
@@ -48,12 +80,12 @@ fn test_oplog_manager_records_put_revoke() {
     assert_eq!(entries[0].producer_view_version, 7);
     assert_eq!(
         decode_record_payload_value_for_test(&entries[0].payload).unwrap(),
-        json!({"key":"k1","op":"put_revoke"})
+        json!({"key":"k1","op":"put_revoke","schema_version":1})
     );
 }
 
 #[test]
-fn test_oplog_manager_derives_fallback_put_end_identity_from_scoped_key() {
+fn test_oplog_manager_records_legacy_put_end_completion_marker() {
     let store = InMemoryOpLog::new(1000);
     let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
 
@@ -62,8 +94,60 @@ fn test_oplog_manager_derives_fallback_put_end_identity_from_scoped_key() {
     let store = manager.into_store().unwrap();
     let entries = store.read_since(1, 10).unwrap();
     let payload = decode_record_payload_value_for_test(&entries[0].payload).unwrap();
-    assert_eq!(payload["tenant_id"], "tenant-a");
-    assert_eq!(payload["user_key"], "k1");
+    assert_eq!(
+        payload,
+        json!({"op": "put_end", "key": "tenant-a\0k1", "size": 42})
+    );
+}
+
+#[test]
+fn test_etcd_keeps_versioned_rust_remove_as_generic_record() {
+    let entry = OpLogRecord {
+        seq: 9,
+        producer_view_version: 4,
+        payload: json!({
+            "op": "remove",
+            "schema_version": 1,
+            "key": "tenant-a\0key",
+        })
+        .to_string(),
+    };
+
+    let encoded = serialize_etcd_value_for_test(&entry).unwrap();
+    let decoded = deserialize_etcd_value_for_test(&encoded).unwrap();
+
+    assert_eq!(decoded.seq, 9);
+    assert_eq!(decoded.producer_view_version, 4);
+    assert_eq!(
+        decode_record_payload_value_for_test(&decoded.payload).unwrap(),
+        json!({
+            "op": "remove",
+            "schema_version": 1,
+            "key": "tenant-a\0key",
+        })
+    );
+}
+
+#[test]
+fn test_etcd_keeps_legacy_put_end_marker_untyped() {
+    let entry = OpLogRecord {
+        seq: 10,
+        producer_view_version: 4,
+        payload: json!({
+            "op": "put_end",
+            "key": "tenant-a\0key",
+            "size": 42,
+        })
+        .to_string(),
+    };
+
+    let encoded = serialize_etcd_value_for_test(&entry).unwrap();
+    let decoded = deserialize_etcd_value_for_test(&encoded).unwrap();
+    let payload = decode_record_payload_value_for_test(&decoded.payload).unwrap();
+
+    assert_eq!(payload["op"], "put_end");
+    assert_eq!(payload["key"], "tenant-a\0key");
+    assert!(payload.get("replicas").is_none());
 }
 
 #[test]
@@ -104,11 +188,11 @@ fn test_local_fs_flush_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LocalFsOpLogStore::new(dir.path(), 2).unwrap();
 
-    // Appending 3 entries with max=2 triggers flush of first 2
+    // The second append synchronously flushes the first full segment.
     store.append(&make_entry(0)).unwrap();
     store.append(&make_entry(0)).unwrap();
-    store.append(&make_entry(0)).unwrap(); // flush triggered for entries 1-2
-    // Manually flush remaining buffer so entry 3 is on disk
+    store.append(&make_entry(0)).unwrap();
+    // Manually flush the remaining partial segment.
     store.flush_durable().unwrap();
 
     let entries = store.read_since(1, 10).unwrap();
@@ -134,51 +218,165 @@ fn test_local_fs_poll_from() {
 }
 
 #[test]
-fn test_local_fs_async_flush_readable_without_explicit_flush() {
+fn test_local_fs_threshold_flush_is_durable_without_explicit_flush() {
     let dir = tempfile::tempdir().unwrap();
-    // max_entries_per_segment=3 triggers async flush on every 3rd append.
     let mut store = LocalFsOpLogStore::new(dir.path(), 3).unwrap();
 
-    // Append 7 entries: triggers async flush at append #3 and #6.
-    for _ in 0..7 {
+    for _ in 0..3 {
         store.append(&make_entry(0)).unwrap();
     }
-    assert_eq!(store.latest_sequence(), 7);
+    assert_eq!(store.latest_sequence(), 3);
 
-    // Give the background thread time to flush segments to disk.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    // read_since reads from both on-disk segments and in-memory buffer.
-    let entries = store.read_since(1, 10).unwrap();
-    assert_eq!(
-        entries.len(),
-        7,
-        "all 7 entries should be readable after async flush"
-    );
+    let reopened = LocalFsOpLogStore::new(dir.path(), 3).unwrap();
+    let entries = reopened.read_since(1, 10).unwrap();
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].seq, 1);
-    assert_eq!(entries[6].seq, 7);
+    assert_eq!(entries[2].seq, 3);
 }
 
 #[test]
-fn test_local_fs_async_flush_fallback_on_channel_close() {
+fn test_local_fs_v2_preserves_u64_sequence_and_producer_view() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = LocalFsOpLogStore::new(dir.path(), 2).unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.update_latest_sequence_id(u32::MAX as u64).unwrap();
+    let entry = OpLogRecord {
+        seq: 0,
+        producer_view_version: 77,
+        payload: "beyond-u32".into(),
+    };
 
-    // Drop the store's flush channel receiver by replacing the sender
-    // with one whose receiver is immediately dropped.
-    let (dead_tx, dead_rx) = std::sync::mpsc::channel::<Vec<OpLogRecord>>();
-    drop(dead_rx);
-    let _old_tx = replace_local_fs_flush_sender_for_test(&mut store, dead_tx);
+    let sequence = store.append(&entry).unwrap();
+    assert_eq!(sequence, u32::MAX as u64 + 1);
 
-    // Append should trigger the fallback: mpsc::send fails → inline sync flush.
-    store.append(&make_entry(0)).unwrap();
-    store.append(&make_entry(0)).unwrap();
-    store.append(&make_entry(0)).unwrap();
+    let reopened = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    let entries = reopened.read_since(sequence, 1).unwrap();
+    assert_eq!(reopened.latest_sequence(), sequence);
+    assert_eq!(entries[0].seq, sequence);
+    assert_eq!(entries[0].producer_view_version, 77);
+    assert_eq!(entries[0].payload, "beyond-u32");
+}
 
-    // Verify data was flushed synchronously via the fallback.
-    assert_eq!(store.latest_sequence(), 3);
+#[test]
+fn test_local_fs_reads_legacy_v1_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    write_legacy_segment(dir.path(), 1, &[(1, "one"), (2, "two")]);
+
+    let store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();
     let entries = store.read_since(1, 10).unwrap();
-    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].producer_view_version, 0);
+    assert_eq!(entries[1].payload, "two");
+}
+
+#[test]
+fn test_local_fs_rejects_truncated_legacy_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&1_u32.to_le_bytes());
+    frame.extend_from_slice(&5_u32.to_le_bytes());
+    frame.extend_from_slice(b"abc");
+    std::fs::write(dir.path().join("oplog_00000000000000000001.bin"), frame).unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("truncated legacy payload must fail recovery");
+    assert!(error.to_string().contains("truncated"));
+}
+
+#[test]
+fn test_local_fs_rejects_truncated_legacy_header() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("oplog_00000000000000000001.bin"),
+        1_u32.to_le_bytes(),
+    )
+    .unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("truncated legacy header must fail recovery");
+    assert!(error.to_string().contains("truncated"));
+}
+
+#[test]
+fn test_local_fs_rejects_v2_checksum_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.append(&make_entry(0)).unwrap();
+    let path = dir.path().join("oplog_00000000000000000001.bin");
+    let mut data = std::fs::read(&path).unwrap();
+    let last = data.last_mut().unwrap();
+    *last ^= 0xff;
+    std::fs::write(path, data).unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("checksum corruption must fail recovery");
+    assert!(error.to_string().contains("checksum mismatch"));
+}
+
+#[test]
+fn test_local_fs_rejects_malformed_latest_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("latest"), "not-a-sequence").unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("malformed latest pointer must fail recovery");
+    assert!(error.to_string().contains("latest sequence is malformed"));
+}
+
+#[test]
+fn test_local_fs_rejects_v2_segment_ahead_of_commit_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.append(&make_entry(0)).unwrap();
+    std::fs::write(dir.path().join("latest"), "0").unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("an uncommitted v2 segment must not be replayed");
+    assert!(
+        error
+            .to_string()
+            .contains("exceeds committed latest pointer")
+    );
+}
+
+#[test]
+fn test_local_fs_rejects_v2_segment_without_commit_pointer() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.append(&make_entry(0)).unwrap();
+    std::fs::remove_file(dir.path().join("latest")).unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("a v2 segment without its commit pointer must not be replayed");
+    assert!(error.to_string().contains("without a committed latest"));
+}
+
+#[test]
+fn test_local_fs_rejects_segment_filename_content_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    write_legacy_segment(dir.path(), 2, &[(1, "one")]);
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("segment filename mismatch must fail recovery");
+    assert!(error.to_string().contains("filename/content mismatch"));
+}
+
+#[test]
+fn test_local_fs_rejects_cross_segment_sequence_gap() {
+    let dir = tempfile::tempdir().unwrap();
+    write_legacy_segment(dir.path(), 1, &[(1, "one")]);
+    write_legacy_segment(dir.path(), 3, &[(3, "three")]);
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("cross-segment sequence gap must fail recovery");
+    assert!(error.to_string().contains("sequence gap"));
 }
 
 #[test]
@@ -263,6 +461,8 @@ fn test_etcd_oplog_value_writes_cpp_outer_json_for_put_end() {
         status: mooncake_store_core::ReplicaStatus::Complete,
         replica_type: mooncake_store_core::ReplicaType::Memory,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         refcnt: 0,
         handle_valid: true,
         base_addr: 4096,
@@ -303,6 +503,88 @@ fn test_etcd_oplog_value_writes_cpp_outer_json_for_put_end() {
 }
 
 #[test]
+fn test_etcd_oplog_v2_round_trips_exact_local_disk_identity() {
+    let holder_client_id = Uuid::new_v4();
+    let storage_id = Uuid::new_v4();
+    let generation_id = Uuid::new_v4();
+    let replica = local_disk_replica(holder_client_id, Some(storage_id), Some(generation_id));
+    let entry = OpLogRecord {
+        seq: 13,
+        producer_view_version: 7,
+        payload: json!({
+            "op": "put_end",
+            "key": "default\0local-disk-v2",
+            "size": 100,
+            "client_id": holder_client_id.to_string(),
+            "tenant_id": "default",
+            "group_id": "",
+            "user_key": "local-disk-v2",
+            "replicas": [replica],
+        })
+        .to_string(),
+    };
+
+    let wire_value = serialize_etcd_value_for_test(&entry).unwrap();
+    let wire: CppWireTestEntry = serde_json::from_str(&wire_value).unwrap();
+    let bytes = BASE64_STANDARD.decode(&wire.payload).unwrap();
+    assert!(bytes.starts_with(b"MCOPMETA2"));
+
+    let parsed = deserialize_etcd_value_for_test(&wire_value).unwrap();
+    let payload = decode_record_payload_value_for_test(&parsed.payload).unwrap();
+    let replicas: Vec<ReplicaDescriptor> =
+        serde_json::from_value(payload["replicas"].clone()).unwrap();
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].local_disk_storage_id, Some(storage_id));
+    assert_eq!(replicas[0].local_disk_generation_id, Some(generation_id));
+}
+
+#[test]
+fn test_etcd_oplog_v1_local_disk_does_not_invent_generation() {
+    let holder_client_id = Uuid::new_v4();
+    let mut replica =
+        serde_json::to_value(local_disk_replica(holder_client_id, None, None)).unwrap();
+    let replica = replica.as_object_mut().unwrap();
+    replica.remove("local_disk_storage_id");
+    replica.remove("local_disk_generation_id");
+    let payload = json!({
+        "op": "put_end",
+        "key": "default\0legacy-local-disk",
+        "size": 100,
+        "client_id": holder_client_id.to_string(),
+        "tenant_id": "default",
+        "group_id": "",
+        "user_key": "legacy-local-disk",
+        "replicas": [replica],
+    });
+    let mut bytes = b"MCOPMETA1".to_vec();
+    bytes.extend_from_slice(&rmp_serde::to_vec_named(&payload).unwrap());
+    let wire = CppWireTestEntry {
+        sequence_id: 14,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "default\0legacy-local-disk".to_string(),
+        payload: BASE64_STANDARD.encode(&bytes),
+        checksum: compute_cpp_checksum_for_test(&bytes),
+        prefix_hash: compute_cpp_prefix_hash_for_test("default\0legacy-local-disk"),
+    };
+
+    let parsed = deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap();
+    let payload = decode_record_payload_value_for_test(&parsed.payload).unwrap();
+    let replicas: Vec<ReplicaDescriptor> =
+        serde_json::from_value(payload["replicas"].clone()).unwrap();
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(
+        replicas[0].replica_type,
+        mooncake_store_core::ReplicaType::LocalDisk
+    );
+    assert_eq!(replicas[0].local_disk_storage_id, None);
+    assert_eq!(
+        replicas[0].local_disk_generation_id, None,
+        "v1 replay must remain offline until exact generation recovery"
+    );
+}
+
+#[test]
 fn test_etcd_oplog_value_reads_versioned_msgpack_put_end() {
     let payload = json!({
         "op": "put_end",
@@ -333,6 +615,30 @@ fn test_etcd_oplog_value_reads_versioned_msgpack_put_end() {
     assert_eq!(value["size"], 42);
     assert_eq!(value["tenant_id"], "tenant-a");
     assert_eq!(value["group_id"], "group-a");
+}
+
+#[test]
+fn test_etcd_oplog_value_rejects_future_msgpack_put_end_schema() {
+    let bytes = b"MCOPMETA3future-body";
+    let wire = CppWireTestEntry {
+        sequence_id: 22,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "future-key".to_string(),
+        payload: BASE64_STANDARD.encode(bytes),
+        checksum: compute_cpp_checksum_for_test(bytes),
+        prefix_hash: compute_cpp_prefix_hash_for_test("future-key"),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported put_end msgpack schema version '3'"),
+        "{error}"
+    );
 }
 
 #[test]

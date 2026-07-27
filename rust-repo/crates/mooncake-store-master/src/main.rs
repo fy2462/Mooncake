@@ -10,11 +10,14 @@ use clap::Parser;
 use mooncake_store_master::MasterServiceImpl;
 use mooncake_store_master::admin_http::AdminRuntimeState;
 use mooncake_store_master::ha::{
-    HABackendSpec, HABackendType, HaError, LeaderCoordinator, LeadershipMonitorHandle,
-    LeadershipSession, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
-    parse_snapshot_catalog_store_type, parse_snapshot_object_store_type,
+    CatalogBackedSnapshotProvider, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
+    LeadershipMonitorHandle, LeadershipSession, MasterServiceSupervisor,
+    MasterServiceSupervisorConfig, MasterView, parse_snapshot_catalog_store_type,
+    parse_snapshot_object_store_type,
 };
-use mooncake_store_master::http_metadata::{bind_metadata_listener, serve_metadata_listener};
+use mooncake_store_master::http_metadata::{
+    bind_metadata_listener, serve_metadata_listener_with_service_gate,
+};
 use mooncake_store_master::metrics;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -24,9 +27,10 @@ use tracing::{error, info, warn};
 
 use mooncake_store_master::main_args::Args;
 use mooncake_store_master::main_config::{
-    build_catalog_snapshot_publisher, build_ha_spec, build_master_service, build_runtime_config,
-    create_coordinator, ensure_supported_rpc_protocol, new_supervisor, parse_snapshot_config,
-    publish_catalog_snapshot, resolve_cluster_id, snapshot_dir_for_cluster,
+    build_ha_spec, build_master_service, build_runtime_config, create_coordinator,
+    ensure_supported_rpc_protocol, new_supervisor, parse_snapshot_config,
+    preflight_snapshot_pipeline, publish_catalog_snapshot, resolve_cluster_id,
+    snapshot_dir_for_cluster, validate_ha_backend_for_serving,
 };
 
 mod main_ha;
@@ -134,17 +138,20 @@ async fn start_leadership_monitor(
     coordinator: &LeaderCoordinator,
     session: &LeadershipSession,
     tx: tokio::sync::watch::Sender<bool>,
+    service: Arc<MasterServiceImpl>,
 ) -> Result<LeadershipMonitorHandle, HaError> {
     let mut role_rx = coordinator.subscribe_role_for_session(session)?;
     let h = tokio::spawn(async move {
         loop {
             if role_rx.changed().await.is_err() {
                 warn!("LeadershipMonitor: role channel closed, shutting down");
+                service.set_service_available(false);
                 let _ = tx.send(true);
                 break;
             }
             if *role_rx.borrow() == mooncake_store_master::ha::LeaderRole::Standby {
                 warn!("LeadershipMonitor: leadership lost, shutting down");
+                service.set_service_available(false);
                 let _ = tx.send(true);
                 break;
             }
@@ -179,7 +186,17 @@ async fn build_leader_oplog_manager(
         }
     };
     let oplog_prefix = format!("/oplog/{}", spec.cluster_namespace);
-    let store = match mooncake_store_master::oplog::EtcdOpLogStore::new(client, &oplog_prefix).await
+    let election_key = format!(
+        "mooncake-store/{}/master_view",
+        spec.cluster_namespace.trim_end_matches('/')
+    );
+    let store = match mooncake_store_master::oplog::EtcdOpLogStore::new_leader(
+        client,
+        &oplog_prefix,
+        election_key,
+        view_version,
+    )
+    .await
     {
         Ok(store) => store,
         Err(e) => {

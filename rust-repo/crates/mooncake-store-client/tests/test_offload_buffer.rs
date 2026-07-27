@@ -1,71 +1,51 @@
-use mooncake_store_client::offload::buffer::{OffloadBatch, OffloadBufferPool};
+use mooncake_store_client::offload::buffer::OffloadBufferPool;
+use std::time::Duration;
 
 #[test]
-fn test_register_returns_unique_ids() {
-    let pool = OffloadBufferPool::new();
-    let id1 = pool.register(OffloadBatch {
-        buffers: vec![vec![1, 2, 3]],
-    });
-    let id2 = pool.register(OffloadBatch {
-        buffers: vec![vec![4, 5]],
-    });
-    assert_ne!(id1, id2);
-    assert!(id1 > 0);
-    assert!(id2 > id1);
+fn test_pool_rejects_invalid_limits() {
+    assert!(
+        OffloadBufferPool::with_limits(0, Duration::from_secs(1), Duration::from_secs(1)).is_err()
+    );
+    assert!(OffloadBufferPool::with_limits(1, Duration::ZERO, Duration::from_secs(1)).is_err());
+    assert!(OffloadBufferPool::with_limits(1, Duration::from_secs(1), Duration::ZERO).is_err());
+    assert!(
+        OffloadBufferPool::with_limits(1, Duration::from_nanos(1), Duration::from_secs(1)).is_err()
+    );
 }
 
 #[test]
-fn test_release_returns_batch() {
-    let pool = OffloadBufferPool::new();
-    let data = vec![1u8, 2, 3, 4];
-    let batch_id = pool.register(OffloadBatch {
-        buffers: vec![data.clone()],
-    });
-    let released = pool.release(batch_id);
-    assert!(released.is_some());
-    assert_eq!(released.unwrap().buffers, vec![data]);
+fn test_reservation_counts_capacity_and_drop_rolls_back() {
+    let pool =
+        OffloadBufferPool::with_limits(8, Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+    let reservation = pool.try_reserve(8).unwrap();
+    assert_eq!(pool.retained_bytes(), 8);
+    assert!(pool.try_reserve(1).is_err());
+    drop(reservation);
+    assert_eq!(pool.retained_bytes(), 0);
+    assert!(pool.try_reserve(8).is_ok());
 }
 
 #[test]
-fn test_release_twice_returns_none_second() {
-    let pool = OffloadBufferPool::new();
-    let batch_id = pool.register(OffloadBatch {
-        buffers: vec![vec![1]],
-    });
-    assert!(pool.release(batch_id).is_some());
-    assert!(pool.release(batch_id).is_none());
+fn test_failed_oversized_reservation_does_not_change_accounting() {
+    let pool =
+        OffloadBufferPool::with_limits(8, Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+    assert!(pool.try_reserve(9).is_err());
+    assert_eq!(pool.retained_bytes(), 0);
+    assert_eq!(pool.active_batch_count(), 0);
 }
 
 #[test]
-fn test_release_unknown_id_returns_none() {
-    let pool = OffloadBufferPool::new();
-    assert!(pool.release(9999).is_none());
+fn test_zero_sized_reservation_is_rejected() {
+    let pool =
+        OffloadBufferPool::with_limits(8, Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+    assert!(pool.try_reserve(0).is_err());
+    assert_eq!(pool.retained_bytes(), 0);
 }
 
 #[test]
-fn test_multiple_registers_and_releases() {
-    let pool = OffloadBufferPool::new();
-    let ids: Vec<u64> = (0..10)
-        .map(|i| {
-            pool.register(OffloadBatch {
-                buffers: vec![vec![i as u8; 1024]],
-            })
-        })
-        .collect();
-    assert_eq!(ids.len(), 10);
-    for (i, &id) in ids.iter().enumerate() {
-        if i % 2 == 0 {
-            let batch = pool.release(id);
-            assert!(batch.is_some());
-            assert_eq!(batch.unwrap().buffers[0].len(), 1024);
-        }
-    }
-    for (i, &id) in ids.iter().enumerate() {
-        let batch = pool.release(id);
-        if i % 2 == 0 {
-            assert!(batch.is_none());
-        } else {
-            assert!(batch.is_some());
-        }
-    }
+fn test_release_unknown_batch_is_idempotent() {
+    let pool =
+        OffloadBufferPool::with_limits(8, Duration::from_secs(1), Duration::from_secs(1)).unwrap();
+    assert!(!pool.release(9999));
+    assert!(!pool.release(9999));
 }

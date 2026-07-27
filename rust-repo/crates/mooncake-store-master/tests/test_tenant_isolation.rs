@@ -61,6 +61,7 @@ fn mount_seg(service: &MasterServiceImpl, name: &str, cid: Uuid, size: u64) {
                 base_addr: 0x100000000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
+                host_id: String::new(),
             }),
         )
         .await
@@ -93,6 +94,7 @@ fn put_object(
                     preferred_nof_segments: vec![],
                     data_type: proto::ObjectDataType::Unknown as i32,
                     group_ids: vec![],
+                    host_id: String::new(),
                 }),
                 tenant_id: tenant_id.into(),
             }),
@@ -135,6 +137,9 @@ fn test_object_state_retains_typed_default_tenant() {
             tenant_id: TenantId::default(),
             group_id: String::new(),
             quota_committed: false,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
             user_key: "typed-object".to_string(),

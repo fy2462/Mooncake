@@ -46,13 +46,20 @@ impl NofHeartbeatWorker {
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 }
 
+                let Some(_background_mutation_guard) = state.begin_background_mutation() else {
+                    continue;
+                };
                 let now = Instant::now();
 
                 // Snapshot active NoF segments.
                 let active_segments: Vec<(Uuid, Uuid, String, String)> = state
                     .nof_segments
                     .iter()
-                    .filter(|entry| entry.status == crate::proto::SegmentStatus::Active)
+                    .filter(|entry| {
+                        entry.status == crate::proto::SegmentStatus::Active
+                            && entry.segment.base != 0
+                            && !entry.segment.te_endpoint.is_empty()
+                    })
                     .map(|entry| {
                         (
                             entry.segment.id,
@@ -142,7 +149,12 @@ impl NofHeartbeatWorker {
                         .get(&seg_id)
                         .map(|entry| entry.segment.client_id);
                     if let Some(owner) = owner {
-                        unmount_nof_segment_owned(&state, seg_id, owner);
+                        let _ = unmount_nof_segment_owned_durable(
+                            &state,
+                            seg_id,
+                            owner,
+                            "nof_heartbeat_unmount",
+                        );
                     } else {
                         state.nof_heartbeat_states.remove(&seg_id);
                     }

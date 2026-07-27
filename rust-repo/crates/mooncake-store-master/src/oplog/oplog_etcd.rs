@@ -1,5 +1,6 @@
 use super::oplog_wire::*;
 use super::*;
+use etcd_client::{Compare, CompareOp, Txn, TxnOp};
 use std::future::Future;
 
 pub struct EtcdOpLogStore {
@@ -8,6 +9,18 @@ pub struct EtcdOpLogStore {
     last_seq: u64,
     /// Entries accumulated for batch write.
     buffer: Vec<OpLogRecord>,
+    /// Etcd election ownership used to fence every mutating transaction.
+    /// Reader-only stores leave this unset and reject writes.
+    writer_fence: Option<EtcdWriterFence>,
+    /// Prevent a failed append from being committed by a later caller.
+    poisoned: Option<String>,
+}
+
+#[derive(Clone)]
+struct EtcdWriterFence {
+    election_key: String,
+    producer_view_version: u64,
+    producer_revision: i64,
 }
 
 impl EtcdOpLogStore {
@@ -15,15 +28,79 @@ impl EtcdOpLogStore {
         since_seq
     }
 
+    fn ensure_not_poisoned(&self) -> Result<(), HaError> {
+        if let Some(reason) = &self.poisoned {
+            return Err(HaError::InvalidBackend(format!(
+                "etcd oplog is poisoned after a persistence failure: {reason}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn fetch_latest_sequence(&self) -> Result<u64, HaError> {
+        let c = self.client.clone();
+        let latest_key = self.latest_key();
+        let response = c
+            .kv_client()
+            .get(latest_key.as_bytes(), None)
+            .await
+            .map_err(|e| HaError::InvalidBackend(format!("etcd get oplog latest: {e}")))?;
+        parse_latest_sequence_value(response.kvs().first().map(|kv| kv.value()))
+    }
+
     /// Create an etcd-backed oplog store, recovering last_seq from the /latest key.
     /// 创建 etcd oplog store，通过读取 `/latest` key 恢复 last_seq。
     pub async fn new(client: etcd_client::Client, key_prefix: &str) -> Result<Self, HaError> {
+        Self::new_inner(client, key_prefix, None).await
+    }
+
+    pub async fn new_leader(
+        client: etcd_client::Client,
+        key_prefix: &str,
+        election_key: impl Into<String>,
+        producer_view_version: u64,
+    ) -> Result<Self, HaError> {
+        let election_key = election_key.into();
+        if election_key.trim().is_empty() {
+            return Err(HaError::InvalidBackend(
+                "etcd oplog writer election key is empty".into(),
+            ));
+        }
+        if producer_view_version == 0 {
+            return Err(HaError::InvalidBackend(
+                "etcd oplog writer producer view is zero".into(),
+            ));
+        }
+        let producer_revision = i64::try_from(producer_view_version).map_err(|_| {
+            HaError::InvalidBackend(format!(
+                "producer view {producer_view_version} exceeds etcd revision range"
+            ))
+        })?;
+        Self::new_inner(
+            client,
+            key_prefix,
+            Some(EtcdWriterFence {
+                election_key,
+                producer_view_version,
+                producer_revision,
+            }),
+        )
+        .await
+    }
+
+    async fn new_inner(
+        client: etcd_client::Client,
+        key_prefix: &str,
+        writer_fence: Option<EtcdWriterFence>,
+    ) -> Result<Self, HaError> {
         let prefix = key_prefix.trim_end_matches('/').to_string();
         let mut store = Self {
             client,
             key_prefix: prefix,
             last_seq: 0,
             buffer: Vec::new(),
+            writer_fence,
+            poisoned: None,
         };
         store.recover().await?;
         Ok(store)
@@ -35,23 +112,55 @@ impl EtcdOpLogStore {
             key_prefix: self.key_prefix.clone(),
             last_seq: self.last_seq,
             buffer: Vec::new(),
+            writer_fence: None,
+            poisoned: self.poisoned.clone(),
         }
+    }
+
+    fn writer_fence(&self) -> Result<&EtcdWriterFence, HaError> {
+        self.writer_fence.as_ref().ok_or_else(|| {
+            HaError::InvalidBackend("reader-only etcd oplog store rejects mutation".into())
+        })
+    }
+
+    fn writer_compare(&self) -> Result<Compare, HaError> {
+        let fence = self.writer_fence()?;
+        Ok(Compare::mod_revision(
+            fence.election_key.as_bytes().to_vec(),
+            CompareOp::Equal,
+            fence.producer_revision,
+        ))
     }
 
     /// Recover `last_seq` from the `/latest` key.
     async fn recover(&mut self) -> Result<(), HaError> {
-        let latest_key = format!("{}/latest", self.key_prefix);
         let c = self.client.clone();
-        match c.kv_client().get(latest_key.as_bytes(), None).await {
-            Ok(resp) => {
-                if let Some(kv) = resp.kvs().first() {
-                    if let Ok(val) = String::from_utf8(kv.value().to_vec()) {
-                        self.last_seq = val.parse::<u64>().unwrap_or(0);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Failed to read oplog latest key: {}", e);
+        self.last_seq = self.fetch_latest_sequence().await?;
+        let range_start = self.entry_key(0);
+        let range_end = self.latest_key();
+        let response = c
+            .kv_client()
+            .get(
+                range_start.as_bytes(),
+                Some(
+                    etcd_client::GetOptions::new()
+                        .with_range(range_end.as_bytes())
+                        .with_sort(
+                            etcd_client::SortTarget::Key,
+                            etcd_client::SortOrder::Descend,
+                        )
+                        .with_limit(1),
+                ),
+            )
+            .await
+            .map_err(|e| HaError::InvalidBackend(format!("etcd get max oplog: {e}")))?;
+        if let Some(kv) = response.kvs().first() {
+            let segment_max = parse_etcd_entry_key_sequence(kv.key())?;
+            if segment_max > self.last_seq {
+                return Err(HaError::InvalidBackend(format!(
+                    "etcd oplog entry exceeds committed latest pointer: entry_max={segment_max}, latest={}",
+                    self.last_seq
+                )));
             }
         }
         Ok(())
@@ -75,39 +184,79 @@ impl EtcdOpLogStore {
         format!("{}/snapshot/{}", self.key_prefix, snapshot_id)
     }
 
-    /// Flush buffered entries to etcd: put each record, then update /latest.
-    /// 将 buffer 批量写入 etcd：逐个 put 每条记录，最后更新 `/latest` 指针。
+    /// Atomically commit buffered entries and the `/latest` pointer in one
+    /// etcd transaction, so readers cannot observe an uncommitted prefix.
     async fn flush(&mut self) -> Result<(), HaError> {
+        self.ensure_not_poisoned()?;
+        let result = self.flush_unpoisoned().await;
+        if let Err(error) = &result {
+            self.poisoned = Some(error.to_string());
+        }
+        result
+    }
+
+    async fn flush_unpoisoned(&mut self) -> Result<(), HaError> {
         if self.buffer.is_empty() {
             return Ok(());
         }
         let started = Instant::now();
-        let c = self.client.clone();
+        let fence = self.writer_fence()?;
+        let (expected_previous_seq, max_seq) = validate_buffer_sequence(&self.buffer)?;
+        if max_seq != self.last_seq {
+            return Err(HaError::InvalidBackend(format!(
+                "etcd oplog buffered sequence diverges from local latest: buffered={max_seq}, local={}",
+                self.last_seq
+            )));
+        }
+        validate_buffer_producer_view(&self.buffer, fence.producer_view_version)?;
+        let latest_key = self.latest_key();
+        let mut compares = Vec::with_capacity(self.buffer.len() + 2);
+        if expected_previous_seq == 0 {
+            compares.push(Compare::version(
+                latest_key.as_bytes().to_vec(),
+                CompareOp::Equal,
+                0,
+            ));
+        } else {
+            compares.push(Compare::value(
+                latest_key.as_bytes().to_vec(),
+                CompareOp::Equal,
+                expected_previous_seq.to_string().into_bytes(),
+            ));
+        }
+        for entry in &self.buffer {
+            compares.push(Compare::version(
+                self.entry_key(entry.seq).into_bytes(),
+                CompareOp::Equal,
+                0,
+            ));
+        }
+        compares.push(self.writer_compare()?);
+        let mut operations = Vec::with_capacity(self.buffer.len() + 1);
         for entry in &self.buffer {
             let key = self.entry_key(entry.seq);
             let value = serialize_etcd_oplog_value(entry)?;
-            if let Err(e) = c
-                .kv_client()
-                .put(key.as_bytes(), value.as_bytes(), None)
-                .await
-            {
+            operations.push(TxnOp::put(key.into_bytes(), value.into_bytes(), None));
+        }
+        operations.push(TxnOp::put(
+            latest_key.into_bytes(),
+            max_seq.to_string().into_bytes(),
+            None,
+        ));
+        let mut client = self.client.clone();
+        let response = client
+            .txn(Txn::new().when(compares).and_then(operations))
+            .await
+            .map_err(|error| {
                 metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
                 metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
-                return Err(HaError::InvalidBackend(format!("etcd put oplog: {e}")));
-            }
-        }
-        // Update latest pointer
-        let max_seq = self.buffer.last().unwrap().seq;
-        let latest_val = max_seq.to_string();
-        if let Err(e) = c
-            .kv_client()
-            .put(self.latest_key().as_bytes(), latest_val.as_bytes(), None)
-            .await
-        {
+                HaError::InvalidBackend(format!("etcd commit oplog: {error}"))
+            })?;
+        if !response.succeeded() {
             metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
             metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
             return Err(HaError::InvalidBackend(format!(
-                "etcd put oplog latest: {e}"
+                "etcd oplog writer fenced or sequence CAS failed: expected_previous_seq={expected_previous_seq}"
             )));
         }
 
@@ -119,9 +268,53 @@ impl EtcdOpLogStore {
     }
 }
 
+fn validate_buffer_sequence(buffer: &[OpLogRecord]) -> Result<(u64, u64), HaError> {
+    let first_sequence = buffer
+        .first()
+        .map(|entry| entry.seq)
+        .ok_or_else(|| HaError::InvalidBackend("empty etcd oplog buffer".into()))?;
+    let expected_previous_sequence = first_sequence.checked_sub(1).ok_or_else(|| {
+        HaError::InvalidBackend("etcd oplog sequence zero cannot be appended".into())
+    })?;
+    for pair in buffer.windows(2) {
+        if pair[0].seq.checked_add(1) != Some(pair[1].seq) {
+            return Err(HaError::InvalidBackend(format!(
+                "etcd oplog append batch has a sequence gap: previous={}, next={}",
+                pair[0].seq, pair[1].seq
+            )));
+        }
+    }
+    Ok((
+        expected_previous_sequence,
+        buffer.last().expect("non-empty buffer").seq,
+    ))
+}
+
+fn validate_buffer_producer_view(
+    buffer: &[OpLogRecord],
+    expected_producer_view_version: u64,
+) -> Result<(), HaError> {
+    if buffer.is_empty() {
+        return Err(HaError::InvalidBackend("empty etcd oplog buffer".into()));
+    }
+    if buffer
+        .iter()
+        .any(|entry| entry.producer_view_version != expected_producer_view_version)
+    {
+        return Err(HaError::InvalidBackend(format!(
+            "etcd oplog batch producer view does not match writer fence: expected={expected_producer_view_version}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EtcdOpLogStore, decode_etcd_range_entry};
+    use super::{
+        EtcdOpLogStore, decode_etcd_range_entry, parse_latest_sequence_value,
+        parse_snapshot_sequence_value, serialize_etcd_oplog_value, validate_buffer_producer_view,
+        validate_buffer_sequence,
+    };
     use crate::ha::OpLogRecord;
 
     #[test]
@@ -159,11 +352,83 @@ mod tests {
         assert!(error.to_string().contains("00000000000000000024"));
         assert!(error.to_string().contains("tenant"));
     }
+
+    #[test]
+    fn range_entry_rejects_key_value_sequence_mismatch() {
+        let key = b"/oplog/cluster/00000000000000000024";
+        let value = serialize_etcd_oplog_value(&OpLogRecord {
+            seq: 25,
+            producer_view_version: 1,
+            payload: serde_json::json!({
+                "op": "remove",
+                "key": "default\0k1",
+            })
+            .to_string(),
+        })
+        .unwrap();
+
+        let error = decode_etcd_range_entry(key, value.as_bytes()).unwrap_err();
+        assert!(error.to_string().contains("key/value sequence mismatch"));
+    }
+
+    #[test]
+    fn latest_sequence_parser_is_fail_closed() {
+        assert_eq!(parse_latest_sequence_value(None).unwrap(), 0);
+        assert_eq!(parse_latest_sequence_value(Some(b"42")).unwrap(), 42);
+        assert!(parse_latest_sequence_value(Some(&[0xff])).is_err());
+        assert!(parse_latest_sequence_value(Some(b"not-a-sequence")).is_err());
+    }
+
+    #[test]
+    fn snapshot_sequence_parser_distinguishes_missing_and_corrupt_values() {
+        assert_eq!(
+            parse_snapshot_sequence_value("snapshot-a", Some(b"42")).unwrap(),
+            42
+        );
+        assert!(parse_snapshot_sequence_value("snapshot-a", None).is_err());
+        assert!(parse_snapshot_sequence_value("snapshot-a", Some(&[0xff])).is_err());
+        assert!(parse_snapshot_sequence_value("snapshot-a", Some(b"not-a-sequence")).is_err());
+    }
+
+    #[test]
+    fn leader_writer_requires_one_nonzero_producer_view_per_batch() {
+        let record = |seq, producer_view_version| OpLogRecord {
+            seq,
+            producer_view_version,
+            payload: r#"{"op":"remove","key":"default\0k"}"#.to_string(),
+        };
+
+        assert!(validate_buffer_producer_view(&[record(1, 7), record(2, 7)], 7).is_ok());
+        assert!(validate_buffer_producer_view(&[record(1, 0)], 7).is_err());
+        assert!(validate_buffer_producer_view(&[record(1, 7), record(2, 8)], 7).is_err());
+        assert!(validate_buffer_producer_view(&[], 7).is_err());
+    }
+
+    #[test]
+    fn leader_writer_requires_nonzero_contiguous_sequences() {
+        let record = |seq| OpLogRecord {
+            seq,
+            producer_view_version: 7,
+            payload: r#"{"op":"remove","key":"default\0k"}"#.to_string(),
+        };
+
+        assert_eq!(
+            validate_buffer_sequence(&[record(4), record(5)]).unwrap(),
+            (3, 5)
+        );
+        assert!(validate_buffer_sequence(&[]).is_err());
+        assert!(validate_buffer_sequence(&[record(0)]).is_err());
+        assert!(validate_buffer_sequence(&[record(1), record(3)]).is_err());
+    }
 }
 
 impl OpLogStore for EtcdOpLogStore {
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
-        self.last_seq += 1;
+        self.ensure_not_poisoned()?;
+        self.writer_fence()?;
+        self.last_seq = self.last_seq.checked_add(1).ok_or_else(|| {
+            HaError::InvalidBackend("oplog sequence exhausted at u64::MAX".into())
+        })?;
         self.buffer.push(OpLogRecord {
             seq: self.last_seq,
             ..entry.clone()
@@ -177,27 +442,25 @@ impl OpLogStore for EtcdOpLogStore {
     }
 
     fn latest_sequence(&self) -> u64 {
-        let c = self.client.clone();
-        let latest_key = self.latest_key();
-        block_on_runtime(async move {
-            match c.kv_client().get(latest_key.as_bytes(), None).await {
-                Ok(resp) => resp
-                    .kvs()
-                    .first()
-                    .and_then(|kv| String::from_utf8(kv.value().to_vec()).ok())
-                    .and_then(|v| v.parse::<u64>().ok()),
-                Err(_) => None,
+        match block_on_runtime(self.fetch_latest_sequence()) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                warn!("failed to refresh etcd oplog latest sequence: {error}");
+                self.last_seq
             }
-        })
-        .unwrap_or(self.last_seq)
+        }
     }
 
     fn max_sequence_id(&self) -> Result<u64, HaError> {
+        self.ensure_not_poisoned()?;
         let mut max_seq = self.last_seq;
+        let mut committed_latest = block_on_runtime(self.fetch_latest_sequence())?;
+        max_seq = max_seq.max(committed_latest);
+
         let c = self.client.clone();
         let range_start = self.entry_key(0);
-        let range_end = self.entry_key(u64::MAX);
-        let backend_max = block_on_runtime(async move {
+        let range_end = self.latest_key();
+        let response = block_on_runtime(async move {
             c.kv_client()
                 .get(
                     range_start.as_bytes(),
@@ -213,35 +476,72 @@ impl OpLogStore for EtcdOpLogStore {
                 )
                 .await
                 .map_err(|e| HaError::InvalidBackend(format!("etcd get max oplog: {e}")))
-        })?
-        .kvs()
-        .first()
-        .and_then(|kv| String::from_utf8(kv.key().to_vec()).ok())
-        .and_then(|key| {
-            key.rsplit('/')
-                .next()
-                .and_then(|seq| seq.parse::<u64>().ok())
-        });
-        if let Some(backend_max) = backend_max {
+        })?;
+        if let Some(kv) = response.kvs().first() {
+            let backend_max = parse_etcd_entry_key_sequence(kv.key())?;
+            if backend_max > committed_latest {
+                // A commit may have landed between the two reads. Refresh the
+                // commit pointer once before classifying the entry as orphaned.
+                committed_latest = block_on_runtime(self.fetch_latest_sequence())?;
+                if backend_max > committed_latest {
+                    return Err(HaError::InvalidBackend(format!(
+                        "etcd oplog entry exceeds committed latest pointer: entry_max={backend_max}, latest={committed_latest}"
+                    )));
+                }
+            }
+            max_seq = max_seq.max(committed_latest);
             max_seq = max_seq.max(backend_max);
         }
         Ok(max_seq)
     }
 
     fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
-        self.last_seq = sequence_id;
-        let c = self.client.clone();
+        self.ensure_not_poisoned()?;
+        self.writer_fence()?;
+        if sequence_id < self.last_seq || !self.buffer.is_empty() {
+            return Err(HaError::InvalidBackend(
+                "oplog latest sequence cannot move backwards or bypass buffered entries".into(),
+            ));
+        }
+        if sequence_id == self.last_seq {
+            return Ok(());
+        }
+        let mut c = self.client.clone();
         let latest_key = self.latest_key();
-        block_on_runtime(async move {
-            c.kv_client()
-                .put(
-                    latest_key.as_bytes(),
-                    sequence_id.to_string().as_bytes(),
-                    None,
-                )
-                .await
-                .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog latest: {e}")))
-        })?;
+        let latest_compare = if self.last_seq == 0 {
+            Compare::version(latest_key.as_bytes().to_vec(), CompareOp::Equal, 0)
+        } else {
+            Compare::value(
+                latest_key.as_bytes().to_vec(),
+                CompareOp::Equal,
+                self.last_seq.to_string().into_bytes(),
+            )
+        };
+        let writer_compare = self.writer_compare()?;
+        if let Err(error) =
+            block_on_runtime(async move {
+                let response =
+                    c.txn(Txn::new().when([latest_compare, writer_compare]).and_then([
+                        TxnOp::put(
+                            latest_key.into_bytes(),
+                            sequence_id.to_string().into_bytes(),
+                            None,
+                        ),
+                    ]))
+                    .await
+                    .map_err(|e| HaError::InvalidBackend(format!("etcd put oplog latest: {e}")))?;
+                if !response.succeeded() {
+                    return Err(HaError::InvalidBackend(
+                        "etcd oplog writer fenced or latest sequence CAS failed".into(),
+                    ));
+                }
+                Ok(())
+            })
+        {
+            self.poisoned = Some(error.to_string());
+            return Err(error);
+        }
+        self.last_seq = sequence_id;
         Ok(())
     }
 
@@ -250,50 +550,79 @@ impl OpLogStore for EtcdOpLogStore {
         snapshot_id: &str,
         sequence_id: u64,
     ) -> Result<(), HaError> {
+        self.ensure_not_poisoned()?;
         validate_snapshot_id(snapshot_id)?;
-        let c = self.client.clone();
+        self.writer_fence()?;
+        if sequence_id > self.last_seq {
+            return Err(HaError::InvalidBackend(format!(
+                "snapshot sequence {sequence_id} exceeds committed oplog sequence {}",
+                self.last_seq
+            )));
+        }
+        let mut c = self.client.clone();
         let key = self.snapshot_key(snapshot_id);
-        block_on_runtime(async move {
-            c.kv_client()
-                .put(key.as_bytes(), sequence_id.to_string().as_bytes(), None)
+        let writer_compare = self.writer_compare()?;
+        if let Err(error) = block_on_runtime(async move {
+            let response = c
+                .txn(Txn::new().when([writer_compare]).and_then([TxnOp::put(
+                    key.into_bytes(),
+                    sequence_id.to_string().into_bytes(),
+                    None,
+                )]))
                 .await
-                .map_err(|e| HaError::InvalidBackend(format!("etcd put snapshot seq: {e}")))
-        })?;
+                .map_err(|e| HaError::InvalidBackend(format!("etcd put snapshot seq: {e}")))?;
+            if !response.succeeded() {
+                return Err(HaError::InvalidBackend(
+                    "etcd oplog writer fenced before snapshot sequence publication".into(),
+                ));
+            }
+            Ok(())
+        }) {
+            self.poisoned = Some(error.to_string());
+            return Err(error);
+        }
         Ok(())
     }
 
     fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+        self.ensure_not_poisoned()?;
         validate_snapshot_id(snapshot_id)?;
         let c = self.client.clone();
         let key = self.snapshot_key(snapshot_id);
-        let value = block_on_runtime(async move {
+        let response = block_on_runtime(async move {
             c.kv_client()
                 .get(key.as_bytes(), None)
                 .await
                 .map_err(|e| HaError::InvalidBackend(format!("etcd get snapshot seq: {e}")))
-        })?
-        .kvs()
-        .first()
-        .and_then(|kv| String::from_utf8(kv.value().to_vec()).ok())
-        .ok_or_else(|| HaError::InvalidBackend(format!("snapshot not found: {snapshot_id}")))?;
-        value
-            .parse::<u64>()
-            .map_err(|e| HaError::InvalidBackend(format!("etcd parse snapshot seq: {e}")))
+        })?;
+        parse_snapshot_sequence_value(snapshot_id, response.kvs().first().map(|kv| kv.value()))
     }
 
     fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
-        let c = self.client.clone();
+        self.ensure_not_poisoned()?;
+        self.writer_fence()?;
+        let mut c = self.client.clone();
         let range_start = self.entry_key(0);
         let range_end = self.entry_key(before_sequence_id);
-        block_on_runtime(async move {
-            c.kv_client()
-                .delete(
-                    range_start.as_bytes(),
-                    Some(etcd_client::DeleteOptions::new().with_range(range_end.as_bytes())),
-                )
+        let writer_compare = self.writer_compare()?;
+        if let Err(error) = block_on_runtime(async move {
+            let response = c
+                .txn(Txn::new().when([writer_compare]).and_then([TxnOp::delete(
+                    range_start.into_bytes(),
+                    Some(etcd_client::DeleteOptions::new().with_range(range_end.into_bytes())),
+                )]))
                 .await
-                .map_err(|e| HaError::InvalidBackend(format!("etcd cleanup oplog: {e}")))
-        })?;
+                .map_err(|e| HaError::InvalidBackend(format!("etcd cleanup oplog: {e}")))?;
+            if !response.succeeded() {
+                return Err(HaError::InvalidBackend(
+                    "etcd oplog writer fenced before cleanup".into(),
+                ));
+            }
+            Ok(())
+        }) {
+            self.poisoned = Some(error.to_string());
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -303,7 +632,10 @@ impl OpLogStore for EtcdOpLogStore {
 
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
         let records = self.read_since(since_seq, max_count).unwrap_or_default();
-        let next_seq = records.last().map(|r| r.seq + 1).unwrap_or(since_seq);
+        let next_seq = records
+            .last()
+            .map(|r| r.seq.saturating_add(1))
+            .unwrap_or(since_seq);
         OpLogPollResult {
             records,
             next_seq,
@@ -415,14 +747,66 @@ async fn sleep_reconnect_delay(
 }
 
 fn decode_etcd_range_entry(key: &[u8], value: &[u8]) -> Result<OpLogRecord, HaError> {
+    let key_sequence = parse_etcd_entry_key_sequence(key)?;
     let key = String::from_utf8_lossy(key);
     let value = std::str::from_utf8(value).map_err(|error| {
         HaError::InvalidBackend(format!(
             "etcd oplog value for key {key:?} is not UTF-8: {error}"
         ))
     })?;
-    deserialize_etcd_oplog_value(value).map_err(|error| {
+    let record = deserialize_etcd_oplog_value(value).map_err(|error| {
         HaError::InvalidBackend(format!("corrupt etcd oplog record at key {key:?}: {error}"))
+    })?;
+    if record.seq != key_sequence {
+        return Err(HaError::InvalidBackend(format!(
+            "etcd oplog key/value sequence mismatch at key {key:?}: record_seq={}",
+            record.seq
+        )));
+    }
+    Ok(record)
+}
+
+fn parse_etcd_entry_key_sequence(key: &[u8]) -> Result<u64, HaError> {
+    let key = std::str::from_utf8(key).map_err(|error| {
+        HaError::InvalidBackend(format!("etcd oplog key is not UTF-8: {error}"))
+    })?;
+    key.rsplit('/')
+        .next()
+        .ok_or_else(|| HaError::InvalidBackend(format!("etcd oplog key has no sequence: {key:?}")))?
+        .parse::<u64>()
+        .map_err(|error| {
+            HaError::InvalidBackend(format!(
+                "etcd oplog key has invalid sequence {key:?}: {error}"
+            ))
+        })
+}
+
+fn parse_latest_sequence_value(value: Option<&[u8]>) -> Result<u64, HaError> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    let value = std::str::from_utf8(value).map_err(|error| {
+        HaError::InvalidBackend(format!("etcd oplog latest is not UTF-8: {error}"))
+    })?;
+    value.parse::<u64>().map_err(|error| {
+        HaError::InvalidBackend(format!(
+            "etcd oplog latest has invalid sequence {value:?}: {error}"
+        ))
+    })
+}
+
+fn parse_snapshot_sequence_value(snapshot_id: &str, value: Option<&[u8]>) -> Result<u64, HaError> {
+    let value = value
+        .ok_or_else(|| HaError::InvalidBackend(format!("snapshot not found: {snapshot_id}")))?;
+    let value = std::str::from_utf8(value).map_err(|error| {
+        HaError::InvalidBackend(format!(
+            "etcd snapshot {snapshot_id:?} sequence is not UTF-8: {error}"
+        ))
+    })?;
+    value.parse::<u64>().map_err(|error| {
+        HaError::InvalidBackend(format!(
+            "etcd snapshot {snapshot_id:?} has invalid sequence {value:?}: {error}"
+        ))
     })
 }
 
@@ -449,12 +833,13 @@ impl EtcdOpLogStore {
         since_seq: u64,
         max_count: usize,
     ) -> Result<(Vec<OpLogRecord>, i64), HaError> {
+        self.ensure_not_poisoned()?;
         let mut entries = Vec::new();
         let c = self.client.clone();
 
         // OpLogStore::read_since is inclusive, matching the in-memory and
         // local-file backends.
-        let range_end = self.entry_key(u64::MAX);
+        let range_end = self.latest_key();
         let range_start = self.entry_key(Self::inclusive_range_start(since_seq));
 
         let revision = match c
@@ -493,6 +878,14 @@ impl EtcdOpLogStore {
         }
 
         entries.sort_by_key(|e| e.seq);
+        for pair in entries.windows(2) {
+            if pair[0].seq.checked_add(1) != Some(pair[1].seq) {
+                return Err(HaError::InvalidBackend(format!(
+                    "etcd oplog contains a sequence gap: previous={}, next={}",
+                    pair[0].seq, pair[1].seq
+                )));
+            }
+        }
         entries.truncate(max_count);
         Ok((entries, revision))
     }
@@ -677,18 +1070,7 @@ impl EtcdOpLogStore {
                             if event.event_type() == etcd_client::EventType::Delete {
                                 continue;
                             }
-                            let value = match String::from_utf8(kv.value().to_vec()) {
-                                Ok(value) => value,
-                                Err(e) => {
-                                    let err = HaError::InvalidBackend(format!(
-                                        "etcd watch oplog utf8: {e}"
-                                    ));
-                                    on_error(err);
-                                    consecutive_errors = consecutive_errors.saturating_add(1);
-                                    continue;
-                                }
-                            };
-                            match deserialize_etcd_oplog_value(&value) {
+                            match decode_etcd_range_entry(kv.key(), kv.value()) {
                                 Ok(entry) => {
                                     if entry.seq > last_seq {
                                         last_seq = entry.seq;

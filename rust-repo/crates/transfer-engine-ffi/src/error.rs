@@ -44,6 +44,55 @@ pub enum TransferEngineError {
     #[error("Transfer Engine operation {operation} failed with code {code}")]
     NativeOperationFailed { operation: &'static str, code: i32 },
 
+    /// A batch handle was passed to a different engine instance.
+    #[error("Transfer Engine batch belongs to a different engine instance")]
+    BatchOwnershipMismatch,
+
+    /// A batch handle was used after its native allocation was released.
+    #[error("Transfer Engine batch was already released")]
+    BatchAlreadyReleased,
+
+    /// Native tasks in the batch are still accessing their payloads.
+    #[error("Transfer Engine batch is still busy")]
+    BatchBusy,
+
+    /// The native engine returned an error that does not prove the batch has
+    /// stopped accessing its registered payload.
+    #[error("Transfer Engine batch quiescence could not be proven; native resources were retained")]
+    QuiescenceUnproven,
+
+    /// A typed memory registration was malformed or used outside its bounds.
+    #[error("Invalid Transfer Engine memory registration: {0}")]
+    InvalidMemoryRegistration(String),
+
+    /// A typed memory registration belongs to a different engine instance.
+    #[error("Transfer Engine memory registration belongs to a different engine instance")]
+    MemoryRegistrationOwnershipMismatch,
+
+    /// A typed memory registration was used after successful unregistration.
+    #[error("Transfer Engine memory registration was already released")]
+    MemoryRegistrationAlreadyReleased,
+
+    /// Region leases still exist and may be used by native transfers.
+    #[error(
+        "Transfer Engine memory registration generation {generation} is busy with {active_leases} active region lease(s)"
+    )]
+    MemoryRegistrationBusy {
+        generation: u64,
+        active_leases: usize,
+    },
+
+    /// A safe registered transfer already owns the registration's exclusive
+    /// native-access claim.
+    #[error(
+        "Transfer Engine memory registration generation {generation} already has an in-flight registered transfer"
+    )]
+    MemoryRegistrationInFlight { generation: u64 },
+
+    /// Native notification metadata was internally inconsistent.
+    #[error("Invalid native notification buffer: {0}")]
+    InvalidNotificationBuffer(&'static str),
+
     /// A native NIC statistic did not contain a terminated device name.
     #[error("Invalid NIC device name: {0}")]
     InvalidDeviceName(&'static str),

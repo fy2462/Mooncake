@@ -90,6 +90,30 @@ impl TenantQuotaTable {
             .map(|_| self.snapshot_for_existing(tenant_id)))
     }
 
+    /// Replace only the explicit policy layer while retaining all runtime
+    /// usage/reservation accounting restored by the standby.
+    pub fn replace_policies(
+        &mut self,
+        policies: &BTreeMap<TenantId, u64>,
+        capacity: u64,
+    ) -> Result<(), TenantQuotaError> {
+        if policies.values().any(|quota| *quota == 0) {
+            return Err(TenantQuotaError::InvalidArgument);
+        }
+        for state in self.tenants.values_mut() {
+            state.requested_quota_bytes = 0;
+            state.has_explicit_policy = false;
+        }
+        for (tenant_id, quota) in policies {
+            let state = self.get_or_create_state(tenant_id);
+            state.requested_quota_bytes = *quota;
+            state.has_explicit_policy = true;
+        }
+        self.recompute_effective_quotas(capacity);
+        self.tenants.retain(|_, state| !is_lazy_empty(state));
+        Ok(())
+    }
+
     #[doc(hidden)]
     pub fn remove_registration_for_test(&mut self, tenant_id: &TenantId, capacity: u64) {
         if let Some(state) = self.tenants.get_mut(tenant_id) {
@@ -123,6 +147,33 @@ impl TenantQuotaTable {
             .collect()
     }
 
+    /// Return the number of committed Memory bytes that must be released before
+    /// an admission of `incoming_bytes` can fit. This mirrors the C++
+    /// `TenantQuotaTable::ComputeDeficit` rule and intentionally includes
+    /// already-reserved bytes in the demand.
+    pub fn compute_deficit(&self, tenant_id: &TenantId, incoming_bytes: u64) -> u64 {
+        let Some(state) = self.tenants.get(tenant_id) else {
+            return incoming_bytes;
+        };
+        let demand =
+            state.used_bytes as u128 + state.reserved_bytes as u128 + incoming_bytes as u128;
+        let deficit = demand.saturating_sub(state.effective_quota_bytes as u128);
+        deficit.min(u64::MAX as u128) as u64
+    }
+
+    /// Clear runtime usage while retaining explicit tenant policies.
+    /// Used before rebuilding accounting from a replacement snapshot.
+    pub fn reset_usage(&mut self) {
+        for state in self.tenants.values_mut() {
+            state.used_bytes = 0;
+            state.reserved_bytes = 0;
+            state.committed_count = 0;
+            state.metadata_object_count = 0;
+            refresh_over_quota(state);
+        }
+        self.tenants.retain(|_, state| !is_lazy_empty(state));
+    }
+
     pub fn recompute_effective_quotas(&mut self, capacity: u64) {
         for state in self.tenants.values_mut() {
             state.effective_quota_bytes = 0;
@@ -139,37 +190,88 @@ impl TenantQuotaTable {
     }
 
     pub fn reserve(&mut self, tenant_id: &TenantId, bytes: u64) -> Result<(), TenantQuotaError> {
-        if bytes == 0 {
-            self.get_or_create_state(tenant_id);
-            return Ok(());
-        }
         let Some(state) = self.tenants.get_mut(tenant_id) else {
             return Err(TenantQuotaError::TenantNotRegistered);
         };
         if !state.has_explicit_policy {
             return Err(TenantQuotaError::TenantNotRegistered);
         }
+        if bytes == 0 {
+            return Ok(());
+        }
         let next = state.used_bytes as u128 + state.reserved_bytes as u128 + bytes as u128;
         if next > state.effective_quota_bytes as u128 {
             return Err(TenantQuotaError::QuotaExceeded);
         }
-        state.reserved_bytes = state.reserved_bytes.saturating_add(bytes);
+        state.reserved_bytes = state
+            .reserved_bytes
+            .checked_add(bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
         refresh_over_quota(state);
         Ok(())
     }
 
     pub fn commit(&mut self, tenant_id: &TenantId, bytes: u64) -> Result<(), TenantQuotaError> {
-        let state = self.get_or_create_state(tenant_id);
-        if bytes == 0 {
-            return Ok(());
-        }
-        if state.reserved_bytes < bytes {
+        self.settle(tenant_id, bytes, bytes, true)
+    }
+
+    /// Settle one reservation, optionally registering the object's first
+    /// positive physical Memory charge.
+    ///
+    /// `reserved_bytes` is always removed from the reservation ledger, while
+    /// only `committed_bytes` becomes physical Memory usage. This permits NoF-
+    /// only objects (`committed_bytes == 0`) and permits partial Memory/NoF
+    /// completion. Metadata object accounting is intentionally independent and
+    /// starts when the object entry is created, not when its write completes.
+    pub fn settle(
+        &mut self,
+        tenant_id: &TenantId,
+        reserved_bytes: u64,
+        committed_bytes: u64,
+        register_committed_charge: bool,
+    ) -> Result<(), TenantQuotaError> {
+        if committed_bytes > reserved_bytes {
             return Err(TenantQuotaError::AccountingMismatch);
         }
-        state.reserved_bytes -= bytes;
-        state.used_bytes = state.used_bytes.saturating_add(bytes);
-        state.committed_count = state.committed_count.saturating_add(1);
+        let state = self.get_or_create_state(tenant_id);
+        if state.reserved_bytes < reserved_bytes {
+            return Err(TenantQuotaError::AccountingMismatch);
+        }
+        let remaining_reserved_bytes = state.reserved_bytes - reserved_bytes;
+        let used_bytes = state
+            .used_bytes
+            .checked_add(committed_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        used_bytes
+            .checked_add(remaining_reserved_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        let committed_count = if register_committed_charge && committed_bytes != 0 {
+            state
+                .committed_count
+                .checked_add(1)
+                .ok_or(TenantQuotaError::AccountingMismatch)?
+        } else {
+            state.committed_count
+        };
+        state.reserved_bytes = remaining_reserved_bytes;
+        state.used_bytes = used_bytes;
+        state.committed_count = committed_count;
+        refresh_over_quota(state);
+        Ok(())
+    }
+
+    pub fn register_object(&mut self, tenant_id: &TenantId) {
+        let state = self.get_or_create_state(tenant_id);
         state.metadata_object_count = state.metadata_object_count.saturating_add(1);
+        refresh_over_quota(state);
+    }
+
+    pub fn unregister_object(&mut self, tenant_id: &TenantId) -> Result<(), TenantQuotaError> {
+        let state = self.get_or_create_state(tenant_id);
+        if state.metadata_object_count == 0 {
+            return Err(TenantQuotaError::AccountingMismatch);
+        }
+        state.metadata_object_count -= 1;
         refresh_over_quota(state);
         Ok(())
     }
@@ -186,16 +288,144 @@ impl TenantQuotaTable {
 
     pub fn release(&mut self, tenant_id: &TenantId, bytes: u64) -> Result<(), TenantQuotaError> {
         let state = self.get_or_create_state(tenant_id);
+        if state.used_bytes < bytes || (bytes != 0 && state.committed_count == 0) {
+            return Err(TenantQuotaError::AccountingMismatch);
+        }
+        state.used_bytes -= bytes;
+        if bytes != 0 {
+            state.committed_count -= 1;
+        }
+        refresh_over_quota(state);
+        Ok(())
+    }
+
+    pub fn release_bytes(
+        &mut self,
+        tenant_id: &TenantId,
+        bytes: u64,
+    ) -> Result<(), TenantQuotaError> {
+        let state = self.get_or_create_state(tenant_id);
         if state.used_bytes < bytes {
             return Err(TenantQuotaError::AccountingMismatch);
         }
         state.used_bytes -= bytes;
-        if state.committed_count > 0 {
+        refresh_over_quota(state);
+        Ok(())
+    }
+
+    pub fn remove_object(
+        &mut self,
+        tenant_id: &TenantId,
+        committed_bytes: u64,
+    ) -> Result<(), TenantQuotaError> {
+        let state = self.get_or_create_state(tenant_id);
+        if state.used_bytes < committed_bytes
+            || (committed_bytes != 0 && state.committed_count == 0)
+            || state.metadata_object_count == 0
+        {
+            return Err(TenantQuotaError::AccountingMismatch);
+        }
+        state.used_bytes -= committed_bytes;
+        if committed_bytes != 0 {
             state.committed_count -= 1;
         }
-        if state.metadata_object_count > 0 {
-            state.metadata_object_count -= 1;
-        }
+        state.metadata_object_count -= 1;
+        refresh_over_quota(state);
+        Ok(())
+    }
+
+    /// Rebuild committed accounting from durable object metadata. All
+    /// counters are projected before mutation so an overflowing candidate can
+    /// be rejected without contaminating the current ledger.
+    pub fn restore_object_checked(
+        &mut self,
+        tenant_id: &TenantId,
+        committed_bytes: u64,
+    ) -> Result<(), TenantQuotaError> {
+        let state = self.get_or_create_state(tenant_id);
+        let used_bytes = state
+            .used_bytes
+            .checked_add(committed_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        used_bytes
+            .checked_add(state.reserved_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        let committed_count = if committed_bytes == 0 {
+            state.committed_count
+        } else {
+            state
+                .committed_count
+                .checked_add(1)
+                .ok_or(TenantQuotaError::AccountingMismatch)?
+        };
+        let metadata_object_count = state
+            .metadata_object_count
+            .checked_add(1)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        state.used_bytes = used_bytes;
+        state.committed_count = committed_count;
+        state.metadata_object_count = metadata_object_count;
+        refresh_over_quota(state);
+        Ok(())
+    }
+
+    /// Rebuild an in-flight reservation from durable object metadata.
+    pub fn restore_reservation_checked(
+        &mut self,
+        tenant_id: &TenantId,
+        reserved_bytes: u64,
+    ) -> Result<(), TenantQuotaError> {
+        let state = self.get_or_create_state(tenant_id);
+        let reserved_bytes = state
+            .reserved_bytes
+            .checked_add(reserved_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        state
+            .used_bytes
+            .checked_add(reserved_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        state.reserved_bytes = reserved_bytes;
+        refresh_over_quota(state);
+        Ok(())
+    }
+
+    /// Rebuild an in-flight size-changing replacement. The new object owns one
+    /// reservation and one metadata slot while the old physical Memory charge
+    /// remains live until the replacement commits or is revoked.
+    pub fn restore_replacement_checked(
+        &mut self,
+        tenant_id: &TenantId,
+        reserved_bytes: u64,
+        pending_replaced_bytes: u64,
+    ) -> Result<(), TenantQuotaError> {
+        let state = self.get_or_create_state(tenant_id);
+        let restored_reserved_bytes = state
+            .reserved_bytes
+            .checked_add(reserved_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        let used_bytes = state
+            .used_bytes
+            .checked_add(pending_replaced_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        used_bytes
+            .checked_add(restored_reserved_bytes)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        let committed_count = if pending_replaced_bytes == 0 {
+            state.committed_count
+        } else {
+            state
+                .committed_count
+                .checked_add(1)
+                .ok_or(TenantQuotaError::AccountingMismatch)?
+        };
+        let metadata_object_count = state
+            .metadata_object_count
+            .checked_add(1)
+            .ok_or(TenantQuotaError::AccountingMismatch)?;
+        state.reserved_bytes = restored_reserved_bytes;
+        state.used_bytes = used_bytes;
+        state.committed_count = committed_count;
+        state.metadata_object_count = metadata_object_count;
         refresh_over_quota(state);
         Ok(())
     }
@@ -238,7 +468,8 @@ fn is_lazy_empty(state: &TenantQuotaState) -> bool {
 
 fn refresh_over_quota(state: &mut TenantQuotaState) {
     state.over_quota = (!state.has_explicit_policy && state.metadata_object_count > 0)
-        || state.used_bytes.saturating_add(state.reserved_bytes) > state.effective_quota_bytes;
+        || state.used_bytes as u128 + state.reserved_bytes as u128
+            > state.effective_quota_bytes as u128;
 }
 
 fn build_effective_quota_assignments(
@@ -310,5 +541,45 @@ fn distribute(
             remaining -= 1;
         }
         assigned.insert(tenant_id, base);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacing_policy_layer_preserves_runtime_accounting() {
+        let tenant = TenantId::new("tenant-a".to_string()).unwrap();
+        let mut table = TenantQuotaTable::new(0);
+        table.upsert_policy(&tenant, 100, 100).unwrap();
+        table.reserve(&tenant, 20).unwrap();
+        table.register_object(&tenant);
+
+        let mut replacement = BTreeMap::new();
+        replacement.insert(tenant.clone(), 80);
+        table.replace_policies(&replacement, 80).unwrap();
+
+        let snapshot = table.get_snapshot(&tenant).unwrap();
+        assert_eq!(snapshot.requested_quota_bytes, 80);
+        assert_eq!(snapshot.effective_quota_bytes, 80);
+        assert_eq!(snapshot.reserved_bytes, 20);
+        assert_eq!(snapshot.metadata_object_count, 1);
+        assert!(snapshot.has_explicit_policy);
+    }
+
+    #[test]
+    fn replacing_policy_layer_can_leave_accounting_only_tenant() {
+        let tenant = TenantId::new("tenant-a".to_string()).unwrap();
+        let mut table = TenantQuotaTable::new(0);
+        table.upsert_policy(&tenant, 100, 100).unwrap();
+        table.reserve(&tenant, 20).unwrap();
+
+        table.replace_policies(&BTreeMap::new(), 100).unwrap();
+
+        let snapshot = table.get_snapshot(&tenant).unwrap();
+        assert_eq!(snapshot.reserved_bytes, 20);
+        assert!(!snapshot.has_explicit_policy);
+        assert!(snapshot.over_quota);
     }
 }

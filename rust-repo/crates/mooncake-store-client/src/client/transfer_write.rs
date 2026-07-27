@@ -1,9 +1,9 @@
 use super::MooncakeClient;
-use super::transfer_local::RegisteredBufferRegion;
+use super::metrics::TransferOperationKind;
+use super::transfer_local::ReadableBufferRegion;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
-use std::ffi::c_void;
-use transfer_engine_ffi::{Opcode, TransferRequest};
+use transfer_engine_ffi::{RegisteredSubmitOutcome, RegisteredTransferRequest};
 
 impl MooncakeClient {
     // -----------------------------------------------------------------------
@@ -16,11 +16,11 @@ impl MooncakeClient {
     //      检查本地副本 + segment_buffer → local_memcpy（快速路径），无需 TE 资源。
     //
     //   2. (Remote path) Copy data into local_buffer → open_segment →
-    //      allocate_batch_id → submit transfer → poll status (10s timeout) →
-    //      free_batch_id → close_segment.
+    //      submit owner-bearing transfer → poll through native
+    //      quiescence/free → close_segment.
     //      (远程路径) 拷贝数据到 local_buffer → open_segment →
-    //      allocate_batch_id → 提交传输 → 轮询状态 (10s 超时) →
-    //      free_batch_id → close_segment。
+    //      提交 owner-bearing transfer → 轮询到 native quiescence/free →
+    //      close_segment。
     //
     // Resource cleanup: on failure or timeout, batch_id is freed and segment
     // is closed before returning the error. This prevents resource leaks in
@@ -49,16 +49,21 @@ impl MooncakeClient {
             base_addr = replica.base_addr,
             data_len = data.len(),
             is_local = self.is_local_replica(replica),
-            has_seg_buf = self.segment_buffer.is_some(),
+            has_seg_buf = self.local_owned_segment(replica).is_some(),
             "write_to_replica: ENTER"
         );
 
         // Fast path: local segment — direct memcpy, no TE overhead.
         // 快速路径：本地 segment —— 直接 memcpy，无 TE 开销。
-        if self.is_local_replica(replica) && self.segment_buffer.is_some() {
+        if self.is_local_replica(replica) && self.local_owned_segment(replica).is_some() {
             tracing::info!(target: "te_debug", "write_to_replica: taking LOCAL_MEMCPY fast path");
             let result = self.local_memcpy_write(replica, data);
             tracing::info!(target: "te_debug", ok = result.is_ok(), "write_to_replica: EXIT (local_memcpy)");
+            if result.is_ok()
+                && let Some(metrics) = &self.metrics
+            {
+                metrics.observe_transfer_bytes(TransferOperationKind::Write, data.len() as u64);
+            }
             return result;
         }
 
@@ -81,93 +86,98 @@ impl MooncakeClient {
         tracing::info!(
             target: "te_debug",
             seg_name = %replica.segment_name,
-            local_buf_ptr = ?self.local_buffer.as_ptr(),
+            local_buf_ptr = ?self.local_buffer.base_ptr(),
             local_buf_len = self.local_buffer.len(),
             "write_to_replica: opening segment"
         );
+
+        let staging_lease = self.local_buffer.lease()?;
+        self.local_buffer.copy_from_slice(&staging_lease, 0, data)?;
+        let target_offset = Self::checked_replica_target_offset(replica, 0)?;
+
         // Step 1: open the segment on the TE. / 第 1 步：在 TE 上打开 segment。
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: segment opened");
 
-        // Step 2: allocate a batch_id for grouping transfer requests.
-        // 第 2 步：分配 batch_id 用于分组传输请求。
-        let batch_id = match self.engine.allocate_batch_id(1) {
-            Ok(batch_id) => batch_id,
-            Err(e) => {
-                let _ = self.engine.close_segment(segment_id);
-                return Err(e.into());
-            }
-        };
-        tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: batch_id allocated");
-
-        // Step 3: copy data into the registered local_buffer (TE source).
-        // 第 3 步：将数据拷贝到已注册的 local_buffer（TE 源）。
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                self.local_buffer.as_ptr() as *mut u8,
-                data.len(),
-            );
-        }
+        // Step 2: data already resides in the exclusively leased staging
+        // buffer, which can be transferred to a cancellation reaper.
         tracing::info!(target: "te_debug", data_len = data.len(), "write_to_replica: data copied to local_buffer");
 
-        // Step 4: build and submit the transfer request.
-        // 第 4 步：构建并提交传输请求。
-        let target_offset = replica.base_addr + replica.offset;
-        let request = TransferRequest {
-            opcode: Opcode::Write,
-            source: self.local_buffer.as_ptr() as *mut c_void,
-            target_id: segment_id,
-            target_offset,
-            length: data.len() as u64,
-        };
+        // Step 3: build and submit an owner-bearing transfer request.
+        let request = self.close_segment_on_prepare_error(
+            segment_id,
+            (|| -> StoreResult<_> {
+                Ok(RegisteredTransferRequest::write(
+                    self.local_buffer
+                        .readable_region(&staging_lease, 0, data.len())?,
+                    segment_id,
+                    target_offset,
+                    data.len(),
+                )?)
+            })(),
+        )?;
         tracing::info!(
             target: "te_debug",
-            src = ?request.source,
-            tgt_id = request.target_id.0,
-            tgt_off = request.target_offset,
-            len = request.length,
+            tgt_id = segment_id.0,
+            tgt_off = target_offset,
+            len = data.len(),
             "write_to_replica: submitting transfer"
         );
 
-        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e.into());
-        }
-        tracing::info!(target: "te_debug", "write_to_replica: transfer submitted, polling...");
-
-        // Step 5: poll transfer status with 10s timeout.
-        // 第 5 步：以 10s 超时轮询传输状态。
-        // 10s is generous for RDMA (us-scale) but covers TCP retransmissions
-        // and slow NVMe-oF targets. 10s 对 RDMA（微秒级）很充裕，但覆盖了 TCP
-        // 重传和慢速 NVMe-oF 目标。
-        let statuses = match self
-            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
-            .await
-        {
-            Ok(statuses) => statuses,
-            Err(e) => {
-                let _ = self.engine.free_batch_id(batch_id);
+        let outcome = match self.engine.submit_transfer(vec![request]) {
+            Ok(outcome) => outcome,
+            Err(error) => {
                 let _ = self.engine.close_segment(segment_id);
-                return Err(e);
+                return Err(error.into());
             }
         };
+        let batch = match outcome {
+            RegisteredSubmitOutcome::Submitted(batch) => batch,
+            RegisteredSubmitOutcome::NativeRejected { error, batch } => {
+                let _completion = self
+                    .release_failed_submission_owned(
+                        batch,
+                        segment_id,
+                        std::time::Duration::from_secs(10),
+                        staging_lease,
+                    )
+                    .await?;
+                return Err(error.into());
+            }
+        };
+        tracing::info!(target: "te_debug", "write_to_replica: transfer submitted, polling...");
+
+        // Step 5: hand every raw-pointer owner to the reaper synchronously,
+        // then await completion. Cancellation only drops the receiver.
+        let completion = self
+            .wait_for_transfer_batch_owned(
+                batch,
+                segment_id,
+                std::time::Duration::from_secs(10),
+                staging_lease,
+            )
+            .await?;
+        if !super::transfer::transfer_statuses_match_lengths(
+            &completion.statuses,
+            [data.len() as u64],
+        ) {
+            return Err(StoreError::Internal(format!(
+                "write transfer did not complete exactly {} bytes",
+                data.len()
+            )));
+        }
         tracing::info!(
             target: "te_debug",
-            transferred = statuses[0].transferred_bytes,
+            transferred = completion.statuses[0].transferred_bytes,
             "write_to_replica: transfer COMPLETED"
         );
 
-        // Step 6: cleanup resources. / 第 6 步：清理资源。
-        tracing::info!(target: "te_debug", batch_id = batch_id.0, "write_to_replica: freeing batch_id");
-        if let Err(e) = self.engine.free_batch_id(batch_id) {
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e.into());
-        }
-        tracing::info!(target: "te_debug", seg_id = segment_id.0, "write_to_replica: closing segment");
-        self.engine.close_segment(segment_id)?;
+        // Step 6: the reaper already released the batch and segment.
+        drop(completion);
         tracing::info!(target: "te_debug", "write_to_replica: EXIT (success)");
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_transfer_bytes(TransferOperationKind::Write, data.len() as u64);
+        }
         Ok(())
     }
 
@@ -185,44 +195,47 @@ impl MooncakeClient {
     // 这消除了额外的 memcpy。
     //
     // Resource lifecycle (资源生命周期):
-    //   open_segment → allocate_batch_id → submit → poll(10s) →
-    //   free_batch_id → close_segment
+    //   open_segment → typed registered submit →
+    //   poll through native quiescence/free → close_segment
     //
     // C++ equivalent: zero-copy path inside Client::WriteToReplica() when
     // the caller passes an externally-registered buffer.
     // -----------------------------------------------------------------------
 
     /// Zero-copy write to a replica using a caller-provided buffer.
-    /// The buffer must be pre-registered with the TE via [`register_buffer`].
+    /// The buffer must be pre-registered with the TE via
+    /// [`register_owned_buffer`](Self::register_owned_buffer).
     ///
     /// 使用调用者提供的缓冲区进行零拷贝写入。
-    /// 缓冲区必须通过 register_buffer 预先向 TE 注册。
+    /// 缓冲区必须通过 register_owned_buffer 预先向 TE 注册。
     ///
-    /// # Safety
-    /// `buffer` must point to at least `size` bytes of valid memory that has
-    /// been registered with the TE. / buffer 必须指向至少 size 字节的已向 TE
-    /// 注册的有效内存。
+    /// `buffer` is already a bounds-checked readable registration capability
+    /// whose lease is transferred to the completion reaper.
     pub(crate) async fn zero_copy_write(
         &mut self,
         replica: &ReplicaDescriptor,
-        buffer: RegisteredBufferRegion,
+        buffer: ReadableBufferRegion,
     ) -> StoreResult<()> {
         let size = buffer.len();
         let source = buffer.foreign_region();
-        let device_source = crate::data_plane_ffi::gather_device_to_host(
-            self.accelerator.as_ref(),
-            source,
-            &mut self.local_buffer,
-        )?;
-        let buffer = if device_source {
-            self.local_buffer.as_mut_ptr().cast()
+        let device_source =
+            crate::data_plane_ffi::is_device_memory(self.accelerator.as_ref(), source)?;
+        let staging_lease = if device_source {
+            let lease = self.local_buffer.lease()?;
+            let mut staged = vec![0_u8; size];
+            crate::data_plane_ffi::gather_device_to_host(
+                self.accelerator.as_ref(),
+                source,
+                &mut staged,
+            )?;
+            self.local_buffer.copy_from_slice(&lease, 0, &staged)?;
+            Some(lease)
         } else {
-            buffer.as_mut_ptr()
+            None
         };
         tracing::info!(
             target: "te_debug",
             seg_name = %replica.segment_name,
-            buf = ?buffer,
             size,
             "zero_copy_write: ENTER"
         );
@@ -230,47 +243,64 @@ impl MooncakeClient {
         let segment_id = self.engine.open_segment(&replica.segment_name)?;
         tracing::info!(target: "te_debug", seg_id = segment_id.0, "zero_copy_write: segment opened");
 
-        let batch_id = match self.engine.allocate_batch_id(1) {
-            Ok(batch_id) => batch_id,
-            Err(e) => {
-                let _ = self.engine.close_segment(segment_id);
-                return Err(e.into());
-            }
-        };
-        tracing::info!(target: "te_debug", batch_id = batch_id.0, "zero_copy_write: batch_id allocated");
-
         // Build transfer: source = caller's buffer directly (no intermediate copy).
         // 构建传输：源 = 直接使用调用者缓冲区（无中间拷贝）。
-        let request = TransferRequest {
-            opcode: Opcode::Write,
-            source: buffer,
-            target_id: segment_id,
-            target_offset: replica.base_addr + replica.offset,
-            length: size as u64,
+        let request = self.close_segment_on_prepare_error(
+            segment_id,
+            (|| -> StoreResult<_> {
+                let local_region = match staging_lease.as_ref() {
+                    Some(lease) => self.local_buffer.readable_region(lease, 0, size)?,
+                    None => buffer.registered_region(),
+                };
+                Ok(RegisteredTransferRequest::write(
+                    local_region,
+                    segment_id,
+                    Self::checked_replica_target_offset(replica, 0)?,
+                    size,
+                )?)
+            })(),
+        )?;
+        let outcome = match self.engine.submit_transfer(vec![request]) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = self.engine.close_segment(segment_id);
+                return Err(error.into());
+            }
         };
-
-        if let Err(e) = self.engine.submit_transfer(batch_id, &[request]) {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e.into());
-        }
+        let batch = match outcome {
+            RegisteredSubmitOutcome::Submitted(batch) => batch,
+            RegisteredSubmitOutcome::NativeRejected { error, batch } => {
+                let _completion = self
+                    .release_failed_submission_owned(
+                        batch,
+                        segment_id,
+                        std::time::Duration::from_secs(10),
+                        (buffer, staging_lease),
+                    )
+                    .await?;
+                return Err(error.into());
+            }
+        };
         tracing::info!(target: "te_debug", "zero_copy_write: transfer submitted, polling...");
 
-        if let Err(e) = self
-            .wait_for_transfer_batch(batch_id, 1, tokio::time::Duration::from_secs(10))
-            .await
-        {
-            let _ = self.engine.free_batch_id(batch_id);
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e);
+        let completion = self
+            .wait_for_transfer_batch_owned(
+                batch,
+                segment_id,
+                std::time::Duration::from_secs(10),
+                (buffer, staging_lease),
+            )
+            .await?;
+        if !super::transfer::transfer_statuses_match_lengths(&completion.statuses, [size as u64]) {
+            return Err(StoreError::Internal(format!(
+                "zero-copy write did not complete exactly {size} bytes"
+            )));
         }
-
-        if let Err(e) = self.engine.free_batch_id(batch_id) {
-            let _ = self.engine.close_segment(segment_id);
-            return Err(e.into());
-        }
-        self.engine.close_segment(segment_id)?;
+        drop(completion);
         tracing::info!(target: "te_debug", "zero_copy_write: EXIT (success)");
+        if let Some(metrics) = &self.metrics {
+            metrics.observe_transfer_bytes(TransferOperationKind::Write, size as u64);
+        }
         Ok(())
     }
 }

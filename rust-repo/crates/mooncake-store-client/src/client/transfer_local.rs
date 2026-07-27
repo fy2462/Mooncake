@@ -3,67 +3,125 @@ use crate::data_plane_ffi::ForeignMemoryRegion;
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, StoreError};
 use std::ffi::c_void;
+use transfer_engine_ffi::{
+    ReadableRegisteredMemoryRegion, RegisteredMemoryAccess, RegisteredMemoryId, StableMemoryOwner,
+    WritableRegisteredMemoryRegion,
+};
 
-/// A Store-validated region of memory registered with the Transfer Engine.
-///
-/// The fields are private so data-plane operations cannot be invoked with an
-/// arbitrary raw pointer. The unsafe registration API establishes the memory
-/// lifetime invariant; region resolution enforces bounds for each operation.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RegisteredBufferRegion {
-    address: usize,
-    len: usize,
+pub use transfer_engine_ffi::RegisteredMemoryId as BufferRegistrationId;
+
+fn ranges_overlap(
+    first_base: usize,
+    first_end: usize,
+    second_base: usize,
+    second_end: usize,
+) -> bool {
+    first_base < second_end && second_base < first_end
 }
 
-impl RegisteredBufferRegion {
-    pub(crate) fn as_mut_ptr(self) -> *mut c_void {
-        self.address as *mut c_void
+fn validate_target_address(buffer: *mut c_void) -> StoreResult<usize> {
+    let target = buffer as usize;
+    if target == 0 {
+        return Err(StoreError::InvalidParams(
+            "buffer address must not be null".to_string(),
+        ));
+    }
+    Ok(target)
+}
+
+fn unregistered_buffer_error() -> StoreError {
+    StoreError::InvalidParams("buffer is not within externally registered memory".to_string())
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ReadableBufferRegion {
+    len: usize,
+    registration: ReadableRegisteredMemoryRegion,
+}
+
+impl ReadableBufferRegion {
+    pub(crate) fn as_mut_ptr(&self) -> *mut c_void {
+        self.registration.as_ptr() as *mut c_void
     }
 
-    pub(crate) fn len(self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 
-    pub(crate) fn foreign_region(self) -> ForeignMemoryRegion {
+    pub(crate) fn foreign_region(&self) -> ForeignMemoryRegion {
         ForeignMemoryRegion::from_caller_owned_raw(self.as_mut_ptr(), self.len)
+    }
+
+    pub(crate) fn registered_region(&self) -> ReadableRegisteredMemoryRegion {
+        self.registration.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WritableBufferRegion {
+    len: usize,
+    registration: WritableRegisteredMemoryRegion,
+}
+
+impl WritableBufferRegion {
+    pub(crate) fn as_mut_ptr(&self) -> *mut c_void {
+        self.registration.as_mut_ptr()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn foreign_region(&self) -> ForeignMemoryRegion {
+        ForeignMemoryRegion::from_caller_owned_raw(self.as_mut_ptr(), self.len)
+    }
+
+    pub(crate) fn registered_region(&self) -> WritableRegisteredMemoryRegion {
+        self.registration.clone()
     }
 }
 
 impl MooncakeClient {
-    pub(crate) fn resolve_writable_buffer_region(
+    pub(crate) fn resolve_readable_buffer_region(
         &self,
         buffer: *mut c_void,
         requested_size: usize,
-    ) -> StoreResult<RegisteredBufferRegion> {
-        let target = buffer as usize;
-        for (&base, &(size, _)) in self.registered_buffers.read().iter() {
-            if target >= base {
-                let offset = target - base;
-                if offset < size && offset.saturating_add(requested_size) <= size {
-                    return Ok(RegisteredBufferRegion {
-                        address: target,
+    ) -> StoreResult<ReadableBufferRegion> {
+        let target = validate_target_address(buffer)?;
+        for registration in self.registered_buffers.read().values() {
+            let id = registration.id()?;
+            if target >= id.base_address() {
+                let offset = target - id.base_address();
+                if let Ok(region) = registration.readable_region(offset, requested_size) {
+                    return Ok(ReadableBufferRegion {
                         len: requested_size,
+                        registration: region,
                     });
                 }
             }
         }
+        Err(unregistered_buffer_error())
+    }
 
-        let base = self.local_buffer.as_ptr() as usize;
-        if target >= base {
-            let offset = target - base;
-            if offset < self.local_buffer.len()
-                && offset.saturating_add(requested_size) <= self.local_buffer.len()
-            {
-                return Ok(RegisteredBufferRegion {
-                    address: target,
-                    len: requested_size,
-                });
+    pub(crate) fn resolve_writable_buffer_region(
+        &self,
+        buffer: *mut c_void,
+        requested_size: usize,
+    ) -> StoreResult<WritableBufferRegion> {
+        let target = validate_target_address(buffer)?;
+        for registration in self.registered_buffers.read().values() {
+            let id = registration.id()?;
+            if target >= id.base_address() {
+                let offset = target - id.base_address();
+                if let Ok(region) = registration.writable_region(offset, requested_size) {
+                    return Ok(WritableBufferRegion {
+                        len: requested_size,
+                        registration: region,
+                    });
+                }
             }
         }
-
-        Err(StoreError::InvalidParams(
-            "buffer is not within Store-managed writable memory".to_string(),
-        ))
+        Err(unregistered_buffer_error())
     }
 
     // -----------------------------------------------------------------------
@@ -86,6 +144,15 @@ impl MooncakeClient {
         self.local_endpoints.read().contains(&replica.segment_name)
     }
 
+    pub(super) fn local_owned_segment(
+        &self,
+        replica: &ReplicaDescriptor,
+    ) -> Option<&super::OwnedStoreSegment> {
+        self.owned_store_segments.iter().find(|segment| {
+            segment.segment_name == replica.segment_name && segment.base_addr() == replica.base_addr
+        })
+    }
+
     /// Direct memory copy into the local segment buffer (same-node write).
     /// Only call this when `is_local_replica(replica)` returns `true` and
     /// `segment_buffer` is `Some`.
@@ -97,25 +164,20 @@ impl MooncakeClient {
         replica: &ReplicaDescriptor,
         data: &[u8],
     ) -> StoreResult<()> {
-        let seg = self
-            .segment_buffer
-            .as_ref()
-            .ok_or_else(|| StoreError::Internal("no local segment buffer".into()))?;
-        let offset = replica.offset as usize;
-        let len = data.len();
-        // Bounds check / 越界检查
-        if offset + len > seg.len() {
-            return Err(StoreError::InvalidParams(format!(
-                "local write out of bounds: offset={} len={} segment_size={}",
-                offset,
-                len,
-                seg.len()
-            )));
-        }
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), seg.as_ptr().add(offset) as *mut u8, len);
-        }
-        Ok(())
+        let segment = self.local_owned_segment(replica).ok_or_else(|| {
+            StoreError::Internal(format!(
+                "no owned local segment for name={:?} base_addr={}",
+                replica.segment_name, replica.base_addr
+            ))
+        })?;
+        let seg = &segment.buffer;
+        let offset = usize::try_from(replica.offset).map_err(|_| {
+            StoreError::InvalidParams(format!(
+                "local write offset cannot fit usize: {}",
+                replica.offset
+            ))
+        })?;
+        seg.copy_from_slice(offset, data)
     }
 
     /// Direct memory copy from the local segment buffer (same-node read).
@@ -125,26 +187,26 @@ impl MooncakeClient {
     /// 直接从本地 segment 缓冲区内存拷贝（同节点读）。
     /// 仅在 is_local_replica(replica) 为 true 且 segment_buffer 为 Some 时调用。
     pub(super) fn local_memcpy_read(&self, replica: &ReplicaDescriptor) -> StoreResult<Vec<u8>> {
-        let seg = self
-            .segment_buffer
-            .as_ref()
-            .ok_or_else(|| StoreError::Internal("no local segment buffer".into()))?;
-        let offset = replica.offset as usize;
-        let len = replica.size as usize;
-        // Bounds check / 越界检查
-        if offset + len > seg.len() {
-            return Err(StoreError::InvalidParams(format!(
-                "local read out of bounds: offset={} len={} segment_size={}",
-                offset,
-                len,
-                seg.len()
-            )));
-        }
-        let mut result = vec![0u8; len];
-        unsafe {
-            std::ptr::copy_nonoverlapping(seg.as_ptr().add(offset), result.as_mut_ptr(), len);
-        }
-        Ok(result)
+        let segment = self.local_owned_segment(replica).ok_or_else(|| {
+            StoreError::Internal(format!(
+                "no owned local segment for name={:?} base_addr={}",
+                replica.segment_name, replica.base_addr
+            ))
+        })?;
+        let seg = &segment.buffer;
+        let offset = usize::try_from(replica.offset).map_err(|_| {
+            StoreError::InvalidParams(format!(
+                "local read offset cannot fit usize: {}",
+                replica.offset
+            ))
+        })?;
+        let len = usize::try_from(replica.size).map_err(|_| {
+            StoreError::InvalidParams(format!(
+                "local read size cannot fit usize: {}",
+                replica.size
+            ))
+        })?;
+        seg.copy_to_vec(offset, len)
     }
 
     // -----------------------------------------------------------------------
@@ -157,47 +219,103 @@ impl MooncakeClient {
     // 外部管理的缓冲区必须先向 TransferEngine 注册，然后才能用作零拷贝传输的源/目标。
     // -----------------------------------------------------------------------
 
-    /// Register an externally-managed buffer with the TransferEngine.
+    /// Register an allocation-owning stable-memory capability.
     ///
-    /// After registration, the TE can DMA directly into/from this buffer,
-    /// enabling true zero-copy I/O.
-    ///
-    /// 向 TransferEngine 注册外部管理的缓冲区。
-    /// 注册后，TE 可以直接对此缓冲区进行 DMA 操作，实现真正的零拷贝 I/O。
-    ///
-    /// # Safety
-    /// `buffer` must point to valid memory of at least `size` bytes and must
-    /// remain alive until [`unregister_buffer`](Self::unregister_buffer) is called.
-    ///
-    /// buffer 必须指向至少 size 字节的有效内存，并且在调用 unregister_buffer
-    /// 之前必须保持存活。
-    pub unsafe fn register_buffer(
+    /// The Transfer Engine FFI owns `owner` until native unregistration
+    /// succeeds. This is the preferred safe boundary for language bindings and
+    /// other adapters that can retain the real allocation owner.
+    pub fn register_owned_buffer<O>(
         &self,
-        buffer: *mut c_void,
-        size: usize,
+        owner: O,
         location: &str,
-    ) -> StoreResult<()> {
-        unsafe {
-            self.engine
-                .register_local_memory(buffer, size, location, true)?;
+    ) -> StoreResult<BufferRegistrationId>
+    where
+        O: StableMemoryOwner,
+    {
+        let base = owner.base_address().as_ptr() as usize;
+        let size = owner.length();
+        let end = base.checked_add(size).ok_or_else(|| {
+            StoreError::InvalidParams("registered buffer range overflows usize".to_string())
+        })?;
+        let local_base = self.local_buffer.base_ptr() as usize;
+        let local_end = local_base
+            .checked_add(self.local_buffer.len())
+            .ok_or_else(|| StoreError::Internal("local buffer range overflow".to_string()))?;
+        if ranges_overlap(base, end, local_base, local_end) {
+            return Err(StoreError::InvalidParams(
+                "external registration overlaps the Store local buffer".to_string(),
+            ));
         }
-        self.registered_buffers
-            .write()
-            .insert(buffer as usize, (size, location.to_string()));
-        Ok(())
+        for segment in &self.owned_store_segments {
+            let segment_base = segment.buffer.as_ptr() as usize;
+            let segment_end = segment_base
+                .checked_add(segment.buffer.len())
+                .ok_or_else(|| StoreError::Internal("segment buffer range overflow".to_string()))?;
+            if ranges_overlap(base, end, segment_base, segment_end) {
+                return Err(StoreError::InvalidParams(
+                    "external registration overlaps the Store segment buffer".to_string(),
+                ));
+            }
+        }
+
+        let mut registrations = self.registered_buffers.write();
+        let registration = self.engine.register_owned_memory(
+            owner,
+            location,
+            true,
+            RegisteredMemoryAccess::ReadWrite,
+        );
+        let registration = registration?;
+        let registration_id = registration.id()?;
+        registrations.insert(base, registration);
+        Ok(registration_id)
     }
 
-    /// Unregister a previously-registered buffer from the TransferEngine.
-    /// 从 TransferEngine 取消注册之前注册的缓冲区。
+    /// Unregister one exact registration generation from the TransferEngine.
     ///
-    /// # Safety
-    /// `buffer` must have been previously registered via `register_buffer`.
-    /// buffer 必须之前已通过 register_buffer 注册。
-    pub unsafe fn unregister_buffer(&self, buffer: *mut c_void) -> StoreResult<()> {
-        unsafe {
-            self.engine.unregister_local_memory(buffer)?;
+    /// This operation is rejected while a Store transfer holds a region lease.
+    /// A stale identity is also rejected without touching a newer registration
+    /// at the same address.
+    pub fn unregister_buffer_handle(
+        &self,
+        registration_id: BufferRegistrationId,
+    ) -> StoreResult<()> {
+        self.unregister_buffer_generation(registration_id)
+    }
+
+    fn unregister_buffer_generation(&self, registration_id: RegisteredMemoryId) -> StoreResult<()> {
+        let base = registration_id.base_address();
+        let mut registrations = self.registered_buffers.write();
+        {
+            let registration = registrations.get_mut(&base).ok_or_else(|| {
+                StoreError::InvalidParams(format!(
+                    "buffer {base:#x} is not an exact registered base address"
+                ))
+            })?;
+            let current_id = registration.id()?;
+            if current_id != registration_id {
+                return Err(StoreError::InvalidParams(format!(
+                    "stale buffer registration identity: expected generation {}, current generation {} at {base:#x}",
+                    registration_id.generation(),
+                    current_id.generation()
+                )));
+            }
+            self.engine.unregister_owned_memory(registration)?;
         }
-        self.registered_buffers.write().remove(&(buffer as usize));
+        registrations.remove(&base);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_ranges_use_half_open_overlap_semantics() {
+        assert!(ranges_overlap(100, 200, 150, 250));
+        assert!(ranges_overlap(100, 200, 50, 101));
+        assert!(!ranges_overlap(100, 200, 200, 300));
+        assert!(!ranges_overlap(100, 200, 0, 100));
     }
 }

@@ -31,11 +31,20 @@ impl MasterServiceImpl {
 
         let user_key = req.key.clone();
         let scoped_key = tenant_id.make_scoped_key(&user_key);
+        // Match C++ AcquireObjectOperationLock: keep the same tenant-scoped
+        // PutStart serialized across quota eviction retries even though the
+        // mutation guard below must be released for the global eviction epoch.
+        let _operation_guard = self.state.key_mutations.lock_operation(&scoped_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        let alive_clients = get_alive_clients_snapshot(&self.state);
+        let mutation_guard = self.state.key_mutations.lock(&scoped_key);
+        clear_invalid_handles_for_key_locked(&self.state, &alive_clients, &scoped_key).map_err(
+            |error| Status::unavailable(format!("stale handle cleanup failed: {error}")),
+        )?;
 
         // C++ master_service.cpp:1467-1507 — prepare_existing:
         // 1. CleanupStaleHandles 清理无效 handle 和死亡客户端的副本
@@ -47,72 +56,66 @@ impl MasterServiceImpl {
         // 2. If all valid replicas cleaned, delete object and allow new PutStart
         // 3. If PutStart timed out with no Completed replicas, discard old object
         // 4. Otherwise return OBJECT_ALREADY_EXISTS
-        if let Some(mut existing) = self.state.objects.get_mut(&scoped_key) {
-            let alive_clients = get_alive_clients_snapshot(&self.state);
-            let should_remove = cleanup_stale_handles(&mut existing, &alive_clients);
-
-            if should_remove {
-                // 所有有效副本已被清理（handle 失效或客户端死亡），删除对象并允许新 PutStart
-                // All valid replicas cleaned (stale handle or dead client); delete object and allow new PutStart
-                let old_replicas = existing.replicas.clone();
-                if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
-                    self.account_removed_object_quota(&removed);
-                }
-                self.state.processing_keys.remove(&scoped_key);
-                self.state.replication_tasks.remove(&scoped_key);
-                drop(existing);
-                release_replicas(&self.state, &old_replicas);
-            } else {
-                // 对象仍有有效副本，但需检查是否可超时丢弃：
-                // 仅当无 Completed 副本且 PutStart 已超时时才允许覆盖，否则返回已存在错误
-                //
-                // Object still has valid replicas, but check if timeout-discardable:
-                // Only allow overwrite when no Completed replicas and PutStart has timed out.
-                let has_completed = existing
-                    .replicas
-                    .iter()
-                    .any(|r| r.status == ReplicaStatus::Complete);
-                if !has_completed {
-                    if let Some(start) = existing.put_start_time {
-                        let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
-                        if elapsed >= self.state.runtime_config.put_start_discard_timeout {
-                            // PutStart 超时，删除对象 / PutStart timed out; delete object
-                            let old_replicas = existing.replicas.clone();
-                            let expired = existing
-                                .replicas
-                                .iter()
-                                .filter(|r| r.status == ReplicaStatus::Allocating)
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
-                                self.account_removed_object_quota(&removed);
-                            }
-                            self.state.processing_keys.remove(&scoped_key);
-                            self.state.replication_tasks.remove(&scoped_key);
-                            drop(existing);
-                            if !expired.is_empty() {
-                                release_replicas_scheduled(&self.state, expired);
-                            } else if !old_replicas.is_empty() {
-                                release_replicas(&self.state, &old_replicas);
-                            }
-                        } else {
-                            return Err(Status::already_exists(format!(
-                                "object already exists: {}",
-                                user_key
-                            )));
+        if let Some(existing) = self.state.objects.get_mut(&scoped_key) {
+            // Object still has valid replicas, but check if it is a timed-out
+            // in-flight PutStart with no completed data.
+            let has_completed = existing
+                .replicas
+                .iter()
+                .any(|r| r.status == ReplicaStatus::Complete);
+            if !has_completed {
+                if let Some(start) = existing.put_start_time {
+                    let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
+                    if elapsed >= self.state.runtime_config.put_start_discard_timeout {
+                        let release_deadline = start
+                            .checked_add(self.state.runtime_config.put_start_release_timeout)
+                            .ok_or_else(|| {
+                                Status::internal("expired PutStart release deadline overflow")
+                            })?;
+                        // PutStart timed out; remove the in-flight metadata and
+                        // defer allocating-buffer release for writer safety.
+                        let old_replicas = existing.replicas.clone();
+                        drop(existing);
+                        if let Some((_, removed)) = self.state.objects.remove(&scoped_key) {
+                            self.account_removed_object_quota(&removed)?;
+                        }
+                        self.state.processing_keys.remove(&scoped_key);
+                        self.state.replication_tasks.remove(&scoped_key);
+                        let delayed = self
+                            .state
+                            .schedule_delayed_replica_release_or_fence(
+                                &scoped_key,
+                                None,
+                                old_replicas,
+                                Some(release_deadline),
+                                "put_start_discard_expired",
+                            )
+                            .map_err(|error| {
+                                Status::unavailable(format!(
+                                    "failed to persist expired PutStart delayed release: {error}"
+                                ))
+                            })?
+                            .is_some();
+                        if !delayed {
+                            self.persist_object_image_or_remove(
+                                &scoped_key,
+                                "put_start_discard_expired",
+                            )?;
                         }
                     } else {
                         return Err(Status::already_exists(format!(
-                            "object already exists: {}",
-                            user_key
+                            "object already exists: {user_key}"
                         )));
                     }
                 } else {
                     return Err(Status::already_exists(format!(
-                        "object already exists: {}",
-                        user_key
+                        "object already exists: {user_key}"
                     )));
                 }
+            } else {
+                return Err(Status::already_exists(format!(
+                    "object already exists: {user_key}"
+                )));
             }
         }
 
@@ -121,9 +124,11 @@ impl MasterServiceImpl {
             .as_ref()
             .map(config_from_proto)
             .unwrap_or_default();
-        if config.replica_num == 0 && config.nof_replica_num == 0 {
+        let disk_enabled =
+            global_disk_replica(&self.state, &scoped_key, req.slice_length).is_some();
+        if config.replica_num == 0 && config.nof_replica_num == 0 && !disk_enabled {
             return Err(Status::invalid_argument(
-                "replica_num and nof_replica_num cannot both be zero",
+                "replica_num and nof_replica_num cannot both be zero when global DISK is disabled",
             ));
         }
         if config.prefer_alloc_in_same_node && config.nof_replica_num > 0 {
@@ -136,7 +141,26 @@ impl MasterServiceImpl {
         }
         let group_id = Self::group_id_for_key(&config, 1, 0)?;
         let replica_count = config.replica_num as usize;
-        self.reserve_tenant_quota(&tenant_id, req.slice_length)?;
+        let requested_quota_charge =
+            checked_requested_memory_quota_charge(req.slice_length, replica_count).map_err(
+                |_| Status::invalid_argument("Memory replica quota charge overflows uint64"),
+            )?;
+        // Tenant quota eviction locks arbitrary keys from this tenant. Release
+        // the requested key first to avoid recursively acquiring the same
+        // mutation stripe, then revalidate existence after quota admission.
+        drop(mutation_guard);
+        self.reserve_tenant_quota_with_eviction(
+            &tenant_id,
+            requested_quota_charge,
+            Some(&scoped_key),
+        )?;
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
+        if self.state.objects.contains_key(&scoped_key) {
+            self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
+            return Err(Status::already_exists(format!(
+                "object already exists: {user_key}"
+            )));
+        }
 
         // 分配 Memory 副本 / Allocate Memory replicas
         let mut replicas = if replica_count > 0 {
@@ -152,8 +176,8 @@ impl MasterServiceImpl {
             Vec::new()
         };
         if replicas.len() != replica_count {
-            release_replicas(&self.state, &replicas);
-            self.abort_tenant_quota(&tenant_id, req.slice_length);
+            release_replicas(&self.state, &replicas)?;
+            self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
             return Err(Status::resource_exhausted(format!(
                 "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                 PUT_NO_SPACE_HELPER_STR,
@@ -171,12 +195,16 @@ impl MasterServiceImpl {
             ) {
                 Ok(replicas) => replicas,
                 Err(status) => {
-                    release_replicas(&self.state, &replicas);
-                    self.abort_tenant_quota(&tenant_id, req.slice_length);
+                    release_replicas(&self.state, &replicas)?;
+                    self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
                     return Err(status);
                 }
             };
             replicas.extend(nof_replicas);
+        }
+        if let Some(disk_replica) = global_disk_replica(&self.state, &scoped_key, req.slice_length)
+        {
+            replicas.push(disk_replica);
         }
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
@@ -201,17 +229,25 @@ impl MasterServiceImpl {
                 } else {
                     None
                 },
-                tenant_id,
+                tenant_id: tenant_id.clone(),
                 group_id,
                 quota_committed: false,
+                reserved_quota_charge_bytes: requested_quota_charge,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
                 user_key,
             },
         );
+        self.register_tenant_metadata_object(&tenant_id);
         // 将 key 加入 processing_keys，防止并发 PutStart 冲突
         // Add key to processing_keys to prevent concurrent PutStart conflicts
-        self.state.processing_keys.insert(scoped_key, ());
+        self.state.processing_keys.insert(scoped_key.clone(), ());
+        // PutStart publishes writable physical descriptors. Persist the exact
+        // Allocating image, quota reservation and allocator geometry before
+        // returning so a promoted standby cannot reuse those ranges.
+        self.persist_object_image_or_remove(&scoped_key, "put_start")?;
 
         metrics::PUT_START_REQUESTS.inc();
         Ok(Response::new(proto::PutStartResponse {
@@ -246,19 +282,16 @@ impl MasterServiceImpl {
         self.apply_put_end_for_key(
             &scoped_key,
             client_id,
-            replica_type_from_i32(req.replica_type),
+            request_replica_type_from_i32(req.replica_type)?,
         )?;
         metrics::PUT_END_REQUESTS.inc();
         Ok(Response::new(proto::PutEndResponse {}))
     }
 
     // ---- AddReplica ----
-    // 向已有对象追加副本。LocalDisk 类型副本按 holder_client_id 去重（同一客户端只保留最新），
-    // 其他类型直接追加。若对象不存在，仅对 LocalDisk 类型自动创建对象条目。
-    //
-    // Append a replica to an existing object. LocalDisk replicas are deduplicated by holder_client_id
-    // (only the latest per client is kept); other types are appended directly.
-    // If the object does not exist, creates an entry only for LocalDisk type.
+    // Deprecated compatibility endpoint. It may only refresh routing metadata
+    // for a LocalDisk replica already authorized by the Master. New replicas
+    // are created exclusively by completion of a Master-admitted offload task.
     pub(super) async fn add_replica_impl(
         &self,
         request: Request<proto::AddReplicaRequest>,
@@ -266,6 +299,7 @@ impl MasterServiceImpl {
         let req = request.into_inner();
         let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
+        let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
         let client_id = uuid_from_proto(
             req.client_id
                 .as_ref()
@@ -276,46 +310,60 @@ impl MasterServiceImpl {
             .as_ref()
             .map(replica_from_proto)
             .ok_or(Status::invalid_argument("missing replica"))?;
-        match self.state.objects.get_mut(&scoped_key) {
-            Some(mut entry) => {
-                if replica.replica_type == ReplicaType::LocalDisk {
-                    if let Some(existing) = entry.replicas.iter_mut().find(|existing| {
-                        existing.replica_type == ReplicaType::LocalDisk
-                            && existing.holder_client_id == replica.holder_client_id
-                    }) {
-                        *existing = replica;
-                    } else {
-                        entry.replicas.push(replica);
-                    }
-                } else {
-                    entry.replicas.push(replica);
-                }
-                sync_cache_total_accounting(&mut entry);
-            }
-            _ => {
-                if replica.replica_type == ReplicaType::LocalDisk {
-                    let mut entry = ObjectEntry {
-                        size: replica.size,
-                        replicas: vec![replica],
-                        last_access: SystemTime::now(),
-                        hard_pinned: false,
-                        data_type: ObjectDataType::Unknown,
-                        client_id,
-                        put_start_time: None,
-                        lease_timeout: None,
-                        soft_pin_timeout: None,
-                        tenant_id,
-                        group_id: String::new(),
-                        quota_committed: false,
-                        memory_cache_total_accounted: false,
-                        disk_cache_total_accounted: false,
-                        user_key: req.key.clone(),
-                    };
-                    sync_cache_total_accounting(&mut entry);
-                    self.state.objects.insert(scoped_key.clone(), entry);
-                }
-            }
+        if replica.replica_type != ReplicaType::LocalDisk {
+            return Err(Status::invalid_argument(
+                "AddReplica only accepts LocalDisk replicas",
+            ));
         }
+        if replica.status != ReplicaStatus::Complete
+            || replica.segment_name.is_empty()
+            || replica.holder_client_id != Some(client_id)
+            || replica.local_disk_generation_id.is_none()
+        {
+            return Err(Status::invalid_argument(
+                "AddReplica requires a complete LocalDisk replica held by the caller",
+            ));
+        }
+        let storage_id = ready_local_disk_storage_for_client(&self.state, client_id)?;
+        if replica.local_disk_storage_id != Some(storage_id) {
+            return Err(Status::permission_denied(
+                "replica does not belong to the caller's LocalDisk storage namespace",
+            ));
+        }
+        if self.state.processing_keys.contains_key(&scoped_key) {
+            return Err(Status::failed_precondition("object is being mutated"));
+        }
+        let mut object =
+            self.state
+                .objects
+                .get_mut(&scoped_key)
+                .ok_or(Status::failed_precondition(
+                    "AddReplica cannot create a missing object",
+                ))?;
+        if object.size != replica.size {
+            return Err(Status::failed_precondition(
+                "LocalDisk replica size does not match authoritative object size",
+            ));
+        }
+        let object_size = object.size;
+        let existing = object
+            .replicas
+            .iter_mut()
+            .find(|existing| {
+                existing.replica_type == ReplicaType::LocalDisk
+                    && existing.local_disk_storage_id == Some(storage_id)
+                    && existing.local_disk_generation_id == replica.local_disk_generation_id
+                    && existing.status == ReplicaStatus::Complete
+                    && existing.size == object_size
+            })
+            .ok_or(Status::failed_precondition(
+                "AddReplica cannot append an unadmitted LocalDisk replica",
+            ))?;
+        existing.segment_name = replica.segment_name;
+        existing.holder_client_id = Some(client_id);
+        existing.handle_valid = true;
+        drop(object);
+        self.persist_object_image_or_remove(&scoped_key, "add_replica")?;
         Ok(Response::new(proto::AddReplicaResponse {}))
     }
 }

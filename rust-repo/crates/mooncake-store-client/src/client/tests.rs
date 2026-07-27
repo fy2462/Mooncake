@@ -96,9 +96,67 @@ fn rpc_timeout_parsing_matches_cpp_env_rules() {
 }
 
 #[test]
+fn cxl_device_size_requires_a_positive_strict_integer() {
+    assert_eq!(
+        MooncakeClient::cxl_device_size_from_value(Some("8589934592")).unwrap(),
+        8 * 1024 * 1024 * 1024
+    );
+    for value in [None, Some(""), Some("0"), Some("-1"), Some("12GiB")] {
+        assert!(matches!(
+            MooncakeClient::cxl_device_size_from_value(value),
+            Err(StoreError::InvalidParams(_))
+        ));
+    }
+}
+
+#[test]
+fn cxl_writes_force_the_local_segment_alias() {
+    assert_eq!(
+        MooncakeClient::placement_preferred_segment_for(
+            "cxl",
+            "writer-host:1234",
+            "caller-choice:1234",
+        ),
+        "writer-host:1234"
+    );
+    assert_eq!(
+        MooncakeClient::placement_preferred_segment_for(
+            "rdma",
+            "writer-host:1234",
+            "caller-choice:1234",
+        ),
+        "caller-choice:1234"
+    );
+}
+
+#[test]
 fn deadline_exceeded_maps_to_rpc_timeout() {
     let err = MooncakeClient::rpc_status_to_error(tonic::Status::deadline_exceeded("expired"));
     assert!(matches!(err, StoreError::RpcTimeout(_)));
+}
+
+#[test]
+fn rpc_status_mapping_preserves_remote_fallback_signal() {
+    let missing = MooncakeClient::rpc_status_to_error(tonic::Status::not_found("missing-key"));
+    assert!(matches!(missing, StoreError::KeyNotFound(key) if key == "missing-key"));
+
+    let unavailable =
+        MooncakeClient::rpc_status_to_error(tonic::Status::unavailable("master down"));
+    assert!(matches!(unavailable, StoreError::ServiceUnavailable));
+}
+
+#[test]
+fn mount_rollback_treats_not_found_as_confirmed_absence() {
+    assert!(super::lifecycle::unmount_confirms_segment_absent(Ok::<
+        (),
+        tonic::Status,
+    >(())));
+    assert!(super::lifecycle::unmount_confirms_segment_absent::<()>(
+        Err(tonic::Status::not_found("already absent"))
+    ));
+    assert!(!super::lifecycle::unmount_confirms_segment_absent::<()>(
+        Err(tonic::Status::unavailable("outcome unknown"))
+    ));
 }
 
 #[test]
@@ -124,6 +182,51 @@ fn validate_global_segment_size_matches_cpp_config_rules() {
 
     let too_small = MooncakeClient::validate_global_segment_size(1023).unwrap_err();
     assert!(matches!(too_small, StoreError::InvalidParams(_)));
+}
+
+#[test]
+fn max_mr_size_splits_total_capacity_without_losing_tail() {
+    assert_eq!(
+        MooncakeClient::split_segment_capacity(10, 4).unwrap(),
+        vec![4, 4, 2]
+    );
+    assert_eq!(
+        MooncakeClient::split_segment_capacity(8, 4).unwrap(),
+        vec![4, 4]
+    );
+    assert!(
+        MooncakeClient::split_segment_capacity(1, 0).is_err(),
+        "a zero MR cap would make the split loop non-progressing"
+    );
+    assert_eq!(
+        MooncakeClient::split_segment_capacity_aligned(64, 40, 16).unwrap(),
+        vec![32, 32]
+    );
+    assert!(MooncakeClient::split_segment_capacity_aligned(63, 40, 16).is_err());
+    assert!(MooncakeClient::split_segment_capacity_aligned(64, 8, 16).is_err());
+}
+
+#[test]
+fn rdma_requires_explicit_max_mr_size_without_device_clamp_ffi() {
+    assert!(MooncakeClient::resolve_max_mr_size("rdma", 4096, None).is_err());
+    assert_eq!(
+        MooncakeClient::resolve_max_mr_size("rdma", 4096, Some("2048")).unwrap(),
+        2048
+    );
+    assert_eq!(
+        MooncakeClient::resolve_max_mr_size("tcp", 4096, None).unwrap(),
+        1024 * 1024 * 1024 * 1024
+    );
+    assert!(MooncakeClient::resolve_max_mr_size("tcp", 4096, Some("0")).is_err());
+    assert_eq!(
+        MooncakeClient::validate_memory_segment_alignment("offset", 1).unwrap(),
+        1
+    );
+    assert_eq!(
+        MooncakeClient::validate_memory_segment_alignment("cachelib", 1 << 24).unwrap(),
+        1 << 24
+    );
+    assert!(MooncakeClient::validate_memory_segment_alignment("cachelib", 3).is_err());
 }
 
 #[test]
@@ -183,6 +286,22 @@ fn effective_transport_protocol_honors_force_tcp_env() {
         MooncakeClient::effective_transport_protocol("rdma", Some(String::new())),
         "tcp"
     );
+}
+
+#[test]
+fn rpc_only_skips_transfer_engine_initialization() {
+    assert!(!MooncakeClient::uses_transfer_engine("rpc_only"));
+    for protocol in ["", "tcp", "rdma", "efa", "cxi"] {
+        assert!(MooncakeClient::uses_transfer_engine(protocol));
+    }
+}
+
+#[test]
+fn tent_environment_presence_is_rejected_before_classic_setup() {
+    assert!(!MooncakeClient::tent_mode_requested(false, false));
+    assert!(MooncakeClient::tent_mode_requested(true, false));
+    assert!(MooncakeClient::tent_mode_requested(false, true));
+    assert!(MooncakeClient::tent_mode_requested(true, true));
 }
 
 #[test]
@@ -348,6 +467,35 @@ fn finalize_decision_flexible_dual_can_keep_one_successful_side() {
             success: true,
         }
     );
+}
+
+#[test]
+fn finalize_decision_supports_global_disk_only_objects() {
+    let config = ReplicateConfig {
+        replica_num: 0,
+        nof_replica_num: 0,
+        ..Default::default()
+    };
+    let success = ReplicaTransferSummary {
+        allocated_disk_replicas: 1,
+        successful_disk_writes: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        determine_finalize_decision(&config, &success),
+        ReplicaFinalizeDecision {
+            end_type: None,
+            revoke_type: None,
+            success: true,
+        }
+    );
+
+    let failure = ReplicaTransferSummary {
+        allocated_disk_replicas: 1,
+        failed_disk_writes: 1,
+        ..Default::default()
+    };
+    assert!(!determine_finalize_decision(&config, &failure).success);
 }
 
 #[test]

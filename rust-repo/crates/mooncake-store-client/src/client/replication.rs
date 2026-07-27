@@ -270,30 +270,58 @@ impl MooncakeClient {
     /// - `targets` — target segment names. / 目标 segment 名称列表。
     pub async fn copy(&mut self, key: &str, source: &str, targets: &[String]) -> StoreResult<()> {
         let tenant_id = self.tenant_id.clone();
+        self.copy_for_tenant(key, &tenant_id, source, targets).await
+    }
+
+    /// Copy a tenant-scoped object. This is used by background task workers,
+    /// whose assigned task may belong to a tenant other than the worker
+    /// client's default tenant.
+    pub async fn copy_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        source: &str,
+        targets: &[String],
+    ) -> StoreResult<()> {
         // Phase 1: CopyStart — allocate targets + pin source.
         // 阶段 1：CopyStart —— 分配目标 + 固定源。
         let (source_replica, target_replicas) =
-            self.copy_start(key, source, targets, &tenant_id).await?;
+            self.copy_start(key, source, targets, tenant_id).await?;
 
         if target_replicas.is_empty() {
             // Targets already exist — just finalize.
             // 目标已存在 —— 直接完成。
-            return self.copy_end(key, &tenant_id).await;
+            return match self.copy_end(key, tenant_id).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.copy_revoke(key, tenant_id).await.ok();
+                    Err(error)
+                }
+            };
         }
 
         // Phase 2: read source data, then write to each target.
         // 阶段 2：读取源数据，然后写入每个目标。
         let key_owned = key.to_string();
         match self
-            .do_execute_replica_transfer(&key_owned, "copy", &source_replica, &target_replicas)
+            .do_execute_replica_transfer(
+                &key_owned,
+                tenant_id,
+                "copy",
+                &source_replica,
+                &target_replicas,
+            )
             .await
         {
-            Ok(()) => {
-                self.copy_end(&key_owned, &tenant_id).await?;
-                Ok(())
-            }
+            Ok(()) => match self.copy_end(&key_owned, tenant_id).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.copy_revoke(&key_owned, tenant_id).await.ok();
+                    Err(error)
+                }
+            },
             Err(e) => {
-                self.copy_revoke(&key_owned, &tenant_id).await.ok();
+                self.copy_revoke(&key_owned, tenant_id).await.ok();
                 Err(e)
             }
         }
@@ -321,29 +349,57 @@ impl MooncakeClient {
     /// - `target` — target segment name. / 目标 segment 名称。
     pub async fn move_object(&mut self, key: &str, source: &str, target: &str) -> StoreResult<()> {
         let tenant_id = self.tenant_id.clone();
+        self.move_object_for_tenant(key, &tenant_id, source, target)
+            .await
+    }
+
+    /// Move a tenant-scoped object. Background workers must use the tenant
+    /// carried by the task payload rather than their own default tenant.
+    pub async fn move_object_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+        source: &str,
+        target: &str,
+    ) -> StoreResult<()> {
         // Phase 1: MoveStart — allocate/reuse target + pin source.
         // 阶段 1：MoveStart —— 分配/复用目标 + 固定源。
-        let (source_replica, target_opt) = self.move_start(key, source, target, &tenant_id).await?;
+        let (source_replica, target_opt) = self.move_start(key, source, target, tenant_id).await?;
 
         let Some(target_replica) = target_opt else {
             // Target already exists — just finalize.
             // 目标已存在 —— 直接完成。
-            return self.move_end(key, &tenant_id).await;
+            return match self.move_end(key, tenant_id).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.move_revoke(key, tenant_id).await.ok();
+                    Err(error)
+                }
+            };
         };
 
         // Phase 2: read source data, then write to target.
         // 阶段 2：读取源数据，然后写入目标。
         let key_owned = key.to_string();
         match self
-            .do_execute_replica_transfer(&key_owned, "move", &source_replica, &[target_replica])
+            .do_execute_replica_transfer(
+                &key_owned,
+                tenant_id,
+                "move",
+                &source_replica,
+                &[target_replica],
+            )
             .await
         {
-            Ok(()) => {
-                self.move_end(&key_owned, &tenant_id).await?;
-                Ok(())
-            }
+            Ok(()) => match self.move_end(&key_owned, tenant_id).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.move_revoke(&key_owned, tenant_id).await.ok();
+                    Err(error)
+                }
+            },
             Err(e) => {
-                self.move_revoke(&key_owned, &tenant_id).await.ok();
+                self.move_revoke(&key_owned, tenant_id).await.ok();
                 Err(e)
             }
         }
@@ -370,6 +426,7 @@ impl MooncakeClient {
     async fn do_execute_replica_transfer(
         &mut self,
         key: &str,
+        tenant_id: &str,
         action_name: &str,
         source: &ReplicaDescriptor,
         targets: &[ReplicaDescriptor],
@@ -384,7 +441,20 @@ impl MooncakeClient {
                 "{action_name}: source replica is not MEMORY type"
             )));
         }
-        let data = self.read_from_replica(key, source).await.map_err(|e| {
+        if self.local_owned_segment(source).is_none() {
+            tracing::error!(
+                target: "te_debug", %key,
+                source_segment = %source.segment_name,
+                "{action_name}: source replica is not owned by this client",
+            );
+            return Err(StoreError::InvalidParams(format!(
+                "{action_name}: source replica is not in local owned memory"
+            )));
+        }
+        let data = self
+            .read_from_replica_for_tenant(key, tenant_id, source)
+            .await
+            .map_err(|e| {
             tracing::error!(target: "te_debug", %key, %e, "{action_name}: failed to read source replica");
             e
         })?;

@@ -1,13 +1,15 @@
 use dashmap::DashMap;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment};
 mod common;
-use common::temp_dir;
+use common::{proto_uuid, temp_dir};
 
 use mooncake_store_master::TenantId;
 use mooncake_store_master::hf3fs::{self, Hf3fsApi};
+use mooncake_store_master::proto;
 use mooncake_store_master::proto::SegmentStatus as ProtoSegmentStatus;
+use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::service::{
-    MasterServiceImpl, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry,
+    MasterRuntimeConfig, MasterServiceImpl, NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry,
 };
 use mooncake_store_master::storage_backend::{
     DistributedStorageConfig, LocalDiskSnapshotEntry, StorageBackend, StorageBackendType,
@@ -16,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
+use tonic::Request;
 use uuid::Uuid;
 
 fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
@@ -33,6 +36,9 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         user_key: String::new(),
         group_id: String::new(),
         quota_committed: false,
+        reserved_quota_charge_bytes: 0,
+        committed_quota_charge_bytes: 0,
+        pending_replaced_quota_charge_bytes: 0,
         memory_cache_total_accounted: false,
         disk_cache_total_accounted: false,
     }
@@ -81,6 +87,8 @@ fn make_mem_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDesc
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Memory,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         protocol: "rdma".into(),
     }
 }
@@ -97,6 +105,8 @@ fn make_disk_replica(sid: Uuid, seg_name: &str, off: u64, sz: u64) -> ReplicaDes
         status: ReplicaStatus::Complete,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         protocol: String::new(),
     }
 }
@@ -119,6 +129,7 @@ fn test_storage_backend_save_and_load() {
                 base: 0x200000000,
                 te_endpoint: "node1:12346".into(),
                 protocol: "rdma".into(),
+                host_id: String::new(),
             },
             used: 4096,
             client_id: cid,
@@ -170,6 +181,7 @@ fn test_storage_backend_local_disk_state_roundtrip() {
     local_disk_segments.insert(
         client_id,
         LocalDiskSnapshotEntry {
+            storage_id: client_id,
             client_id,
             enable_offloading: true,
             offloading_objects: HashMap::from([("tenant\0key".to_string(), 4096)]),
@@ -234,6 +246,7 @@ async fn test_master_service_restores_local_disk_state_from_snapshot() {
     local_disk_segments.insert(
         client_id,
         LocalDiskSnapshotEntry {
+            storage_id: client_id,
             client_id,
             enable_offloading: true,
             offloading_objects: HashMap::from([("tenant\0key".to_string(), 4096)]),
@@ -258,7 +271,390 @@ async fn test_master_service_restores_local_disk_state_from_snapshot() {
     assert_eq!(local_disk.client_id, client_id);
     assert!(local_disk.enable_offloading);
     assert_eq!(local_disk.offloading_objects["tenant\0key"], 4096);
-    assert_eq!(local_disk.ssd_total_capacity_bytes, 1 << 30);
+    assert_eq!(local_disk.ssd_total_capacity_bytes, 0);
+}
+
+#[tokio::test]
+async fn test_master_service_restores_future_graceful_unmount_deadline() {
+    let tmp = temp_dir();
+    let client_id = Uuid::new_v4();
+    let segment_name = "snapshot-graceful-future:1";
+    let service = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: "rdma".into(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let segment_id = service.segment_id_by_name(segment_name).unwrap();
+    MasterService::graceful_unmount_segment(
+        &service,
+        Request::new(proto::GracefulUnmountSegmentRequest {
+            segment_id: Some(proto_uuid(segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+            grace_period_ms: 800,
+        }),
+    )
+    .await
+    .unwrap();
+    let original_deadline = service
+        .capture_loaded_snapshot("before-native-save")
+        .graceful_unmounts[0]
+        .deadline_epoch_ms;
+
+    service.save_snapshot();
+    let snapshot_path = tmp.join("master_snapshot.msgpack");
+    for _ in 0..200 {
+        if snapshot_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 0)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(snapshot_path.exists(), "snapshot save did not finish");
+    drop(service);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let restored = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    let restored_snapshot = restored.capture_loaded_snapshot("after-native-restore");
+    assert_eq!(restored_snapshot.graceful_unmounts.len(), 1);
+    assert_eq!(
+        restored_snapshot.graceful_unmounts[0].deadline_epoch_ms, original_deadline,
+        "restore must retain the absolute deadline instead of restarting grace"
+    );
+    assert!(restored.segment_id_by_name(segment_name).is_some());
+
+    for _ in 0..250 {
+        if restored.segment_id_by_name(segment_name).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(
+        restored.segment_id_by_name(segment_name).is_none(),
+        "future restored deadline was not rescheduled"
+    );
+    assert!(
+        restored
+            .capture_loaded_snapshot("after-expiry")
+            .graceful_unmounts
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn test_master_service_executes_expired_graceful_unmount_after_restore() {
+    let tmp = temp_dir();
+    let client_id = Uuid::new_v4();
+    let segment_name = "snapshot-graceful-expired:1";
+    let service = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: "rdma".into(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let segment_id = service.segment_id_by_name(segment_name).unwrap();
+    MasterService::graceful_unmount_segment(
+        &service,
+        Request::new(proto::GracefulUnmountSegmentRequest {
+            segment_id: Some(proto_uuid(segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+            grace_period_ms: 200,
+        }),
+    )
+    .await
+    .unwrap();
+    service.save_snapshot();
+    let snapshot_path = tmp.join("master_snapshot.msgpack");
+    for _ in 0..200 {
+        if snapshot_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 0)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert!(snapshot_path.exists(), "snapshot save did not finish");
+    drop(service);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    let restored = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    for _ in 0..100 {
+        if restored.segment_id_by_name(segment_name).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert!(
+        restored.segment_id_by_name(segment_name).is_none(),
+        "expired restored deadline must execute immediately"
+    );
+    assert!(
+        restored
+            .capture_loaded_snapshot("expired")
+            .graceful_unmounts
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn test_legacy_snapshot_status_without_deadline_completes_immediately() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let segment_id = Uuid::new_v4();
+    let client_id = Uuid::new_v4();
+    let segment_name = "snapshot-graceful-legacy:1";
+    let segments = DashMap::new();
+    segments.insert(
+        segment_id,
+        SegmentEntry {
+            segment: Segment {
+                id: segment_id,
+                name: segment_name.into(),
+                size: 4096,
+                base: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: "rdma".into(),
+                host_id: String::new(),
+            },
+            used: 0,
+            client_id,
+            status: ProtoSegmentStatus::GracefullyUnmounting,
+        },
+    );
+    backend
+        .save(&segments, &DashMap::new(), &DashMap::new(), &DashMap::new())
+        .unwrap();
+    let snapshot_path = tmp.join("master_snapshot.msgpack");
+    let mut legacy: serde_json::Value =
+        rmp_serde::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    let object = legacy.as_object_mut().unwrap();
+    object.insert("format_version".into(), serde_json::json!(3));
+    object.remove("graceful_unmounts");
+    std::fs::write(&snapshot_path, rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+
+    let restored = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    for _ in 0..100 {
+        if restored.segment_id_by_name(segment_name).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    assert!(
+        restored.segment_id_by_name(segment_name).is_none(),
+        "legacy status=GracefullyUnmounting without a deadline must not remain stuck"
+    );
+}
+
+#[tokio::test]
+async fn test_master_service_restores_inflight_native_copy_from_snapshot() {
+    let tmp = temp_dir();
+    let client_id = Uuid::new_v4();
+    let service = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    for (index, segment_name) in ["snapshot-copy-src:1", "snapshot-copy-dst:1"]
+        .into_iter()
+        .enumerate()
+    {
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: segment_name.into(),
+                size: 4096,
+                base_addr: 0x100000000 + index as u64 * 0x10000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "snapshot-copy-key".into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: "snapshot-copy-src:1".into(),
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
+                host_id: String::new(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "snapshot-copy-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::copy_start(
+        &service,
+        Request::new(proto::CopyStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "snapshot-copy-key".into(),
+            source: "snapshot-copy-src:1".into(),
+            targets: vec!["snapshot-copy-dst:1".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    service.save_snapshot();
+    let snapshot_path = tmp.join("master_snapshot.msgpack");
+    for _ in 0..100 {
+        if snapshot_path
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > 0)
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(snapshot_path.exists(), "snapshot save did not finish");
+    drop(service);
+
+    let restored = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+    assert_eq!(
+        restored
+            .capture_loaded_snapshot("restored-copy")
+            .replication_tasks
+            .len(),
+        1
+    );
+    MasterService::copy_end(
+        &restored,
+        Request::new(proto::CopyEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "snapshot-copy-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let replicas = MasterService::get_replica_list(
+        &restored,
+        Request::new(proto::GetReplicaListRequest {
+            key: "snapshot-copy-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert_eq!(replicas.len(), 2);
+    assert!(
+        replicas
+            .iter()
+            .any(|replica| replica.segment_name == "snapshot-copy-dst:1")
+    );
+}
+
+#[tokio::test]
+async fn test_master_service_rebuilds_allocator_holes_from_snapshot_replicas() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let segment_id = Uuid::new_v4();
+    let client_id = Uuid::new_v4();
+    let segment_name = "snapshot-hole:1";
+    let segments = DashMap::new();
+    segments.insert(
+        segment_id,
+        SegmentEntry {
+            segment: Segment {
+                id: segment_id,
+                name: segment_name.into(),
+                size: 1_000,
+                base: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: "rdma".into(),
+                host_id: String::new(),
+            },
+            // The legacy aggregate cannot describe the hole [100, 300).
+            used: 200,
+            client_id,
+            status: ProtoSegmentStatus::Active,
+        },
+    );
+    let objects = DashMap::new();
+    for (key, offset) in [("left", 0), ("right", 300)] {
+        let mut object = make_entry(
+            vec![make_mem_replica(segment_id, segment_name, offset, 100)],
+            100,
+        );
+        object.user_key = key.into();
+        objects.insert(TenantId::default().make_scoped_key(key), object);
+    }
+    backend
+        .save(&segments, &DashMap::new(), &objects, &DashMap::new())
+        .unwrap();
+
+    let service = MasterServiceImpl::new_with_runtime_config(
+        Some(StorageBackendType::LocalDisk),
+        Some(tmp),
+        MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::ZERO,
+            ..Default::default()
+        },
+    );
+    let allocated = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "fills-hole".into(),
+            slice_length: 150,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: segment_name.into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(allocated.replicas.len(), 1);
+    assert_eq!(allocated.replicas[0].offset, 100);
 }
 
 #[test]
@@ -287,6 +683,7 @@ fn test_storage_backend_multiple_objects() {
                 base: 0,
                 te_endpoint: String::new(),
                 protocol: "tcp".into(),
+                host_id: String::new(),
             },
             used: 0,
             client_id: cid,
@@ -353,6 +750,7 @@ fn test_storage_backend_hf3fs_uses_fd_registration() {
                 base: 0,
                 te_endpoint: String::new(),
                 protocol: "tcp".into(),
+                host_id: String::new(),
             },
             used: 0,
             client_id: cid,
@@ -394,6 +792,8 @@ fn test_serialize_replica_status_roundtrip() {
         status: ReplicaStatus::Written,
         replica_type: ReplicaType::Disk,
         holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
         protocol: String::new(),
     };
     assert_eq!(rd.segment_name, "node1:12345");
@@ -466,6 +866,119 @@ fn test_storage_backend_rejects_invalid_snapshot_uuid() {
     assert!(error.contains("invalid memory segment id"));
 }
 
+#[test]
+fn test_master_service_try_constructor_rejects_corrupt_native_snapshot() {
+    let tmp = temp_dir();
+    std::fs::write(tmp.join("master_snapshot.msgpack"), b"not valid msgpack").unwrap();
+
+    let error = match MasterServiceImpl::try_new_with_runtime_config(
+        Some(StorageBackendType::LocalDisk),
+        Some(tmp),
+        MasterRuntimeConfig::default(),
+    ) {
+        Ok(service) => {
+            drop(service);
+            panic!("corrupt native snapshot must not produce a service")
+        }
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to load native master snapshot")
+    );
+}
+
+#[test]
+fn test_master_service_try_constructor_rejects_future_native_snapshot() {
+    let tmp = temp_dir();
+    let snapshot = serde_json::json!({
+        "format_version": 999u32,
+        "segments": [],
+        "nof_segments": [],
+        "objects": [],
+        "tasks": []
+    });
+    std::fs::write(
+        tmp.join("master_snapshot.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+
+    let error = match MasterServiceImpl::try_new_with_runtime_config(
+        Some(StorageBackendType::LocalDisk),
+        Some(tmp),
+        MasterRuntimeConfig::default(),
+    ) {
+        Ok(service) => {
+            drop(service);
+            panic!("future native snapshot must not produce a service")
+        }
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported master snapshot format version")
+    );
+}
+
+#[test]
+fn test_master_service_try_constructor_rejects_logically_invalid_native_snapshot() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
+    let segment_id = Uuid::new_v4();
+    let client_id = Uuid::new_v4();
+    let segments = DashMap::new();
+    segments.insert(
+        segment_id,
+        SegmentEntry {
+            segment: Segment {
+                id: segment_id,
+                name: "duplicate-graceful-intent:1".into(),
+                size: 4096,
+                base: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: "rdma".into(),
+                host_id: String::new(),
+            },
+            used: 0,
+            client_id,
+            status: ProtoSegmentStatus::GracefullyUnmounting,
+        },
+    );
+    backend
+        .save(&segments, &DashMap::new(), &DashMap::new(), &DashMap::new())
+        .unwrap();
+
+    let snapshot_path = tmp.join("master_snapshot.msgpack");
+    let mut snapshot: serde_json::Value =
+        rmp_serde::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    let intent = serde_json::json!({
+        "segment_id": segment_id,
+        "client_id": client_id,
+        "deadline_epoch_ms": 1234u64
+    });
+    snapshot["graceful_unmounts"] = serde_json::Value::Array(vec![intent.clone(), intent]);
+    std::fs::write(&snapshot_path, rmp_serde::to_vec_named(&snapshot).unwrap()).unwrap();
+
+    let error = match MasterServiceImpl::try_new_with_runtime_config(
+        Some(StorageBackendType::LocalDisk),
+        Some(tmp),
+        MasterRuntimeConfig::default(),
+    ) {
+        Ok(service) => {
+            drop(service);
+            panic!("logically invalid native snapshot must not produce a service")
+        }
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("duplicate graceful unmount"));
+}
+
 /// Verify `clear()` removes both msgpack and legacy JSON files.
 #[test]
 fn test_storage_backend_clear_removes_both_formats() {
@@ -523,6 +1036,21 @@ fn test_storage_backend_retains_bounded_snapshot_history() {
         })
         .count();
     assert_eq!(history_count, 2);
+}
+
+#[tokio::test]
+async fn test_native_snapshot_save_is_rejected_after_service_gate_closes() {
+    let tmp = temp_dir();
+    let service = MasterServiceImpl::new(Some(StorageBackendType::LocalDisk), Some(tmp.clone()));
+
+    service.set_service_available(false);
+    service.save_snapshot();
+    tokio::task::yield_now().await;
+
+    assert!(
+        !tmp.join("master_snapshot.msgpack").exists(),
+        "a non-serving master must not publish a native snapshot"
+    );
 }
 
 #[path = "test_storage/backends.rs"]

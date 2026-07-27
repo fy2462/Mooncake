@@ -124,6 +124,9 @@ impl MooncakeClient {
             }))
             .await
             .map_err(Self::rpc_status_to_error)?;
+        if owner_client_id == self.client_id {
+            self.mounted_nof_segments.write().remove(&segment_id);
+        }
         Ok(())
     }
 }

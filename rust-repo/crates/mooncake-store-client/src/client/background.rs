@@ -64,8 +64,12 @@ pub struct ClientBackgroundHandle {
 }
 
 impl ClientBackgroundHandle {
-    pub async fn shutdown(self) {
+    pub fn request_shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    pub async fn shutdown(self) {
+        self.request_shutdown();
         for handle in self.join_handles {
             let _ = handle.await;
         }
@@ -80,7 +84,7 @@ impl MooncakeClient {
     /// The client is passed behind a Tokio mutex so all existing `&mut self`
     /// APIs can be reused without making the whole client cloneable.
     pub fn start_background_workers(
-        client: Arc<tokio::sync::Mutex<Self>>,
+        client: Arc<tokio::sync::Mutex<Option<Self>>>,
         config: ClientBackgroundConfig,
     ) -> ClientBackgroundHandle {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -120,7 +124,7 @@ impl MooncakeClient {
     }
 
     async fn health_worker_loop(
-        client: Arc<tokio::sync::Mutex<Self>>,
+        client: Arc<tokio::sync::Mutex<Option<Self>>>,
         interval: Duration,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
@@ -128,7 +132,11 @@ impl MooncakeClient {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let result = client.lock().await.health_check().await;
+                    let mut slot = client.lock().await;
+                    let Some(client) = slot.as_mut() else {
+                        break;
+                    };
+                    let result = client.health_check().await;
                     if let Err(e) = result {
                         tracing::warn!(target: "client_background", %e, "health_check worker iteration failed");
                     }
@@ -143,7 +151,7 @@ impl MooncakeClient {
     }
 
     async fn storage_worker_loop(
-        client: Arc<tokio::sync::Mutex<Self>>,
+        client: Arc<tokio::sync::Mutex<Option<Self>>>,
         config: ClientBackgroundConfig,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
@@ -151,7 +159,10 @@ impl MooncakeClient {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let mut guard = client.lock().await;
+                    let mut slot = client.lock().await;
+                    let Some(guard) = slot.as_mut() else {
+                        break;
+                    };
                     if config.report_ssd_capacity {
                         if let Some(storage) = guard.local_storage.as_ref() {
                             let (_, total) = storage.space_usage();
@@ -170,7 +181,9 @@ impl MooncakeClient {
                             tracing::warn!(target: "client_background", %e, "promotion worker iteration failed");
                         }
                     }
-                    if config.enable_disk_watermark_eviction && guard.local_storage.is_some() {
+                    if config.enable_disk_watermark_eviction
+                        && (guard.local_storage.is_some() || guard.global_disk.is_some())
+                    {
                         match guard.run_disk_watermark_eviction(
                             config.disk_eviction_high_watermark_ratio,
                             config.disk_eviction_low_watermark_ratio,
@@ -191,7 +204,7 @@ impl MooncakeClient {
     }
 
     async fn task_worker_loop(
-        client: Arc<tokio::sync::Mutex<Self>>,
+        client: Arc<tokio::sync::Mutex<Option<Self>>>,
         interval: Duration,
         batch_size: u32,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -200,7 +213,10 @@ impl MooncakeClient {
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let mut guard = client.lock().await;
+                    let mut slot = client.lock().await;
+                    let Some(guard) = slot.as_mut() else {
+                        break;
+                    };
                     let tasks = match guard.fetch_tasks(batch_size).await {
                         Ok(tasks) => tasks,
                         Err(e) => {
