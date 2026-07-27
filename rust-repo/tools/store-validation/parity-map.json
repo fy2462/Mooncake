@@ -1333,9 +1333,10 @@
       "behavior": "When metrics collection is disabled, the HTTP metrics endpoint returns 503 with 'metrics not available'.",
       "boundary": ["client", "http", "metrics", "disabled-mode"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.HttpMetricsEndpointReturns503WhenMetricsDisabled"},
-      "reason": "Rust handler implements this response for a snapshot without metrics, but no HTTP test requests the endpoint in that state.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsEndpointReturns503WhenMetricsDisabled and Rust metrics_handler", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/http.rs", "test": "metrics_endpoint_returns_503_when_metrics_are_disabled"}],
+      "status": "covered"
     },
     {
       "behavior": "An occupied client HTTP port does not fail Store client setup, and the already-running listener remains intact.",

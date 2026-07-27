@@ -239,6 +239,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_endpoint_returns_503_when_metrics_are_disabled() {
+        let state = ClientHttpServerState::default();
+        state
+            .start(
+                ClientHttpConfig {
+                    enabled: true,
+                    port: 0,
+                },
+                ClientHttpSnapshot::default(),
+            )
+            .await;
+        let port = state.port().expect("server should bind an ephemeral port");
+
+        let response = get(port, "/metrics").await;
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(response.contains("metrics not available"), "{response}");
+    }
+
+    #[tokio::test]
     async fn occupied_port_and_duplicate_start_do_not_replace_the_running_server() {
         // Bind the same wildcard interface used by ClientHttpServerState.
         // On macOS a loopback-only listener does not reliably conflict with a
