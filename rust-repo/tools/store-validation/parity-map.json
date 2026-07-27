@@ -551,6 +551,99 @@
       "reason": "Safe Rust decompression accepts a slice/reader, which cannot represent a null pointer with an independent length; this raw-pointer validation contract is not applicable.",
       "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust slice safety", "reviewed": true},
       "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Byte counts format with binary B/KB/MB/GB/TB units and two decimal places above bytes.",
+      "boundary": ["configuration", "diagnostics", "byte-size"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.ByteSizeToString"},
+      "reason": "Rust Store has no shared byte-size formatter or equivalent regression test for the C++ display contract.",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and byte_size_to_string", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Byte-size parsing accepts binary unit strings and zero while rejecting negative and unknown-unit inputs.",
+      "boundary": ["configuration", "byte-size", "validation"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.StringToByteSize"},
+      "reason": "Rust Store configuration uses field-specific integer parsers and has no shared C++-compatible byte-size parser.",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and try_string_to_byte_size", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Boolean parsing is case-insensitive and whitespace-tolerant for 1/true/yes/on and 0/false/no/off, while invalid or empty input remains distinguishable.",
+      "boundary": ["configuration", "boolean", "validation"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.StringToBool"},
+      "reason": "Rust has duplicated truthy-only helpers that collapse recognized false and malformed values to the same bool, so it lacks the C++ tri-state parsing contract.",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp, string_to_bool, and Rust parse_bool_env helpers", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "An IPv4 TCP port is reservable when free, unavailable while bound, and available again after the reservation closes.",
+      "boundary": ["client", "network", "port-reservation"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.IsPortAvailable"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp, isPortAvailable, and AutoPortBinder", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "port_reservation_is_exclusive_and_releases_on_drop"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Port availability detects an existing listening bind even when that listener enables address reuse.",
+      "boundary": ["client", "network", "port-conflict"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.IsPortAvailableWithBindingConflict"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and bind-conflict detection", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "port_reservation_detects_reuseaddr_listener_conflict"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Two simultaneous automatic port reservations select distinct ports in the configured range.",
+      "boundary": ["client", "network", "port-reservation", "concurrency"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.AutoPortBinderMultipleInstances"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and AutoPortBinder simultaneous instances", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "multiple_reservations_choose_distinct_ports_in_requested_range"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ splitString convenience wrapper splits on a delimiter and optionally trims each token.",
+      "boundary": ["cpp-only", "utility", "string-splitting"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.SplitStringBasic"},
+      "reason": "Rust uses standard str::split and str::trim iterators at call sites instead of exposing the C++ convenience wrapper; no product-level behavior depends on that wrapper identity.",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp, splitString, and Rust standard string iterators", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Network-interface lookup resolves the loopback interface to its IPv4 address.",
+      "boundary": ["network", "interface-discovery"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.GetInterfaceIPv4AddressLoopback"},
+      "reason": "No discoverable Rust Store test or helper resolves a named network interface to its IPv4 address.",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and GetInterfaceIPv4Address", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Network-interface lookup rejects a missing interface with explicit not-found context.",
+      "boundary": ["network", "interface-discovery", "failure-reporting"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.GetInterfaceIPv4AddressMissingInterface"},
+      "reason": "No discoverable Rust Store interface-address lookup exposes or tests missing-interface error context.",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and GetInterfaceIPv4Address failure path", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A client port reservation owns the bind for its lifetime and releases it when dropped.",
+      "boundary": ["client", "network", "port-reservation", "ownership"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.AutoPortBinderRAII"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and AutoPortBinder RAII", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "port_reservation_is_exclusive_and_releases_on_drop"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Automatic client port reservation honors a caller-supplied inclusive port range.",
+      "boundary": ["client", "network", "port-reservation", "configuration"],
+      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.AutoPortBinderCustomRange"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and AutoPortBinder custom range", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "multiple_reservations_choose_distinct_ports_in_requested_range"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1

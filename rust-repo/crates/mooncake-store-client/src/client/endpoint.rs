@@ -220,8 +220,10 @@ fn reserve_port(port: u16) -> std::io::Result<PortReservation> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedClientEndpoint, format_host_port, validated_port_range, validated_setup_retries,
+        ParsedClientEndpoint, format_host_port, reserve_endpoint, validated_port_range,
+        validated_setup_retries,
     };
+    use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
     #[test]
     fn parses_hostname_ipv4_and_ipv6_endpoints() {
@@ -286,5 +288,51 @@ mod tests {
         assert_eq!(validated_setup_retries(None), 20);
         assert_eq!(validated_setup_retries(Some(0)), 20);
         assert_eq!(validated_setup_retries(Some(7)), 7);
+    }
+
+    #[test]
+    fn port_reservation_is_exclusive_and_releases_on_drop() {
+        let probe = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let endpoint = reserve_endpoint("127.0.0.1".into(), port, port, 1).unwrap();
+        assert_eq!(endpoint.port, port);
+        assert!(TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).is_err());
+        drop(endpoint);
+        assert!(TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).is_ok());
+    }
+
+    #[test]
+    fn port_reservation_detects_reuseaddr_listener_conflict() {
+        let listener = socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )
+        .unwrap();
+        listener.set_reuse_address(true).unwrap();
+        listener
+            .bind(&socket2::SockAddr::from(SocketAddrV4::new(
+                Ipv4Addr::UNSPECIFIED,
+                0,
+            )))
+            .unwrap();
+        listener.listen(1).unwrap();
+        let port = listener.local_addr().unwrap().as_socket().unwrap().port();
+
+        assert!(reserve_endpoint("127.0.0.1".into(), port, port, 1).is_err());
+        drop(listener);
+        assert!(reserve_endpoint("127.0.0.1".into(), port, port, 1).is_ok());
+    }
+
+    #[test]
+    fn multiple_reservations_choose_distinct_ports_in_requested_range() {
+        let first = reserve_endpoint("127.0.0.1".into(), 20_000, 20_100, 20).unwrap();
+        let second = reserve_endpoint("127.0.0.1".into(), 20_000, 20_100, 20).unwrap();
+
+        assert!((20_000..=20_100).contains(&first.port));
+        assert!((20_000..=20_100).contains(&second.port));
+        assert_ne!(first.port, second.port);
     }
 }
