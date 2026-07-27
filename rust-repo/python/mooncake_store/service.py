@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import inspect
 import json
 import logging
 import signal
@@ -42,7 +43,7 @@ class StoreService:
                 client = await self._create_client()
                 await asyncio.sleep(0)
                 if shutdown_event.is_set():
-                    await client.close()
+                    await self._close_client(client)
                     return False
                 self.client = client
                 return True
@@ -64,7 +65,14 @@ class StoreService:
     async def stop(self):
         client, self.client = self.client, None
         if client is not None:
-            await client.close()
+            await self._close_client(client)
+
+    @staticmethod
+    async def _close_client(client):
+        """Accept both synchronous adapters and awaitable Rust client closes."""
+        result = client.close()
+        if inspect.isawaitable(result):
+            await result
 
 
 async def run_service(

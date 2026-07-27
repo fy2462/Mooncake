@@ -72,14 +72,18 @@ fn test_ephemeral_storage_wipes_owned_data_on_startup_and_drop() {
     }
 
     assert!(data_dir.exists(), "drop wipe keeps the data directory");
-    let remaining = std::fs::read_dir(&data_dir)
+    let mut remaining = std::fs::read_dir(&data_dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
+    remaining.sort();
     assert_eq!(
         remaining,
-        [std::ffi::OsString::from(".mooncake-storage-format")],
-        "drop wipe preserves only the ownership/format marker"
+        [
+            std::ffi::OsString::from(".mooncake-storage-format"),
+            std::ffi::OsString::from(".mooncake-storage-id"),
+        ],
+        "drop wipe preserves the namespace identity and format markers"
     );
 }
 
@@ -507,10 +511,11 @@ fn test_remove_by_regex_no_match() {
 
 #[test]
 fn test_eviction_fifo_order() {
-    let quota = 110u64;
+    let quota = 150u64;
     let (backend, _tmp) = eviction_backend(quota);
 
-    // Write 3 objects of 40 bytes each. Total 120 > quota 100.
+    // Each record includes the key and generation metadata. Two records fit,
+    // while the third exceeds the quota.
     // Oldest should be evicted first.
     backend.write_object("evict_a", &vec![0u8; 40]).unwrap();
     backend.write_object("evict_b", &vec![0u8; 40]).unwrap();
@@ -538,7 +543,8 @@ fn test_no_eviction_when_under_quota() {
 
 #[test]
 fn test_eviction_returns_evicted_keys() {
-    let quota = 60u64;
+    // Either encoded record fits individually, but both cannot coexist.
+    let quota = 100u64;
     let (backend, _tmp) = eviction_backend(quota);
 
     backend.write_object("large", &vec![0u8; 40]).unwrap();

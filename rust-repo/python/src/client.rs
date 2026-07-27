@@ -90,7 +90,7 @@ use crate::dlpack::DLPackMemoryOwner;
 use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
 use crate::tensor_parallelism::{
-    ParallelAxisPy, ReadTargetPy, ShardManifest, TensorParallelismPy, WriterPartitionPy,
+    AxisKind, ParallelAxisPy, ReadTargetPy, ShardManifest, TensorParallelismPy, WriterPartitionPy,
     parallelism_key, parallelism_manifest_key, writer_manifest_key, writer_shard_key,
 };
 use mooncake_store_client::proto::StorageObjectMetadata;
@@ -100,6 +100,7 @@ use mooncake_store_client::{
 };
 use mooncake_store_core::{NoFSegment, ReplicateConfig};
 use parking_lot::Mutex;
+use pyo3::IntoPyObjectExt;
 use pyo3::buffer::PyUntypedBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -678,7 +679,9 @@ fn parallel_tensor_write_plan(
                 ));
             }
             let manifest = manifest
-                .map(|manifest| Ok((parallelism_manifest_key(key), manifest.encode()?.to_vec())))
+                .map(|manifest| {
+                    Ok::<_, PyErr>((parallelism_manifest_key(key), manifest.encode()?.to_vec()))
+                })
                 .transpose()?;
             Ok(ParallelTensorWritePlan {
                 object_key: parallelism_key(key, &resolved_parallelism)?,
@@ -723,7 +726,9 @@ fn parallel_tensor_full_write_plan(
                 .map(|(parallelism, payload)| Ok((parallelism_key(key, &parallelism)?, payload)))
                 .collect::<PyResult<Vec<_>>>()?;
             let manifest = manifest
-                .map(|manifest| Ok((parallelism_manifest_key(key), manifest.encode()?.to_vec())))
+                .map(|manifest| {
+                    Ok::<_, PyErr>((parallelism_manifest_key(key), manifest.encode()?.to_vec()))
+                })
                 .transpose()?;
             Ok(ParallelTensorFullWritePlan { objects, manifest })
         }
@@ -763,7 +768,8 @@ fn optional_parallelism(value: &Bound<'_, PyAny>) -> PyResult<Option<TensorParal
     if value.is_none() {
         Ok(None)
     } else {
-        value.extract().map(Some)
+        let value: PyRef<'_, TensorParallelismPy> = value.extract()?;
+        Ok(Some(TensorParallelismPy::clone(&value)))
     }
 }
 
@@ -771,7 +777,8 @@ fn optional_writer_partition(value: &Bound<'_, PyAny>) -> PyResult<Option<Writer
     if value.is_none() {
         Ok(None)
     } else {
-        value.extract().map(Some)
+        let value: PyRef<'_, WriterPartitionPy> = value.extract()?;
+        Ok(Some(WriterPartitionPy::clone(&value)))
     }
 }
 
@@ -1113,7 +1120,7 @@ fn parallel_tensor_read_plan(
                             split_dim: axis.split_dim.unwrap_or(0),
                         },
                     ),
-                    expected_parallelism: Some(parallelism),
+                    expected_parallelism: Some(parallelism.clone()),
                 });
             }
             candidates.dedup_by(|left, right| left.key == right.key);
