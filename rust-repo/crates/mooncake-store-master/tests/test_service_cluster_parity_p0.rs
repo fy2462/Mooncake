@@ -8,6 +8,9 @@ use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
+static NEXT_SEGMENT_BASE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x4_0000_0000);
+
 fn replicate_config() -> proto::ReplicateConfig {
     proto::ReplicateConfig {
         replica_num: 1,
@@ -25,13 +28,14 @@ fn replicate_config() -> proto::ReplicateConfig {
 }
 
 async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str, size: u64) {
+    let base_addr = NEXT_SEGMENT_BASE.fetch_add(0x10000, std::sync::atomic::Ordering::Relaxed);
     MasterService::mount_segment(
         service,
         Request::new(proto::MountSegmentRequest {
             client_id: Some(proto_uuid(client_id)),
             segment_name: name.into(),
             size,
-            base_addr: 0x100000000,
+            base_addr,
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),

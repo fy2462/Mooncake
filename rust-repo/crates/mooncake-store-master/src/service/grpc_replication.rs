@@ -265,6 +265,18 @@ impl MasterServiceImpl {
                 true
             }
         });
+        if !revoked.quota_committed {
+            let remaining_reservation = checked_allocating_memory_quota_charge(&revoked)
+                .map_err(|_| Status::internal("PutRevoke quota charge overflow"))?;
+            let released_reservation = revoked
+                .reserved_quota_charge_bytes
+                .checked_sub(remaining_reservation)
+                .ok_or_else(|| {
+                    Status::internal("PutRevoke increased the durable quota reservation")
+                })?;
+            self.abort_tenant_quota(&revoked.tenant_id, released_reservation)?;
+            revoked.reserved_quota_charge_bytes = remaining_reservation;
+        }
         let remove_object = revoked.replicas.is_empty();
         let quota_settled = if remove_object {
             false

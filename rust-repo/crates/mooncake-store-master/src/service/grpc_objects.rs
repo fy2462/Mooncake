@@ -39,6 +39,7 @@
 //! | `Upsert` | 原子 Upsert / Atomic upsert |
 
 use super::*;
+use crate::service::helpers::replica_is_routable;
 
 impl MasterServiceImpl {
     pub(crate) fn persist_object_image_or_remove(

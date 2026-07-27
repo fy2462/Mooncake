@@ -2,6 +2,7 @@ use mooncake_store_core::ReplicaType;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
@@ -48,6 +49,7 @@ async fn seed_local_disk_object(
     key: &str,
     size: u64,
 ) {
+    static NEXT_SOURCE_BASE: AtomicU64 = AtomicU64::new(0x2_0000_0000);
     let source_segment = format!("promotion-source-{key}");
     let source_segment_id = MasterService::mount_segment(
         service,
@@ -55,7 +57,7 @@ async fn seed_local_disk_object(
             client_id: Some(uuid_proto(holder_id)),
             segment_name: source_segment.clone(),
             size: 4096,
-            base_addr: 0x100000000,
+            base_addr: NEXT_SOURCE_BASE.fetch_add(0x1_0000, Ordering::Relaxed),
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),
@@ -149,6 +151,8 @@ async fn seed_local_disk_object(
 async fn test_promotion_flow_success_and_failure() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_offload: true,
+        promotion_on_hit: true,
+        promotion_admission_threshold: 1,
         ..Default::default()
     });
     let holder_id = Uuid::new_v4();
@@ -333,6 +337,7 @@ async fn test_promotion_flow_success_and_failure() {
 async fn test_promotion_admission_threshold_requires_multiple_reads() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_offload: true,
+        promotion_on_hit: true,
         promotion_admission_threshold: 2,
         ..Default::default()
     });
@@ -392,6 +397,8 @@ async fn test_promotion_admission_threshold_requires_multiple_reads() {
 async fn test_promotion_queue_limit_released_after_success() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_offload: true,
+        promotion_on_hit: true,
+        promotion_admission_threshold: 1,
         promotion_queue_limit: 1,
         ..Default::default()
     });
@@ -515,6 +522,8 @@ async fn test_promotion_queue_limit_released_after_success() {
 async fn test_promotion_reaper_resets_deadline_and_releases_staged_buffer() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_offload: true,
+        promotion_on_hit: true,
+        promotion_admission_threshold: 1,
         put_start_release_timeout: Duration::from_millis(120),
         reaper_interval: Duration::from_millis(20),
         ..Default::default()

@@ -2344,7 +2344,6 @@ mod tests {
     use crate::TenantId;
     use crate::ha::OpLogRecord;
     use crate::service::{ReplicationTaskEntry, ReplicationTaskKind};
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use dashmap::DashMap;
     use parking_lot::RwLock;
     use std::sync::Arc;
@@ -2439,9 +2438,7 @@ mod tests {
             "user_key": "legacy-local-disk",
             "replicas": [replica],
         });
-        let mut bytes = b"MCOPMETA1".to_vec();
-        bytes.extend_from_slice(&rmp_serde::to_vec_named(&payload).unwrap());
-        let payload = format!("msgpack:{}", BASE64_STANDARD.encode(bytes));
+        let payload = serde_json::to_string(&payload).unwrap();
 
         let applied = applier.apply_op_log_entries(&[OpLogRecord {
             seq: 1,
@@ -2564,6 +2561,7 @@ mod tests {
         for (key, user_key) in [(&first_key, "first"), (&second_key, "second")] {
             let mut object = durable_disk_object(tenant_id.clone(), user_key);
             object.group_id = "lease-group".into();
+            object.last_access = old_lease;
             object.lease_timeout = Some(old_lease);
             object.soft_pin_timeout = Some(old_soft);
             state.objects.insert(key.clone(), object);
@@ -2729,9 +2727,14 @@ mod tests {
 
         // Build a record through the independently validated object-image
         // encoder, then attach the malformed task to exercise standby input.
-        producer.record_object_image_durable(&key, &object).unwrap();
+        let mut encodable_object = object.clone();
+        encodable_object.replicas.truncate(1);
+        producer
+            .record_object_image_durable(&key, &encodable_object)
+            .unwrap();
         let object_record = producer.store().unwrap().read_since(1, 1).unwrap();
-        let object_payload = decode_record_payload_value(&object_record[0].payload).unwrap();
+        let mut object_payload = decode_record_payload_value(&object_record[0].payload).unwrap();
+        object_payload["object"]["replicas"] = serde_json::to_value(&object.replicas).unwrap();
         let payload = serde_json::json!({
             "op": "replication_start",
             "schema_version": 1,
@@ -2785,7 +2788,7 @@ mod tests {
 
         let source = ReplicaDescriptor {
             segment_id: source_segment_id,
-            segment_name: "source".into(),
+            segment_name: "seg-a".into(),
             offset: 0,
             size: 256,
             status: ReplicaStatus::Complete,
@@ -2800,7 +2803,7 @@ mod tests {
         };
         let target = ReplicaDescriptor {
             segment_id: target_segment_id,
-            segment_name: "target".into(),
+            segment_name: "seg-a".into(),
             offset: 0,
             size: 256,
             status: ReplicaStatus::Allocating,
@@ -2925,8 +2928,8 @@ mod tests {
             base_addr: 4096,
             protocol: "rdma".into(),
         };
-        let source = replica(source_segment_id, "source");
-        let target = replica(target_segment_id, "target");
+        let source = replica(source_segment_id, "seg-a");
+        let target = replica(target_segment_id, "seg-a");
         let object = ObjectEntry {
             replicas: vec![source.clone(), target.clone()],
             size: 256,

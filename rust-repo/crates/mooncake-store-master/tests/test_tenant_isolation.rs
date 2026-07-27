@@ -25,6 +25,9 @@ use std::time::{Duration, SystemTime};
 use tonic::Request;
 use uuid::Uuid;
 
+static NEXT_SEGMENT_BASE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x6_0000_0000);
+
 fn client_proto(id: Uuid) -> proto::Uuid {
     proto::Uuid {
         high: id.as_u64_pair().0,
@@ -51,6 +54,7 @@ fn strict_service(tenants: &[&str], lease_ttl: Duration) -> MasterServiceImpl {
 }
 
 fn mount_seg(service: &MasterServiceImpl, name: &str, cid: Uuid, size: u64) {
+    let base_addr = NEXT_SEGMENT_BASE.fetch_add(0x10000, std::sync::atomic::Ordering::Relaxed);
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         MasterService::mount_segment(
             service,
@@ -58,7 +62,7 @@ fn mount_seg(service: &MasterServiceImpl, name: &str, cid: Uuid, size: u64) {
                 client_id: Some(client_proto(cid)),
                 segment_name: name.into(),
                 size,
-                base_addr: 0x100000000,
+                base_addr,
                 te_endpoint: String::new(),
                 protocol: String::new(),
                 host_id: String::new(),

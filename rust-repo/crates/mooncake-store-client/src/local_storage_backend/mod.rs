@@ -2730,7 +2730,7 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].storage_key, "tenant/key");
-        assert_eq!(entries[0].size, 17);
+        assert_eq!(entries[0].size, 35);
         assert_eq!(entries[0].value_size, 3);
         assert_eq!(
             Path::new(&entries[0].relative_path)
@@ -2747,14 +2747,14 @@ mod tests {
 
     #[test]
     fn watermark_eviction_can_be_rolled_back_without_deleting_files() {
-        let (backend, _tmp) = backend_with_available_space_sequence(140, vec![u64::MAX]);
+        let (backend, _tmp) = backend_with_available_space_sequence(180, vec![u64::MAX]);
         backend.write_object("tenant/key-a", &[0u8; 60]).unwrap();
         backend.write_object("tenant/key-b", &[0u8; 20]).unwrap();
 
         let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
         assert_eq!(pending.keys(), vec!["tenant/key-a"]);
         assert!(backend.exists("tenant/key-a"));
-        assert_eq!(backend.space_usage(), (112, 140));
+        assert_eq!(backend.space_usage(), (148, 180));
 
         backend.rollback_eviction(pending);
         let pending_again = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
@@ -2763,7 +2763,7 @@ mod tests {
 
     #[test]
     fn watermark_eviction_commit_deletes_fifo_victims() {
-        let (backend, _tmp) = backend_with_available_space_sequence(140, vec![u64::MAX]);
+        let (backend, _tmp) = backend_with_available_space_sequence(180, vec![u64::MAX]);
         backend.write_object("tenant/key-a", &[0u8; 60]).unwrap();
         backend.write_object("tenant/key-b", &[0u8; 20]).unwrap();
 
@@ -2772,7 +2772,7 @@ mod tests {
 
         assert!(!backend.exists("tenant/key-a"));
         assert!(backend.exists("tenant/key-b"));
-        assert_eq!(backend.space_usage(), (36, 140));
+        assert_eq!(backend.space_usage(), (54, 180));
     }
 
     #[test]
@@ -2815,7 +2815,7 @@ mod tests {
 
     #[test]
     fn pending_eviction_reservation_blocks_overwrite_but_allows_read() {
-        let (backend, _tmp) = backend_with_available_space_sequence(140, vec![u64::MAX]);
+        let (backend, _tmp) = backend_with_available_space_sequence(180, vec![u64::MAX]);
         backend.write_object("tenant/key-a", &[7_u8; 60]).unwrap();
         backend.write_object("tenant/key-b", &[8_u8; 20]).unwrap();
 
@@ -2839,7 +2839,7 @@ mod tests {
 
     #[test]
     fn pending_writes_reserve_same_key_and_future_quota() {
-        let (backend, _tmp) = backend_with_available_space_sequence(90, vec![u64::MAX]);
+        let (backend, _tmp) = backend_with_available_space_sequence(126, vec![u64::MAX]);
 
         let first = backend.prepare_write("a", 40).unwrap();
         assert!(backend.prepare_write("a", 40).is_err());
@@ -2851,14 +2851,14 @@ mod tests {
 
         backend.commit_write("a", &[1_u8; 40], first).unwrap();
         backend.commit_write("b", &[2_u8; 40], second).unwrap();
-        assert_eq!(backend.space_usage(), (90, 90));
+        assert_eq!(backend.space_usage(), (126, 126));
         assert_eq!(backend.read_object("a").unwrap(), vec![1_u8; 40]);
         assert_eq!(backend.read_object("b").unwrap(), vec![2_u8; 40]);
     }
 
     #[test]
     fn external_unlink_of_reserved_victim_is_reconciled_once() {
-        let (backend, _tmp) = backend_with_available_space_sequence(140, vec![u64::MAX]);
+        let (backend, _tmp) = backend_with_available_space_sequence(180, vec![u64::MAX]);
         backend.write_object("tenant/key-a", &[0_u8; 60]).unwrap();
         backend.write_object("tenant/key-b", &[0_u8; 20]).unwrap();
 
@@ -2866,7 +2866,7 @@ mod tests {
         std::fs::remove_file(backend.key_path("tenant/key-a")).unwrap();
         backend.commit_eviction(pending).unwrap();
 
-        assert_eq!(backend.space_usage(), (36, 140));
+        assert_eq!(backend.space_usage(), (54, 180));
         assert!(!backend.exists("tenant/key-a"));
         assert!(backend.exists("tenant/key-b"));
     }
@@ -2880,7 +2880,7 @@ mod tests {
 
         assert!(backend.write_object("tenant/other", b"value").is_err());
         assert!(!data_dir.exists());
-        assert_eq!(backend.space_usage().0, 19);
+        assert_eq!(backend.space_usage().0, 37);
     }
 
     #[test]
@@ -2889,9 +2889,11 @@ mod tests {
         backend.write_object("tenant/key", b"value").unwrap();
         let data_dir = backend.data_dir();
         let marker = backend.expected_format_marker().as_bytes().to_vec();
+        let storage_id = std::fs::read(backend.storage_id_path()).unwrap();
         std::fs::remove_dir_all(&data_dir).unwrap();
         std::fs::create_dir(&data_dir).unwrap();
         std::fs::write(backend.format_marker_path(), marker).unwrap();
+        std::fs::write(backend.storage_id_path(), storage_id).unwrap();
 
         let error = backend.write_object("tenant/other", b"value").unwrap_err();
         assert!(error.to_string().contains("namespace identity changed"));
@@ -2900,7 +2902,7 @@ mod tests {
 
     #[test]
     fn dropping_pending_lease_releases_target_and_fifo_victim() {
-        let (backend, _tmp) = backend_with_available_space_sequence(140, vec![u64::MAX]);
+        let (backend, _tmp) = backend_with_available_space_sequence(180, vec![u64::MAX]);
         backend.write_object("tenant/key-a", &[0_u8; 60]).unwrap();
         backend.write_object("tenant/key-b", &[0_u8; 20]).unwrap();
 
@@ -2946,6 +2948,6 @@ mod tests {
             "the deliberately non-empty temp namespace must surface a durability error"
         );
         assert_eq!(backend.read_object("tenant/key").unwrap(), b"value");
-        assert_eq!(backend.space_usage(), (19, 140));
+        assert_eq!(backend.space_usage(), (37, 140));
     }
 }

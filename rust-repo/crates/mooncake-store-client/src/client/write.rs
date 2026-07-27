@@ -8,7 +8,6 @@
 use mooncake_store_core::error::StoreResult;
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::collections::HashMap;
-use std::ffi::c_void;
 use transfer_engine_ffi::{RegisteredSubmitOutcome, RegisteredTransferRequest};
 
 use super::{

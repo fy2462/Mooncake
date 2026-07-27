@@ -11,6 +11,13 @@ use std::time::Duration;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
+static NEXT_SEGMENT_BASE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x5_0000_0000);
+
+fn next_segment_base() -> u64 {
+    NEXT_SEGMENT_BASE.fetch_add(0x10000, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn replicate_config() -> proto::ReplicateConfig {
     proto::ReplicateConfig {
         replica_num: 1,
@@ -57,7 +64,7 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
             client_id: Some(proto_uuid(client_id)),
             segment_name: name.into(),
             size,
-            base_addr: 0x100000000,
+            base_addr: next_segment_base(),
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),
@@ -105,7 +112,7 @@ async fn mount_local_disk_and_notify_success(
             client_id: Some(proto_uuid(holder_id)),
             segment_name: source_segment.clone(),
             size: 4096,
-            base_addr: 0x100000000,
+            base_addr: next_segment_base(),
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),
@@ -329,22 +336,27 @@ async fn test_offload_success_records_complete_object_image_for_standby() {
         .find(|payload| {
             payload["op"] == "put_end"
                 && payload["key"] == "default\0offloaded-key"
-                && payload["replicas"].as_array().is_some_and(|replicas| {
-                    replicas.iter().any(|replica| {
-                        replica["replica_type"]
-                            == serde_json::to_value(mooncake_store_core::ReplicaType::LocalDisk)
-                                .unwrap()
+                && payload["object"]["replicas"]
+                    .as_array()
+                    .is_some_and(|replicas| {
+                        replicas.iter().any(|replica| {
+                            replica["replica_type"]
+                                == serde_json::to_value(mooncake_store_core::ReplicaType::LocalDisk)
+                                    .unwrap()
+                        })
                     })
-                })
         })
         .expect("offload must persist a complete LocalDisk object image");
     assert_eq!(payload["op"], "put_end");
     assert_eq!(payload["key"], "default\0offloaded-key");
     assert_eq!(payload["tenant_id"], "default");
     assert_eq!(payload["user_key"], "offloaded-key");
-    assert_eq!(payload["replicas"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        payload["object"]["replicas"].as_array().map(Vec::len),
+        Some(1)
+    );
     let replicas: Vec<mooncake_store_core::ReplicaDescriptor> =
-        serde_json::from_value(payload["replicas"].clone()).unwrap();
+        serde_json::from_value(payload["object"]["replicas"].clone()).unwrap();
     assert_eq!(replicas[0].local_disk_storage_id, Some(storage_id));
     assert_eq!(replicas[0].local_disk_generation_id, Some(generation_id));
 }

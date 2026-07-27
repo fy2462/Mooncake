@@ -1223,7 +1223,7 @@ impl OffsetAllocatorStorageBackend {
                 generation_id,
             });
         }
-        records.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        records.sort_unstable_by(|left, right| left.storage_key.cmp(&right.storage_key));
         Ok(records)
     }
 
@@ -2458,6 +2458,7 @@ mod durable_recovery_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
+    use uuid::Uuid;
 
     fn config(root_dir: PathBuf, _mode: OffsetPersistMode, _crc: bool) -> OffsetAllocatorConfig {
         OffsetAllocatorConfig {
@@ -2559,7 +2560,7 @@ mod durable_recovery_tests {
     }
 
     #[test]
-    fn strict_v3_record_and_nonzero_sequence_round_trip() {
+    fn strict_v4_record_and_nonzero_sequence_round_trip() {
         let temp = tempfile::tempdir().unwrap();
         let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
         backend.write_object("alpha", b"value-a").unwrap();
@@ -2568,7 +2569,7 @@ mod durable_recovery_tests {
         let durable = checkpoint_json(temp.path());
         assert!(durable["payload"]["next_write_seq"].as_u64().unwrap() > 1);
         let entry = &durable["payload"]["index"]["entries"]["alpha"];
-        assert_eq!(entry["format"], "v3");
+        assert_eq!(entry["format"], "v4");
         assert!(entry["write_seq"].as_u64().unwrap() > 0);
 
         let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
@@ -2583,7 +2584,7 @@ mod durable_recovery_tests {
         backend.write_object("alpha", b"value-a").unwrap();
 
         let durable = checkpoint_json(temp.path());
-        assert_eq!(durable["version"], 3);
+        assert_eq!(durable["version"], 4);
         assert_eq!(durable["payload"]["quota_bytes"], 64 * 1024);
     }
 
@@ -2678,7 +2679,7 @@ mod durable_recovery_tests {
 
         assert_eq!(restarted.read_object("legacy").unwrap(), b"v1-value");
         let upgraded = checkpoint_json(temp.path());
-        assert_eq!(upgraded["version"], 3);
+        assert_eq!(upgraded["version"], 4);
         assert_eq!(upgraded["payload"]["quota_bytes"], 64 * 1024);
     }
 
@@ -2694,7 +2695,7 @@ mod durable_recovery_tests {
 
         assert_eq!(restarted.read_object("legacy").unwrap(), b"v2-value");
         let upgraded = checkpoint_json(temp.path());
-        assert_eq!(upgraded["version"], 3);
+        assert_eq!(upgraded["version"], 4);
         assert_eq!(upgraded["payload"]["quota_bytes"], 64 * 1024);
     }
 
@@ -2894,10 +2895,11 @@ mod durable_recovery_tests {
             backend.write_object("b", b"bbbb"),
             Err(StoreError::NoAvailableHandle)
         ));
-        assert!(!backend.exists("a"));
+        assert!(backend.exists("a"));
         continue_read.wait();
         assert_eq!(reader.join().unwrap().unwrap(), b"aaaa");
         backend.write_object("b", b"bbbb").unwrap();
+        assert!(!backend.exists("a"));
         assert_eq!(record_offset(temp.path(), "b"), original_offset);
     }
 
@@ -3456,7 +3458,7 @@ mod durable_recovery_tests {
             durable["payload"]["index"]["entries"]["legacy"]["format"],
             "legacy_raw"
         );
-        assert_eq!(durable["payload"]["index"]["entries"]["v3"]["format"], "v3");
+        assert_eq!(durable["payload"]["index"]["entries"]["v3"]["format"], "v4");
         let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
         assert_eq!(restarted.read_object("legacy").unwrap(), b"legacy-value");
         assert_eq!(restarted.read_object("v3").unwrap(), b"new-value");
@@ -3501,6 +3503,7 @@ mod persistence_mode_tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
+    use uuid::Uuid;
 
     fn config(root: &Path, _mode: OffsetPersistMode) -> OffsetAllocatorConfig {
         OffsetAllocatorConfig {

@@ -79,7 +79,21 @@ fn strict_service_with_unregistered_object(tenant_id: &str, key: &str) -> Master
     objects.insert(
         format!("{tenant_id}\0{key}"),
         ObjectEntry {
-            replicas: vec![],
+            replicas: vec![mooncake_store_core::ReplicaDescriptor {
+                segment_id: Uuid::new_v4(),
+                segment_name: "disk://fixture".into(),
+                offset: 0,
+                size: 128,
+                status: mooncake_store_core::ReplicaStatus::Complete,
+                replica_type: ReplicaType::Disk,
+                holder_client_id: None,
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
+                refcnt: 0,
+                handle_valid: true,
+                base_addr: 0,
+                protocol: String::new(),
+            }],
             size: 128,
             last_access: SystemTime::now(),
             hard_pinned: false,
@@ -109,6 +123,7 @@ fn strict_service_with_unregistered_object(tenant_id: &str, key: &str) -> Master
         Some(snapshot_dir.keep()),
         MasterRuntimeConfig {
             enable_tenant_quota: true,
+            enable_offload: true,
             tenant_quota_connector_uri: policy.path().to_string_lossy().into_owned(),
             tenant_quota_pool_capacity_bytes: 16 * 1024,
             default_tenant_quota_bytes: 16 * 1024,
@@ -425,7 +440,7 @@ async fn unsolicited_offload_success_rejects_unregistered_tenant_without_mutatio
         .iter()
         .find(|(key, _)| key == "unregistered\0unsolicited")
         .unwrap();
-    assert!(object.1.replicas.is_empty());
+    assert_eq!(object.1.replicas.len(), 1);
 }
 
 #[tokio::test]

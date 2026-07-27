@@ -343,9 +343,10 @@ impl MasterServiceImpl {
         );
         sync_client_segments(&self.state, client_id);
 
-        let mut allocator = self.state.allocator.write();
-        allocator.add_segment(segment, 0, client_id);
-        drop(allocator);
+        {
+            let mut allocator = self.state.allocator.write();
+            allocator.add_segment(segment, 0, client_id);
+        }
 
         bump_view_version(&self.state);
         metrics::SEGMENT_COUNT.set(self.state.segments.len() as i64);

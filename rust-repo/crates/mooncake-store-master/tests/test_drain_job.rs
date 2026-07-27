@@ -172,7 +172,7 @@ async fn test_create_and_query_drain_job() {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: "host1:12345".into(),
                 size: 4096,
-                base_addr: 0x100000000,
+                base_addr: 0x100010000,
                 te_endpoint: String::new(),
                 protocol: String::new(),
                 host_id: String::new(),
@@ -292,14 +292,17 @@ async fn test_drain_job_rejects_empty_segments() {
 async fn test_drain_job_schedules_one_unit_per_draining_source_replica() {
     let service = MasterServiceImpl::default();
     let client_id = uuid::Uuid::new_v4();
-    for name in ["source-a:1", "source-b:1", "target-a:1"] {
+    for (index, name) in ["source-a:1", "source-b:1", "target-a:1"]
+        .into_iter()
+        .enumerate()
+    {
         service
             .mount_segment(Request::new(
                 mooncake_store_master::proto::MountSegmentRequest {
                     client_id: Some(proto_uuid(client_id)),
                     segment_name: name.into(),
                     size: 4096,
-                    base_addr: 0x100000000,
+                    base_addr: 0x100000000 + (index as u64 * 0x10000),
                     te_endpoint: String::new(),
                     protocol: String::new(),
                     host_id: String::new(),
@@ -365,14 +368,14 @@ async fn test_drain_job_schedules_one_unit_per_draining_source_replica() {
 async fn test_drain_job_rejects_invalid_concurrency_duplicates_and_overlap() {
     let service = MasterServiceImpl::default();
     let client_id = uuid::Uuid::new_v4();
-    for name in ["source-a:1", "target-a:1"] {
+    for (index, name) in ["source-a:1", "target-a:1"].into_iter().enumerate() {
         service
             .mount_segment(Request::new(
                 mooncake_store_master::proto::MountSegmentRequest {
                     client_id: Some(proto_uuid(client_id)),
                     segment_name: name.into(),
                     size: 4096,
-                    base_addr: 0x100000000,
+                    base_addr: 0x100000000 + (index as u64 * 0x10000),
                     te_endpoint: String::new(),
                     protocol: String::new(),
                     host_id: String::new(),

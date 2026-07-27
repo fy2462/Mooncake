@@ -366,7 +366,7 @@ impl SegmentAllocator {
         None
     }
 
-    fn allocate_from_segment_id_inner(
+    pub(super) fn allocate_from_segment_id_inner(
         &mut self,
         segment_id: Uuid,
         slice_size: u64,

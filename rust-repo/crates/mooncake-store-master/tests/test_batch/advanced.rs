@@ -273,7 +273,11 @@ async fn test_upsert_all_does_not_complete_stale_local_disk_replica() {
     .await
     .unwrap()
     .into_inner();
-    assert_eq!(start.replicas.len(), 2);
+    assert_eq!(start.replicas.len(), 1);
+    assert_eq!(
+        start.replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::Memory as i32
+    );
 
     MasterService::batch_upsert_end(
         &service,

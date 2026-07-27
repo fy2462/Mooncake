@@ -268,9 +268,10 @@ async fn test_master_service_restores_local_disk_state_from_snapshot() {
 
     assert_eq!(restored.local_disk_segments.len(), 1);
     let local_disk = &restored.local_disk_segments[0];
-    assert_eq!(local_disk.client_id, client_id);
-    assert!(local_disk.enable_offloading);
-    assert_eq!(local_disk.offloading_objects["tenant\0key"], 4096);
+    assert_eq!(local_disk.storage_id, client_id);
+    assert_eq!(local_disk.client_id, Uuid::nil());
+    assert!(!local_disk.enable_offloading);
+    assert!(local_disk.offloading_objects.is_empty());
     assert_eq!(local_disk.ssd_total_capacity_bytes, 0);
 }
 
@@ -434,7 +435,7 @@ async fn test_legacy_snapshot_status_without_deadline_completes_immediately() {
                 size: 4096,
                 base: 0x100000000,
                 te_endpoint: String::new(),
-                protocol: "rdma".into(),
+                protocol: String::new(),
                 host_id: String::new(),
             },
             used: 0,
@@ -560,6 +561,25 @@ async fn test_master_service_restores_inflight_native_copy_from_snapshot() {
             .len(),
         1
     );
+    for (index, segment_name) in ["snapshot-copy-src:1", "snapshot-copy-dst:1"]
+        .into_iter()
+        .enumerate()
+    {
+        MasterService::mount_segment(
+            &restored,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: segment_name.into(),
+                size: 4096,
+                base_addr: 0x100000000 + index as u64 * 0x10000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
     MasterService::copy_end(
         &restored,
         Request::new(proto::CopyEndRequest {
@@ -593,9 +613,17 @@ async fn test_master_service_restores_inflight_native_copy_from_snapshot() {
 async fn test_master_service_rebuilds_allocator_holes_from_snapshot_replicas() {
     let tmp = temp_dir();
     let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
-    let segment_id = Uuid::new_v4();
     let client_id = Uuid::new_v4();
     let segment_name = "snapshot-hole:1";
+    let segment_id = mooncake_store_core::stable_memory_segment_id(
+        client_id,
+        segment_name,
+        0x100000000,
+        1_000,
+        "",
+        "rdma",
+        "",
+    );
     let segments = DashMap::new();
     segments.insert(
         segment_id,
@@ -636,6 +664,20 @@ async fn test_master_service_rebuilds_allocator_holes_from_snapshot_replicas() {
             ..Default::default()
         },
     );
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 1_000,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: "rdma".into(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
     let allocated = MasterService::put_start(
         &service,
         Request::new(proto::PutStartRequest {
@@ -954,15 +996,33 @@ fn test_master_service_try_constructor_rejects_logically_invalid_native_snapshot
         .unwrap();
 
     let snapshot_path = tmp.join("master_snapshot.msgpack");
-    let mut snapshot: serde_json::Value =
-        rmp_serde::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
-    let intent = serde_json::json!({
-        "segment_id": segment_id,
-        "client_id": client_id,
-        "deadline_epoch_ms": 1234u64
-    });
-    snapshot["graceful_unmounts"] = serde_json::Value::Array(vec![intent.clone(), intent]);
-    std::fs::write(&snapshot_path, rmp_serde::to_vec_named(&snapshot).unwrap()).unwrap();
+    #[derive(serde::Serialize)]
+    struct GracefulIntent {
+        segment_id: Uuid,
+        client_id: Uuid,
+        deadline_epoch_ms: u64,
+    }
+    let intent_bytes = rmp_serde::to_vec_named(&GracefulIntent {
+        segment_id,
+        client_id,
+        deadline_epoch_ms: 1234,
+    })
+    .unwrap();
+    let intent: rmpv::Value = rmpv::decode::read_value(&mut intent_bytes.as_slice()).unwrap();
+    let snapshot_bytes = std::fs::read(&snapshot_path).unwrap();
+    let mut snapshot: rmpv::Value =
+        rmpv::decode::read_value(&mut snapshot_bytes.as_slice()).unwrap();
+    let rmpv::Value::Map(fields) = &mut snapshot else {
+        panic!("native snapshot must be a map")
+    };
+    let graceful_unmounts = fields
+        .iter_mut()
+        .find(|(key, _)| key.as_str() == Some("graceful_unmounts"))
+        .expect("snapshot must contain graceful_unmounts");
+    graceful_unmounts.1 = rmpv::Value::Array(vec![intent.clone(), intent]);
+    let mut encoded = Vec::new();
+    rmpv::encode::write_value(&mut encoded, &snapshot).unwrap();
+    std::fs::write(&snapshot_path, encoded).unwrap();
 
     let error = match MasterServiceImpl::try_new_with_runtime_config(
         Some(StorageBackendType::LocalDisk),
@@ -976,7 +1036,10 @@ fn test_master_service_try_constructor_rejects_logically_invalid_native_snapshot
         Err(error) => error,
     };
 
-    assert!(error.to_string().contains("duplicate graceful unmount"));
+    assert!(
+        error.to_string().contains("duplicate graceful unmount"),
+        "{error}"
+    );
 }
 
 /// Verify `clear()` removes both msgpack and legacy JSON files.

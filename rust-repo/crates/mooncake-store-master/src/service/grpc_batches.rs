@@ -15,6 +15,7 @@
 //! | `BatchEvictDiskReplica` | 批量驱逐磁盘副本 / Batch evict disk replicas |
 
 use super::*;
+use crate::service::helpers::replica_is_routable;
 
 mod batch_evict;
 mod batch_put_start;

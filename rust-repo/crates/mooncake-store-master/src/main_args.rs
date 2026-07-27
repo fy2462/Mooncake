@@ -1,5 +1,16 @@
 use clap::Parser;
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|error| error.to_string())
+        .and_then(|parsed| {
+            (parsed > 0)
+                .then_some(parsed)
+                .ok_or_else(|| "value must be greater than zero".to_string())
+        })
+}
+
 // CLI 参数定义，使用 clap derive 宏。
 // CLI argument definitions via clap derive macro.
 #[derive(Parser, Debug)]
@@ -207,7 +218,7 @@ pub struct Args {
     #[arg(
         long,
         default_value_t = 1,
-        value_parser = clap::value_parser!(usize).range(1..)
+        value_parser = parse_positive_usize
     )]
     pub promotion_max_per_heartbeat: usize,
 

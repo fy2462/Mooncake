@@ -104,14 +104,14 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     let client_id = Uuid::new_v4();
     let tenant_id = "tenant-a";
 
-    for segment_name in ["evict-a", "evict-b"] {
+    for (index, segment_name) in ["evict-a", "evict-b"].into_iter().enumerate() {
         MasterService::mount_segment(
             &service,
             Request::new(proto::MountSegmentRequest {
                 client_id: Some(uuid_proto(client_id)),
                 segment_name: segment_name.into(),
                 size: 4096,
-                base_addr: 0x100000000,
+                base_addr: 0x100000000 + (index as u64 * 0x10000),
                 te_endpoint: String::new(),
                 protocol: String::new(),
                 host_id: String::new(),
@@ -343,14 +343,14 @@ async fn test_background_eviction_worker_triggers_offload_on_high_watermark() {
     });
     let client_id = Uuid::new_v4();
 
-    for segment_name in ["bg-evict-a", "bg-evict-b"] {
+    for (index, segment_name) in ["bg-evict-a", "bg-evict-b"].into_iter().enumerate() {
         MasterService::mount_segment(
             &service,
             Request::new(proto::MountSegmentRequest {
                 client_id: Some(uuid_proto(client_id)),
                 segment_name: segment_name.into(),
                 size: 4096,
-                base_addr: 0x100000000,
+                base_addr: 0x100000000 + (index as u64 * 0x10000),
                 te_endpoint: String::new(),
                 protocol: String::new(),
                 host_id: String::new(),

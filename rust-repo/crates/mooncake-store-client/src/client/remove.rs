@@ -12,6 +12,7 @@
 // BatchIsExist() / RemoveByRegex() / RemoveAll()
 // ============================================================================
 
+use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 
 use super::MooncakeClient;

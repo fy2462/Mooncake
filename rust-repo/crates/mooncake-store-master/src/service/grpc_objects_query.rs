@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::helpers::replica_is_routable;
 
 impl MasterServiceImpl {
     // ---- GetReplicaList ----

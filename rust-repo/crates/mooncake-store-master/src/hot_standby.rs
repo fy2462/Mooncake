@@ -93,10 +93,9 @@ impl Default for HotStandbyConfig {
 mod tests {
     use super::*;
     use crate::TenantId;
-    use crate::ha::SnapshotProvider;
+    use crate::ha::{OpLogPollResult, OpLogRecord, SnapshotProvider};
     use crate::oplog::{
-        InMemoryOpLog, OpLogChangeNotifier, OpLogEntryCallback, OpLogErrorCallback,
-        OpLogPollResult, OpLogRecord, OpLogStore,
+        InMemoryOpLog, OpLogChangeNotifier, OpLogEntryCallback, OpLogErrorCallback, OpLogStore,
     };
     use crate::service::{
         ObjectEntry, ReplicationTaskKind, ReplicationTaskSnapshotEntry, SegmentEntry,

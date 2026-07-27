@@ -12,6 +12,9 @@ use std::os::unix::fs::PermissionsExt;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
+static NEXT_SEGMENT_BASE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x7_0000_0000);
+
 fn one_replica_config(segment: &str) -> proto::ReplicateConfig {
     proto::ReplicateConfig {
         replica_num: 1,
@@ -29,13 +32,14 @@ fn one_replica_config(segment: &str) -> proto::ReplicateConfig {
 }
 
 async fn mount_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str, size: u64) {
+    let base_addr = NEXT_SEGMENT_BASE.fetch_add(0x10000, std::sync::atomic::Ordering::Relaxed);
     MasterService::mount_segment(
         service,
         Request::new(proto::MountSegmentRequest {
             client_id: Some(proto_uuid(client_id)),
             segment_name: name.to_string(),
             size,
-            base_addr: 0x100000000,
+            base_addr,
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),
@@ -1018,6 +1022,8 @@ async fn test_promotion_registers_first_physical_memory_charge() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_tenant_quota: true,
         enable_offload: true,
+        promotion_on_hit: true,
+        promotion_admission_threshold: 1,
         tenant_quota_connector_uri: temp_policy_uri(),
         tenant_quota_pool_capacity_bytes: 400,
         ..Default::default()

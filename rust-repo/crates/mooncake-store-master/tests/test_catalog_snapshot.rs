@@ -190,7 +190,9 @@ fn synthetic_cpp_metadata_with_discarded_replica(
     );
     let mut cursor = Cursor::new(encoded);
     let mut root = rmpv::decode::read_value(&mut cursor).unwrap();
-    let fields = root.as_map_mut().unwrap();
+    let Value::Map(fields) = &mut root else {
+        panic!("synthetic C++ metadata root must be a map");
+    };
     fields.push((
         "discarded_replicas".into(),
         Value::Array(vec![Value::Array(vec![
@@ -550,7 +552,12 @@ fn test_catalog_provider_parses_legacy_scoped_key_identity() {
 
 #[test]
 fn test_catalog_provider_skips_expired_unpinned_objects() {
-    let (_root, provider, _, _, _) = publish_fixture(1);
+    let (_root, provider, _, _, _) = publish_fixture_with_identity_and_shape(
+        Some("tenant-a"),
+        "expired-unpinned",
+        1,
+        SyntheticCppMetadataShape::V2DataType,
+    );
 
     let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
 
@@ -866,8 +873,12 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
     );
     assert_eq!(loaded.snapshot_sequence_id, 77);
     assert_eq!(loaded.allocator_config, snapshot.allocator_config);
-    assert_eq!(loaded.segments[0].segment.id, segment_id);
-    assert_eq!(loaded.segments[0].used, 512);
+    let loaded_segment = loaded
+        .segments
+        .iter()
+        .find(|entry| entry.segment.id == segment_id)
+        .expect("published Memory segment must round-trip by durable UUID");
+    assert_eq!(loaded_segment.used, 512);
     assert_eq!(loaded.objects.len(), 1);
     assert_eq!(loaded.objects[0].0, "tenant-a\0key-a");
     assert_eq!(loaded.objects[0].1.replicas[0].offset, 0x100);

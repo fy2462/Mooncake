@@ -24,14 +24,17 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
     let client_id = Uuid::new_v4();
     let other_client_id = Uuid::new_v4();
 
-    for (cid, name) in [(client_id, "node-a:1"), (client_id, "node-b:1")] {
+    for (index, (cid, name)) in [(client_id, "node-a:1"), (client_id, "node-b:1")]
+        .into_iter()
+        .enumerate()
+    {
         MasterService::mount_segment(
             &service,
             Request::new(proto::MountSegmentRequest {
                 client_id: Some(proto_uuid(cid)),
                 segment_name: name.into(),
                 size: 1024,
-                base_addr: 0x100000000,
+                base_addr: 0x100000000 + (index as u64 * 0x10000),
                 te_endpoint: String::new(),
                 protocol: String::new(),
                 host_id: String::new(),
@@ -429,14 +432,17 @@ async fn test_hard_pinned_object_survives_eviction_cycle() {
 async fn test_copy_move_and_revoke_workflow() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();
-    for name in ["copy-src:1", "copy-dst:1", "move-dst:1"] {
+    for (index, name) in ["copy-src:1", "copy-dst:1", "move-dst:1"]
+        .into_iter()
+        .enumerate()
+    {
         MasterService::mount_segment(
             &service,
             Request::new(proto::MountSegmentRequest {
                 client_id: Some(proto_uuid(client_id)),
                 segment_name: name.into(),
                 size: 4096,
-                base_addr: 0x100000000,
+                base_addr: 0x100000000 + (index as u64 * 0x10000),
                 te_endpoint: String::new(),
                 protocol: String::new(),
                 host_id: String::new(),
@@ -681,6 +687,17 @@ async fn test_put_revoke_remove_all_and_storage_config() {
         )
         .await
         .unwrap();
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
     }
 
     MasterService::put_start(
@@ -713,6 +730,17 @@ async fn test_put_revoke_remove_all_and_storage_config() {
             client_id: Some(proto_uuid(client_id)),
             key: "remove-all-tenant".into(),
             replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "remove-all-tenant".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
             tenant_id: "tenant-a".into(),
         }),
     )

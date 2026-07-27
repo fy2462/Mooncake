@@ -1,5 +1,6 @@
 use super::*;
 use crate::TenantId;
+use crate::service::helpers::{client_id_by_replica_segment_id, unique_active_memory_segment_id};
 
 // ============================================================================
 // Drain Job Processing / Drain 任务处理

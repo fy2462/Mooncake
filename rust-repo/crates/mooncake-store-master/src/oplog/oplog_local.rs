@@ -67,7 +67,7 @@ impl LocalFsOpLogStore {
         let persisted_latest = self.read_persisted_latest()?;
         let mut segments: Vec<u64> = self.list_segment_files()?;
         segments.sort();
-        let mut previous_seq = None;
+        let mut previous_seq: Option<u64> = None;
         let mut saw_v2_segment = false;
         for start_seq in segments {
             let (entries, is_v2) = self.read_segment_with_format(start_seq)?;
@@ -529,7 +529,7 @@ impl OpLogStore for LocalFsOpLogStore {
 
     fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
         self.ensure_not_poisoned()?;
-        let result = (|| {
+        let result: Result<(), HaError> = (|| {
             self.buffer.retain(|entry| entry.seq >= before_sequence_id);
             for start_seq in self.list_segment_files()? {
                 let path = self.segment_path(start_seq);

@@ -1,4 +1,5 @@
 use super::*;
+use mooncake_store_core::ReplicaType;
 
 /// Tracks an in-flight drain unit task for a single key during segment draining.
 /// 记录 segment drain 过程中单个 key 的迁移单元任务。

@@ -8,14 +8,18 @@ use mooncake_store_master::proto::master_service_server::MasterService;
 use tonic::Request;
 use uuid::Uuid;
 
+static NEXT_SEGMENT_BASE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0x3_0000_0000);
+
 async fn mount_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str) {
+    let base_addr = NEXT_SEGMENT_BASE.fetch_add(0x10000, std::sync::atomic::Ordering::Relaxed);
     MasterService::mount_segment(
         service,
         Request::new(proto::MountSegmentRequest {
             client_id: Some(proto_uuid(client_id)),
             segment_name: name.into(),
             size: 4096,
-            base_addr: 0x100000000,
+            base_addr,
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),
@@ -150,8 +154,9 @@ async fn test_move_end_invalid_source_releases_refcnt_and_keeps_source() {
     .unwrap()
     .into_inner()
     .replicas;
+    assert!(service.has_replica_for_test(key, "move-src:1", ""));
     assert!(
-        replicas
+        !replicas
             .iter()
             .any(|replica| replica.segment_name == "move-src:1")
     );

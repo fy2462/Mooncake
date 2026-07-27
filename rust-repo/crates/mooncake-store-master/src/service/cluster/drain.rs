@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::service::state::DrainSourceSegment;
 
 impl MasterServiceImpl {
     // ---- CreateDrainJob ----

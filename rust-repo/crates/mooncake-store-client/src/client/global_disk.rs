@@ -345,18 +345,6 @@ impl GlobalDiskStorage {
         let _lock = self.acquire_namespace_lock()?;
         self.reconcile_namespace()?;
         let records = self.scan_records()?;
-        let now_unix_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .min(u64::MAX as u128) as u64;
-        let created_unix_ns = records
-            .iter()
-            .map(|record| record.metadata.created_unix_ns)
-            .max()
-            .map_or(now_unix_ns, |latest| {
-                now_unix_ns.max(latest.saturating_add(1))
-            });
         let used = Self::used_bytes(&records)?;
         if self.enable_eviction && used > self.quota_bytes {
             return Err(StoreError::InvalidParams(format!(
@@ -588,6 +576,18 @@ impl GlobalDiskStorage {
         }
         let namespace_lock = self.acquire_namespace_lock()?;
         let records = self.scan_records()?;
+        let now_unix_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        let created_unix_ns = records
+            .iter()
+            .map(|record| record.metadata.created_unix_ns)
+            .max()
+            .map_or(now_unix_ns, |latest| {
+                now_unix_ns.max(latest.saturating_add(1))
+            });
         let used = Self::used_bytes(&records)?;
         let current_size = records
             .iter()

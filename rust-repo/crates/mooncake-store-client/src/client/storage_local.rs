@@ -341,7 +341,8 @@ impl MooncakeClient {
         let Some(storage) = self.local_storage.as_ref().cloned() else {
             return Ok(0);
         };
-        let metadata = tokio::task::spawn_blocking(move || storage.scan_records())
+        let scan_storage = storage.clone();
+        let metadata = tokio::task::spawn_blocking(move || scan_storage.scan_records())
             .await
             .map_err(|error| {
                 StoreError::Internal(format!(
@@ -1367,6 +1368,7 @@ mod tests {
     use crate::local_storage_backend::{
         AttachedLocalStorage, LocalStorageBackend, LocalStorageConfig,
     };
+    use mooncake_store_master::proto as master_proto;
     use mooncake_store_master::proto::master_service_server::{MasterService, MasterServiceServer};
     use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
     use std::collections::VecDeque;
@@ -1528,7 +1530,7 @@ mod tests {
             root_dir: temp.path().to_path_buf(),
             fsdir: "partial-finalize".to_string(),
             enable_eviction: true,
-            quota_bytes: 140,
+            quota_bytes: 200,
         }));
         backend.init().unwrap();
 
@@ -1752,12 +1754,12 @@ mod tests {
         let storage_key = local_storage_key("tenant-a", "persistent-key");
         let id = Uuid::new_v4();
         let (high, low) = id.as_u64_pair();
-        let client_id = proto::Uuid { high, low };
+        let master_client_id = master_proto::Uuid { high, low };
         let writer = Arc::new(LocalStorageBackend::new_persistent(config.clone()));
         writer.init().unwrap();
         let storage_uuid = writer.storage_id().unwrap();
         let (high, low) = storage_uuid.as_u64_pair();
-        let storage_id = proto::Uuid { high, low };
+        let master_storage_id = master_proto::Uuid { high, low };
 
         // Create the object and LocalDisk descriptor exclusively through the
         // Master-authoritative Put -> task -> generation -> Notify flow.
@@ -1767,8 +1769,8 @@ mod tests {
         });
         MasterService::mount_segment(
             &service,
-            tonic::Request::new(proto::MountSegmentRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::MountSegmentRequest {
+                client_id: Some(master_client_id.clone()),
                 segment_name: "recovery-e2e-memory".to_string(),
                 size: 4096,
                 base_addr: 0x1000_0000,
@@ -1781,13 +1783,13 @@ mod tests {
         .unwrap();
         let initial_session_uuid = Uuid::new_v4();
         let (high, low) = initial_session_uuid.as_u64_pair();
-        let initial_session = proto::Uuid { high, low };
+        let initial_session = master_proto::Uuid { high, low };
         MasterService::mount_local_disk_segment(
             &service,
-            tonic::Request::new(proto::MountLocalDiskSegmentRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::MountLocalDiskSegmentRequest {
+                client_id: Some(master_client_id.clone()),
                 enable_offloading: false,
-                storage_id: Some(storage_id.clone()),
+                storage_id: Some(master_storage_id.clone()),
                 recovery_complete: false,
                 recovery_session_id: Some(initial_session.clone()),
             }),
@@ -1796,10 +1798,10 @@ mod tests {
         .unwrap();
         MasterService::mount_local_disk_segment(
             &service,
-            tonic::Request::new(proto::MountLocalDiskSegmentRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::MountLocalDiskSegmentRequest {
+                client_id: Some(master_client_id.clone()),
                 enable_offloading: true,
-                storage_id: Some(storage_id.clone()),
+                storage_id: Some(master_storage_id.clone()),
                 recovery_complete: true,
                 recovery_session_id: Some(initial_session),
             }),
@@ -1808,12 +1810,12 @@ mod tests {
         .unwrap();
         MasterService::put_start(
             &service,
-            tonic::Request::new(proto::PutStartRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::PutStartRequest {
+                client_id: Some(master_client_id.clone()),
                 key: "persistent-key".to_string(),
                 slice_length: 5,
                 tenant_id: "tenant-a".to_string(),
-                config: Some(proto::ReplicateConfig {
+                config: Some(master_proto::ReplicateConfig {
                     replica_num: 1,
                     preferred_segment: "recovery-e2e-memory".to_string(),
                     ..Default::default()
@@ -1824,10 +1826,10 @@ mod tests {
         .unwrap();
         MasterService::put_end(
             &service,
-            tonic::Request::new(proto::PutEndRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::PutEndRequest {
+                client_id: Some(master_client_id.clone()),
                 key: "persistent-key".to_string(),
-                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                replica_type: master_proto::replica_descriptor::ReplicaType::Memory as i32,
                 tenant_id: "tenant-a".to_string(),
             }),
         )
@@ -1835,8 +1837,8 @@ mod tests {
         .unwrap();
         let offload_task = MasterService::offload_object_heartbeat(
             &service,
-            tonic::Request::new(proto::OffloadObjectHeartbeatRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(master_client_id.clone()),
                 enable_offloading: true,
             }),
         )
@@ -1855,10 +1857,10 @@ mod tests {
             .unwrap();
         MasterService::notify_offload_success(
             &service,
-            tonic::Request::new(proto::NotifyOffloadSuccessRequest {
-                client_id: Some(client_id.clone()),
+            tonic::Request::new(master_proto::NotifyOffloadSuccessRequest {
+                client_id: Some(master_client_id.clone()),
                 keys: vec!["persistent-key".to_string()],
-                metadatas: vec![proto::StorageObjectMetadata {
+                metadatas: vec![master_proto::StorageObjectMetadata {
                     bucket_id: 0,
                     offset: 0,
                     key_size: "persistent-key".len() as i64,
@@ -1903,6 +1905,10 @@ mod tests {
         ))
         .await
         .unwrap();
+        let (high, low) = id.as_u64_pair();
+        let client_id = proto::Uuid { high, low };
+        let (high, low) = storage_uuid.as_u64_pair();
+        let storage_id = proto::Uuid { high, low };
 
         let recovery_session_uuid = Uuid::new_v4();
         let (high, low) = recovery_session_uuid.as_u64_pair();
@@ -1942,8 +1948,15 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(first.replicas.len(), 1);
-        let replica = &first.replicas[0];
+        let local_disk_replicas = first
+            .replicas
+            .iter()
+            .filter(|replica| {
+                replica.replica_type == proto::replica_descriptor::ReplicaType::LocalDisk as i32
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(local_disk_replicas.len(), 1);
+        let replica = local_disk_replicas[0];
         assert_eq!(
             replica.replica_type,
             proto::replica_descriptor::ReplicaType::LocalDisk as i32

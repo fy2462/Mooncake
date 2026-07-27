@@ -19,8 +19,8 @@ use super::helpers::{
     account_removed_object_quota, choose_drain_target_segment, client_id_by_exact_replica_segment,
     clone_object_for_mutation, completed_memory_quota_charge, default_drain_target_segments,
     has_pending_task_capacity, is_lease_expired, memory_usage_ratio, nof_usage_ratio,
-    release_committed_memory_quota_charge, release_replicas, requested_memory_quota_charge,
-    sync_cache_total_accounting, unique_task_id,
+    release_committed_memory_quota_charge, release_replicas, replica_is_routable,
+    requested_memory_quota_charge, sync_cache_total_accounting, unique_task_id,
 };
 use super::state::{
     MasterState, ObjectEntry, OffloadingTaskEntry, PromotionCandidate, PromotionCandidateReason,
@@ -413,8 +413,11 @@ fn evict_memory_pressure_object(
     let should_offload = state.runtime_config.offload_on_evict && !has_local_disk;
     let mut queued_here = false;
     if should_offload {
-        let force_without_offload =
-            state.runtime_config.offload_force_evict && *offload_enqueued >= offload_cap;
+        let cap_reached = *offload_enqueued >= offload_cap;
+        if cap_reached && !state.runtime_config.offload_force_evict {
+            return Ok(0);
+        }
+        let force_without_offload = state.runtime_config.offload_force_evict && cap_reached;
         if !force_without_offload {
             if let Some(owner_client) = owner_client {
                 let had_task = state.offloading_tasks.contains_key(key);

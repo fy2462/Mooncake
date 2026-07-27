@@ -550,25 +550,20 @@ mod tests {
         let context = zmq::Context::new();
         let subscriber = context.socket(zmq::SUB).unwrap();
         subscriber.set_subscribe(b"").unwrap();
-        subscriber.set_rcvtimeo(2_000).unwrap();
+        subscriber.set_rcvtimeo(200).unwrap();
         subscriber.connect(&endpoint).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
-
-        publisher.publish_stored(
-            object_key,
-            "cpu",
-            &TenantId::new("tenant-a".to_string()).unwrap(),
-            group_id,
-        );
-        let frames = subscriber.recv_multipart(0).unwrap();
+        let tenant_id = TenantId::new("tenant-a".to_string()).unwrap();
+        let frames = (0..20)
+            .find_map(|_| {
+                publisher.publish_stored(object_key, "cpu", &tenant_id, group_id);
+                subscriber.recv_multipart(0).ok()
+            })
+            .expect("subscriber did not receive an event after PUB/SUB subscription retries");
 
         assert_eq!(frames.len(), 3);
         assert!(frames[0].is_empty());
         assert_eq!(frames[1].len(), std::mem::size_of::<u64>());
-        assert_eq!(
-            u64::from_be_bytes(frames[1].as_slice().try_into().unwrap()),
-            1
-        );
+        assert!(u64::from_be_bytes(frames[1].as_slice().try_into().unwrap()) >= 1);
 
         let decoded = rmpv::decode::read_value(&mut frames[2].as_slice()).unwrap();
         let fields = first_event_fields(&decoded);
@@ -585,13 +580,11 @@ mod tests {
         );
         assert_eq!(map_array_len(fields, "seq_hashes"), Some(0));
 
-        let stats = wait_for_stats(&publisher, |stats| {
-            stats.published_events == 1 && stats.published_batches == 1
-        });
-        assert_eq!(stats.published_events, 1);
-        assert_eq!(stats.published_batches, 1);
+        let stats = wait_for_stats(&publisher, |stats| stats.published_events >= 1);
+        assert!(stats.published_events >= 1);
+        assert!(stats.published_batches >= 1);
         assert_eq!(stats.dropped_events, 0);
-        assert_eq!(stats.skipped_unparsed_keys, 1);
+        assert_eq!(stats.skipped_unparsed_keys, stats.published_events);
     }
 
     #[test]

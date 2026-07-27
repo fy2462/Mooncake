@@ -21,7 +21,7 @@
 // ============================================================================
 
 use mooncake_store_core::error::StoreResult;
-use mooncake_store_core::{NoFSegment, NoFSegmentOwnerInfo};
+use mooncake_store_core::{NoFSegment, NoFSegmentOwnerInfo, StoreError};
 use std::collections::HashMap;
 use uuid::Uuid;
 

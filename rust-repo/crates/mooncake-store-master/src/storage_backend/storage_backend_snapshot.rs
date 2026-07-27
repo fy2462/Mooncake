@@ -1197,7 +1197,7 @@ mod tests {
         snapshot
             .objects
             .push(("object-key".to_owned(), legacy_object));
-        let (_, _, objects, _, _, _, _) = StorageBackend::build_loaded_state(
+        let (_, _, objects, _, _, _, _, _, _) = StorageBackend::build_loaded_state(
             snapshot,
             StorageBackendType::LocalDisk,
             Path::new("legacy-v3.msgpack"),

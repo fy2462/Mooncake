@@ -320,7 +320,7 @@ impl MooncakeClient {
         .await;
         for (key, status) in keys.iter().zip(statuses.iter()) {
             if *status == 0 {
-                self.remove_stale_local_disk_after_upsert(key, tenant_id)
+                self.remove_stale_local_disk_after_upsert(key, &tenant_id)
                     .await;
                 self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);
             }

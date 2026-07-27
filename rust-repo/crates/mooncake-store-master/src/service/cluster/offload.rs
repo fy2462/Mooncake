@@ -220,6 +220,12 @@ impl MasterServiceImpl {
                     self.state.runtime_config.enable_tenant_quota,
                 )?;
                 let scoped_key = tenant_id.make_scoped_key(&task.key);
+                if recovery_complete
+                    && !self.state.offloading_tasks.contains_key(&scoped_key)
+                    && self.resolve_write_tenant(&task.tenant_id).is_err()
+                {
+                    return Err(Status::resource_exhausted("tenant not registered"));
+                }
                 if !seen_keys.insert(scoped_key.clone()) {
                     return Err(Status::invalid_argument(format!(
                         "duplicate offload result for key {}",

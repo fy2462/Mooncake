@@ -7,6 +7,7 @@ use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use prometheus::{Encoder, TextEncoder};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tonic::Request;
 use uuid::Uuid;
 
@@ -45,13 +46,14 @@ fn multi_replicate_config(segments: &[&str]) -> proto::ReplicateConfig {
 }
 
 async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name: &str) {
+    static NEXT_BASE: AtomicU64 = AtomicU64::new(0x1_0000_0000);
     MasterService::mount_segment(
         service,
         Request::new(proto::MountSegmentRequest {
             client_id: Some(proto_uuid(client_id)),
             segment_name: name.into(),
             size: 4096,
-            base_addr: 0x100000000,
+            base_addr: NEXT_BASE.fetch_add(0x1_0000, Ordering::Relaxed),
             te_endpoint: String::new(),
             protocol: String::new(),
             host_id: String::new(),

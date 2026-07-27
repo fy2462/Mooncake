@@ -314,7 +314,7 @@ pub(crate) fn restore_loaded_snapshot_state(
     replication_tasks: Vec<ReplicationTaskSnapshotEntry>,
     local_disk_segments: Vec<LocalDiskSnapshotEntry>,
     graceful_unmounts: Vec<GracefulUnmountSnapshotEntry>,
-    delayed_replica_releases: Vec<state::DelayedReplicaReleaseEntry>,
+    mut delayed_replica_releases: Vec<state::DelayedReplicaReleaseEntry>,
     allocator_config: Option<AllocatorSnapshotConfig>,
 ) -> Result<(), String> {
     if let Some(snapshot_config) = allocator_config {
@@ -670,11 +670,13 @@ pub(crate) fn restore_loaded_snapshot_state(
             })
         })
         .collect::<HashSet<_>>();
+    let mut orphaned_staged_releases = Vec::new();
     for (key, object) in &mut objects {
-        let before = object.replicas.len();
         let has_put_start = object.put_start_time.is_some();
-        object.replicas.retain(|replica| {
-            replica.status == ReplicaStatus::Complete
+        let mut retained = Vec::with_capacity(object.replicas.len());
+        let mut orphaned = Vec::new();
+        for replica in std::mem::take(&mut object.replicas) {
+            let keep = replica.status == ReplicaStatus::Complete
                 || has_put_start
                 || covered_targets.contains(&(
                     key.clone(),
@@ -682,14 +684,24 @@ pub(crate) fn restore_loaded_snapshot_state(
                     replica.offset,
                     replica.size,
                     replica.replica_type,
-                ))
-        });
-        if object.replicas.len() != before {
+                ));
+            if keep {
+                retained.push(replica);
+            } else if matches!(
+                replica.replica_type,
+                ReplicaType::Memory | ReplicaType::NoFSsd
+            ) {
+                orphaned.push(replica);
+            }
+        }
+        object.replicas = retained;
+        if !orphaned.is_empty() {
             tracing::warn!(
                 key,
-                removed = before - object.replicas.len(),
-                "discarded orphan non-complete replicas from snapshot"
+                removed = orphaned.len(),
+                "quarantined orphan non-complete replicas from snapshot"
             );
+            orphaned_staged_releases.push((key.clone(), orphaned));
             object.reserved_quota_charge_bytes = 0;
             // Only malformed legacy allocating targets without either a
             // Put/Upsert deadline or a native replication task reach here.
@@ -1011,6 +1023,20 @@ pub(crate) fn restore_loaded_snapshot_state(
         })?;
     if restore_epoch_ms == 0 {
         return Err("current epoch milliseconds must be non-zero".into());
+    }
+    let release_delay_ms =
+        u64::try_from(state.runtime_config.put_start_release_timeout.as_millis())
+            .map_err(|_| "delayed release timeout exceeds u64 milliseconds".to_string())?;
+    let orphan_release_deadline = restore_epoch_ms
+        .checked_add(release_delay_ms)
+        .ok_or_else(|| "orphan delayed release deadline overflows u64".to_string())?;
+    for (scoped_key, replicas) in orphaned_staged_releases {
+        delayed_replica_releases.push(state::DelayedReplicaReleaseEntry {
+            id: Uuid::new_v4(),
+            scoped_key,
+            deadline_epoch_ms: orphan_release_deadline,
+            replicas,
+        });
     }
     let mut restored_graceful_unmounts = HashMap::new();
     for pending in graceful_unmounts {
@@ -2617,6 +2643,19 @@ impl MasterServiceImpl {
     }
 
     #[doc(hidden)]
+    pub fn has_replica_for_test(&self, key: &str, segment_name: &str, tenant_id: &str) -> bool {
+        let scoped_key = TenantId::new(tenant_id.to_owned())
+            .expect("test tenant id must be valid")
+            .make_scoped_key(key);
+        self.state.objects.get(&scoped_key).is_some_and(|object| {
+            object
+                .replicas
+                .iter()
+                .any(|replica| replica.segment_name == segment_name)
+        })
+    }
+
+    #[doc(hidden)]
     pub fn drain_task_for_test(&self, job_id: Uuid) -> Option<TaskEntry> {
         let job = self.state.drain_jobs.get(&job_id)?;
         let task_id = *job.active_tasks.keys().next()?;
@@ -2833,6 +2872,8 @@ impl Default for MasterServiceImpl {
 #[cfg(test)]
 mod snapshot_restore_tests {
     use super::*;
+    use crate::service::background_ops::reap_expired_background_tasks;
+    use std::time::Instant;
 
     fn pending_move_task(key: &str, payload: &str) -> TaskEntry {
         let now = chrono::Utc::now();
@@ -4209,8 +4250,11 @@ mod snapshot_restore_tests {
 
     #[test]
     fn tenant_quota_abort_mismatch_fences_master() {
+        let temp = tempfile::tempdir().unwrap();
         let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
             enable_tenant_quota: true,
+            tenant_quota_connector_type: "file".into(),
+            tenant_quota_connector_uri: temp.path().join("quota.yaml").display().to_string(),
             ..Default::default()
         });
 

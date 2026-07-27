@@ -232,7 +232,7 @@ pub(super) fn allocate_cachelib(
             offset,
             CachelibAllocation {
                 pool_id: default_pool_id,
-                requested_size: size,
+                requested_size,
                 class_size,
                 slab_index,
                 slot_index,
@@ -286,7 +286,7 @@ pub(super) fn allocate_cachelib(
         offset,
         CachelibAllocation {
             pool_id: default_pool_id,
-            requested_size: size,
+            requested_size,
             class_size,
             slab_index,
             slot_index,

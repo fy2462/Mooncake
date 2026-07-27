@@ -418,7 +418,7 @@ fn test_manager_append_and_persist_flushes_local_fs() {
     assert_eq!(entries.len(), 1);
     assert_eq!(
         decode_record_payload_value_for_test(&entries[0].payload).unwrap(),
-        json!({"op": "remove", "key": "k1"})
+        json!({"op": "remove", "schema_version": 1, "key": "k1"})
     );
 }
 
@@ -541,21 +541,27 @@ fn test_etcd_oplog_v2_round_trips_exact_local_disk_identity() {
 #[test]
 fn test_etcd_oplog_v1_local_disk_does_not_invent_generation() {
     let holder_client_id = Uuid::new_v4();
-    let mut replica =
-        serde_json::to_value(local_disk_replica(holder_client_id, None, None)).unwrap();
-    let replica = replica.as_object_mut().unwrap();
-    replica.remove("local_disk_storage_id");
-    replica.remove("local_disk_generation_id");
-    let payload = json!({
-        "op": "put_end",
-        "key": "default\0legacy-local-disk",
-        "size": 100,
-        "client_id": holder_client_id.to_string(),
-        "tenant_id": "default",
-        "group_id": "",
-        "user_key": "legacy-local-disk",
-        "replicas": [replica],
-    });
+    #[derive(serde::Serialize)]
+    struct LegacyPutEndPayload {
+        op: &'static str,
+        key: &'static str,
+        size: u64,
+        client_id: String,
+        tenant_id: &'static str,
+        group_id: &'static str,
+        user_key: &'static str,
+        replicas: Vec<ReplicaDescriptor>,
+    }
+    let payload = LegacyPutEndPayload {
+        op: "put_end",
+        key: "default\0legacy-local-disk",
+        size: 100,
+        client_id: holder_client_id.to_string(),
+        tenant_id: "default",
+        group_id: "",
+        user_key: "legacy-local-disk",
+        replicas: vec![local_disk_replica(holder_client_id, None, None)],
+    };
     let mut bytes = b"MCOPMETA1".to_vec();
     bytes.extend_from_slice(&rmp_serde::to_vec_named(&payload).unwrap());
     let wire = CppWireTestEntry {
@@ -619,7 +625,7 @@ fn test_etcd_oplog_value_reads_versioned_msgpack_put_end() {
 
 #[test]
 fn test_etcd_oplog_value_rejects_future_msgpack_put_end_schema() {
-    let bytes = b"MCOPMETA3future-body";
+    let bytes = b"MCOPMETA4future-body";
     let wire = CppWireTestEntry {
         sequence_id: 22,
         timestamp_ms: 1,
@@ -636,7 +642,7 @@ fn test_etcd_oplog_value_rejects_future_msgpack_put_end_schema() {
     assert!(
         error
             .to_string()
-            .contains("unsupported put_end msgpack schema version '3'"),
+            .contains("unsupported put_end msgpack schema version '4'"),
         "{error}"
     );
 }
