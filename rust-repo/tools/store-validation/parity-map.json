@@ -644,6 +644,105 @@
       "review": {"oracle": "mooncake-store/tests/utils_test.cpp and AutoPortBinder custom range", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "multiple_reservations_choose_distinct_ports_in_requested_range"}],
       "status": "covered"
+    },
+    {
+      "behavior": "Allocation from an empty segment set returns no memory replica.",
+      "boundary": ["master", "allocator", "empty-state"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.EmptyAllocatorsMap"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp EmptyAllocatorsMap and Rust SegmentAllocator empty-state allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_allocator_new_is_empty"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A missing preferred segment falls back to an available segment and preserves the requested allocation size.",
+      "boundary": ["master", "allocator", "preferred-segment", "fallback"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.PreferredSegmentNotFound"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredSegmentNotFound and Rust preferred-segment fallback", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_preferred_segment_nonexistent"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A single-replica request on an available segment produces exactly one correctly sized memory replica.",
+      "boundary": ["master", "allocator", "single-replica"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.SingleSliceAllocation"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SingleSliceAllocation and Rust single-segment allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_single_segment_single_replica"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A multi-replica request places successful replicas on distinct available segments.",
+      "boundary": ["master", "allocator", "replication"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.MultipleReplicasAllocation"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp MultipleReplicasAllocation and Rust distinct-segment replica allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_replicas_on_different_segments"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "When a preferred segment lacks capacity, allocation falls back to another segment with sufficient space.",
+      "boundary": ["master", "allocator", "preferred-segment", "capacity"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.PreferredSegmentInsufficientSpace"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredSegmentInsufficientSpace and Rust preferred-segment capacity fallback", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_preferred_segment_no_space"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Allocation returns no replica when every available segment lacks enough free capacity.",
+      "boundary": ["master", "allocator", "capacity-exhaustion"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.AllAllocatorsFull"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp AllAllocatorsFull and Rust all-segments-full allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_all_segments_too_full"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "An object larger than every segment capacity cannot receive a memory replica.",
+      "boundary": ["master", "allocator", "oversized-allocation"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.VeryLargeSizeAllocation"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp VeryLargeSizeAllocation and Rust oversized-object allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_large_object_no_segment"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Replica allocation is best-effort when the requested count exceeds the number of available segments, returning one replica per available segment.",
+      "boundary": ["master", "allocator", "replication", "best-effort"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.InsufficientAllocatorsForReplicas"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp InsufficientAllocatorsForReplicas and Rust replica shortage behavior", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_not_enough_segments_for_replicas"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Excluded segments are skipped for both preferred and fallback allocation, while eligible segments remain usable.",
+      "boundary": ["master", "allocator", "segment-exclusion"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.ExcludedSegmentsAllocation"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp ExcludedSegmentsAllocation and Rust exclusion-aware allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_allocate_with_exclusions_skips_preferred_and_fallback_segments"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Allocation returns no replica when every available segment is excluded.",
+      "boundary": ["master", "allocator", "segment-exclusion", "empty-result"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.AllSegmentsExcluded"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp AllSegmentsExcluded and Rust exclusion-aware allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_allocate_with_exclusions_skips_preferred_and_fallback_segments"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Exclusion takes precedence when a preferred segment is also excluded, and allocation falls back only to eligible segments.",
+      "boundary": ["master", "allocator", "preferred-segment", "segment-exclusion"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.PreferredAndExcludedSegmentsConflict"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredAndExcludedSegmentsConflict and Rust exclusion-aware preferred allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_allocate_with_exclusions_skips_preferred_and_fallback_segments"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
