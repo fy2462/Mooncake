@@ -1251,9 +1251,10 @@
       "behavior": "The combined client summary includes transfer, RPC, and interface-operation sections with their observed values.",
       "boundary": ["client", "metrics", "summary", "interface-operation"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.ClientMetricsSummaryTest"},
-      "reason": "Rust verifies a combined summary header, one RPC, and SSD data but does not assert interface-operation entries or the full C++ section composition.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp ClientMetricsSummaryTest and Rust ClientMetrics::summary", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "persistent_registry_exports_cpp_metric_names_and_summary"}],
+      "status": "covered"
     },
     {
       "behavior": "Metric byte formatting uses binary B, KB, MB, and GB units at their exact boundaries.",
@@ -1268,9 +1269,10 @@
       "behavior": "Human-readable summaries remain shorter than Prometheus serialization while retaining count and latency-bound information.",
       "boundary": ["client", "metrics", "summary", "prometheus"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.CompareWithSerializedMetrics"},
-      "reason": "No Rust test compares summary and Prometheus lengths or asserts the corresponding count/p95/max information.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp CompareWithSerializedMetrics and Rust render_prometheus/summary", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "summary_is_compact_and_preserves_count_and_latency_bounds"}],
+      "status": "covered"
     },
     {
       "behavior": "MC_STORE_CLIENT_METRIC_BANDWIDTH=0 removes bandwidth lines from the client summary.",

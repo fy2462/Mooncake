@@ -875,9 +875,12 @@ mod tests {
     #[test]
     fn persistent_registry_exports_cpp_metric_names_and_summary() {
         let metrics = ClientMetrics::new(Some("test-cluster".to_string()), true, true).unwrap();
-        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
-        metrics.observe_get(1024, Duration::from_micros(125));
-        metrics.observe_rpc("GetReplicaList", Duration::from_micros(75));
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 5 * 1024 * 1024);
+        metrics.observe_transfer_bytes(TransferOperationKind::Write, 10 * 1024 * 1024);
+        metrics.observe_get(2 * 1024, Duration::from_micros(220));
+        metrics.observe_batch_get(0, Duration::from_micros(1_500));
+        metrics.observe_batch_put(4 * 1024, Duration::from_micros(2_000));
+        metrics.observe_rpc("ExistKey", Duration::from_micros(180));
         metrics.observe_ssd_write(2048, 1, Duration::from_micros(500));
 
         let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
@@ -888,12 +891,19 @@ mod tests {
 
         let summary = metrics.summary();
         assert!(summary.contains("Client Metrics Summary"));
-        assert!(summary.contains("GetReplicaList: count=1"));
+        assert!(summary.contains("Transfer Metrics Summary"));
+        assert!(summary.contains("RPC Metrics Summary"));
+        assert!(summary.contains("Interface Operation Metrics Summary"));
+        assert!(summary.contains("Total Read: 5.00 MB"));
+        assert!(summary.contains("Total Write: 10.00 MB"));
+        assert!(summary.contains("ExistKey: count=1"));
+        assert!(summary.contains("get_buffer: count=1"));
+        assert!(summary.contains("put_batch: count=1"));
         assert!(summary.contains("SSD Write: 2.00 KB, ops=1"));
 
         let report = metrics.periodic_report();
         assert!(report.contains("=== Interval Throughput Summary ==="));
-        assert!(report.contains("1.00 KB over"));
+        assert!(report.contains("5.00 MB over"));
     }
 
     #[test]
@@ -909,6 +919,23 @@ mod tests {
         assert!(!text.contains("mooncake_client_rpc_count"), "{text}");
         assert!(!text.contains("mooncake_client_rpc_latency"), "{text}");
         assert!(text.contains("mooncake_transfer_read_bytes"), "{text}");
+    }
+
+    #[test]
+    fn summary_is_compact_and_preserves_count_and_latency_bounds() {
+        let metrics = ClientMetrics::new(None, true, true).unwrap();
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024 * 1024);
+        metrics.observe_get(1024 * 1024, Duration::from_micros(200));
+        metrics.observe_rpc("GetReplicaList", Duration::from_micros(250));
+
+        let summary = metrics.summary();
+        let serialized =
+            String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+
+        assert!(summary.len() < serialized.len());
+        assert!(summary.contains("count="), "{summary}");
+        assert!(summary.contains("p95<"), "{summary}");
+        assert!(summary.contains("max<"), "{summary}");
     }
 
     #[test]
