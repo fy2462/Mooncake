@@ -2,9 +2,9 @@
 
 use mooncake_store_client::{
     ClientBackgroundConfig, ClientHealthStatus, LocalHotCache, LocalStorageBackend,
-    LocalStorageConfig, MooncakeClient,
+    LocalStorageConfig, MooncakeClient, proto,
 };
-use mooncake_store_core::ReplicateConfig;
+use mooncake_store_core::{ReplicaType, ReplicateConfig, StoreError};
 use mooncake_store_master::MasterRuntimeConfig;
 use mooncake_store_master::MasterServiceImpl;
 use mooncake_store_master::http_metadata::serve_metadata_listener_with_service_gate;
@@ -1038,5 +1038,123 @@ async fn three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments
     drop(source);
     drop(copy_target);
     drop(move_target);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn permanently_full_copy_target_reaches_failed_task_after_bounded_retries() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        max_task_retry_attempts: 2,
+        put_start_release_timeout: std::time::Duration::ZERO,
+        ..Default::default()
+    })
+    .await;
+    let mut source = create_tcp_client_with_segment_size(&master, 64 * 1024 * 1024).await;
+    let target = create_tcp_client(&master).await;
+    let target_name = target.get_hostname();
+    let filler = vec![0x41; 1024 * 1024];
+    for index in 0..20 {
+        source
+            .put(
+                &format!("terminal-task-filler-{index}"),
+                &filler,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: target_name.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    source
+        .put(
+            "terminal-copy-source",
+            &filler,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: source.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let task_id = source
+        .create_copy_task("terminal-copy-source", std::slice::from_ref(&target_name))
+        .await
+        .unwrap();
+    let mut assignments = source.fetch_tasks(1).await.unwrap();
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].max_retry_attempts, 2);
+    assert!(matches!(
+        source
+            .execute_task_assignment(assignments.remove(0))
+            .await
+            .unwrap_err(),
+        StoreError::NoAvailableHandle
+    ));
+
+    let terminal = source.query_task(task_id).await.unwrap();
+    assert_eq!(terminal.status, proto::TaskStatus::TaskFailed as i32);
+    assert!(terminal.message.contains("max retries reached: 2"));
+
+    drop(target);
+    drop(source);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_disk_fifo_eviction_removes_only_the_oldest_master_replica() {
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        enable_disk_eviction: true,
+        quota_bytes: 3 * 1024,
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client(&master).await;
+    let segment = client.get_hostname();
+    let keys = (0..4)
+        .map(|index| format!("global-disk-fifo-{index}"))
+        .collect::<Vec<_>>();
+
+    for (index, key) in keys.iter().enumerate() {
+        client
+            .put(
+                key,
+                &vec![b'A' + index as u8; 1024],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: segment.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut disk_presence = Vec::new();
+    for key in &keys {
+        disk_presence.push(
+            client
+                .query(key)
+                .await
+                .unwrap()
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Disk),
+        );
+    }
+    assert_eq!(disk_presence, [false, true, true, true]);
+    for (index, key) in keys.iter().enumerate() {
+        assert_eq!(
+            client.get(key).await.unwrap(),
+            vec![b'A' + index as u8; 1024]
+        );
+    }
+
+    drop(client);
     let _ = shutdown.send(());
 }
