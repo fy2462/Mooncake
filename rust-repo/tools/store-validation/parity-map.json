@@ -1579,6 +1579,64 @@
       "review": {"oracle": "mooncake-store/tests/serializer_test.cpp MountedSegmentDeserializesLegacyFormatWithoutHostId and Rust segment snapshot decoder", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/src/ha/catalog_snapshot.rs", "test": "segment_decoder_accepts_legacy_mounted_segment_without_host_id"}],
       "status": "covered"
+    },
+    {
+      "behavior": "The C++ PosixFile wrapper accepts an already-open descriptor and closes it when the wrapper is destroyed.",
+      "boundary": ["cpp-only", "file-wrapper", "posix", "raii"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.FileLifecycle"},
+      "reason": "Rust storage backends own std::fs::File values directly, whose Drop implementation supplies lifecycle closure; there is no PosixFile fd-adoption wrapper to port.",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp FileLifecycle and Rust std::fs::File ownership", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The POSIX-backed local storage path writes a complete byte payload and reports success.",
+      "boundary": ["client", "local-storage", "posix", "write"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.BasicWrite"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp BasicWrite and Rust local storage round trip", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_write_and_read_roundtrip"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The POSIX-backed local storage path reads the exact previously written byte payload.",
+      "boundary": ["client", "local-storage", "posix", "read"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.BasicRead"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp BasicRead and Rust local storage round trip", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_write_and_read_roundtrip"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ PosixFile wrapper writes multiple iovec buffers at one explicit offset through pwritev.",
+      "boundary": ["cpp-only", "file-wrapper", "posix", "vectored-io"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.VectorizedWrite"},
+      "reason": "Rust local-storage formats assemble validated records and use typed write_all/write-at operations; they do not expose the C++ StorageFile::vector_write interface.",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp VectorizedWrite and Rust local storage file paths", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ PosixFile wrapper scatters one explicit-offset preadv result across multiple iovec buffers.",
+      "boundary": ["cpp-only", "file-wrapper", "posix", "vectored-io"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.VectorizedRead"},
+      "reason": "Rust backends return owned byte buffers or fill typed record buffers and do not retain the C++ StorageFile::vector_read API boundary.",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp VectorizedRead and Rust local storage file paths", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ PosixFile wrapper maps an injected invalid fd to FILE_INVALID_HANDLE and subsequent read/write failures to FILE_NOT_FOUND.",
+      "boundary": ["cpp-only", "file-wrapper", "posix", "invalid-fd"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.ErrorCases"},
+      "reason": "Safe Rust std::fs::File construction cannot create an invalid raw descriptor, and backend I/O propagates typed io::Error rather than the removed wrapper's sticky error-code mapping.",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp ErrorCases and Rust safe File/error model", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ PosixFile wrapper exposes scoped flock read/write locks and rejects wrapper reads while its write-lock state is held.",
+      "boundary": ["cpp-only", "file-wrapper", "posix", "advisory-lock"],
+      "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.FileLocking"},
+      "reason": "Rust has no per-operation StorageFile lock wrapper; backend ownership and namespace locks are validated at their own product boundaries instead of reproducing this internal lock-state API.",
+      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp FileLocking and Rust backend synchronization architecture", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1
