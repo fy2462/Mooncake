@@ -845,7 +845,7 @@ fn histogram_summary(histogram: &Histogram) -> String {
 }
 
 fn format_bytes(bytes: u64) -> String {
-    format_rate_with_suffix(bytes as f64, "B")
+    crate::utils::byte_size_to_string(bytes)
 }
 
 fn format_rate(bytes_per_second: f64) -> String {
@@ -1012,6 +1012,36 @@ mod tests {
         let summary = metrics.summary();
         assert!(!summary.contains("Average Read Throughput:"), "{summary}");
         assert!(!summary.contains("Average Write Throughput:"), "{summary}");
+    }
+
+    #[test]
+    fn transfer_summary_covers_empty_totals_throughput_and_latency_counts() {
+        let metrics = ClientMetrics::new(HashMap::new(), true, true).unwrap();
+
+        let empty = metrics.summary();
+        assert!(empty.contains("Total Read: 0 B"), "{empty}");
+        assert!(empty.contains("Total Write: 0 B"), "{empty}");
+        assert!(empty.contains("Get: No data"), "{empty}");
+        assert!(empty.contains("Put: No data"), "{empty}");
+
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
+        metrics.observe_transfer_bytes(TransferOperationKind::Write, 2 * 1024 * 1024);
+        for latency_us in [150, 200, 300] {
+            metrics.observe_get(0, Duration::from_micros(latency_us));
+        }
+        for latency_us in [500, 750] {
+            metrics.observe_put(0, Duration::from_micros(latency_us));
+        }
+
+        let summary = metrics.summary();
+        assert!(summary.contains("Total Read: 1.00 KB"), "{summary}");
+        assert!(summary.contains("Total Write: 2.00 MB"), "{summary}");
+        assert!(summary.contains("Average Read Throughput:"), "{summary}");
+        assert!(summary.contains("Average Write Throughput:"), "{summary}");
+        assert!(summary.contains("Get: count=3"), "{summary}");
+        assert!(summary.contains("Put: count=2"), "{summary}");
+        assert!(summary.contains("p95<"), "{summary}");
+        assert!(summary.contains("max<"), "{summary}");
     }
 
     #[test]

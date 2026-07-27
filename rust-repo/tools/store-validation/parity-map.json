@@ -1234,9 +1234,10 @@
       "behavior": "Transfer metric summaries report empty state, byte totals, throughput, operation counts, and latency percentiles.",
       "boundary": ["client", "metrics", "summary", "latency"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.TransferMetricsSummaryTest"},
-      "reason": "Rust summary tests cover selected byte and operation fields but do not assert empty-state text, read/write throughput, both operation counts, or percentile/max output together.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp TransferMetricsSummaryTest and Rust ClientMetrics::summary tests", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "transfer_summary_covers_empty_totals_throughput_and_latency_counts"}],
+      "status": "covered"
     },
     {
       "behavior": "Master RPC metric summaries report empty state and per-method call counts after observations.",
