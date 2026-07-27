@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::{Arc, Barrier, Mutex};
 
 mod common;
 use common::{make_seg, make_seg_with_usage};
@@ -496,6 +497,65 @@ fn test_large_object_no_segment() {
     a.add_segment(make_seg("big:1", 1_000_000), 0, Uuid::new_v4());
     let repls = a.allocate("huge_key", 2_000_000, 1, &ReplicateConfig::default());
     assert!(repls.is_empty());
+}
+
+#[test]
+fn offset_and_cachelib_allocators_reject_requests_larger_than_capacity() {
+    for kind in [
+        MemoryAllocatorKind::Offset,
+        MemoryAllocatorKind::CachelibLike,
+    ] {
+        let capacity = CACHELIB_SLAB_SIZE * 2;
+        let mut allocator = SegmentAllocator::new().with_memory_allocator(kind);
+        allocator.add_segment(make_seg("oversized:1", capacity), 0, Uuid::new_v4());
+        assert!(
+            allocator
+                .allocate("oversized", capacity + 1, 1, &ReplicateConfig::default())
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn offset_and_cachelib_allocators_support_parallel_allocate_release() {
+    for kind in [
+        MemoryAllocatorKind::Offset,
+        MemoryAllocatorKind::CachelibLike,
+    ] {
+        let mut allocator = SegmentAllocator::new().with_memory_allocator(kind);
+        allocator.add_segment(
+            make_seg("parallel:1", CACHELIB_SLAB_SIZE * 4),
+            0,
+            Uuid::new_v4(),
+        );
+        let allocator = Arc::new(Mutex::new(allocator));
+        let barrier = Arc::new(Barrier::new(4));
+        let workers = (0..4)
+            .map(|worker| {
+                let allocator = Arc::clone(&allocator);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for iteration in 0..500 {
+                        let mut allocator = allocator.lock().unwrap();
+                        let replicas = allocator.allocate(
+                            &format!("worker-{worker}-{iteration}"),
+                            128,
+                            1,
+                            &ReplicateConfig::default(),
+                        );
+                        assert_eq!(replicas.len(), 1);
+                        assert_eq!(replicas[0].size, 128);
+                        allocator.release(&replicas).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(allocator.lock().unwrap().usage_totals().1, 0);
+    }
 }
 
 #[test]

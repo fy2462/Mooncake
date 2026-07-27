@@ -64,6 +64,40 @@ pub struct BufferHandle {
     allocator: Option<Arc<Mutex<ClientBufferAllocator>>>,
 }
 
+impl BufferHandle {
+    /// Copy bytes into this owned allocation.
+    pub fn write(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        if bytes.len() > self.size {
+            return Err("source exceeds buffer allocation");
+        }
+        let allocator = self
+            .allocator
+            .as_ref()
+            .ok_or("buffer allocation is detached")?;
+        let mut allocator = allocator.lock();
+        let end = self
+            .offset
+            .checked_add(bytes.len())
+            .ok_or("buffer range overflows")?;
+        allocator.buffer[self.offset..end].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Return a copy of the logical bytes owned by this allocation.
+    pub fn read(&self) -> Result<Vec<u8>, &'static str> {
+        let allocator = self
+            .allocator
+            .as_ref()
+            .ok_or("buffer allocation is detached")?;
+        let allocator = allocator.lock();
+        let end = self
+            .offset
+            .checked_add(self.size)
+            .ok_or("buffer range overflows")?;
+        Ok(allocator.buffer[self.offset..end].to_vec())
+    }
+}
+
 impl Drop for BufferHandle {
     fn drop(&mut self) {
         if let Some(ref allocator) = self.allocator {

@@ -62,3 +62,40 @@ fn test_zero_and_overflowing_allocations_are_rejected() {
     assert!(ClientBufferAllocator::allocate(&allocator, usize::MAX).is_none());
     assert_eq!(allocator.lock().allocated(), 0);
 }
+
+#[test]
+fn owned_allocations_are_aligned_writable_and_independent() {
+    let allocator = ClientBufferAllocator::new(64 * 4096);
+    let first = ClientBufferAllocator::allocate(&allocator, 13).unwrap();
+    let second = ClientBufferAllocator::allocate(&allocator, 17).unwrap();
+    assert_eq!(first.offset % 4096, 0);
+    assert_eq!(second.offset % 4096, 0);
+    first.write(b"hello, buffer").unwrap();
+    second.write(b"independent bytes").unwrap();
+    assert_eq!(first.read().unwrap(), b"hello, buffer");
+    assert_eq!(second.read().unwrap(), b"independent bytes");
+    assert!(first.write(&[0; 14]).is_err());
+    drop(second);
+    drop(first);
+    assert_eq!(allocator.lock().allocated(), 0);
+}
+
+#[test]
+fn varying_size_allocations_survive_reverse_order_release() {
+    let allocator = ClientBufferAllocator::new(128 * 4096);
+    let mut handles = Vec::new();
+    for index in 0..100 {
+        let size = index % 4096 + 1;
+        let handle = ClientBufferAllocator::allocate(&allocator, size).unwrap();
+        handle.write(&vec![index as u8; size]).unwrap();
+        handles.push(handle);
+    }
+    for (index, handle) in handles.iter().enumerate() {
+        assert_eq!(handle.read().unwrap(), vec![index as u8; handle.size]);
+    }
+    while let Some(handle) = handles.pop() {
+        drop(handle);
+    }
+    assert_eq!(allocator.lock().allocated(), 0);
+    assert!(ClientBufferAllocator::allocate(&allocator, 100 * 4096).is_some());
+}
