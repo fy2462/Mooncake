@@ -344,6 +344,60 @@
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and StandbyController", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_controller_promotion_preserves_standby_start_failure"}],
       "status": "covered"
+    },
+    {
+      "behavior": "An empty tenant identifier normalizes to the canonical default tenant while named tenants retain their value and default classification.",
+      "boundary": ["master", "tenant", "identity"],
+      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.NormalizesEmptyTenantToDefault"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and TenantId construction", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "normalizes_and_validates_canonical_values"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Canonical tenant validation accepts default and ordinary names while rejecting the reserved underscore prefix and control bytes.",
+      "boundary": ["master", "tenant", "validation"],
+      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.ValidatesCanonicalTenantName"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and TenantId::IsValid", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "normalizes_and_validates_canonical_values"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Tenant identifiers provide stable lexical ordering and hash-key equality.",
+      "boundary": ["master", "tenant", "collection-contract"],
+      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.SupportsOrderedAndHashedKeys"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and TenantId comparison/hash", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "supports_ordering_and_hashing"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A scoped key preserves colons and path characters and round-trips by splitting only at the tenant/local-key NUL delimiter.",
+      "boundary": ["master", "tenant", "key-encoding"],
+      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.ScopedKeyPreservesExistingEncoding"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and TenantId scoped-key encoding", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "scoped_key_preserves_wire_format_and_local_nuls"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Scoped-key parsing preserves embedded NUL bytes in the local key after the first tenant delimiter.",
+      "boundary": ["master", "tenant", "binary-key"],
+      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.ScopedKeyRoundTripPreservesEmbeddedNullInLocalKey"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and TenantId::ParseScopedKey", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "scoped_key_preserves_wire_format_and_local_nuls"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A legacy key without a tenant delimiter parses as belonging to the default tenant without changing the local key.",
+      "boundary": ["master", "tenant", "backward-compatibility"],
+      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.ParsesLegacyUnscopedKeyAsDefaultTenant"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and legacy unscoped-key parsing", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "scoped_key_preserves_wire_format_and_local_nuls"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
