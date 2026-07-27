@@ -1229,6 +1229,122 @@
       "review": {"oracle": "mooncake-store/tests/health_check_test.cpp MetricsEndpointsReturnCorrectData and Rust client/http.rs tests", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "Transfer metric summaries report empty state, byte totals, throughput, operation counts, and latency percentiles.",
+      "boundary": ["client", "metrics", "summary", "latency"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.TransferMetricsSummaryTest"},
+      "reason": "Rust summary tests cover selected byte and operation fields but do not assert empty-state text, read/write throughput, both operation counts, or percentile/max output together.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp TransferMetricsSummaryTest and Rust ClientMetrics::summary tests", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Master RPC metric summaries report empty state and per-method call counts after observations.",
+      "boundary": ["client", "metrics", "rpc", "summary"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.MasterClientMetricsSummaryTest"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp MasterClientMetricsSummaryTest and Rust persistent registry summary", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "persistent_registry_exports_cpp_metric_names_and_summary"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The combined client summary includes transfer, RPC, and interface-operation sections with their observed values.",
+      "boundary": ["client", "metrics", "summary", "interface-operation"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.ClientMetricsSummaryTest"},
+      "reason": "Rust verifies a combined summary header, one RPC, and SSD data but does not assert interface-operation entries or the full C++ section composition.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp ClientMetricsSummaryTest and Rust ClientMetrics::summary", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Metric byte formatting uses binary B, KB, MB, and GB units at their exact boundaries.",
+      "boundary": ["client", "metrics", "byte-size", "formatting"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.ByteFormattingTest"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp ByteFormattingTest and shared Rust byte-size formatter", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/utils.rs", "test": "byte_size_formatting_matches_cpp"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Human-readable summaries remain shorter than Prometheus serialization while retaining count and latency-bound information.",
+      "boundary": ["client", "metrics", "summary", "prometheus"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.CompareWithSerializedMetrics"},
+      "reason": "No Rust test compares summary and Prometheus lengths or asserts the corresponding count/p95/max information.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp CompareWithSerializedMetrics and Rust render_prometheus/summary", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "MC_STORE_CLIENT_METRIC_BANDWIDTH=0 removes bandwidth lines from the client summary.",
+      "boundary": ["client", "metrics", "configuration", "bandwidth"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.BandwidthSummaryRespectsEnvFlag"},
+      "reason": "Rust reads the same environment flag but has no test proving that disabled bandwidth output is omitted.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp BandwidthSummaryRespectsEnvFlag and Rust ClientMetrics::from_environment", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Client metrics can omit all master RPC summary and serialized series while retaining transfer metrics.",
+      "boundary": ["client", "metrics", "rpc", "configuration"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.SummaryCanOmitMasterRpcMetrics"},
+      "reason": "Rust constructor supports the RPC metrics flag but no test asserts both summary and Prometheus omission.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp SummaryCanOmitMasterRpcMetrics and Rust ClientMetrics constructor", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Prometheus serialization applies instance, cluster, replica, and mount-segment labels to every metric family.",
+      "boundary": ["client", "metrics", "prometheus", "labels"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.SerializeWithDynamicLabels"},
+      "reason": "Rust currently exposes and tests only cluster_id; it does not implement the complete C++ dynamic-label set.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp SerializeWithDynamicLabels and Rust ClientMetrics labels", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Prometheus serialization omits dynamic label names when no labels are configured.",
+      "boundary": ["client", "metrics", "prometheus", "labels"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.SerializeWithoutDynamicLabels"},
+      "reason": "Rust has no test asserting the absence of all C++ dynamic label names across metric families.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp SerializeWithoutDynamicLabels and Rust ClientMetrics labels", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Enabled client HTTP metrics and summary endpoints return 200 with metric data.",
+      "boundary": ["client", "http", "metrics"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.HttpMetricsEndpointsReturnData"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsEndpointsReturnData and Rust client HTTP endpoint test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/http.rs", "test": "health_and_prometheus_metrics_reflect_shared_state"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ string configuration parser trims whitespace around the HTTP enable flag and port.",
+      "boundary": ["cpp-only", "client", "configuration", "http"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.HttpMetricsConfigParserTrimsWhitespace"},
+      "reason": "Rust construction accepts typed bool/u16 values rather than the C++ ConfigDict string parser, so whitespace is not representable at this API boundary.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsConfigParserTrimsWhitespace and Rust ClientHttpConfig", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ string configuration parser rejects malformed and overflowing HTTP port integers.",
+      "boundary": ["cpp-only", "client", "configuration", "http", "validation"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.HttpMetricsConfigParserRejectsInvalidIntegers"},
+      "reason": "Rust's typed u16 ClientHttpConfig cannot contain malformed or overflowing integer text; it separately rejects enabled port zero.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsConfigParserRejectsInvalidIntegers and Rust typed ClientHttpConfig", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "When metrics collection is disabled, the HTTP metrics endpoint returns 503 with 'metrics not available'.",
+      "boundary": ["client", "http", "metrics", "disabled-mode"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.HttpMetricsEndpointReturns503WhenMetricsDisabled"},
+      "reason": "Rust handler implements this response for a snapshot without metrics, but no HTTP test requests the endpoint in that state.",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsEndpointReturns503WhenMetricsDisabled and Rust metrics_handler", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "An occupied client HTTP port does not fail Store client setup, and the already-running listener remains intact.",
+      "boundary": ["client", "http", "port-conflict", "lifecycle"],
+      "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.HttpMetricsPortConflictDoesNotFailSetup"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsPortConflictDoesNotFailSetup and Rust occupied-port server test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/client/http.rs", "test": "occupied_port_and_duplicate_start_do_not_replace_the_running_server"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
