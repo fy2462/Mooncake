@@ -1,6 +1,9 @@
 #![cfg(feature = "link-native")]
 
-use mooncake_store_client::{ClientBackgroundConfig, ClientHealthStatus, MooncakeClient};
+use mooncake_store_client::{
+    ClientBackgroundConfig, ClientHealthStatus, LocalStorageBackend, LocalStorageConfig,
+    MooncakeClient,
+};
 use mooncake_store_core::ReplicateConfig;
 use mooncake_store_master::MasterRuntimeConfig;
 use mooncake_store_master::MasterServiceImpl;
@@ -16,9 +19,17 @@ async fn start_master() -> (String, oneshot::Sender<()>) {
 async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, oneshot::Sender<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (shutdown_tx, _server) = spawn_master(listener, config);
+    (address.to_string(), shutdown_tx)
+}
+
+fn spawn_master(
+    listener: tokio::net::TcpListener,
+    config: MasterRuntimeConfig,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>) {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let service = Arc::new(MasterServiceImpl::with_runtime_config(config));
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(MasterServiceServer::from_arc(service))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
@@ -27,7 +38,7 @@ async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, onesh
             .await
             .unwrap();
     });
-    (address.to_string(), shutdown_tx)
+    (shutdown_tx, server)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -55,6 +66,19 @@ async fn health_lifecycle_and_real_transfer_metrics_match_cpp_codes() {
     assert_eq!(client.get("health-metrics").await.unwrap(), payload);
     client.health_check().await.unwrap();
     assert_eq!(client.health_status(), ClientHealthStatus::Healthy);
+    client
+        .put(
+            "after-health-remount",
+            &payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: client.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(client.get("after-health-remount").await.unwrap(), payload);
     let metrics = client.serialize_metrics().unwrap();
     for metric in [
         "mooncake_transfer_write_bytes",
@@ -100,6 +124,165 @@ async fn health_lifecycle_and_real_transfer_metrics_match_cpp_codes() {
     let mut client = slot.lock().await.take().unwrap();
     let _ = client.tear_down_all().await;
     assert_eq!(client.health_status(), ClientHealthStatus::NotInitialized);
+}
+
+fn health_only_background_config() -> ClientBackgroundConfig {
+    ClientBackgroundConfig {
+        health_interval: std::time::Duration::from_millis(20),
+        enable_offloading: false,
+        enable_promotion: false,
+        enable_task_poll: false,
+        report_ssd_capacity: false,
+        enable_disk_watermark_eviction: false,
+        ..Default::default()
+    }
+}
+
+async fn wait_for_healthy(slot: &Arc<tokio::sync::Mutex<Option<MooncakeClient>>>) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if slot
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|client| client.health_status() == ClientHealthStatus::Healthy)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("storage heartbeat did not become healthy");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zero_segment_heartbeat_activates_after_first_memory_mount() {
+    let (master, shutdown) = start_master().await;
+    let client = create_tcp_client_with_segment_size(&master, 0).await;
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        health_only_background_config(),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        slot.lock().await.as_ref().unwrap().health_status(),
+        ClientHealthStatus::MasterUnreachable,
+        "compute-only clients must not send storage heartbeat"
+    );
+    slot.lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .allocate_and_mount_segments(16 * 1024 * 1024)
+        .await
+        .unwrap();
+    wait_for_healthy(&slot).await;
+
+    background.shutdown().await;
+    drop(slot.lock().await.take());
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zero_segment_heartbeat_activates_after_local_disk_mount() {
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        enable_offload: true,
+        ..Default::default()
+    })
+    .await;
+    let backend = Arc::new(LocalStorageBackend::new_ephemeral(LocalStorageConfig {
+        root_dir: root.path().join("client"),
+        fsdir: "local-disk".into(),
+        enable_eviction: false,
+        quota_bytes: 16 * 1024 * 1024,
+    }));
+    backend.init().unwrap();
+    let client = create_tcp_client_with_segment_size(&master, 0)
+        .await
+        .with_local_storage_backend(backend);
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        health_only_background_config(),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        slot.lock().await.as_ref().unwrap().health_status(),
+        ClientHealthStatus::MasterUnreachable
+    );
+    slot.lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .mount_local_disk_segment(false)
+        .await
+        .unwrap();
+    wait_for_healthy(&slot).await;
+
+    background.shutdown().await;
+    drop(slot.lock().await.take());
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn non_ha_master_restart_remounts_owned_segments_on_the_same_endpoint() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (shutdown, server) = spawn_master(listener, MasterRuntimeConfig::default());
+    let client = create_tcp_client(&address.to_string()).await;
+    let hostname = client.get_hostname();
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        health_only_background_config(),
+    );
+    wait_for_healthy(&slot).await;
+
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if slot.lock().await.as_ref().is_some_and(|client| {
+                client.health_status() == ClientHealthStatus::MasterUnreachable
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("client did not observe the stopped master");
+
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let (shutdown, server) = spawn_master(listener, MasterRuntimeConfig::default());
+    wait_for_healthy(&slot).await;
+    let payload = vec![0x5a; 4096];
+    {
+        let mut client = slot.lock().await;
+        let client = client.as_mut().unwrap();
+        client
+            .put(
+                "after-master-restart",
+                &payload,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: hostname,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(client.get("after-master-restart").await.unwrap(), payload);
+    }
+
+    background.shutdown().await;
+    drop(slot.lock().await.take());
+    shutdown.send(()).unwrap();
+    server.await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1465,25 +1465,22 @@
       "behavior": "A compute-only client sends no storage heartbeat until its first memory segment mount, after which heartbeat starts automatically.",
       "boundary": ["client", "non-ha", "heartbeat", "memory-mount", "lifecycle"],
       "cpp": {"file": "non_ha_reconnect_test.cpp", "test": "NonHAReconnectTest.ZeroSegmentClientStartsHeartbeatOnlyAfterMount"},
-      "reason": "Rust exposes health/background workers and memory mounting, but has no test or lifecycle wiring proving that the first memory mount automatically starts heartbeat while a zero-segment client remains idle.",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ZeroSegmentClientStartsHeartbeatOnlyAfterMount and Rust client background/lifecycle code", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "zero_segment_heartbeat_activates_after_first_memory_mount"}], "status": "covered"
     },
     {
       "behavior": "A compute-only client starts storage heartbeat automatically after its first local-disk mount.",
       "boundary": ["client", "non-ha", "heartbeat", "local-disk", "lifecycle"],
       "cpp": {"file": "non_ha_reconnect_test.cpp", "test": "NonHAReconnectTest.ZeroSegmentClientStartsHeartbeatAfterLocalDiskMount"},
-      "reason": "Rust records local-disk mount state for remount but does not prove that mounting local disk automatically activates the background health heartbeat.",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ZeroSegmentClientStartsHeartbeatAfterLocalDiskMount and Rust storage/background code", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "zero_segment_heartbeat_activates_after_local_disk_mount"}], "status": "covered"
     },
     {
       "behavior": "In non-HA mode, a mounted client reconnects after the Master restarts on the same address and automatically remounts its segment.",
       "boundary": ["client", "non-ha", "reconnect", "master-restart", "remount"],
       "cpp": {"file": "non_ha_reconnect_test.cpp", "test": "NonHAReconnectTest.ClientAutoReconnectAndRemount"},
-      "reason": "Rust implements ping-triggered remount logic, but no test restarts a non-HA Master at the same address and proves the background client reconnects and republishes its mounted segment.",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ClientAutoReconnectAndRemount and Rust health_check/remount_all", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "non_ha_master_restart_remounts_owned_segments_on_the_same_endpoint"}], "status": "covered"
     },
     {
       "behavior": "With P2P handshake and no memcpy override, reading a complete replica mounted by the same client automatically uses the LOCAL_MEMCPY strategy and returns exact bytes.",

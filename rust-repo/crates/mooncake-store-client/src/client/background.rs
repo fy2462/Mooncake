@@ -77,6 +77,17 @@ impl ClientBackgroundHandle {
 }
 
 impl MooncakeClient {
+    fn has_storage_heartbeat_role(&self) -> bool {
+        !self.owned_store_segments.is_empty()
+            || !self.mounted_external_segments.read().is_empty()
+            || self.cxl_segment_registration.is_some()
+            || !self.mounted_nof_segments.read().is_empty()
+            || self
+                .local_disk_mount_state
+                .desired_enable_offloading()
+                .is_some()
+    }
+
     /// Start C++-style client background workers.
     ///
     /// The workers periodically run health/remount checks, storage
@@ -136,6 +147,9 @@ impl MooncakeClient {
                     let Some(client) = slot.as_mut() else {
                         break;
                     };
+                    if !client.has_storage_heartbeat_role() {
+                        continue;
+                    }
                     let result = client.health_check().await;
                     if let Err(e) = result {
                         tracing::warn!(target: "client_background", %e, "health_check worker iteration failed");
