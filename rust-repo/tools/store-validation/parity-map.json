@@ -959,6 +959,69 @@
       "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp StressTest and Rust ClientBufferAllocator tests", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "Batch remove returns one successful result for every existing key and removes all requested objects.",
+      "boundary": ["client", "master", "batch-remove", "end-to-end"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.BasicFunctionality"},
+      "reason": "The existing Rust test removes entries directly from a DashMap and does not invoke the batch-remove RPC or client result mapping.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp BasicFunctionality and Rust batch_remove_impl/test_batch_remove_logic", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Batch remove preserves input order while returning success for existing keys and not-found for missing keys in the same request.",
+      "boundary": ["client", "master", "batch-remove", "per-item-status"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.MixedExistence"},
+      "reason": "No Rust test invokes batch_remove_impl with a mixed existing/missing request and asserts ordered per-item statuses.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp MixedExistence and Rust batch_remove_impl", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An empty batch returns no results, while duplicate keys are processed sequentially so only the first removal succeeds.",
+      "boundary": ["client", "master", "batch-remove", "empty-input", "duplicates"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.EmptyAndDuplicate"},
+      "reason": "The Rust empty test only asserts that a local vector is empty, and no test exercises duplicate-key sequencing through batch_remove_impl.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp EmptyAndDuplicate and Rust test_batch_remove_empty/batch_remove_impl", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Single remove and one-item batch remove return consistent success and not-found results.",
+      "boundary": ["client", "master", "batch-remove", "single-remove", "error-parity"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.ConsistencyWithSingleRemove"},
+      "reason": "No Rust test compares the public single-remove and batch-remove paths for existing and missing keys.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp ConsistencyWithSingleRemove and Rust remove/batch_remove implementations", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A missing-key batch result maps to the public OBJECT_NOT_FOUND or RPC_FAIL error domain rather than an invalid numeric value.",
+      "boundary": ["client", "master", "batch-remove", "error-code"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.ErrorCodeFormat"},
+      "reason": "Rust has internal BatchStatus mapping tests for other batch RPCs, but no client-level assertion for missing-key BatchRemove error conversion.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp ErrorCodeFormat and Rust batch-remove status mapping", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A 1000-key batch remove completes successfully for every key within five seconds and records reproducible throughput.",
+      "boundary": ["client", "master", "batch-remove", "performance", "benchmark"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.LargeBatch"},
+      "reason": "Rust has no equivalent 1000-key batch-remove workload, latency assertion, or benchmark artifact.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp LargeBatch and the absence of Rust batch-remove benchmarks", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Batch remove accepts keys containing spaces, slashes, colons, punctuation, and UTF-8 text without changing their identity.",
+      "boundary": ["client", "master", "batch-remove", "key-encoding", "utf8"],
+      "cpp": {"file": "batch_remove_test.cpp", "test": "BatchRemoveTest.SpecialCharacters"},
+      "reason": "No Rust batch-remove test sends special-character and UTF-8 keys through the public RPC path.",
+      "review": {"oracle": "mooncake-store/tests/batch_remove_test.cpp SpecialCharacters and Rust tenant key canonicalization/batch_remove_impl", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
