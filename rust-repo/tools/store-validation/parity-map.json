@@ -12,13 +12,12 @@
         "file": "e2e/e2e_rand_test.cpp",
         "test": "E2ERandTest.RandomSequentialDeletePutGet"
       },
-      "reason": "No discoverable Rust crate test currently sustains randomized cross-client delete/put/get operations with large values and eviction pressure.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/e2e_rand_test.cpp and its ClientTestWrapper/MasterProcessHandler calls",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "seeded_two_client_large_object_delete_put_get_never_returns_stale_bytes"}],
+      "status": "covered"
     },
     {
       "behavior": "During repeated random crashes and restarts of a three-Master HA group, successful small-object puts remain readable with exact values, and service resumes for all keys after a surviving leader stabilizes.",

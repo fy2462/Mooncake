@@ -1158,3 +1158,65 @@ async fn global_disk_fifo_eviction_removes_only_the_oldest_master_replica() {
     drop(client);
     let _ = shutdown.send(());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn seeded_two_client_large_object_delete_put_get_never_returns_stale_bytes() {
+    const SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
+    const VALUE_SIZE: usize = 3 * 1024 * 1024;
+    const KEY_COUNT: usize = 42;
+    const ROUNDS: usize = 4;
+    const SEED: u64 = 0x4d4f_4f4e_4341_4b45;
+
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        put_start_release_timeout: std::time::Duration::ZERO,
+        reaper_interval: std::time::Duration::from_millis(5),
+        eviction_interval: std::time::Duration::from_millis(5),
+        lease_ttl: std::time::Duration::from_millis(5),
+        eviction_high_watermark_ratio: 0.90,
+        eviction_ratio: 0.20,
+        ..Default::default()
+    })
+    .await;
+    let mut clients = vec![
+        create_tcp_client_with_segment_size(&master, SEGMENT_SIZE).await,
+        create_tcp_client_with_segment_size(&master, SEGMENT_SIZE).await,
+    ];
+    let mut rng = SEED;
+    let mut selected = 0_usize;
+    let mut successful_reads = 0_usize;
+
+    for _ in 0..ROUNDS {
+        for key_index in 0..KEY_COUNT {
+            rng = rng
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            if (rng >> 32) % 100 < 50 {
+                continue;
+            }
+            selected += 1;
+            let key = format!("seeded-pressure-{key_index}");
+            let value = vec![(key_index as u8).wrapping_mul(17); VALUE_SIZE];
+
+            rng = rng.rotate_left(13);
+            let delete_client = ((rng >> 32) as usize) % clients.len();
+            let _ = clients[delete_client].remove(&key, false).await;
+            rng = rng.rotate_left(17);
+            let put_client = ((rng >> 32) as usize) % clients.len();
+            let _ = clients[put_client].put(&key, &value, None).await;
+            rng = rng.rotate_left(23);
+            let get_client = ((rng >> 32) as usize) % clients.len();
+            if let Ok(actual) = clients[get_client].get(&key).await {
+                assert_eq!(actual, value, "seed={SEED:#x}, key={key}");
+                successful_reads += 1;
+            }
+        }
+    }
+
+    assert!(selected >= KEY_COUNT, "seed did not create enough pressure");
+    assert!(
+        successful_reads > 0,
+        "pressure run produced no successful reads"
+    );
+    drop(clients);
+    let _ = shutdown.send(());
+}
