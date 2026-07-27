@@ -1345,6 +1345,110 @@
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp HttpMetricsPortConflictDoesNotFailSetup and Rust occupied-port server test", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/src/client/http.rs", "test": "occupied_port_and_duplicate_start_do_not_replace_the_running_server"}],
       "status": "covered"
+    },
+    {
+      "behavior": "The C++ SharedMutex wrapper can acquire and release an exclusive lock.",
+      "boundary": ["cpp-only", "synchronization", "shared-mutex"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.CanLockExclusive"},
+      "reason": "Rust uses parking_lot/std lock guards directly and has no SharedMutex compatibility wrapper whose lock/unlock surface needs parity testing.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp CanLockExclusive and Rust direct lock-guard usage", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutex wrapper can acquire and release a shared lock.",
+      "boundary": ["cpp-only", "synchronization", "shared-mutex"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.CanLockShared"},
+      "reason": "Rust uses parking_lot/std RwLock read guards directly rather than exposing the C++ lock_shared/unlock_shared wrapper API.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp CanLockShared and Rust direct RwLock guard usage", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutex wrapper serializes concurrent exclusive holders.",
+      "boundary": ["cpp-only", "synchronization", "shared-mutex", "exclusive"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.ExclusiveAccessIsMutuallyExclusive"},
+      "reason": "This test checks std::shared_mutex primitive semantics delegated by the C++ wrapper; Rust delegates the same responsibility to maintained lock libraries without a corresponding Store abstraction.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp ExclusiveAccessIsMutuallyExclusive and mooncake-store/include/mutex.h", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutex wrapper permits concurrent shared holders.",
+      "boundary": ["cpp-only", "synchronization", "shared-mutex", "shared"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.SharedAccessIsConcurrent"},
+      "reason": "This is a std::shared_mutex conformance check; Rust uses parking_lot/std RwLock guards directly and does not own an equivalent wrapper implementation.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp SharedAccessIsConcurrent and Rust RwLock usage", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "A shared reader prevents the C++ SharedMutex wrapper from granting an exclusive try-lock until release.",
+      "boundary": ["cpp-only", "synchronization", "shared-mutex", "contention"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.WriterBlocksReaders"},
+      "reason": "The assertion is delegated std::shared_mutex behavior and the Rust Store has no C++-compatible SharedMutex API boundary.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp WriterBlocksReaders and mooncake-store/include/mutex.h", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutexLocker acquires exclusively on construction and releases on destruction.",
+      "boundary": ["cpp-only", "synchronization", "raii", "exclusive"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.LocksOnConstructionExclusive"},
+      "reason": "Rust lock guards encode acquisition and Drop-based release in the type system, so the C++ pointer-based RAII wrapper is intentionally absent.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp LocksOnConstructionExclusive and Rust lock guards", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutexLocker acquires in shared mode on construction and releases on destruction.",
+      "boundary": ["cpp-only", "synchronization", "raii", "shared"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.LocksOnConstructionShared"},
+      "reason": "Rust RwLock read guards provide native scoped ownership and Drop release without the C++ SharedMutexLocker compatibility type.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp LocksOnConstructionShared and Rust RwLock read guards", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutexLocker supports a null initial mutex and manual early unlock.",
+      "boundary": ["cpp-only", "synchronization", "raii", "manual-unlock"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.ManualLockUnlock"},
+      "reason": "Rust lock guards cannot be constructed from null pointers; early release is expressed by dropping a guard, eliminating this wrapper-specific state machine.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp ManualLockUnlock and Rust guard ownership", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutexLocker can try-lock exclusively after release and refuses a second acquisition while held.",
+      "boundary": ["cpp-only", "synchronization", "raii", "try-lock"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.TryLockSuccess"},
+      "reason": "The mutable locked flag and re-lock refusal belong to the C++ SharedMutexLocker wrapper; Rust returns an owned optional guard from try_lock instead.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp TryLockSuccess and Rust try_lock guard semantics", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SharedMutexLocker can try-lock in shared mode after release and refuses a second acquisition while held.",
+      "boundary": ["cpp-only", "synchronization", "raii", "shared", "try-lock"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.TryLockSharedSuccess"},
+      "reason": "This tests the C++ wrapper's internal lock-state flag; Rust try_read returns a scoped guard and exposes no equivalent re-lockable locker object.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp TryLockSharedSuccess and Rust try_read guard semantics", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Every operation on a null C++ SharedMutexLocker is a safe no-op or failed try-lock.",
+      "boundary": ["cpp-only", "synchronization", "raii", "null-pointer"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.HandlesNullptrSafely"},
+      "reason": "Safe Rust lock guards have no null-pointer construction path, so this defensive C++ compatibility behavior is unrepresentable.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp HandlesNullptrSafely and Rust safe lock APIs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ atomic-flag SpinLock reports state, implements try-lock, and blocks a competing thread until release.",
+      "boundary": ["cpp-only", "synchronization", "spin-lock"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SpinLockTest.LockUnlockTest"},
+      "reason": "Rust Store does not port the C++ atomic_flag SpinLock or expose is_locked; it uses maintained mutex/RwLock implementations for its synchronization sites.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp LockUnlockTest and Rust synchronization usage", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ SpinLocker acquires a SpinLock for its scope and releases it on destruction.",
+      "boundary": ["cpp-only", "synchronization", "spin-lock", "raii"],
+      "cpp": {"file": "mutex_test.cpp", "test": "SpinLockTest.SpinLockerTest"},
+      "reason": "Rust uses native scoped lock guards and has no SpinLocker compatibility wrapper to validate.",
+      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp SpinLockerTest and Rust lock guards", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1
