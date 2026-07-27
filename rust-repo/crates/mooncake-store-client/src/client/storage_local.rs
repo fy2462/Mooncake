@@ -907,12 +907,17 @@ impl MooncakeClient {
                 "mounted Memory segment overlaps an existing local segment".to_string(),
             ));
         }
+        let transport_endpoint = if self.protocol == "cxl" {
+            self.local_hostname.clone()
+        } else {
+            self.engine.get_local_ip_and_port()?
+        };
         let expected_segment_id = mooncake_store_core::stable_memory_segment_id(
             self.client_id,
             segment_name,
             base_addr,
             size,
-            &self.local_hostname,
+            &transport_endpoint,
             &self.protocol,
             &self.host_id,
         );
@@ -923,7 +928,7 @@ impl MooncakeClient {
                 segment_name: segment_name.to_string(),
                 size,
                 base_addr,
-                te_endpoint: self.local_hostname.clone(),
+                te_endpoint: transport_endpoint.clone(),
                 protocol: self.protocol.clone(),
                 host_id: self.host_id.clone(),
             }))
@@ -1004,13 +1009,13 @@ impl MooncakeClient {
                 segment_name: segment_name.to_string(),
                 size,
                 base_addr,
-                te_endpoint: self.local_hostname.clone(),
+                te_endpoint: transport_endpoint.clone(),
                 protocol: self.protocol.clone(),
                 host_id: self.host_id.clone(),
             },
         );
         // Register as a local endpoint for subsequent locality checks
-        self.register_local_endpoint(segment_name);
+        self.register_local_endpoint(&transport_endpoint);
         Ok(segment_id)
     }
 
@@ -1123,9 +1128,27 @@ impl MooncakeClient {
         mounted.remove(&segment_id);
         let name_still_mounted = mounted.values().any(|name| name == &segment_name);
         drop(mounted);
-        self.mounted_external_segments.write().remove(&segment_id);
-        if !name_still_mounted {
-            self.unregister_local_endpoint(&segment_name);
+        let removed_external = self.mounted_external_segments.write().remove(&segment_id);
+        let transport_endpoint = removed_external
+            .as_ref()
+            .map(|segment| segment.te_endpoint.clone())
+            .or_else(|| {
+                (self.protocol != "cxl")
+                    .then(|| self.engine.get_local_ip_and_port().ok())
+                    .flatten()
+            })
+            .unwrap_or_else(|| self.local_hostname.clone());
+        let endpoint_still_mounted = self
+            .mounted_external_segments
+            .read()
+            .values()
+            .any(|segment| segment.te_endpoint == transport_endpoint)
+            || self
+                .owned_store_segments
+                .iter()
+                .any(|segment| segment.segment_id != segment_id);
+        if !name_still_mounted && !endpoint_still_mounted {
+            self.unregister_local_endpoint(&transport_endpoint);
         }
         Ok(())
     }
@@ -1201,20 +1224,6 @@ impl MooncakeClient {
             prepared.push(buffer);
         }
 
-        let opened_here = !self
-            .mounted_segment_ids
-            .read()
-            .values()
-            .any(|name| name == &self.local_hostname);
-        if opened_here && let Err(error) = engine.open_segment(&self.local_hostname) {
-            super::lifecycle::release_failed_store_segments(
-                &engine,
-                &self.local_hostname,
-                prepared,
-            );
-            return Err(error.into());
-        }
-
         let segment_name = self.local_hostname.clone();
         let mut mounted: Vec<super::OwnedStoreSegment> = Vec::new();
         let mut remaining = prepared.into_iter();
@@ -1227,7 +1236,7 @@ impl MooncakeClient {
                 Err(error) => {
                     let retain_current_owner =
                         matches!(&error, StoreError::SegmentMountOutcomeAmbiguous { .. });
-                    let mut endpoint_safe_to_remove = opened_here && !retain_current_owner;
+                    let mut endpoint_safe_to_remove = !retain_current_owner;
                     for segment in mounted.drain(..) {
                         if self
                             .unmount_segment_by_id(segment.segment_id, 0)
@@ -1335,14 +1344,6 @@ impl MooncakeClient {
                     "CUDA host unregister failed for Store segment {segment_id}; allocation leaked"
                 )));
             }
-        }
-        if !self
-            .mounted_segment_ids
-            .read()
-            .values()
-            .any(|name| name == &self.local_hostname)
-        {
-            self.engine.remove_local_segment(&self.local_hostname)?;
         }
         Ok(())
     }

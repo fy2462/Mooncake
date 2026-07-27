@@ -59,6 +59,10 @@ impl ClientTransferEngine {
         self.require()?.open_segment(segment_name)
     }
 
+    pub(crate) fn get_local_ip_and_port(&self) -> TransferEngineResult<String> {
+        self.require()?.get_local_ip_and_port()
+    }
+
     pub(crate) fn close_segment(&self, segment_id: SegmentId) -> TransferEngineResult<()> {
         self.require()?.close_segment(segment_id)
     }

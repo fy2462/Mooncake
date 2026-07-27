@@ -2392,6 +2392,37 @@
       "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchUpsertMixed"},
       "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchUpsertMixed and the in-process TCP batch-upsert test", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "client_integration_basic_remove_batch_upsert_and_large_payload_parity"}], "status": "covered"
+    },
+    {
+      "behavior": "Batch put treats a duplicate key's already-exists result as success for both input positions and preserves the shared value.", "boundary": ["client", "master", "batch-put", "duplicate-key"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchPutDuplicateKeys"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchPutDuplicateKeys and the in-process TCP duplicate-key batch test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_duplicate_keys_and_mixed_group_ids_preserve_cpp_client_results"}], "status": "covered"
+    },
+    {
+      "behavior": "Client batch put accepts per-key grouped, ungrouped, and differently grouped entries while preserving ordered bytes and removal results.", "boundary": ["client", "master", "batch-put", "group-id", "ordering"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchPutMixedGroupIdsThroughClient"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchPutMixedGroupIdsThroughClient and the in-process TCP mixed-group test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_duplicate_keys_and_mixed_group_ids_preserve_cpp_client_results"}], "status": "covered"
+    },
+    {
+      "behavior": "Batch replica clear handles single, multiple, empty, and missing key lists after leases expire and removes the cleared objects.", "boundary": ["client", "master", "batch-replica-clear", "lease-expiry"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.BatchReplicaClearOperations"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp BatchReplicaClearOperations and the short-lease in-process client test", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"}], "status": "covered"
+    },
+    {
+      "behavior": "A dynamically allocated client-owned segment returns a canonical UUID, routes bytes through its actual P2P endpoint, and unmounts by UUID.", "boundary": ["client", "master", "mount", "unmount", "segment-uuid", "p2p"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.MountSegmentAndGetIdAndUnmountSegmentById"},
+      "reason": "", "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp MountSegmentAndGetIdAndUnmountSegmentById and Rust owned-segment lifecycle", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "dynamic_owned_segment_mount_routes_data_and_unmounts_by_canonical_id"}], "status": "covered"
+    },
+    {
+      "behavior": "The disabled C++ heavy allocation loop performs thirteen one-MiB put/get iterations when manually enabled.", "boundary": ["cpp-disabled", "client", "stress"],
+      "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.DISABLED_AllocateTest"},
+      "reason": "The behavioral reference is explicitly disabled and therefore is not part of the executable C++ correctness oracle; active Rust large-object and batch tests cover the supported paths without treating a disabled stress loop as a required parity gate.",
+      "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp DISABLED_AllocateTest", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1

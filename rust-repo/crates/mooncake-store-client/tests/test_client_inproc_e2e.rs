@@ -2,6 +2,7 @@
 
 use mooncake_store_client::MooncakeClient;
 use mooncake_store_core::ReplicateConfig;
+use mooncake_store_master::MasterRuntimeConfig;
 use mooncake_store_master::MasterServiceImpl;
 use mooncake_store_master::proto::master_service_server::MasterServiceServer;
 use std::sync::Arc;
@@ -9,10 +10,14 @@ use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
 
 async fn start_master() -> (String, oneshot::Sender<()>) {
+    start_master_with_config(MasterRuntimeConfig::default()).await
+}
+
+async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, oneshot::Sender<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let service = Arc::new(MasterServiceImpl::default());
+    let service = Arc::new(MasterServiceImpl::with_runtime_config(config));
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(MasterServiceServer::from_arc(service))
@@ -25,7 +30,147 @@ async fn start_master() -> (String, oneshot::Sender<()>) {
     (address.to_string(), shutdown_tx)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_duplicate_keys_and_mixed_group_ids_preserve_cpp_client_results() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client(&master).await;
+    let mut reader = create_tcp_client(&master).await;
+
+    let duplicate_keys = vec!["duplicate-key".to_string(); 2];
+    assert_eq!(
+        writer
+            .batch_put(
+                &duplicate_keys,
+                &[b"same".as_slice(), b"same".as_slice()],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: writer.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0]
+    );
+    assert_eq!(reader.get("duplicate-key").await.unwrap(), b"same");
+
+    let keys = vec![
+        "grouped-a".to_string(),
+        "ungrouped".to_string(),
+        "grouped-b".to_string(),
+    ];
+    let values = [
+        b"value-a".as_slice(),
+        b"value-u".as_slice(),
+        b"value-b".as_slice(),
+    ];
+    assert_eq!(
+        writer
+            .batch_put(
+                &keys,
+                &values,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: writer.get_hostname(),
+                    group_ids: vec!["group-a".to_string(), String::new(), "group-b".to_string()],
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0, 0]
+    );
+    assert_eq!(
+        reader.batch_get(&keys).await.unwrap(),
+        values
+            .iter()
+            .map(|value| Some(value.to_vec()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        writer.batch_remove(&keys, true).await.unwrap(),
+        vec![0, 0, 0]
+    );
+
+    drop(writer);
+    drop(reader);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_replica_clear_handles_single_multiple_empty_and_missing_keys() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(20),
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client(&master).await;
+    let keys = vec![
+        "clear-a".to_string(),
+        "clear-b".to_string(),
+        "clear-c".to_string(),
+    ];
+    assert_eq!(
+        client
+            .batch_put(
+                &keys,
+                &[b"a".as_slice(), b"b".as_slice(), b"c".as_slice()],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0, 0]
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    assert_eq!(
+        client
+            .batch_replica_clear(&keys[..1], client.client_id(), "", "")
+            .await
+            .unwrap(),
+        keys[..1]
+    );
+    assert_eq!(
+        client
+            .batch_replica_clear(&keys[1..], client.client_id(), "", "")
+            .await
+            .unwrap(),
+        keys[1..]
+    );
+    assert_eq!(client.batch_is_exist(&keys).await.unwrap(), vec![false; 3]);
+    assert!(
+        client
+            .batch_replica_clear(&[], client.client_id(), "", "")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        client
+            .batch_replica_clear(
+                &["missing-a".to_string(), "missing-b".to_string()],
+                client.client_id(),
+                "",
+                "",
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
 async fn create_tcp_client(master: &str) -> MooncakeClient {
+    create_tcp_client_with_segment_size(master, 16 * 1024 * 1024).await
+}
+
+async fn create_tcp_client_with_segment_size(master: &str, segment_size: u64) -> MooncakeClient {
     let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local_host = probe.local_addr().unwrap().to_string();
     drop(probe);
@@ -35,11 +180,57 @@ async fn create_tcp_client(master: &str) -> MooncakeClient {
         &local_host,
         "tcp",
         "",
-        16 * 1024 * 1024,
+        segment_size,
         8 * 1024 * 1024,
     )
     .await
     .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dynamic_owned_segment_mount_routes_data_and_unmounts_by_canonical_id() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client_with_segment_size(&master, 0).await;
+    let mut reader = create_tcp_client(&master).await;
+    let segment_ids = writer
+        .allocate_and_mount_segments(16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(segment_ids.len(), 1);
+
+    writer
+        .put(
+            "dynamic-segment-object",
+            b"dynamic-segment-bytes",
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reader.get("dynamic-segment-object").await.unwrap(),
+        b"dynamic-segment-bytes"
+    );
+
+    writer
+        .unmount_and_free_segments(&segment_ids, 0)
+        .await
+        .unwrap();
+    assert!(
+        writer
+            .get_segments_detail()
+            .await
+            .unwrap()
+            .iter()
+            .all(|segment| segment.segment_id != segment_ids[0])
+    );
+
+    drop(writer);
+    drop(reader);
+    let _ = shutdown.send(());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
