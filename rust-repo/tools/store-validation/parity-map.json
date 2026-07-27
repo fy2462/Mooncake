@@ -743,6 +743,132 @@
       "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredAndExcludedSegmentsConflict and Rust exclusion-aware preferred allocation", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_allocate_with_exclusions_skips_preferred_and_fallback_segments"}],
       "status": "covered"
+    },
+    {
+      "behavior": "A preferred segment is selected ahead of non-preferred segments when it has sufficient capacity.",
+      "boundary": ["master", "allocator", "preferred-segment"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.PreferredSegmentAllocation"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredSegmentAllocation and Rust preferred-segment precedence", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_preferred_segment_takes_precedence_over_preferred_segments"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A preferred-segment request against an empty allocator set fails with NO_AVAILABLE_HANDLE.",
+      "boundary": ["master", "allocator", "preferred-segment", "error-code"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.PreferredSegmentWithEmptyAllocators"},
+      "reason": "Rust tests prove an empty allocator returns no replicas, but do not assert the preferred-segment request path or the C++ NO_AVAILABLE_HANDLE error code.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredSegmentWithEmptyAllocators and Rust SegmentAllocator APIs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A zero-byte allocation is rejected with INVALID_PARAMS.",
+      "boundary": ["master", "allocator", "validation", "error-code"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.ZeroSizeAllocation"},
+      "reason": "Rust bulk allocation currently collapses zero-byte input to an empty replica vector instead of exposing the C++ INVALID_PARAMS disposition.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp ZeroSizeAllocation and SegmentAllocator::allocate_for_client_excluding", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A zero replica-count allocation is rejected with INVALID_PARAMS.",
+      "boundary": ["master", "allocator", "validation", "error-code"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.InvalidReplicationCount"},
+      "reason": "Rust bulk allocation currently collapses a zero replica count to an empty replica vector; service-level validation only rejects the separate case where memory, NoF, and disk replica counts are all disabled.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp InvalidReplicationCount, SegmentAllocator::allocate_for_client_excluding, and put_start validation", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Multiple preferred segments can satisfy a multi-replica request before ordinary fallback segments are considered.",
+      "boundary": ["master", "allocator", "preferred-segment", "replication"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.MultiplePreferredSegmentsAllocation"},
+      "reason": "Rust tests cover singular preferred-segment precedence but do not assert that multiple plural preferred segments jointly satisfy a multi-replica request.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp MultiplePreferredSegmentsAllocation and Rust preferred_segment_names", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A non-excluded preferred segment is retained while other excluded segments are skipped during a multi-replica allocation.",
+      "boundary": ["master", "allocator", "preferred-segment", "segment-exclusion"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.PreferredAndExcludedSegmentsCombination"},
+      "reason": "Rust exclusion coverage exercises an excluded preferred segment, not the complementary combination where the preferred segment remains eligible and another segment is excluded.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PreferredAndExcludedSegmentsCombination and Rust exclusion-aware allocation", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Sustained FreeRatioFirst allocation across differently sized segments keeps utilization ratios within the C++ balance tolerance.",
+      "boundary": ["master", "allocator", "free-ratio", "distribution"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyParameterizedTest.FreeRatioFirstLoadBalancingDistribution"},
+      "reason": "Rust verifies candidate ordering for a small allocation, but has no sustained distribution test across differently sized segments or utilization tolerance assertion.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp FreeRatioFirstLoadBalancingDistribution and Rust free-ratio strategy tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Random and FreeRatioFirst allocation over 512 segments and 5000 allocations complete successfully and report comparable elapsed time.",
+      "boundary": ["master", "allocator", "performance", "benchmark"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.PerformanceComparison"},
+      "reason": "Rust has no reproducible allocator strategy benchmark or equivalent 512-segment comparison workload.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PerformanceComparison and the absence of Rust benchmark targets", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Each configured allocation strategy completes a 512-segment, 5000-allocation timing workload without allocation failure.",
+      "boundary": ["master", "allocator", "performance", "benchmark"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.PerformanceTest"},
+      "reason": "Rust has no equivalent parameterized allocator timing workload or benchmark result artifact.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PerformanceTest and the absence of Rust benchmark targets", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "SsdFreeRatioFirst selects the segment owned by the client with the highest SSD free ratio.",
+      "boundary": ["master", "allocator", "ssd-metrics", "free-ratio"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.SsdFreeRatioFirstChoosesHighestFreeRatio"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstChoosesHighestFreeRatio and Rust owner SSD metrics selection", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "test_ssd_free_ratio_first_uses_owner_ssd_metrics"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "SsdFreeRatioFirst remains usable without an SSD metrics provider by falling back to ordinary allocator availability.",
+      "boundary": ["master", "allocator", "ssd-metrics", "fallback"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.SsdFreeRatioFirstWithoutMetricsProviderAllocates"},
+      "reason": "The Rust implementation contains a memory-free-ratio fallback, but no discoverable test invokes SsdFreeRatioFirst with no metrics provider.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstWithoutMetricsProviderAllocates and Rust ssd_free_ratio_for_name", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "SsdFreeRatioFirst skips an excluded segment even when it has the highest SSD free ratio.",
+      "boundary": ["master", "allocator", "ssd-metrics", "segment-exclusion"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.SsdFreeRatioFirstExcludedSegmentsSkipped"},
+      "reason": "Rust tests exclusion under another strategy and SSD ordering without exclusions, but not their interaction.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstExcludedSegmentsSkipped and Rust SSD/exclusion strategy paths", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "SSD usage greater than total capacity is clamped to zero free space so a normally reported segment is preferred.",
+      "boundary": ["master", "allocator", "ssd-metrics", "defensive-accounting"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.SsdFreeRatioFirstUsedExceedsTotalIsClamped"},
+      "reason": "Rust uses a clamping free-ratio helper but has no SSD-strategy regression test for used_bytes greater than total_capacity_bytes.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstUsedExceedsTotalIsClamped and Rust offset_layout::free_ratio", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Random and SsdFreeRatioFirst strategies complete the fixed warmup and measured workloads and emit their comparative timing.",
+      "boundary": ["master", "allocator", "ssd-metrics", "performance", "benchmark"],
+      "cpp": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.SsdFreeRatioFirstVsRandomStrategyPerformance"},
+      "reason": "Rust has no reproducible SSD-aware allocator strategy benchmark or baseline artifact.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstVsRandomStrategyPerformance and the absence of Rust benchmark targets", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
