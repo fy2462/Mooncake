@@ -1,5 +1,6 @@
 use super::*;
 use crate::service::helpers::ready_local_disk_storage_for_client;
+use crate::service::proto_conv::replica_to_proto_for_state;
 
 impl MasterServiceImpl {
     // ---- PutStart ----
@@ -209,8 +210,10 @@ impl MasterServiceImpl {
         }
         sync_segment_usage(&self.state, replicas.iter().map(|r| r.segment_id));
 
-        let proto_replicas: Vec<proto::ReplicaDescriptor> =
-            replicas.iter().map(replica_to_proto).collect();
+        let proto_replicas: Vec<proto::ReplicaDescriptor> = replicas
+            .iter()
+            .map(|replica| replica_to_proto_for_state(&self.state, replica))
+            .collect();
 
         let now = SystemTime::now();
         self.state.objects.insert(

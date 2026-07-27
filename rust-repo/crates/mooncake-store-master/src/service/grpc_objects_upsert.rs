@@ -475,7 +475,10 @@ impl MasterServiceImpl {
         let replicas =
             self.upsert_start_for_entry(client_id, &req.key, &tenant_id, req.slice_length, config)?;
         Ok(Response::new(proto::UpsertResponse {
-            replicas: replicas.iter().map(replica_to_proto).collect(),
+            replicas: replicas
+                .iter()
+                .map(|replica| replica_to_proto_for_state(&self.state, replica))
+                .collect(),
         }))
     }
 }

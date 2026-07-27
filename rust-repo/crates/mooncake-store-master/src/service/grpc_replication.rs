@@ -532,8 +532,11 @@ impl MasterServiceImpl {
             })?;
 
         Ok(Response::new(proto::CopyStartResponse {
-            source: Some(replica_to_proto(&source)),
-            targets: allocated.iter().map(replica_to_proto).collect(),
+            source: Some(replica_to_proto_for_state(&self.state, &source)),
+            targets: allocated
+                .iter()
+                .map(|replica| replica_to_proto_for_state(&self.state, replica))
+                .collect(),
         }))
     }
 
@@ -1027,8 +1030,9 @@ impl MasterServiceImpl {
                 Status::unavailable(format!("failed to persist move_start oplog: {error}"))
             })?;
         Ok(Response::new(proto::MoveStartResponse {
-            source: Some(replica_to_proto(&source)),
-            target: (!target_was_existing).then(|| replica_to_proto(&target)),
+            source: Some(replica_to_proto_for_state(&self.state, &source)),
+            target: (!target_was_existing)
+                .then(|| replica_to_proto_for_state(&self.state, &target)),
         }))
     }
 

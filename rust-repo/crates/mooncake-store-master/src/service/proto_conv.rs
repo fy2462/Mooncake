@@ -10,6 +10,7 @@
 //! and all `from_proto` functions deserialize protobuf messages to internal types (for gRPC requests).
 
 use crate::proto;
+use crate::service::state::MasterState;
 use mooncake_store_core::{
     NoFSegment, NoFSegmentOwnerInfo, ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType,
     ReplicateConfig, TaskStatus, TaskType,
@@ -49,6 +50,15 @@ pub(crate) fn uuid_from_proto(p: &proto::Uuid) -> Uuid {
 /// 将内部 ReplicaDescriptor 序列化为 proto 格式，供 gRPC 响应使用。
 /// Serialize internal ReplicaDescriptor to proto format for gRPC responses.
 pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescriptor {
+    replica_to_proto_with_transport_endpoint(r, &r.segment_name)
+}
+
+/// Serialize a replica while preserving the distinction between its logical
+/// segment name and the endpoint used by the Transfer Engine data plane.
+pub(crate) fn replica_to_proto_with_transport_endpoint(
+    r: &ReplicaDescriptor,
+    transport_endpoint: &str,
+) -> proto::ReplicaDescriptor {
     proto::ReplicaDescriptor {
         segment_id: Some(uuid_to_proto(r.segment_id)),
         segment_name: r.segment_name.clone(),
@@ -58,7 +68,7 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         slice_key_hash: vec![],
         size: r.size,
         holder_client_id: r.holder_client_id.map(uuid_to_proto),
-        transport_endpoint: r.segment_name.clone(),
+        transport_endpoint: transport_endpoint.to_string(),
         file_path: if r.replica_type == ReplicaType::Disk {
             r.segment_name.clone()
         } else {
@@ -71,6 +81,27 @@ pub(crate) fn replica_to_proto(r: &ReplicaDescriptor) -> proto::ReplicaDescripto
         local_disk_storage_id: r.local_disk_storage_id.map(uuid_to_proto),
         local_disk_generation_id: r.local_disk_generation_id.map(uuid_to_proto),
     }
+}
+
+/// Resolve the transport-only address from the mounted segment registry.
+/// Replica metadata deliberately retains the logical segment name for
+/// placement, accounting, and snapshot compatibility.
+pub(crate) fn replica_to_proto_for_state(
+    state: &MasterState,
+    r: &ReplicaDescriptor,
+) -> proto::ReplicaDescriptor {
+    let endpoint = match r.replica_type {
+        ReplicaType::Memory => state
+            .segments
+            .get(&r.segment_id)
+            .map(|entry| entry.segment.te_endpoint.clone()),
+        ReplicaType::NoFSsd => state
+            .nof_segments
+            .get(&r.segment_id)
+            .map(|entry| entry.segment.te_endpoint.clone()),
+        _ => None,
+    };
+    replica_to_proto_with_transport_endpoint(r, endpoint.as_deref().unwrap_or(&r.segment_name))
 }
 
 /// 从 proto 反序列化回 ReplicaDescriptor，status/replica_type 枚举值按 C++ 约定映射。

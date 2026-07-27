@@ -189,7 +189,10 @@ impl MasterServiceImpl {
             let expected_replica_count =
                 memory_replica_count + nof_replica_count + usize::from(disk_enabled);
             if replicas.len() == expected_replica_count {
-                let proto_r: Vec<_> = replicas.iter().map(replica_to_proto).collect();
+                let proto_r: Vec<_> = replicas
+                    .iter()
+                    .map(|replica| replica_to_proto_for_state(&self.state, replica))
+                    .collect();
                 sync_segment_usage(
                     &self.state,
                     replicas

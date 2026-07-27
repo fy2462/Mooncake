@@ -100,12 +100,12 @@ impl MooncakeClient {
     ///    使其可用作数据传输的源/目标。
     ///
     /// 7. **Allocate segment buffer** (if `global_segment_size > 0`) — allocate a
-    ///    large memory region, register it with the TE, call `open_segment` so the
-    ///    TE knows which registered memory backs this segment, and send a
+    ///    large memory region, register it with the TE, publish the TE's actual
+    ///    transport endpoint, and send a
     ///    `MountSegmentRequest` to the master to announce the segment.
     ///
     ///    分配 segment 缓冲区（如果 global_segment_size > 0）—— 分配大块内存，
-    ///    向 TE 注册，调用 open_segment 让 TE 知道哪块注册内存支撑此 segment，
+    ///    向 TE 注册，并发布 TE 实际的传输端点，
     ///    并向 master 发送 MountSegmentRequest 宣告此 segment。
     ///    C++ 等价：`Client::MountSegment(...)`。
     ///
@@ -570,6 +570,7 @@ impl MooncakeClient {
             let engine = engine
                 .as_deref()
                 .expect("data-plane segment validation requires Transfer Engine");
+            let transport_endpoint = engine.get_local_ip_and_port()?;
             let max_mr_size = Self::resolve_max_mr_size(
                 effective_protocol,
                 global_segment_size,
@@ -604,11 +605,6 @@ impl MooncakeClient {
                 }
                 prepared.push(seg_buf);
             }
-            if let Err(error) = engine.open_segment(local_host) {
-                release_failed_store_segments(engine, local_host, prepared);
-                return Err(error.into());
-            }
-
             let mut prepared = prepared.into_iter();
             while let Some(seg_buf) = prepared.next() {
                 let size = seg_buf.len() as u64;
@@ -617,7 +613,7 @@ impl MooncakeClient {
                     local_host,
                     seg_buf.as_ptr() as u64,
                     size,
-                    local_host,
+                    &transport_endpoint,
                     effective_protocol,
                     &host_id,
                 );
@@ -629,7 +625,7 @@ impl MooncakeClient {
                     segment_name: local_host.to_string(),
                     size,
                     base_addr: seg_buf.as_ptr() as u64,
-                    te_endpoint: local_host.to_string(),
+                    te_endpoint: transport_endpoint.clone(),
                     protocol: effective_protocol.to_string(),
                     host_id: host_id.clone(),
                 };

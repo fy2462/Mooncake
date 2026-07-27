@@ -157,7 +157,7 @@ impl MasterServiceImpl {
         // reserved until orphan cleanup durably retires it.
         self.persist_object_image_or_remove(&scoped_key, "promotion_alloc_start")?;
         Ok(Response::new(proto::PromotionAllocStartResponse {
-            memory_descriptor: Some(replica_to_proto(&staged)),
+            memory_descriptor: Some(replica_to_proto_for_state(&self.state, &staged)),
         }))
     }
 

@@ -1,5 +1,6 @@
 use super::*;
 use crate::service::helpers::replica_is_routable;
+use crate::service::proto_conv::replica_to_proto_for_state;
 
 impl MasterServiceImpl {
     // ---- GetReplicaList ----
@@ -48,7 +49,10 @@ impl MasterServiceImpl {
             .filter(|replica| replica_is_routable(&self.state, replica))
             .collect::<Vec<_>>();
         let first_replica_type = complete[0].replica_type;
-        let completed_replicas = complete.into_iter().map(replica_to_proto).collect();
+        let completed_replicas = complete
+            .into_iter()
+            .map(|replica| replica_to_proto_for_state(&self.state, replica))
+            .collect();
         let object_size = entry.size;
 
         // Promotion admission reacquires the tenant-scoped mutation gate.
@@ -76,7 +80,7 @@ impl MasterServiceImpl {
                     .replicas
                     .iter()
                     .filter(|r| replica_is_routable(&self.state, r))
-                    .map(replica_to_proto)
+                    .map(|replica| replica_to_proto_for_state(&self.state, replica))
                     .collect();
                 if replicas.is_empty() {
                     return Err(Status::failed_precondition("replica is not ready"));
@@ -167,7 +171,7 @@ impl MasterServiceImpl {
                 .replicas
                 .iter()
                 .filter(|replica| replica_is_routable(&self.state, replica))
-                .map(replica_to_proto)
+                .map(|replica| replica_to_proto_for_state(&self.state, replica))
                 .collect::<Vec<_>>();
             if completed_replicas.is_empty() {
                 tracing::warn!(
@@ -320,7 +324,11 @@ impl MasterServiceImpl {
             if !pattern.is_match(&entry.user_key) {
                 continue;
             }
-            let r = entry.replicas.iter().map(replica_to_proto).collect();
+            let r = entry
+                .replicas
+                .iter()
+                .map(|replica| replica_to_proto_for_state(&self.state, replica))
+                .collect();
             entries.push(proto::query_by_regex_response::Entry {
                 key: entry.key().clone(),
                 replicas: r,

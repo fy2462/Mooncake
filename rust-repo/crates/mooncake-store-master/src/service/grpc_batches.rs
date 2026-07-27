@@ -174,7 +174,10 @@ impl MasterServiceImpl {
                             && complete
                                 .iter()
                                 .any(|replica| replica.replica_type == ReplicaType::LocalDisk);
-                        let replicas = complete.into_iter().map(replica_to_proto).collect();
+                        let replicas = complete
+                            .into_iter()
+                            .map(|replica| replica_to_proto_for_state(&self.state, replica))
+                            .collect();
                         hits.push(BatchGetHit {
                             scoped_key: scoped_key.clone(),
                             first_replica_type,
@@ -609,7 +612,10 @@ impl MasterServiceImpl {
                 config,
             ) {
                 Ok(replicas) => {
-                    let proto_replicas = replicas.iter().map(replica_to_proto).collect::<Vec<_>>();
+                    let proto_replicas = replicas
+                        .iter()
+                        .map(|replica| replica_to_proto_for_state(&self.state, replica))
+                        .collect::<Vec<_>>();
                     let status = BatchStatus::Success.into();
                     statuses.push(status);
                     all_replicas.extend(proto_replicas.iter().cloned());
