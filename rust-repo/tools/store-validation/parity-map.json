@@ -2096,6 +2096,62 @@
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp InFlightPromotionTaskSnapshotSafe and Rust restore transient-promotion cleanup", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "snapshot_restore_keeps_committed_object_readable_and_quarantines_orphan_promotion_range"}],
       "status": "covered"
+    },
+    {
+      "behavior": "The C++ snapshot manifest encodes the messagepack protocol, version 1.0.0, and exact snapshot ID separated by pipes.",
+      "boundary": ["master", "ha", "snapshot", "manifest", "cpp-wire"],
+      "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.EncodeManifestPreservesSnapshotId"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeManifestPreservesSnapshotId and Rust catalog manifest publisher", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Encoding and decoding an empty Master state produces non-empty metadata, segment, and task payloads and restores successfully.",
+      "boundary": ["master", "ha", "snapshot", "codec", "round-trip"],
+      "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.EncodeDecodeRoundTrip"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeDecodeRoundTrip and Rust catalog provider publish/load", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Snapshot decode restores segments before Memory replicas so the restored object remains queryable with its backing segment.",
+      "boundary": ["master", "ha", "snapshot", "memory-replica", "restore-order"],
+      "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.EncodeDecodeRoundTripWithMemoryReplica"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeDecodeRoundTripWithMemoryReplica and Rust C++-compatible catalog round-trip", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Corrupt snapshot payload bytes fail decoding rather than partially restoring Master state.",
+      "boundary": ["master", "ha", "snapshot", "codec", "corruption"],
+      "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.DecodeWithCorruptPayloadFails"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp DecodeWithCorruptPayloadFails and Rust bounded zstd/MessagePack decoders", "reviewed": true},
+      "rust": [
+        {"file": "mooncake-store-master/src/ha/catalog_snapshot.rs", "test": "messagepack_decoder_rejects_trailing_bytes"},
+        {"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "invalid_zstd_payload_fails_closed"}
+      ],
+      "status": "covered"
+    },
+    {
+      "behavior": "The C++ snapshot codec rejects a null target MasterService pointer before decoding payloads.",
+      "boundary": ["cpp-only", "master", "snapshot", "null-pointer"],
+      "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.DecodeWithNullService"},
+      "reason": "Rust snapshot restore APIs require an owned or borrowed concrete state/service reference, so a null target is unrepresentable in safe Rust.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp DecodeWithNullService and Rust typed restore APIs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "A structurally valid task payload with a wrong field type returns a decode error without throwing or aborting snapshot fallback.",
+      "boundary": ["master", "ha", "snapshot", "task-codec", "type-error"],
+      "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.DecodeWithInvalidTaskFieldTypeReturnsError"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp DecodeWithInvalidTaskFieldTypeReturnsError and Rust task decoder", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "malformed_or_duplicate_tasks_fail_closed"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
