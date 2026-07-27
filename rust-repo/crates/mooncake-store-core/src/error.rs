@@ -155,3 +155,16 @@ pub enum StoreError {
 /// Convenience type alias — every fallible function in this crate returns this.
 /// 便利类型别名——本 crate 中所有可能失败的函数都返回此类型。
 pub type StoreResult<T> = Result<T, StoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::StoreError;
+
+    #[test]
+    fn rpc_timeout_error_is_distinct_and_human_readable() {
+        let err = StoreError::RpcTimeout("expired".into());
+        assert_eq!(err.to_string(), "rpc timeout: expired");
+        assert!(matches!(&err, StoreError::RpcTimeout(message) if message == "expired"));
+        assert!(!matches!(&err, StoreError::ServiceUnavailable));
+    }
+}

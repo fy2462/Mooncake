@@ -246,6 +246,102 @@
       "reason": "Rust Store does not use the C++ ThreadPool class; workload and fault tests cover its Tokio/component worker behavior at product boundaries.",
       "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
       "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "An RPC deadline failure has a dedicated timeout error class, distinct from generic service failure, with a human-readable timeout message.",
+      "boundary": ["client", "rpc", "error-contract"],
+      "cpp": {"file": "rpc_timeout_test.cpp", "test": "RpcTimeoutTest.ErrorCodeValueAndString"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/rpc_timeout_test.cpp, ErrorCode::RPC_TIMEOUT, and toString", "reviewed": true},
+      "rust": [
+        {"file": "mooncake-store-client/src/client/tests.rs", "test": "deadline_exceeded_maps_to_rpc_timeout"},
+        {"file": "mooncake-store-core/src/error.rs", "test": "rpc_timeout_error_is_distinct_and_human_readable"}
+      ],
+      "status": "covered"
+    },
+    {
+      "behavior": "A configured short RPC timeout bounds an unanswered readiness call and reports timeout rather than generic RPC failure.",
+      "boundary": ["client", "rpc", "timeout", "fault-injection"],
+      "cpp": {"file": "rpc_timeout_test.cpp", "test": "RpcTimeoutTest.RpcTimesOutAgainstUnresponsiveMaster"},
+      "reason": "Rust separately tests timeout configuration parsing and deadline status mapping, but has no black-hole server test proving an actual RPC honors the configured wall-clock budget.",
+      "review": {"oracle": "mooncake-store/tests/rpc_timeout_test.cpp and BlackHoleServer", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Republishing byte-identical RPC metadata is idempotent and leaves the original metadata available.",
+      "boundary": ["master", "http-metadata", "idempotency"],
+      "cpp": {"file": "http_metadata_server_test.cpp", "test": "HttpMetadataServerTest.AllowsIdempotentRpcMetaRepublish"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer PUT path", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_http_metadata.rs", "test": "test_transfer_engine_http_metadata_get_put_delete_protocol"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Republishing changed RPC metadata for an existing location is rejected and does not overwrite the original value.",
+      "boundary": ["master", "http-metadata", "conflict-safety"],
+      "cpp": {"file": "http_metadata_server_test.cpp", "test": "HttpMetadataServerTest.RejectsChangedRpcMetaRepublish"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer PUT conflict path", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_http_metadata.rs", "test": "test_transfer_engine_http_metadata_get_put_delete_protocol"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Starting the HTTP metadata listener on an occupied address reports bind failure.",
+      "boundary": ["master", "http-metadata", "startup-failure"],
+      "cpp": {"file": "http_metadata_server_test.cpp", "test": "HttpMetadataServerTest.StartReportsBindFailure"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer::Start", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_http_metadata.rs", "test": "test_metadata_listener_reports_occupied_port"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A CXL-backed client can put and get an object with exact byte preservation.",
+      "boundary": ["client", "cxl", "data-path"],
+      "cpp": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.BasicPutGetOperations"},
+      "reason": "Rust tests CXL configuration and placement selection but has no end-to-end CXL put/get byte-integrity test.",
+      "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL client data path", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A CXL-backed client supports batch put and get while preserving every object's bytes.",
+      "boundary": ["client", "cxl", "batch", "data-path"],
+      "cpp": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.BatchPutGetOperations"},
+      "reason": "Rust has no end-to-end CXL batch put/get integrity test.",
+      "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL batch data path", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Evicting a CXL-backed object removes it from the client-visible data path.",
+      "boundary": ["client", "cxl", "eviction"],
+      "cpp": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.EvictOperation"},
+      "reason": "Rust has no end-to-end CXL eviction test.",
+      "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL eviction path", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Snapshot-only standby startup restores configured snapshot metadata, discards stale state, and exposes the restored sequence as applied progress.",
+      "boundary": ["master", "ha", "snapshot", "recovery"],
+      "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartBootstrapsFromConfiguredBackend"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and HotStandbyService snapshot bootstrap", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "test_snapshot_bootstrap_replaces_stale_state_and_rebuilds_allocator_holes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Snapshot-only standby startup with no available snapshot succeeds from an empty metadata and sequence baseline.",
+      "boundary": ["master", "ha", "snapshot", "empty-baseline"],
+      "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartUsesEmptyBaselineWhenSnapshotMissing"},
+      "reason": "Rust tests snapshot load success and failure fallback paths, but has no direct snapshot-only no-snapshot test asserting empty state and zero applied/primary sequence.",
+      "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and missing-snapshot startup", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "If standby startup fails due to invalid snapshot configuration, promotion returns the same failure instead of hiding it.",
+      "boundary": ["master", "ha", "promotion", "error-propagation"],
+      "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "StandbyControllerTest.PromoteStandbyReturnsStartFailure"},
+      "reason": "Rust tests bootstrap and promotion failures independently, but has no controller test proving promotion propagates a prior standby-start configuration failure.",
+      "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and StandbyController", "reviewed": true},
+      "rust": [], "status": "missing"
     }
   ],
   "schema_version": 1
