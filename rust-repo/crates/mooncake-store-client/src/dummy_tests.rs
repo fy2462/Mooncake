@@ -45,6 +45,21 @@ fn shared_memory_pool_is_fd_backed() {
 }
 
 #[test]
+fn ipc_channel_sends_raw_payload() {
+    let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
+    let mut client = DummyIpcChannel::from_stream(left);
+    let mut server = DummyIpcChannel::from_stream(right);
+
+    client.send_raw(&41_u32.to_ne_bytes()).unwrap();
+    let request = server.recv_exact(mem::size_of::<u32>()).unwrap();
+    let response = u32::from_ne_bytes(request.try_into().unwrap()) + 1;
+    server.send_raw(&response.to_ne_bytes()).unwrap();
+
+    let response = client.recv_exact(mem::size_of::<u32>()).unwrap();
+    assert_eq!(u32::from_ne_bytes(response.try_into().unwrap()), 42);
+}
+
+#[test]
 fn ipc_channel_sends_and_receives_fd() {
     let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
     let client = DummyIpcChannel::from_stream(left);

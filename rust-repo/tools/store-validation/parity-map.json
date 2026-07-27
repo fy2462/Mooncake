@@ -398,6 +398,90 @@
       "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and legacy unscoped-key parsing", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "scoped_key_preserves_wire_format_and_local_nuls"}],
       "status": "covered"
+    },
+    {
+      "behavior": "A Unix-domain IPC connection transfers an exact raw request and response payload in both directions.",
+      "boundary": ["client", "uds", "ipc", "payload"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.SendsRawPayload"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnection raw I/O", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_channel_sends_raw_payload"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Unix-domain IPC transfers an SCM_RIGHTS file descriptor from the initiating endpoint and the receiver can use the same underlying file.",
+      "boundary": ["client", "uds", "ipc", "fd-passing"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.SendsFdFromClientToServer"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnection::sendFd/recvFd", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_channel_sends_and_receives_fd"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Receiving an SCM_RIGHTS descriptor with a shorter-than-required payload fails and closes the received descriptor.",
+      "boundary": ["client", "uds", "ipc", "truncation-safety"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.RejectsFdWithPartialPayload"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnection::recvFd truncation handling", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_channel_rejects_fd_with_partial_payload"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Unix-domain IPC transfers an SCM_RIGHTS file descriptor from the accepting endpoint and the initiator can use the same underlying file.",
+      "boundary": ["client", "uds", "ipc", "fd-passing"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.SendsFdFromServerToClient"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and symmetric UdsConnection descriptor passing", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_channel_sends_and_receives_fd"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Stopping the C++ background UDS acceptor wakes its accept loop and removes the listening endpoint.",
+      "boundary": ["cpp-only", "uds", "acceptor-lifecycle"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.StopWakesAcceptLoop"},
+      "reason": "Rust Dummy IPC exposes a caller-owned one-shot listener rather than the C++ background UdsAcceptor, so this internal accept-loop lifecycle is not a Rust API contract.",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor, and Rust DummyIpcChannel::listen_once", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Stopping the C++ background UDS acceptor shuts down active connections so blocked handlers wake and exit.",
+      "boundary": ["cpp-only", "uds", "acceptor-lifecycle"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.StopWakesActiveClientHandler"},
+      "reason": "Rust Dummy IPC does not own a background acceptor or handler threads; connection and thread cancellation remain with its caller.",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::stop, and Rust DummyIpcChannel", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "A Unix-domain connector rejects a non-positive connection timeout before attempting to connect.",
+      "boundary": ["client", "uds", "timeout", "validation"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectRejectsNonPositiveTimeout"},
+      "reason": "Rust DummyIpcChannel has no configurable connect-timeout parameter or validation contract.",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnector timeout validation", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "Connecting to a missing Unix-domain endpoint with a short timeout fails promptly and identifies the endpoint.",
+      "boundary": ["client", "uds", "timeout", "failure-reporting"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectFailureReturnsPromptlyWithShortTimeout"},
+      "reason": "Rust uses blocking UnixStream::connect without an explicit timeout budget and has no prompt-failure/error-context test.",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnector timed connect", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "After a timed Unix-domain connect succeeds, the connector clears its temporary socket send timeout.",
+      "boundary": ["cpp-only", "uds", "connector-implementation"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectClearsSendTimeout"},
+      "reason": "Rust UnixStream::connect does not install a temporary SO_SNDTIMEO, so clearing that C++ implementation detail is not applicable.",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsConnector, and Rust DummyIpcChannel::connect", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Starting the C++ background UDS acceptor without a registered handler fails with an explicit handler error.",
+      "boundary": ["cpp-only", "uds", "acceptor-lifecycle"],
+      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.StartRequiresRegisteredHandler"},
+      "reason": "Rust Dummy IPC exposes no handler-registration or background acceptor API; callers invoke the one-shot listener and process the returned channel directly.",
+      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::start, and Rust DummyIpcChannel::listen_once", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1
