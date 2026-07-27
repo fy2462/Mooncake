@@ -502,17 +502,24 @@ mod tests {
         assert_eq!(ops.register_calls.load(Ordering::Relaxed), 1);
         assert!(first.release());
         assert_eq!(manager.pinned_bytes_for_test(), 0);
-        assert!(manager.try_pin(0x2000, 64, "second").is_some());
+        assert_eq!(ops.unregister_calls.load(Ordering::Relaxed), 1);
+        let mut second = manager.try_pin(0x2000, 64, "second").unwrap();
+        assert_eq!(ops.register_calls.load(Ordering::Relaxed), 2);
+        assert!(second.release());
+        assert_eq!(ops.unregister_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn overlap_is_rejected_but_adjacent_ranges_are_allowed() {
         let (manager, ops) = manager(128);
-        let _first = manager.try_pin(0x1010, 32, "first").unwrap();
+        let mut first = manager.try_pin(0x1010, 32, "first").unwrap();
         assert!(manager.try_pin(0x1010, 32, "duplicate").is_none());
         assert!(manager.try_pin(0x1020, 16, "overlap").is_none());
-        assert!(manager.try_pin(0x1030, 16, "adjacent").is_some());
+        let mut adjacent = manager.try_pin(0x1030, 16, "adjacent").unwrap();
         assert_eq!(ops.register_calls.load(Ordering::Relaxed), 2);
+        assert!(adjacent.release());
+        assert!(first.release());
+        assert_eq!(ops.unregister_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -522,7 +529,10 @@ mod tests {
         assert!(manager.try_pin(0x1000, 32, "failure").is_none());
         assert_eq!(manager.pinned_bytes_for_test(), 0);
         ops.register_succeeds.store(true, Ordering::Relaxed);
-        assert!(manager.try_pin(0x1000, 32, "retry").is_some());
+        let mut retried = manager.try_pin(0x1000, 32, "retry").unwrap();
+        assert_eq!(ops.register_calls.load(Ordering::Relaxed), 2);
+        assert!(retried.release());
+        assert_eq!(ops.unregister_calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -537,9 +547,12 @@ mod tests {
         let mut failed = manager.try_pin(0x2000, 32, "failed").unwrap();
         *ops.unregister_result.lock().unwrap() = UnregisterResult::Error;
         assert!(!failed.release());
+        assert_eq!(ops.unregister_calls.load(Ordering::Relaxed), 2);
         assert_eq!(manager.pinned_bytes_for_test(), 32);
         assert!(manager.try_pin(0x2000, 32, "same range").is_none());
         assert!(manager.try_pin(0x3000, 32, "quota retained").is_none());
+        assert_eq!(ops.register_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(ops.unregister_calls.load(Ordering::Relaxed), 2);
     }
 
     #[test]

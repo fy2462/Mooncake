@@ -121,33 +121,33 @@
       "behavior": "Pinned-memory registration rejects duplicate and overlapping ranges while accepting an adjacent range, and each accepted range unregisters exactly once when released.",
       "boundary": ["transfer-engine-ffi", "memory-registration", "ownership"],
       "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.OverlapAndDuplicateAreRejected"},
-      "reason": "Rust implements overlap checks for owner-backed registrations but has no discoverable fake-native test proving duplicate/overlap rejection, adjacent acceptance, and exact unregister calls.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "overlap_is_rejected_but_adjacent_ranges_are_allowed"}], "status": "covered"
     },
     {
       "behavior": "Pinned-memory quota rejects capacity beyond the configured limit, releasing a region refunds capacity, and a later full-size registration succeeds and unregisters once.",
       "boundary": ["transfer-engine-ffi", "memory-registration", "quota"],
       "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.QuotaRejectsAndReleaseRefunds"},
-      "reason": "Rust owner-backed registration has no equivalent configured pinned-byte quota test with release/refund accounting.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager quota accounting", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "quota_rejects_and_release_refunds"}], "status": "covered"
     },
     {
       "behavior": "A failed native pin operation refunds its reservation so retrying the same range after native recovery succeeds and later unregisters exactly once.",
       "boundary": ["transfer-engine-ffi", "memory-registration", "error-recovery"],
       "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.RegisterFailureRefundsReservation"},
-      "reason": "Rust has no discoverable fake-native regression test proving failed registration leaves no live or blocked reservation and permits an exact retry.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager registration rollback", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "registration_failure_refunds_reservation"}], "status": "covered"
     },
     {
       "behavior": "A failed native unregister retains the address and quota reservation, preventing overlapping or capacity-consuming replacement registrations from reusing unsafe memory.",
       "boundary": ["transfer-engine-ffi", "memory-registration", "failure-safety"],
       "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.UnregisterFailureRetainsReservation"},
-      "reason": "Rust records blocked ranges after Drop-time unregister failure, but no discoverable fake-native test proves the range remains unavailable after the failure.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager unregister failure path", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "runtime_unloading_releases_but_unregister_error_retains_reservation"}], "status": "covered"
     },
     {
       "behavior": "Copying host bytes to an accelerator pointer selects the matching device, switches to its device ordinal, performs a host-to-device copy, and preserves the bytes.",

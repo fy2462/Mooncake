@@ -28,6 +28,7 @@ class InventoryTest(unittest.TestCase):
             [(ref.file, ref.name) for ref in refs],
             [
                 ("rust_tests.rs", "degraded_read_uses_remaining_replica"),
+                ("rust_tests.rs", "test_after_lifetime_is_discovered"),
                 ("rust_tests.rs", "tokio_restart_recovers_catalog"),
             ],
         )

@@ -33,7 +33,7 @@ class TestRef:
     name: str
 
 
-def _strip_c_like_comments(text: str) -> str:
+def _strip_c_like_comments(text: str, *, single_quoted_strings: bool = True) -> str:
     """Remove C/C++ comments while preserving strings and line structure."""
     output: list[str] = []
     index = 0
@@ -43,7 +43,7 @@ def _strip_c_like_comments(text: str) -> str:
         char = text[index]
         next_char = text[index + 1] if index + 1 < len(text) else ""
         if state == "code":
-            if char in {'"', "'"}:
+            if char == '"' or (single_quoted_strings and char == "'"):
                 state = "string"
                 quote = char
                 output.append(char)
@@ -112,7 +112,9 @@ def discover_cpp_tests(root: Path) -> list[TestRef]:
 def discover_rust_tests(root: Path) -> list[TestRef]:
     refs: list[TestRef] = []
     for path in _iter_files(root, RUST_SUFFIXES):
-        text = _strip_c_like_comments(path.read_text(encoding="utf-8"))
+        text = _strip_c_like_comments(
+            path.read_text(encoding="utf-8"), single_quoted_strings=False
+        )
         relative = path.relative_to(root).as_posix()
         refs.extend(
             TestRef("rust", relative, name) for name in RUST_TEST_RE.findall(text)
