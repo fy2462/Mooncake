@@ -1278,9 +1278,10 @@
       "behavior": "MC_STORE_CLIENT_METRIC_BANDWIDTH=0 removes bandwidth lines from the client summary.",
       "boundary": ["client", "metrics", "configuration", "bandwidth"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.BandwidthSummaryRespectsEnvFlag"},
-      "reason": "Rust reads the same environment flag but has no test proving that disabled bandwidth output is omitted.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp BandwidthSummaryRespectsEnvFlag and Rust ClientMetrics::from_environment", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "bandwidth_environment_flag_disables_throughput_summary"}],
+      "status": "covered"
     },
     {
       "behavior": "Client metrics can omit all master RPC summary and serialized series while retaining transfer metrics.",
@@ -1295,17 +1296,19 @@
       "behavior": "Prometheus serialization applies instance, cluster, replica, and mount-segment labels to every metric family.",
       "boundary": ["client", "metrics", "prometheus", "labels"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.SerializeWithDynamicLabels"},
-      "reason": "Rust currently exposes and tests only cluster_id; it does not implement the complete C++ dynamic-label set.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp SerializeWithDynamicLabels and Rust ClientMetrics labels", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "prometheus_applies_all_static_labels_to_every_metric_family"}],
+      "status": "covered"
     },
     {
       "behavior": "Prometheus serialization omits dynamic label names when no labels are configured.",
       "boundary": ["client", "metrics", "prometheus", "labels"],
       "cpp": {"file": "client_metrics_test.cpp", "test": "ClientMetricsTest.SerializeWithoutDynamicLabels"},
-      "reason": "Rust has no test asserting the absence of all C++ dynamic label names across metric families.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_metrics_test.cpp SerializeWithoutDynamicLabels and Rust ClientMetrics labels", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/metrics.rs", "test": "prometheus_without_static_labels_omits_dynamic_label_names"}],
+      "status": "covered"
     },
     {
       "behavior": "Enabled client HTTP metrics and summary endpoints return 200 with metric data.",

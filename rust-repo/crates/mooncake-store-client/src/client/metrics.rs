@@ -217,11 +217,13 @@ impl ClientMetrics {
                 .ok()
                 .as_deref(),
         );
-        let cluster_id = std::env::var("MC_STORE_CLUSTER_ID")
+        let labels = std::env::var("MC_STORE_CLUSTER_ID")
             .ok()
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
+            .map(|value| HashMap::from([("cluster_id".to_string(), value)]))
+            .unwrap_or_default();
         Self::new_with_reporting_interval(
-            cluster_id,
+            labels,
             bandwidth_summary_enabled,
             true,
             reporting_interval,
@@ -230,12 +232,12 @@ impl ClientMetrics {
     }
 
     pub(super) fn new(
-        cluster_id: Option<String>,
+        labels: HashMap<String, String>,
         bandwidth_summary_enabled: bool,
         master_rpc_metrics_enabled: bool,
     ) -> StoreResult<Self> {
         Self::new_with_reporting_interval(
-            cluster_id,
+            labels,
             bandwidth_summary_enabled,
             master_rpc_metrics_enabled,
             Duration::ZERO,
@@ -243,14 +245,11 @@ impl ClientMetrics {
     }
 
     fn new_with_reporting_interval(
-        cluster_id: Option<String>,
+        labels: HashMap<String, String>,
         bandwidth_summary_enabled: bool,
         master_rpc_metrics_enabled: bool,
         reporting_interval: Duration,
     ) -> StoreResult<Self> {
-        let labels = cluster_id
-            .map(|value| HashMap::from([("cluster_id".to_string(), value)]))
-            .unwrap_or_default();
         let opts = |name, help| Opts::new(name, help).const_labels(labels.clone());
         let histogram_opts = |name, help, buckets: &[f64]| {
             HistogramOpts::new(name, help)
@@ -764,10 +763,15 @@ impl ClientMetrics {
 }
 
 fn parse_bool_env(name: &str, default: bool) -> bool {
-    let Ok(value) = std::env::var(name) else {
+    let value = std::env::var(name).ok();
+    parse_bool_value(name, value.as_deref(), default)
+}
+
+fn parse_bool_value(name: &str, value: Option<&str>, default: bool) -> bool {
+    let Some(value) = value else {
         return default;
     };
-    match crate::utils::string_to_bool(&value) {
+    match crate::utils::string_to_bool(value) {
         Some(parsed) => parsed,
         None if value.eq_ignore_ascii_case("enable") => true,
         None if value.eq_ignore_ascii_case("disable") => false,
@@ -869,12 +873,18 @@ fn format_rate_with_suffix(value: f64, suffix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMetrics, TransferOperationKind, parse_metrics_interval};
+    use super::{ClientMetrics, TransferOperationKind, parse_bool_value, parse_metrics_interval};
+    use std::collections::HashMap;
     use std::time::Duration;
 
     #[test]
     fn persistent_registry_exports_cpp_metric_names_and_summary() {
-        let metrics = ClientMetrics::new(Some("test-cluster".to_string()), true, true).unwrap();
+        let metrics = ClientMetrics::new(
+            HashMap::from([("cluster_id".to_string(), "test-cluster".to_string())]),
+            true,
+            true,
+        )
+        .unwrap();
         metrics.observe_transfer_bytes(TransferOperationKind::Read, 5 * 1024 * 1024);
         metrics.observe_transfer_bytes(TransferOperationKind::Write, 10 * 1024 * 1024);
         metrics.observe_get(2 * 1024, Duration::from_micros(220));
@@ -908,7 +918,7 @@ mod tests {
 
     #[test]
     fn disabled_master_rpc_metrics_are_omitted_from_summary_and_prometheus() {
-        let metrics = ClientMetrics::new(None, true, false).unwrap();
+        let metrics = ClientMetrics::new(HashMap::new(), true, false).unwrap();
         metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
         metrics.observe_rpc("GetReplicaList", Duration::from_micros(75));
 
@@ -923,7 +933,7 @@ mod tests {
 
     #[test]
     fn summary_is_compact_and_preserves_count_and_latency_bounds() {
-        let metrics = ClientMetrics::new(None, true, true).unwrap();
+        let metrics = ClientMetrics::new(HashMap::new(), true, true).unwrap();
         metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024 * 1024);
         metrics.observe_get(1024 * 1024, Duration::from_micros(200));
         metrics.observe_rpc("GetReplicaList", Duration::from_micros(250));
@@ -936,6 +946,72 @@ mod tests {
         assert!(summary.contains("count="), "{summary}");
         assert!(summary.contains("p95<"), "{summary}");
         assert!(summary.contains("max<"), "{summary}");
+    }
+
+    #[test]
+    fn prometheus_applies_all_static_labels_to_every_metric_family() {
+        let labels = HashMap::from([
+            ("instance_id".to_string(), "12345".to_string()),
+            ("cluster_id".to_string(), "cluster1".to_string()),
+            ("replica_id".to_string(), "replica1".to_string()),
+            ("mount_segment_id".to_string(), "mount1".to_string()),
+        ]);
+        let metrics = ClientMetrics::new(labels, true, true).unwrap();
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
+        metrics.observe_get(1024, Duration::from_micros(200));
+        metrics.observe_rpc("GetReplicaList", Duration::from_micros(250));
+
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        for family in [
+            "mooncake_transfer_read_bytes",
+            "mooncake_transfer_get_latency",
+            "mooncake_client_rpc_count",
+            "mooncake_client_rpc_latency",
+        ] {
+            let line = text
+                .lines()
+                .find(|line| line.starts_with(family) && !line.starts_with("#"))
+                .unwrap_or_else(|| panic!("missing metric family {family}: {text}"));
+            for label in [
+                "instance_id=\"12345\"",
+                "cluster_id=\"cluster1\"",
+                "replica_id=\"replica1\"",
+                "mount_segment_id=\"mount1\"",
+            ] {
+                assert!(line.contains(label), "{family} lacks {label}: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn prometheus_without_static_labels_omits_dynamic_label_names() {
+        let metrics = ClientMetrics::new(HashMap::new(), true, true).unwrap();
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
+        metrics.observe_rpc("GetReplicaList", Duration::from_micros(250));
+
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        for label_name in [
+            "instance_id",
+            "cluster_id",
+            "replica_id",
+            "mount_segment_id",
+        ] {
+            assert!(
+                !text.contains(label_name),
+                "unexpected {label_name}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn bandwidth_environment_flag_disables_throughput_summary() {
+        let enabled = parse_bool_value("MC_STORE_CLIENT_METRIC_BANDWIDTH", Some("0"), true);
+        let metrics = ClientMetrics::new(HashMap::new(), enabled, true).unwrap();
+        metrics.observe_transfer_bytes(TransferOperationKind::Read, 1024);
+
+        let summary = metrics.summary();
+        assert!(!summary.contains("Average Read Throughput:"), "{summary}");
+        assert!(!summary.contains("Average Write Throughput:"), "{summary}");
     }
 
     #[test]
