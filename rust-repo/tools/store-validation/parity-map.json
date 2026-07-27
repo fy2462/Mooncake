@@ -2224,6 +2224,108 @@
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires and Rust background reaper", "reviewed": true},
       "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas"}],
       "status": "covered"
+    },
+    {
+      "behavior": "A zero-capacity client buffer allocator rejects a nonzero allocation.", "boundary": ["client", "buffer", "allocation"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.ZeroSizeAllocator"}, "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp ZeroSizeAllocator and Rust ClientBufferAllocator", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_zero_and_overflowing_allocations_are_rejected"}], "status": "covered"
+    },
+    {
+      "behavior": "A ClientBufferAllocator created with SPDK DMA ownership releases its arena through spdk_free on destruction.", "boundary": ["cpp-only", "client", "spdk", "dma", "destructor"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SpdkDmaAllocatorDestroysWithSpdkFree"},
+      "reason": "Rust ClientBufferAllocator owns a Vec arena and never accepts SPDK DMA ownership; native registered/accelerator allocations use the separate memory_ffi ownership types.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SpdkDmaAllocatorDestroysWithSpdkFree and Rust buffer_allocator/memory_ffi ownership split", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Multiple live client-buffer allocations occupy distinct regions and all capacity returns when their RAII handles drop.", "boundary": ["client", "buffer", "allocation", "raii"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.MultipleAllocations"}, "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp MultipleAllocations and Rust allocator accounting", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_multiple_allocations"}], "status": "covered"
+    },
+    {
+      "behavior": "An allocation larger than the entire client buffer is rejected without changing accounting.", "boundary": ["client", "buffer", "allocation", "bounds"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocationTooLarge"}, "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocationTooLarge and Rust checked aligned allocation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_zero_and_overflowing_allocations_are_rejected"}], "status": "covered"
+    },
+    {
+      "behavior": "A zero-byte allocation is rejected.", "boundary": ["client", "buffer", "allocation", "zero-size"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.ZeroSizeAllocation"}, "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp ZeroSizeAllocation and Rust allocation validation", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_zero_and_overflowing_allocations_are_rejected"}], "status": "covered"
+    },
+    {
+      "behavior": "A one-byte allocation exposes the requested logical size while reserving aligned internal capacity.", "boundary": ["client", "buffer", "allocation", "alignment"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SmallAllocation"}, "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SmallAllocation and Rust logical/reserved size split", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_4k_alignment"}], "status": "covered"
+    },
+    {
+      "behavior": "Moving a C++ BufferHandle transfers ownership and nulls the source handle.", "boundary": ["language-specific", "client", "buffer", "move-semantics"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.BufferHandleMoveConstructor"},
+      "reason": "Rust moves BufferHandle ownership by language semantics and makes the source binding statically unusable, so a runtime null-source assertion is unrepresentable.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp BufferHandleMoveConstructor and Rust affine move semantics", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ pointer helper splits a BufferHandle into contiguous nonempty slices capped at kMaxSliceSize.", "boundary": ["cpp-only", "client", "buffer", "pointer-slices"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SplitIntoSlices"},
+      "reason": "Rust transfer APIs consume checked byte slices directly and do not expose the removed raw-pointer Slice helper.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlices and Rust slice-based transfer APIs", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ pointer helper emits one slice when a buffer is smaller than kMaxSliceSize.", "boundary": ["cpp-only", "client", "buffer", "pointer-slices"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SplitIntoSlicesSmallBuffer"},
+      "reason": "Rust transfer APIs consume checked byte slices directly and do not expose the removed raw-pointer Slice helper.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlicesSmallBuffer and Rust slice-based transfer APIs", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ raw pointer and length overload produces bounded slices covering the complete range.", "boundary": ["cpp-only", "client", "buffer", "raw-pointer"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SplitIntoSlicesPtrLength"},
+      "reason": "Safe Rust represents pointer and length as one slice and does not need or expose this raw-pointer reconstruction helper.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlicesPtrLength and Rust safe slices", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Eight page-sized allocations exactly exhaust an eight-page arena; a ninth fails and dropping handles makes capacity reusable.", "boundary": ["client", "buffer", "allocation", "exhaustion"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.MemoryExhaustion"}, "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp MemoryExhaustion and Rust allocator exhaustion", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_allocation_exhaustion"}], "status": "covered"
+    },
+    {
+      "behavior": "The C++ variant helper obtains total bytes from MemoryDescriptor.buffer_descriptor.", "boundary": ["cpp-only", "client", "replica-variant", "size"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.CalculateTotalSizeMemoryReplica"},
+      "reason": "Rust normalizes every replica kind to ReplicaDescriptor.size, eliminating the C++ descriptor-variant size visitor.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeMemoryReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ variant helper obtains total bytes from DiskDescriptor.object_size.", "boundary": ["cpp-only", "client", "replica-variant", "size"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.CalculateTotalSizeDiskReplica"},
+      "reason": "Rust normalizes every replica kind to ReplicaDescriptor.size, eliminating the C++ descriptor-variant size visitor.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeDiskReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ Memory descriptor size helper preserves zero.", "boundary": ["cpp-only", "client", "replica-variant", "zero-size"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.CalculateTotalSizeZeroSizeMemoryReplica"},
+      "reason": "Rust normalizes every replica kind to ReplicaDescriptor.size and has no descriptor-variant size visitor.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeZeroSizeMemoryReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ allocateSlices helper maps a Memory descriptor onto caller-owned raw memory.", "boundary": ["cpp-only", "client", "memory-replica", "raw-pointer"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesMemoryReplica"},
+      "reason": "Rust transfer planning accepts caller-owned byte slices and ReplicaDescriptor.size directly; it has no raw-pointer allocateSlices adapter.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesMemoryReplica and Rust transfer planners", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ allocateSlices helper partitions a Disk descriptor's object size over caller-owned raw memory.", "boundary": ["cpp-only", "client", "disk-replica", "raw-pointer"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesDiskReplica"},
+      "reason": "Rust transfer planning accepts caller-owned byte slices and ReplicaDescriptor.size directly; it has no raw-pointer allocateSlices adapter.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesDiskReplica and Rust transfer planners", "reviewed": true}, "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "The C++ allocateSlices helper preserves a zero-size Memory slice at the supplied pointer.", "boundary": ["cpp-only", "client", "memory-replica", "zero-size"],
+      "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesZeroSizeMemoryReplica"},
+      "reason": "Rust rejects zero-length object transfers at API validation and has no raw-pointer allocateSlices adapter.",
+      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesZeroSizeMemoryReplica and Rust transfer validation", "reviewed": true}, "rust": [], "status": "not-applicable"
     }
   ],
   "schema_version": 1

@@ -45,7 +45,8 @@ pub struct ClientBufferAllocator {
 ///
 /// ## 字段 (Fields)
 /// - `offset`: 分配区域在缓冲区中的起始偏移量
-/// - `size`: 分配的大小（已按 4K 对齐）
+/// - `size`: 调用者请求的逻辑大小
+/// - `reserved_size`: 分配器内部保留的 4K 对齐大小
 /// - `allocator`: 指向所属分配器的引用（用于 Drop 时归还内存）
 ///
 /// ## 生命周期 (Lifecycle)
@@ -55,8 +56,10 @@ pub struct ClientBufferAllocator {
 pub struct BufferHandle {
     /// 在底层缓冲区中的偏移量 (byte offset within the backing buffer)
     pub offset: usize,
-    /// 已分配区域的大小（4K 对齐） (size of the allocated region, 4K-aligned)
+    /// 调用者请求的逻辑大小 (logical size requested by the caller)
     pub size: usize,
+    /// 分配器内部保留的 4K 对齐大小 (allocator-internal 4K-aligned reservation)
+    reserved_size: usize,
     /// 分配器引用，Drop 时用于归还 (reference to allocator, used on Drop for deallocation)
     allocator: Option<Arc<Mutex<ClientBufferAllocator>>>,
 }
@@ -64,7 +67,7 @@ pub struct BufferHandle {
 impl Drop for BufferHandle {
     fn drop(&mut self) {
         if let Some(ref allocator) = self.allocator {
-            allocator.lock().deallocate(self.offset, self.size);
+            allocator.lock().deallocate(self.offset, self.reserved_size);
         }
     }
 }
@@ -97,10 +100,13 @@ impl ClientBufferAllocator {
     /// - `Some(BufferHandle)`: 分配成功
     /// - `None`: 没有足够大的连续空闲区域
     pub fn allocate(self_: &Arc<Mutex<Self>>, size: usize) -> Option<BufferHandle> {
+        if size == 0 {
+            return None;
+        }
         let mut me = self_.lock();
         // Simple first-fit with 4K alignment
         // 简单的 first-fit 策略 + 4K 对齐
-        let aligned_size = (size + 4095) & !4095;
+        let aligned_size = size.checked_add(4095)? & !4095;
         for i in 0..me.free_regions.len() {
             let (offset, free_size) = me.free_regions[i];
             if free_size >= aligned_size {
@@ -114,7 +120,8 @@ impl ClientBufferAllocator {
                 me.allocated += aligned_size;
                 return Some(BufferHandle {
                     offset,
-                    size: aligned_size,
+                    size,
+                    reserved_size: aligned_size,
                     allocator: Some(Arc::clone(self_)),
                 });
             }

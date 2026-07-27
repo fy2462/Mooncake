@@ -25,10 +25,12 @@ fn test_multiple_allocations() {
 
 #[test]
 fn test_allocation_exhaustion() {
-    let allocator = ClientBufferAllocator::new(4096);
-    let h1 = ClientBufferAllocator::allocate(&allocator, 4096).unwrap();
+    let allocator = ClientBufferAllocator::new(8 * 4096);
+    let handles = (0..8)
+        .map(|_| ClientBufferAllocator::allocate(&allocator, 4096).unwrap())
+        .collect::<Vec<_>>();
     assert!(ClientBufferAllocator::allocate(&allocator, 1).is_none());
-    drop(h1);
+    drop(handles);
     assert!(ClientBufferAllocator::allocate(&allocator, 4096).is_some());
 }
 
@@ -48,5 +50,15 @@ fn test_coalescing() {
 fn test_4k_alignment() {
     let allocator = ClientBufferAllocator::new(65536);
     let h = ClientBufferAllocator::allocate(&allocator, 100).unwrap();
-    assert_eq!(h.size, 4096);
+    assert_eq!(h.size, 100);
+    assert_eq!(allocator.lock().allocated(), 4096);
+}
+
+#[test]
+fn test_zero_and_overflowing_allocations_are_rejected() {
+    let allocator = ClientBufferAllocator::new(65536);
+    assert!(ClientBufferAllocator::allocate(&allocator, 0).is_none());
+    assert!(ClientBufferAllocator::allocate(&allocator, 65537).is_none());
+    assert!(ClientBufferAllocator::allocate(&allocator, usize::MAX).is_none());
+    assert_eq!(allocator.lock().allocated(), 0);
 }
