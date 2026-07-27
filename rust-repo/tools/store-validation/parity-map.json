@@ -869,6 +869,96 @@
       "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstVsRandomStrategyPerformance and the absence of Rust benchmark targets", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "Both offset and Cachelib-style segment allocators release an allocation and make its capacity reusable.",
+      "boundary": ["master", "allocator", "memory-lifecycle"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "BufferAllocatorTest.AllocateAndDeallocate"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp AllocateAndDeallocate and Rust offset/Cachelib-like release tests", "reviewed": true},
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_allocator_eviction.rs", "test": "test_allocator_advances_offsets_and_reuses_freed_space"},
+        {"file": "mooncake-store-master/tests/test_allocator/cachelib.rs", "test": "test_cachelib_like_allocator_reuses_freed_slot"}
+      ],
+      "status": "covered"
+    },
+    {
+      "behavior": "Multiple live allocations receive distinct extents and their total usage is tracked until release.",
+      "boundary": ["master", "allocator", "multiple-allocation"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "BufferAllocatorTest.AllocateMultiple"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp AllocateMultiple and Rust offset/Cachelib-like multiple allocation tests", "reviewed": true},
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_allocator_eviction.rs", "test": "test_allocator_advances_offsets_and_reuses_freed_space"},
+        {"file": "mooncake-store-master/tests/test_allocator/cachelib.rs", "test": "test_cachelib_like_allocator_reuses_freed_slot"}
+      ],
+      "status": "covered"
+    },
+    {
+      "behavior": "Both offset and Cachelib-style allocators reject a request larger than the segment capacity.",
+      "boundary": ["master", "allocator", "capacity", "failure"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "BufferAllocatorTest.AllocateTooLarge"},
+      "reason": "Rust proves oversized rejection for the default offset allocator, but lacks an equivalent Cachelib-like oversized-request assertion.",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp AllocateTooLarge and Rust SegmentAllocator capacity tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Repeated allocate-and-release cycles reuse capacity without exhausting either allocator backend.",
+      "boundary": ["master", "allocator", "memory-lifecycle", "reuse"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "BufferAllocatorTest.RepeatAllocateAndDeallocate"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp RepeatAllocateAndDeallocate and Rust offset/Cachelib-like reuse tests", "reviewed": true},
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_allocator_eviction.rs", "test": "test_allocator_advances_offsets_and_reuses_freed_space"},
+        {"file": "mooncake-store-master/tests/test_allocator/cachelib.rs", "test": "test_cachelib_like_allocator_reuses_freed_slot"}
+      ],
+      "status": "covered"
+    },
+    {
+      "behavior": "Four threads can repeatedly allocate and release from both allocator backends without invalid descriptors or deadlock.",
+      "boundary": ["master", "allocator", "concurrency", "stress"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "BufferAllocatorTest.ParallelAllocation"},
+      "reason": "No discoverable Rust test concurrently stresses shared offset and Cachelib-like segment allocation for a bounded duration.",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp ParallelAllocation and Rust allocator tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The simple allocator returns writable, at-least-eight-byte-aligned memory and accepts its deallocation.",
+      "boundary": ["allocator", "raw-memory", "alignment", "memory-lifecycle"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "SimpleAllocatorTest.BasicAllocationAndDeallocation"},
+      "reason": "Rust's ClientBufferAllocator manages aligned offsets into separately owned memory; existing tests do not prove writable raw-memory ownership corresponding to C++ SimpleAllocator.",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp BasicAllocationAndDeallocation and Rust ClientBufferAllocator", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The simple allocator supports multiple live aligned allocations and releases them independently.",
+      "boundary": ["allocator", "raw-memory", "multiple-allocation", "alignment"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "SimpleAllocatorTest.MultipleAllocations"},
+      "reason": "Rust tests multiple offset reservations but do not exercise the C++ SimpleAllocator raw-memory ownership and alignment contract.",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp MultipleAllocations and Rust ClientBufferAllocator", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An allocation larger than the simple allocator capacity is rejected without changing subsequent capacity.",
+      "boundary": ["allocator", "capacity", "failure"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "SimpleAllocatorTest.AllocationTooLarge"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp AllocationTooLarge and Rust ClientBufferAllocator exhaustion", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_buffer_allocator.rs", "test": "test_allocation_exhaustion"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "The simple allocator survives one hundred varying-size allocations followed by reverse-order release.",
+      "boundary": ["allocator", "raw-memory", "stress", "memory-lifecycle"],
+      "cpp": {"file": "buffer_allocator_test.cpp", "test": "SimpleAllocatorTest.StressTest"},
+      "reason": "Rust has no equivalent varying-size, reverse-release stress test for the client buffer allocator or a raw-memory replacement.",
+      "review": {"oracle": "mooncake-store/tests/buffer_allocator_test.cpp StressTest and Rust ClientBufferAllocator tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
