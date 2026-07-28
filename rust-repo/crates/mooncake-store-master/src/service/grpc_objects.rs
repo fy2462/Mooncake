@@ -174,7 +174,6 @@ impl MasterServiceImpl {
     ) -> Result<(), Status> {
         if let Err(error) = self
             .oplog_manager
-            .lock()
             .record_lease_refresh_batch_durable(entries)
         {
             self.state
@@ -277,7 +276,7 @@ impl MasterServiceImpl {
         scoped_key: &str,
         object: &ObjectEntry,
     ) -> Result<(), Status> {
-        if let Err(error) = self.oplog_manager.lock().record_remove_durable(scoped_key) {
+        if let Err(error) = self.oplog_manager.record_remove_durable(scoped_key) {
             self.state.fence_after_durability_failure("remove", &error);
             return Err(Status::unavailable(format!(
                 "failed to persist remove oplog: {error}"
@@ -386,7 +385,6 @@ impl MasterServiceImpl {
 
                 if let Err(error) = self
                     .oplog_manager
-                    .lock()
                     .record_object_image_durable(scoped_key, &durable_image)
                 {
                     self.state.fence_after_durability_failure("put_end", &error);

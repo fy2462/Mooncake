@@ -269,7 +269,7 @@ pub(crate) struct MasterState {
     /// Keeping one handle in `MasterState` prevents background eviction,
     /// reaping, and stale-handle cleanup from mutating the authoritative
     /// object table without emitting the same object image as foreground RPCs.
-    pub(crate) oplog_manager: Arc<Mutex<crate::oplog::OpLogManager>>,
+    pub(crate) oplog_manager: Arc<crate::oplog::OpLogManager>,
     /// 全局在途晋升计数 / Global in-flight promotion counter: prevents exceeding queue limit.
     pub(crate) promotion_in_flight: AtomicUsize,
     /// Exact number of entries reserved in `promotion_candidates`.
@@ -396,7 +396,6 @@ impl MasterState {
         let object_image = object.clone();
         drop(object);
         self.oplog_manager
-            .lock()
             .record_object_image_durable(scoped_key, &object_image)?;
         Ok(true)
     }
@@ -406,9 +405,7 @@ impl MasterState {
         scoped_key: &str,
     ) -> Result<(), crate::ha::HaError> {
         if !self.record_current_object_image_durable(scoped_key)? {
-            self.oplog_manager
-                .lock()
-                .record_remove_durable(scoped_key)?;
+            self.oplog_manager.record_remove_durable(scoped_key)?;
         }
         Ok(())
     }
@@ -445,7 +442,7 @@ impl MasterState {
             })?;
             let task_image = task.clone();
             drop(task);
-            self.oplog_manager.lock().record_replication_start_durable(
+            self.oplog_manager.record_replication_start_durable(
                 scoped_key,
                 &object_image,
                 &task_image,
@@ -489,7 +486,6 @@ impl MasterState {
                 }
             }
             self.oplog_manager
-                .lock()
                 .record_task_state_batch_durable(&upserts, remove_ids)?;
             Ok(())
         })();
@@ -561,7 +557,6 @@ impl MasterState {
             .insert(entry.id, entry.clone());
         let result = self
             .oplog_manager
-            .lock()
             .record_object_delayed_release_batch_durable(
                 scoped_key,
                 authoritative_object.as_ref(),
@@ -588,7 +583,6 @@ impl MasterState {
             .map(|object| object.clone());
         if let Err(error) = self
             .oplog_manager
-            .lock()
             .record_object_delayed_release_batch_durable(
                 &entry.scoped_key,
                 object.as_ref(),
@@ -639,7 +633,7 @@ impl MasterState {
             nof_allocator: RwLock::new(SegmentAllocator::new()),
             nof_eviction_requested: AtomicBool::new(false),
             storage_backend: RwLock::new(None),
-            oplog_manager: Arc::new(Mutex::new(crate::oplog::OpLogManager::new(None, 0))),
+            oplog_manager: Arc::new(crate::oplog::OpLogManager::new(None, 0)),
             promotion_in_flight: AtomicUsize::new(0),
             promotion_candidate_count: AtomicUsize::new(0),
             promotion_retry_cursor: AtomicUsize::new(0),

@@ -536,7 +536,6 @@ pub(crate) fn unmount_segment_owned_durable_locked(
 
     if let Err(error) = state
         .oplog_manager
-        .lock()
         .record_unmount_segment_durable(&segment_name, segment_id)
     {
         state.fence_after_durability_failure(operation, &error);
@@ -620,7 +619,6 @@ pub(crate) fn unmount_nof_segment_owned_durable_locked(
 
     if let Err(error) = state
         .oplog_manager
-        .lock()
         .record_unmount_nof_segment_durable(&segment_name, segment_id)
     {
         state.fence_after_durability_failure(operation, &error);

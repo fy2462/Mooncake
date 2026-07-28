@@ -181,7 +181,6 @@ fn maybe_complete_drain_job(state: &MasterState, job_id: Uuid) -> bool {
                 .collect::<Vec<_>>();
             if let Err(error) = state
                 .oplog_manager
-                .lock()
                 .record_segment_status_batch_durable(&durable_statuses)
             {
                 state.fence_after_durability_failure("drain completion", &error);
@@ -284,7 +283,6 @@ fn maybe_complete_drain_job(state: &MasterState, job_id: Uuid) -> bool {
                 .collect::<Vec<_>>();
             if let Err(error) = state
                 .oplog_manager
-                .lock()
                 .record_segment_status_batch_durable(&durable_statuses)
             {
                 state.fence_after_durability_failure("drain terminal failure", &error);

@@ -475,7 +475,7 @@ async fn test_mount_retry_reuses_memory_segment_identity_without_new_oplog() {
         .unwrap();
 
     assert_eq!(first, second);
-    assert_eq!(service.oplog_manager().lock().latest_sequence(), 1);
+    assert_eq!(service.oplog_manager().latest_sequence(), 1);
     assert_eq!(service.segments_detail_snapshot().len(), 1);
 }
 
@@ -550,7 +550,7 @@ async fn test_mount_retry_reuses_nof_id_and_rejects_endpoint_alias() {
             .unwrap_err();
 
     assert_eq!(alias_error.code(), tonic::Code::AlreadyExists);
-    assert_eq!(service.oplog_manager().lock().latest_sequence(), 1);
+    assert_eq!(service.oplog_manager().latest_sequence(), 1);
     assert_eq!(
         service
             .capture_loaded_snapshot("nof-mount-retry")
@@ -824,7 +824,7 @@ async fn test_graceful_unmount_pauses_on_standby_and_completes_after_promotion()
     .await
     .unwrap();
     let segment_id = service.segment_id_by_name(segment_name).unwrap();
-    assert_eq!(service.oplog_manager().lock().latest_sequence(), 1);
+    assert_eq!(service.oplog_manager().latest_sequence(), 1);
 
     MasterService::graceful_unmount_segment(
         &service,
@@ -836,7 +836,7 @@ async fn test_graceful_unmount_pauses_on_standby_and_completes_after_promotion()
     )
     .await
     .unwrap();
-    assert_eq!(service.oplog_manager().lock().latest_sequence(), 2);
+    assert_eq!(service.oplog_manager().latest_sequence(), 2);
 
     service.set_service_available(false);
     tokio::time::sleep(std::time::Duration::from_millis(130)).await;
@@ -851,7 +851,7 @@ async fn test_graceful_unmount_pauses_on_standby_and_completes_after_promotion()
             .len(),
         1
     );
-    assert_eq!(service.oplog_manager().lock().latest_sequence(), 2);
+    assert_eq!(service.oplog_manager().latest_sequence(), 2);
 
     service.set_service_available(true);
     for _ in 0..100 {
@@ -865,7 +865,7 @@ async fn test_graceful_unmount_pauses_on_standby_and_completes_after_promotion()
         "promotion must immediately execute an already-expired deadline"
     );
     assert_eq!(
-        service.oplog_manager().lock().latest_sequence(),
+        service.oplog_manager().latest_sequence(),
         3,
         "scheduler completion must append the final unmount oplog"
     );

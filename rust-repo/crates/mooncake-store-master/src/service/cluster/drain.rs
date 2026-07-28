@@ -116,7 +116,6 @@ impl MasterServiceImpl {
             .collect::<Vec<_>>();
         self.state
             .oplog_manager
-            .lock()
             .record_segment_status_batch_durable(&durable_statuses)
             .map_err(|error| {
                 Status::unavailable(format!(
@@ -299,7 +298,6 @@ impl MasterServiceImpl {
             .collect::<Vec<_>>();
         self.state
             .oplog_manager
-            .lock()
             .record_segment_status_batch_durable(&durable_statuses)
             .map_err(|error| {
                 Status::unavailable(format!("failed to persist drain cancellation: {error}"))

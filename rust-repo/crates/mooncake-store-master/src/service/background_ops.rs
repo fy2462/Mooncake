@@ -607,7 +607,6 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
     if target_count == 0 {
         return Vec::new();
     }
-    let _global_mutation_guard = state.key_mutations.lock_snapshot();
     let manager = EvictionManager::new(
         state.runtime_config.soft_pin_ttl,
         state.runtime_config.lease_ttl,
@@ -663,6 +662,55 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
             if evicted.len() >= target_count {
                 break;
             }
+
+            // Candidate collection is advisory. An ungrouped victim can be
+            // revalidated and mutated under its key stripe, which keeps a
+            // slow durable write from excluding unrelated object mutations.
+            // Group membership is immutable for an existing object, so the
+            // authoritative re-read below cannot become grouped while this
+            // key guard is held.
+            let tentatively_ungrouped = state
+                .objects
+                .get(&key)
+                .is_some_and(|candidate| candidate.group_id.is_empty());
+            if tentatively_ungrouped {
+                let mutation_guard = state.key_mutations.lock(&key);
+                let Some(candidate) = state.objects.get(&key) else {
+                    continue;
+                };
+                if candidate.group_id.is_empty() {
+                    let tenant_id = candidate.tenant_id.clone();
+                    let user_key = candidate.user_key_for_event(&key).to_string();
+                    drop(candidate);
+                    let freed = match evict_memory_pressure_object(
+                        state,
+                        &tenant_id,
+                        &key,
+                        allow_soft_pinned,
+                        SystemTime::now(),
+                        offload_cap,
+                        &mut offload_enqueued,
+                        "automatic_eviction",
+                    ) {
+                        Ok(freed) => freed,
+                        Err(_) => return evicted,
+                    };
+                    if freed != 0 {
+                        evicted.push(user_key);
+                    }
+                    drop(mutation_guard);
+                    continue;
+                }
+                drop(candidate);
+                drop(mutation_guard);
+            }
+
+            // Rust currently has no group-scoped coordinator: a new member
+            // can join a group on an unrelated key stripe. Keep the exclusive
+            // snapshot epoch for grouped victims so membership and all-member
+            // lease validation remain atomic. Scope it to this group instead
+            // of the whole eviction cycle.
+            let _global_mutation_guard = state.key_mutations.lock_snapshot();
             let Some(candidate) = state.objects.get(&key) else {
                 continue;
             };
@@ -1061,6 +1109,335 @@ pub(crate) fn try_push_promotion_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::MasterRuntimeConfig;
+    use crate::ha::{HaError, OpLogPollResult, OpLogRecord};
+    use crate::oplog::test_support::decode_record_payload_value_for_test;
+    use crate::oplog::{InMemoryOpLog, OpLogManager, OpLogStore};
+    use crate::proto::master_service_server::MasterService;
+    use crate::service::MasterServiceImpl;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex, mpsc};
+    use std::time::Duration;
+    use tonic::Request;
+
+    #[derive(Default)]
+    struct DurableFlushGate {
+        armed: AtomicBool,
+        flush_count: AtomicUsize,
+        entered: Mutex<bool>,
+        entered_cv: Condvar,
+        released: Mutex<bool>,
+        released_cv: Condvar,
+    }
+
+    impl DurableFlushGate {
+        fn arm(&self) {
+            *self.entered.lock().unwrap() = false;
+            *self.released.lock().unwrap() = false;
+            self.flush_count.store(0, Ordering::Release);
+            self.armed.store(true, Ordering::Release);
+        }
+
+        fn block_if_armed(&self) {
+            self.flush_count.fetch_add(1, Ordering::AcqRel);
+            if !self.armed.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            *self.entered.lock().unwrap() = true;
+            self.entered_cv.notify_all();
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.released_cv.wait(released).unwrap();
+            }
+        }
+
+        fn wait_until_entered(&self, timeout: Duration) -> bool {
+            let entered = self.entered.lock().unwrap();
+            let (entered, _) = self
+                .entered_cv
+                .wait_timeout_while(entered, timeout, |entered| !*entered)
+                .unwrap();
+            *entered
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.released_cv.notify_all();
+        }
+
+        fn flush_count(&self) -> usize {
+            self.flush_count.load(Ordering::Acquire)
+        }
+    }
+
+    struct GateableOpLog {
+        inner: InMemoryOpLog,
+        flush_gate: Arc<DurableFlushGate>,
+    }
+
+    impl OpLogStore for GateableOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.flush_gate.block_if_armed();
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
+    }
+
+    fn proto_uuid(id: Uuid) -> proto::Uuid {
+        proto::Uuid {
+            high: id.as_u64_pair().0,
+            low: id.as_u64_pair().1,
+        }
+    }
+
+    fn put_request(client_id: Uuid, key: &str) -> Request<proto::PutStartRequest> {
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "eviction-concurrency:1".into(),
+                ..Default::default()
+            }),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ungrouped_eviction_durable_flush_does_not_hold_global_snapshot_barrier() {
+        let flush_gate = Arc::new(DurableFlushGate::default());
+        let service = Arc::new(MasterServiceImpl::new_with_runtime_config_and_oplog(
+            None,
+            None,
+            MasterRuntimeConfig {
+                lease_ttl: Duration::ZERO,
+                ..Default::default()
+            },
+            Some(OpLogManager::new(
+                Some(Box::new(GateableOpLog {
+                    inner: InMemoryOpLog::new(32),
+                    flush_gate: Arc::clone(&flush_gate),
+                })),
+                0,
+            )),
+        ));
+        let client_id = Uuid::new_v4();
+        let setup_service = Arc::clone(&service);
+        std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async move {
+                    MasterService::mount_segment(
+                        setup_service.as_ref(),
+                        Request::new(proto::MountSegmentRequest {
+                            client_id: Some(proto_uuid(client_id)),
+                            segment_name: "eviction-concurrency:1".into(),
+                            size: 512,
+                            base_addr: 0x100000000,
+                            te_endpoint: String::new(),
+                            protocol: String::new(),
+                            host_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    MasterService::put_start(
+                        setup_service.as_ref(),
+                        put_request(client_id, "victim-a"),
+                    )
+                    .await
+                    .unwrap();
+                    MasterService::put_end(
+                        setup_service.as_ref(),
+                        Request::new(proto::PutEndRequest {
+                            client_id: Some(proto_uuid(client_id)),
+                            key: "victim-a".into(),
+                            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                            tenant_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                });
+        })
+        .join()
+        .unwrap();
+        let sequence_before_eviction = service.oplog_manager().latest_sequence();
+
+        flush_gate.arm();
+        let eviction_service = Arc::clone(&service);
+        let eviction = std::thread::spawn(move || eviction_service.run_eviction_cycle_for_test(1));
+        let eviction_entered = flush_gate.wait_until_entered(Duration::from_secs(1));
+
+        let (same_key_attempted_tx, same_key_attempted_rx) = mpsc::sync_channel(1);
+        let (same_key_acquired_tx, same_key_acquired_rx) = mpsc::sync_channel(1);
+        let same_key_service = Arc::clone(&service);
+        let same_key_waiter = std::thread::spawn(move || {
+            same_key_attempted_tx.send(()).unwrap();
+            let _guard = same_key_service
+                .state
+                .key_mutations
+                .lock("default\0victim-a");
+            same_key_acquired_tx.send(()).unwrap();
+        });
+        let same_key_attempt_started = same_key_attempted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+        let same_key_guard_held = matches!(
+            same_key_acquired_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+
+        let put_service = Arc::clone(&service);
+        let unrelated_put = tokio::spawn(async move {
+            MasterService::put_start(put_service.as_ref(), put_request(client_id, "unrelated-b"))
+                .await
+        });
+        let processing_service = Arc::clone(&service);
+        let (unrelated_waiting_tx, unrelated_waiting_rx) = mpsc::sync_channel(1);
+        let unrelated_waiter = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            let observed = loop {
+                if processing_service
+                    .state
+                    .processing_keys
+                    .contains_key("default\0unrelated-b")
+                {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                std::thread::yield_now();
+            };
+            unrelated_waiting_tx.send(observed).unwrap();
+        });
+        let unrelated_durable_call_waiting = unrelated_waiting_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap_or(false);
+        let queue_deadline = std::time::Instant::now() + Duration::from_millis(200);
+        let unrelated_durable_call_queued = loop {
+            if service.queued_oplog_command_count_for_test() >= 1 {
+                break true;
+            }
+            if std::time::Instant::now() >= queue_deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+
+        let (heartbeat_tx, heartbeat_rx) = mpsc::sync_channel(1);
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            heartbeat_tx.send(()).unwrap();
+        });
+        let heartbeat_completed_while_durable_calls_waited = heartbeat_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_ok();
+
+        flush_gate.release();
+        let evicted = eviction.join().unwrap();
+        let unrelated_response = unrelated_put.await.unwrap();
+        let same_key_acquired_after_durability = same_key_acquired_rx
+            .recv_timeout(Duration::from_secs(1))
+            .is_ok();
+        same_key_waiter.join().unwrap();
+        unrelated_waiter.join().unwrap();
+
+        assert!(
+            eviction_entered,
+            "the regression did not reach eviction's durable persistence boundary"
+        );
+        assert!(
+            same_key_attempt_started,
+            "the same-key waiter did not reach the victim's mutation stripe"
+        );
+        assert!(
+            same_key_guard_held,
+            "the victim key guard was released before its eviction image was durable"
+        );
+        assert!(
+            unrelated_durable_call_waiting,
+            "unrelated PutStart did not reach its durable mutation boundary"
+        );
+        assert!(
+            unrelated_durable_call_queued,
+            "unrelated PutStart did not enter the manager worker queue"
+        );
+        assert!(
+            heartbeat_completed_while_durable_calls_waited,
+            "Tokio runtime stopped making progress while durable callers waited"
+        );
+        assert!(
+            same_key_acquired_after_durability,
+            "the victim key guard was not released after durability completed"
+        );
+        assert_eq!(evicted, vec!["victim-a".to_string()]);
+        assert!(unrelated_response.is_ok());
+
+        let records = service
+            .oplog_manager()
+            .read_since(sequence_before_eviction + 1, 32)
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].seq, sequence_before_eviction + 1);
+        assert_eq!(records[1].seq, sequence_before_eviction + 2);
+        let eviction_payload = decode_record_payload_value_for_test(&records[0].payload).unwrap();
+        assert_eq!(eviction_payload["op"], "remove");
+        assert_eq!(eviction_payload["key"], "default\0victim-a");
+        let unrelated_payload = decode_record_payload_value_for_test(&records[1].payload).unwrap();
+        assert_eq!(unrelated_payload["op"], "put_end");
+        assert_eq!(unrelated_payload["key"], "default\0unrelated-b");
+        assert!(matches!(flush_gate.flush_count(), 1 | 2));
+    }
 
     fn memory_replica(segment_name: &str, refcnt: u32) -> ReplicaDescriptor {
         ReplicaDescriptor {

@@ -326,7 +326,14 @@ async fn ensure_leader_oplog(
     // current election-key revision.
     match build_leader_oplog_manager(&context.ha_spec, session.view.view_version).await {
         Some(manager) => {
-            *service_arc.oplog_manager().lock() = manager;
+            if let Err(error) = service_arc.replace_oplog_manager(manager) {
+                warn!(
+                    "Leader oplog manager replacement failed, releasing leadership: {}",
+                    error
+                );
+                release_and_retry(coordinator, supervisor, session, shutdown_rx).await;
+                return false;
+            }
             true
         }
         None => {
@@ -343,7 +350,6 @@ fn apply_acquired_view(service_arc: &Arc<MasterServiceImpl>, view: &Option<Maste
         service_arc.set_leadership_view_version(view.view_version);
         service_arc
             .oplog_manager()
-            .lock()
             .set_view_version(view.view_version);
     }
 }

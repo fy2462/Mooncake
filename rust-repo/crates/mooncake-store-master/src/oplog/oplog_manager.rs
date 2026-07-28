@@ -47,6 +47,13 @@ impl OpLogManager {
             .unwrap_or(0)
     }
 
+    #[cfg(test)]
+    pub(crate) fn queued_command_count_for_test(&self) -> usize {
+        self.worker()
+            .map(|worker| worker.queued_command_count_for_test())
+            .unwrap_or(0)
+    }
+
     pub fn max_sequence_id(&self) -> Result<u64, HaError> {
         self.worker()
             .map(|worker| worker.max_sequence_id())

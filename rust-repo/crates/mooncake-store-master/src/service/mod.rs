@@ -139,7 +139,7 @@ pub struct MasterServiceImpl {
     client_monitor_worker: ClientMonitorWorker,
     drain_worker: DrainWorker,
     nof_heartbeat_worker: NofHeartbeatWorker,
-    oplog_manager: Arc<parking_lot::Mutex<crate::oplog::OpLogManager>>,
+    oplog_manager: Arc<crate::oplog::OpLogManager>,
     kv_event_publisher: Arc<KvEventPublisher>,
 }
 
@@ -1409,7 +1409,6 @@ pub(crate) fn abort_orphaned_drain_segments_after_recovery(state: &MasterState) 
     if !durable_statuses.is_empty()
         && let Err(error) = state
             .oplog_manager
-            .lock()
             .record_segment_status_batch_durable(&durable_statuses)
     {
         state.fence_after_durability_failure("abort_orphaned_drain_segments", &error);
@@ -1925,14 +1924,11 @@ impl MasterServiceImpl {
         backend_type: Option<StorageBackendType>,
         backup_dir: Option<PathBuf>,
         runtime_config: MasterRuntimeConfig,
-        mut oplog_manager: Option<crate::oplog::OpLogManager>,
+        oplog_manager: Option<crate::oplog::OpLogManager>,
         initial_service_available: bool,
     ) -> Result<Self, HaError> {
-        let oplog_manager = Arc::new(parking_lot::Mutex::new(
-            oplog_manager
-                .take()
-                .unwrap_or_else(|| crate::oplog::OpLogManager::new(None, 0)),
-        ));
+        let oplog_manager =
+            Arc::new(oplog_manager.unwrap_or_else(|| crate::oplog::OpLogManager::new(None, 0)));
         let snapshot_backup_dir = backup_dir.clone();
         let storage_backend = match (backend_type, backup_dir) {
             (Some(btype), Some(dir)) => RwLock::new(Some(StorageBackend::new(btype, &dir))),
@@ -2322,7 +2318,7 @@ impl MasterServiceImpl {
                         if state.service_fenced.load(Ordering::Acquire) {
                             worker_cancelled.store(true, Ordering::Release);
                         }
-                        let last_included_seq = state.oplog_manager.lock().latest_sequence();
+                        let last_included_seq = state.oplog_manager.latest_sequence();
                         let mut local_disk_segments =
                             Vec::with_capacity(state.local_disk_segments.len());
                         let mut local_capture_cancelled = worker_cancelled.load(Ordering::Acquire);
@@ -2374,7 +2370,7 @@ impl MasterServiceImpl {
                             last_included_seq,
                             &worker_cancelled,
                         );
-                        let sequence_after_capture = state.oplog_manager.lock().latest_sequence();
+                        let sequence_after_capture = state.oplog_manager.latest_sequence();
                         if sequence_after_capture != last_included_seq {
                             tracing::error!(
                                 last_included_seq,
@@ -2448,7 +2444,7 @@ impl MasterServiceImpl {
 
     pub fn capture_loaded_snapshot(&self, snapshot_id: impl Into<String>) -> LoadedSnapshot {
         let _snapshot_guard = self.state.key_mutations.lock_snapshot();
-        let snapshot_sequence_id = self.oplog_manager.lock().latest_sequence();
+        let snapshot_sequence_id = self.oplog_manager.latest_sequence();
         LoadedSnapshot {
             snapshot_id: snapshot_id.into(),
             snapshot_sequence_id,
@@ -2760,9 +2756,22 @@ impl MasterServiceImpl {
         run_promotion_candidate_retry(&self.state, 256);
     }
 
-    /// 获取 oplog 管理器的可变引用 / Returns mutable reference to oplog manager.
-    pub fn oplog_manager(&self) -> &parking_lot::Mutex<crate::oplog::OpLogManager> {
+    #[cfg(test)]
+    fn queued_oplog_command_count_for_test(&self) -> usize {
+        self.oplog_manager.queued_command_count_for_test()
+    }
+
+    /// 获取 oplog 管理器引用 / Returns a reference to the oplog manager.
+    pub fn oplog_manager(&self) -> &crate::oplog::OpLogManager {
         self.oplog_manager.as_ref()
+    }
+
+    /// Replace the active oplog backend without exposing a service-wide lock.
+    pub fn replace_oplog_manager(
+        &self,
+        replacement: crate::oplog::OpLogManager,
+    ) -> Result<(), HaError> {
+        self.oplog_manager.replace_with(replacement)
     }
 
     /// Initialize the service view version for a leadership term.

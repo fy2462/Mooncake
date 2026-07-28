@@ -2376,9 +2376,7 @@ mod tests {
             nof_allocator: RwLock::new(crate::allocator::SegmentAllocator::new()),
             nof_eviction_requested: AtomicBool::new(false),
             storage_backend: RwLock::new(None),
-            oplog_manager: Arc::new(parking_lot::Mutex::new(crate::oplog::OpLogManager::new(
-                None, 0,
-            ))),
+            oplog_manager: Arc::new(crate::oplog::OpLogManager::new(None, 0)),
             promotion_in_flight: AtomicUsize::new(0),
             promotion_candidate_count: AtomicUsize::new(0),
             promotion_retry_cursor: AtomicUsize::new(0),

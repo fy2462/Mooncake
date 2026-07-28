@@ -316,7 +316,7 @@ impl MasterServiceImpl {
                 "allocator/topology mismatch for Memory segment UUID",
             ));
         }
-        if let Err(error) = self.oplog_manager.lock().record_mount_segment_durable(
+        if let Err(error) = self.oplog_manager.record_mount_segment_durable(
             &req.segment_name,
             segment_id,
             req.base_addr,
@@ -515,7 +515,7 @@ impl MasterServiceImpl {
                 "allocator/topology mismatch for NoF segment UUID",
             ));
         }
-        if let Err(error) = self.oplog_manager.lock().record_mount_nof_segment_durable(
+        if let Err(error) = self.oplog_manager.record_mount_nof_segment_durable(
             &segment.name,
             segment.id,
             segment.base,
@@ -730,7 +730,7 @@ impl MasterServiceImpl {
             // Publish the intent to durable HA state before making it visible
             // in the leader's in-memory maps. A failed/ambiguous append cannot
             // be acknowledged as a successful graceful unmount.
-            let persist_result = self.oplog_manager.lock().record_graceful_unmount_segment(
+            let persist_result = self.oplog_manager.record_graceful_unmount_segment(
                 &segment_name,
                 segment_id,
                 client_id,
@@ -1080,7 +1080,7 @@ impl MasterServiceImpl {
                 drop(entry);
                 rebind_runtime_replicas(&self.state, segment, ReplicaType::Memory);
             } else {
-                if let Err(error) = self.oplog_manager.lock().record_mount_segment_durable(
+                if let Err(error) = self.oplog_manager.record_mount_segment_durable(
                     &segment.name,
                     segment.id,
                     segment.base,
@@ -1316,7 +1316,7 @@ impl MasterServiceImpl {
                 drop(entry);
                 rebind_runtime_replicas(&self.state, &allocator_segment, ReplicaType::NoFSsd);
             } else {
-                if let Err(error) = self.oplog_manager.lock().record_mount_nof_segment_durable(
+                if let Err(error) = self.oplog_manager.record_mount_nof_segment_durable(
                     &segment.name,
                     segment.id,
                     segment.base,

@@ -169,7 +169,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
     .await
     .unwrap();
 
-    let sequence_before_clear = service.oplog_manager().lock().latest_sequence();
+    let sequence_before_clear = service.oplog_manager().latest_sequence();
     let cleared = MasterService::batch_replica_clear(
         &service,
         Request::new(proto::BatchReplicaClearRequest {
@@ -184,7 +184,7 @@ async fn test_batch_replica_clear_respects_client_and_segment_name() {
     .into_inner();
     assert_eq!(cleared.cleared_keys, vec!["batch-clear-key".to_string()]);
     assert_eq!(
-        service.oplog_manager().lock().latest_sequence(),
+        service.oplog_manager().latest_sequence(),
         sequence_before_clear + 1,
         "successful replica clear must publish one durable object image"
     );
