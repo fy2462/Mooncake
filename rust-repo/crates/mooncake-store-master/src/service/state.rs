@@ -146,6 +146,11 @@ impl KeyMutationCoordinator {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_lock_stripe_for_test(&self, scoped_key: &str) -> Option<MutexGuard<'_, ()>> {
+        self.stripes[self.stripe_index(scoped_key)].try_lock()
+    }
+
     /// Serialize a complete PutStart/UpsertStart operation, including quota
     /// eviction retries that must temporarily release the mutation stripe.
     ///

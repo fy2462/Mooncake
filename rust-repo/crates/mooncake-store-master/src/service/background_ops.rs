@@ -1316,25 +1316,21 @@ mod tests {
         let eviction_service = Arc::clone(&service);
         let eviction = std::thread::spawn(move || eviction_service.run_eviction_cycle_for_test(1));
         let eviction_entered = flush_gate.wait_until_entered(Duration::from_secs(1));
+        let victim_stripe_unavailable_while_durable = service
+            .state
+            .key_mutations
+            .try_lock_stripe_for_test("default\0victim-a")
+            .is_none();
 
-        let (same_key_attempted_tx, same_key_attempted_rx) = mpsc::sync_channel(1);
         let (same_key_acquired_tx, same_key_acquired_rx) = mpsc::sync_channel(1);
         let same_key_service = Arc::clone(&service);
         let same_key_waiter = std::thread::spawn(move || {
-            same_key_attempted_tx.send(()).unwrap();
             let _guard = same_key_service
                 .state
                 .key_mutations
                 .lock("default\0victim-a");
             same_key_acquired_tx.send(()).unwrap();
         });
-        let same_key_attempt_started = same_key_attempted_rx
-            .recv_timeout(Duration::from_secs(1))
-            .is_ok();
-        let same_key_guard_held = matches!(
-            same_key_acquired_rx.recv_timeout(Duration::from_millis(50)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        );
 
         let put_service = Arc::clone(&service);
         let unrelated_put = tokio::spawn(async move {
@@ -1391,17 +1387,18 @@ mod tests {
             .is_ok();
         same_key_waiter.join().unwrap();
         unrelated_waiter.join().unwrap();
+        let victim_stripe_available_after_durability = service
+            .state
+            .key_mutations
+            .try_lock_stripe_for_test("default\0victim-a")
+            .is_some();
 
         assert!(
             eviction_entered,
             "the regression did not reach eviction's durable persistence boundary"
         );
         assert!(
-            same_key_attempt_started,
-            "the same-key waiter did not reach the victim's mutation stripe"
-        );
-        assert!(
-            same_key_guard_held,
+            victim_stripe_unavailable_while_durable,
             "the victim key guard was released before its eviction image was durable"
         );
         assert!(
@@ -1419,6 +1416,10 @@ mod tests {
         assert!(
             same_key_acquired_after_durability,
             "the victim key guard was not released after durability completed"
+        );
+        assert!(
+            victim_stripe_available_after_durability,
+            "the victim key stripe remained unavailable after durability completed"
         );
         assert_eq!(evicted, vec!["victim-a".to_string()]);
         assert!(unrelated_response.is_ok());
