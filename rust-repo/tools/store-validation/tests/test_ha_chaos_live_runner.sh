@@ -29,7 +29,18 @@ case "$1" in
     echo fake-etcd
     ;;
   port) echo '127.0.0.1:42379' ;;
-  exec) exit 0 ;;
+  exec)
+    if [[ ${MOONCAKE_HA_DOCKER_MODE:-success} == health-fail ]]; then
+      health_attempt=0
+      if [[ -f "$MOONCAKE_HA_HEALTH_CALLS" ]]; then
+        health_attempt=$(<"$MOONCAKE_HA_HEALTH_CALLS")
+      fi
+      printf '%s\n' "$((health_attempt + 1))" >"$MOONCAKE_HA_HEALTH_CALLS"
+      if ((health_attempt == 0)); then exit 37; fi
+      exit 41
+    fi
+    exit 0
+    ;;
   rm) exit 0 ;;
   *) echo "unexpected docker command: $*" >&2; exit 64 ;;
 esac
@@ -54,6 +65,7 @@ case "$1" in
       incomplete)
         printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"FAIL"}}}' >"$MOONCAKE_HA_RESULT"
         ;;
+      no-output) : ;;
       fail) exit 9 ;;
       term) while :; do sleep 1; done ;;
       *) echo "unexpected cargo mode: $MOONCAKE_HA_CARGO_MODE" >&2; exit 64 ;;
@@ -64,22 +76,35 @@ esac
 SH
 chmod +x "$fake_bin/docker" "$fake_bin/cargo"
 
+cat >"$fake_bin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [[ ${MOONCAKE_HA_FAST_SLEEP:-0} == 1 ]]; then
+  exit 0
+fi
+exec /bin/sleep "$@"
+SH
+chmod +x "$fake_bin/sleep"
+
 run_runner() {
   local artifact_root=$1
   local docker_mode=$2
   local cargo_mode=$3
+  local fast_sleep=${4:-0}
   mkdir -p "$artifact_root"
   MOONCAKE_HA_CALLS="$calls" \
   MOONCAKE_HA_DOCKER="$fake_bin/docker" \
   MOONCAKE_HA_CARGO="$fake_bin/cargo" \
   MOONCAKE_HA_DOCKER_MODE="$docker_mode" \
   MOONCAKE_HA_CARGO_MODE="$cargo_mode" \
+  MOONCAKE_HA_FAST_SLEEP="$fast_sleep" \
+  MOONCAKE_HA_HEALTH_CALLS="$artifact_root/health-calls" \
   MOONCAKE_HA_RUN_ID=contract \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_ETCD_IMAGE=quay.io/coreos/etcd:v3.5.0 \
   MOONCAKE_HA_SEED=0x4d4f4f4e48414348 \
   LD_LIBRARY_PATH="$temp_dir/native" \
   RUSTFLAGS="-L native=$temp_dir/native" \
+  PATH="$fake_bin:$PATH" \
   bash "$runner"
 }
 
@@ -95,6 +120,16 @@ expect_owned_cleanup() {
   grep -F -- 'rm -f mc-store-ha-chaos-contract' "$calls"
 }
 
+expect_status() {
+  local expected_status=$1
+  shift
+  set +e
+  "$@"
+  local actual_status=$?
+  set -e
+  [[ $actual_status -eq $expected_status ]]
+}
+
 : >"$calls"
 artifact_root="$temp_dir/artifacts"
 run_runner "$artifact_root" success pass
@@ -107,6 +142,17 @@ grep -F -- "test-env run=1 endpoint=http://127.0.0.1:42379 master=$rust_root/tar
 expect_owned_cleanup
 test "$(jq -r .status "$artifact_root/ha-chaos-result.json")" = PASS
 test -s "$artifact_root/runner.log"
+
+: >"$calls"
+stale_result_root="$temp_dir/stale-result"
+mkdir -p "$stale_result_root"
+printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"PASS"}}}' >"$stale_result_root/ha-chaos-result.json"
+expect_failure run_runner "$stale_result_root" success no-output
+expect_owned_cleanup
+
+: >"$calls"
+expect_status 37 run_runner "$temp_dir/health-failure" health-fail pass 1
+expect_owned_cleanup
 
 : >"$calls"
 expect_failure env -u LD_LIBRARY_PATH \

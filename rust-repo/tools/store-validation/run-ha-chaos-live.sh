@@ -92,16 +92,19 @@ on_signal() {
 }
 
 wait_for_etcd() {
-  local attempt status
+  local attempt status first_failure=0
   for attempt in $(seq 1 30); do
     "$docker_cmd" exec "$etcd_container" etcdctl endpoint health
     status=$?
     if ((status == 0)); then
       return 0
     fi
+    if ((first_failure == 0)); then
+      first_failure=$status
+    fi
     sleep 1
   done
-  return 1
+  return "$first_failure"
 }
 
 validate_result() {
@@ -154,9 +157,11 @@ if ((status != 0)); then
 fi
 etcd_owned=1
 
-if ! wait_for_etcd; then
-  first_status=1
-  exit 1
+wait_for_etcd
+status=$?
+if ((status != 0)); then
+  first_status=$status
+  exit "$status"
 fi
 
 published_port=$("$docker_cmd" port "$etcd_container" 2379/tcp)
@@ -172,6 +177,13 @@ fi
 etcd_endpoint="http://$published_port"
 
 "$cargo_cmd" build -p mooncake-store-master --bin mooncake-master
+status=$?
+if ((status != 0)); then
+  first_status=$status
+  exit "$status"
+fi
+
+rm -f -- "$result_path"
 status=$?
 if ((status != 0)); then
   first_status=$status
