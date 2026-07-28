@@ -57,6 +57,7 @@ fs2 = "0.4"
 [dev-dependencies]
 tempfile = "3"
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [build-dependencies]
 tonic-build.workspace = true

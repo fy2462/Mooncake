@@ -36,6 +36,12 @@ use mooncake_store_master::main_config::{
 mod main_ha;
 mod main_server;
 
+#[cfg(not(test))]
+const LEADER_OPLOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const LEADER_OPLOG_REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
+const LEADER_OPLOG_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// 主入口：初始化日志系统，解析参数，按模式分派。
 /// Main entry point: init logging, parse args, dispatch by mode.
 #[tokio::main]
@@ -178,7 +184,10 @@ async fn build_leader_oplog_manager(
         .map(|s| s.to_string())
         .collect();
 
-    let client = match etcd_client::Client::connect(endpoints, None).await {
+    let connect_options = etcd_client::ConnectOptions::new()
+        .with_timeout(LEADER_OPLOG_REQUEST_TIMEOUT)
+        .with_connect_timeout(LEADER_OPLOG_CONNECT_TIMEOUT);
+    let client = match etcd_client::Client::connect(endpoints, Some(connect_options)).await {
         Ok(client) => client,
         Err(e) => {
             warn!("Failed to connect etcd for leader oplog: {}", e);
@@ -208,4 +217,188 @@ async fn build_leader_oplog_manager(
         Some(Box::new(store)),
         view_version,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mooncake_store_master::MasterRuntimeConfig;
+    use mooncake_store_master::proto;
+    use mooncake_store_master::proto::master_service_server::MasterService;
+    use prost::Message;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::codegen::{Body, BoxFuture, Service, StdError, http};
+    use tonic::transport::Server;
+    use tonic::{Request, Response, Status};
+    use uuid::Uuid;
+
+    const STALLED_TRANSACTION_DURATION: Duration = Duration::from_millis(300);
+    const MAX_BOUNDED_TRANSACTION_DURATION: Duration = Duration::from_millis(200);
+    const MAX_FAIL_FAST_DURATION: Duration = Duration::from_millis(50);
+
+    #[derive(Clone, PartialEq, Message)]
+    struct EmptyEtcdMessage {}
+
+    struct ImmediateEmptyResponse;
+
+    impl tonic::server::UnaryService<EmptyEtcdMessage> for ImmediateEmptyResponse {
+        type Response = EmptyEtcdMessage;
+        type Future = BoxFuture<Response<Self::Response>, Status>;
+
+        fn call(&mut self, _request: Request<EmptyEtcdMessage>) -> Self::Future {
+            Box::pin(async { Ok(Response::new(EmptyEtcdMessage {})) })
+        }
+    }
+
+    struct StalledTransaction {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl tonic::server::UnaryService<EmptyEtcdMessage> for StalledTransaction {
+        type Response = EmptyEtcdMessage;
+        type Future = BoxFuture<Response<Self::Response>, Status>;
+
+        fn call(&mut self, _request: Request<EmptyEtcdMessage>) -> Self::Future {
+            let calls = Arc::clone(&self.calls);
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::AcqRel);
+                tokio::time::sleep(STALLED_TRANSACTION_DURATION).await;
+                Ok(Response::new(EmptyEtcdMessage {}))
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct StalledEtcdKv {
+        transaction_calls: Arc<AtomicUsize>,
+    }
+
+    impl<B> Service<http::Request<B>> for StalledEtcdKv
+    where
+        B: Body + Send + 'static,
+        B::Error: Into<StdError> + Send + 'static,
+    {
+        type Response = http::Response<tonic::body::BoxBody>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<B>) -> Self::Future {
+            match request.uri().path() {
+                "/etcdserverpb.KV/Range" => Box::pin(async move {
+                    let mut grpc = tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+                    Ok(grpc.unary(ImmediateEmptyResponse, request).await)
+                }),
+                "/etcdserverpb.KV/Txn" => {
+                    let calls = Arc::clone(&self.transaction_calls);
+                    Box::pin(async move {
+                        let mut grpc =
+                            tonic::server::Grpc::new(tonic::codec::ProstCodec::default());
+                        Ok(grpc.unary(StalledTransaction { calls }, request).await)
+                    })
+                }
+                _ => Box::pin(async move {
+                    let mut response = http::Response::new(tonic::body::empty_body());
+                    response.headers_mut().insert(
+                        tonic::Status::GRPC_STATUS,
+                        (tonic::Code::Unimplemented as i32).into(),
+                    );
+                    Ok(response)
+                }),
+            }
+        }
+    }
+
+    impl tonic::server::NamedService for StalledEtcdKv {
+        const NAME: &'static str = "etcdserverpb.KV";
+    }
+
+    fn proto_uuid(id: Uuid) -> proto::Uuid {
+        proto::Uuid {
+            high: id.as_u64_pair().0,
+            low: id.as_u64_pair().1,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_leader_oplog_transaction_is_bounded_poisoned_and_fences_service() {
+        let transaction_calls = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(
+            Server::builder()
+                .add_service(StalledEtcdKv {
+                    transaction_calls: Arc::clone(&transaction_calls),
+                })
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let spec = HABackendSpec {
+            backend_type: HABackendType::Etcd,
+            connstring: format!("http://{address}"),
+            cluster_namespace: "stalled-oplog".into(),
+            pod_identity: None,
+        };
+        let manager = build_leader_oplog_manager(&spec, 1)
+            .await
+            .expect("initialize leader oplog against responsive range endpoint");
+        let service = MasterServiceImpl::new_with_runtime_config_and_oplog(
+            None,
+            None,
+            MasterRuntimeConfig::default(),
+            Some(manager),
+        );
+        let client_id = Uuid::new_v4();
+
+        let started = std::time::Instant::now();
+        let error = MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: "stalled-oplog:1".into(),
+                size: 1024,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .expect_err("a stalled durable mount must fail closed");
+        let first_duration = started.elapsed();
+
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert!(
+            first_duration < MAX_BOUNDED_TRANSACTION_DURATION,
+            "stalled etcd transaction remained in flight for {first_duration:?}"
+        );
+        assert!(service.is_service_fenced());
+        assert!(!service.is_service_available());
+        assert_eq!(transaction_calls.load(Ordering::Acquire), 1);
+
+        let fail_fast_started = std::time::Instant::now();
+        service
+            .oplog_manager()
+            .record_remove_durable("default\0must-not-retry")
+            .expect_err("a timed-out etcd oplog writer must remain poisoned");
+        let fail_fast_duration = fail_fast_started.elapsed();
+
+        assert!(
+            fail_fast_duration < MAX_FAIL_FAST_DURATION,
+            "poisoned writer did not fail fast: {fail_fast_duration:?}"
+        );
+        assert_eq!(
+            transaction_calls.load(Ordering::Acquire),
+            1,
+            "poisoned writer issued another etcd transaction"
+        );
+
+        server.abort();
+    }
 }

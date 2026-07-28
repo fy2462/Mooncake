@@ -6,20 +6,36 @@ use mooncake_store_master::oplog::{InMemoryOpLog, OpLogManager, OpLogStore};
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tonic::Request;
 use uuid::Uuid;
 
 struct FailingFlushOpLog {
     inner: InMemoryOpLog,
-    flush_count: usize,
+    append_count: Arc<AtomicUsize>,
+    flush_count: Arc<AtomicUsize>,
     fail_on_flush: usize,
 }
 
 impl FailingFlushOpLog {
     fn new(fail_on_flush: usize) -> Self {
+        Self::new_with_counters(
+            fail_on_flush,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicUsize::new(0)),
+        )
+    }
+
+    fn new_with_counters(
+        fail_on_flush: usize,
+        append_count: Arc<AtomicUsize>,
+        flush_count: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             inner: InMemoryOpLog::new(32),
-            flush_count: 0,
+            append_count,
+            flush_count,
             fail_on_flush,
         }
     }
@@ -27,6 +43,7 @@ impl FailingFlushOpLog {
 
 impl OpLogStore for FailingFlushOpLog {
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+        self.append_count.fetch_add(1, Ordering::AcqRel);
         self.inner.append(entry)
     }
 
@@ -64,8 +81,8 @@ impl OpLogStore for FailingFlushOpLog {
     }
 
     fn flush_durable(&mut self) -> Result<(), HaError> {
-        self.flush_count += 1;
-        if self.flush_count == self.fail_on_flush {
+        let flush_count = self.flush_count.fetch_add(1, Ordering::AcqRel) + 1;
+        if flush_count == self.fail_on_flush {
             return Err(HaError::InvalidBackend(
                 "injected durable flush failure".into(),
             ));
@@ -925,6 +942,76 @@ async fn test_mount_flush_failure_does_not_publish_memory_segment() {
             .segments
             .is_empty(),
         "a non-durable Memory mount must not become snapshot-visible"
+    );
+}
+
+#[tokio::test]
+async fn test_mount_flush_failure_fences_service_before_next_backend_mutation() {
+    let append_count = Arc::new(AtomicUsize::new(0));
+    let flush_count = Arc::new(AtomicUsize::new(0));
+    let service = MasterServiceImpl::new_with_runtime_config_and_oplog(
+        None,
+        None,
+        MasterRuntimeConfig::default(),
+        Some(OpLogManager::new(
+            Some(Box::new(FailingFlushOpLog::new_with_counters(
+                1,
+                Arc::clone(&append_count),
+                Arc::clone(&flush_count),
+            ))),
+            0,
+        )),
+    );
+    let first_client_id = Uuid::new_v4();
+
+    let first_error = MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(first_client_id)),
+            segment_name: "host-mount-fence-first:3333".into(),
+            size: 1024,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .expect_err("an ambiguous durable flush failure must reject the first mount");
+
+    assert_eq!(first_error.code(), tonic::Code::Unavailable);
+    assert!(service.is_service_fenced());
+    assert!(!service.is_service_available());
+    let append_count_after_failure = append_count.load(Ordering::Acquire);
+    let flush_count_after_failure = flush_count.load(Ordering::Acquire);
+    assert_eq!(append_count_after_failure, 1);
+    assert_eq!(flush_count_after_failure, 1);
+
+    let second_error = MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(Uuid::new_v4())),
+            segment_name: "host-mount-fence-unrelated:4444".into(),
+            size: 2048,
+            base_addr: 0x200000000,
+            te_endpoint: "tcp://unrelated".into(),
+            protocol: "tcp".into(),
+            host_id: "unrelated-host".into(),
+        }),
+    )
+    .await
+    .expect_err("a fenced service must reject an unrelated mount");
+
+    assert_eq!(second_error.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        append_count.load(Ordering::Acquire),
+        append_count_after_failure,
+        "a fenced service must reject before another backend append"
+    );
+    assert_eq!(
+        flush_count.load(Ordering::Acquire),
+        flush_count_after_failure,
+        "a fenced service must reject before another backend flush"
     );
 }
 
