@@ -1,10 +1,85 @@
 use super::oplog_wire::validate_record_size;
 use super::{HaError, OpLogRecord, OpLogStore};
 use crate::metrics;
-use parking_lot::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use parking_lot::{Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+struct TestPauseState {
+    reached: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+struct TestPause {
+    state: std::sync::Mutex<TestPauseState>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl TestPause {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(TestPauseState {
+                reached: false,
+                released: false,
+            }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+
+    fn pause(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.reached = true;
+        self.changed.notify_all();
+        while !state.released {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn wait_until_reached(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.state.lock().unwrap();
+        while !state.reached {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (next, result) = self.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if result.timed_out() && !state.reached {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct WorkerTestHooks {
+    after_acceptance: Mutex<Option<Arc<TestPause>>>,
+    before_flush_call: Mutex<Option<Arc<TestPause>>>,
+    after_first_completion: Mutex<Option<Arc<TestPause>>>,
+    before_worker_exit: Mutex<Option<Arc<TestPause>>>,
+    after_shutdown_start: Mutex<Option<Arc<TestPause>>>,
+    after_batch_completion: Mutex<Option<Arc<TestPause>>>,
+}
+
+#[cfg(test)]
+fn run_test_pause(slot: &Mutex<Option<Arc<TestPause>>>) {
+    if let Some(pause) = slot.lock().clone() {
+        pause.pause();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OpLogWorkerConfig {
@@ -62,19 +137,37 @@ enum Command {
         before_sequence_id: u64,
         completion: mpsc::SyncSender<Result<(), HaError>>,
     },
-    Shutdown {
-        completion: mpsc::SyncSender<Result<(), HaError>>,
-    },
+    Shutdown,
+}
+
+#[derive(Clone)]
+enum ShutdownState {
+    NotStarted,
+    Requested,
+    Complete(Result<(), HaError>),
+}
+
+struct WorkerState {
+    terminal: Option<HaError>,
+    accepting: bool,
+    backend_call_in_progress: bool,
+    shutdown: ShutdownState,
+}
+
+struct WorkerControl {
+    state: Mutex<WorkerState>,
+    changed: Condvar,
 }
 
 pub(crate) struct SequencedOpLogWorker {
     sender: mpsc::SyncSender<Command>,
     latest_assigned: Arc<AtomicU64>,
     latest_committed: Arc<AtomicU64>,
-    poison: Arc<Mutex<Option<HaError>>>,
-    shutting_down: Arc<AtomicBool>,
+    control: Arc<WorkerControl>,
     queue_depth: Arc<AtomicUsize>,
     completion_timeout: Duration,
+    #[cfg(test)]
+    test_hooks: Arc<WorkerTestHooks>,
 }
 
 #[derive(Clone, Copy)]
@@ -88,15 +181,26 @@ impl SequencedOpLogWorker {
         let initial_sequence = store.latest_sequence();
         let latest_assigned = Arc::new(AtomicU64::new(initial_sequence));
         let latest_committed = Arc::new(AtomicU64::new(initial_sequence));
-        let poison = Arc::new(Mutex::new(None));
-        let shutting_down = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(WorkerControl {
+            state: Mutex::new(WorkerState {
+                terminal: None,
+                accepting: true,
+                backend_call_in_progress: false,
+                shutdown: ShutdownState::NotStarted,
+            }),
+            changed: Condvar::new(),
+        });
         let queue_depth = Arc::new(AtomicUsize::new(0));
+        #[cfg(test)]
+        let test_hooks = Arc::new(WorkerTestHooks::default());
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
 
         let thread_assigned = Arc::clone(&latest_assigned);
         let thread_committed = Arc::clone(&latest_committed);
-        let thread_poison = Arc::clone(&poison);
+        let thread_control = Arc::clone(&control);
         let thread_queue_depth = Arc::clone(&queue_depth);
+        #[cfg(test)]
+        let thread_test_hooks = Arc::clone(&test_hooks);
         let thread_config = config.clone();
         let spawn_result = std::thread::Builder::new()
             .name("mooncake-oplog-writer".to_string())
@@ -107,13 +211,15 @@ impl SequencedOpLogWorker {
                     thread_config,
                     thread_assigned,
                     thread_committed,
-                    thread_poison,
+                    thread_control,
                     thread_queue_depth,
+                    #[cfg(test)]
+                    thread_test_hooks,
                 );
             });
         if let Err(error) = spawn_result {
             install_poison(
-                &poison,
+                &control,
                 HaError::InvalidBackend(format!("failed to start oplog writer thread: {error}")),
             );
         }
@@ -122,10 +228,11 @@ impl SequencedOpLogWorker {
             sender,
             latest_assigned,
             latest_committed,
-            poison,
-            shutting_down,
+            control,
             queue_depth,
             completion_timeout: config.completion_timeout,
+            #[cfg(test)]
+            test_hooks,
         }
     }
 
@@ -240,67 +347,87 @@ impl SequencedOpLogWorker {
     }
 
     pub(crate) fn shutdown(&self) -> Result<(), HaError> {
-        if let Some(error) = self.poison.lock().clone() {
-            metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
-            return Err(error);
-        }
-        if self.shutting_down.swap(true, Ordering::AcqRel) {
-            return Ok(());
+        let started = Instant::now();
+        let is_leader = {
+            let mut state = self.control.state.lock();
+            if let Some(error) = state.terminal.clone() {
+                metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
+                return Err(error);
+            }
+            match &state.shutdown {
+                ShutdownState::NotStarted => {
+                    state.accepting = false;
+                    state.shutdown = ShutdownState::Requested;
+                    true
+                }
+                ShutdownState::Requested => false,
+                ShutdownState::Complete(result) => return result.clone(),
+            }
+        };
+        #[cfg(test)]
+        if is_leader {
+            run_test_pause(&self.test_hooks.after_shutdown_start);
         }
 
-        let started = Instant::now();
-        let (completion, result) = mpsc::sync_channel(1);
-        let mut command = Command::Shutdown { completion };
-        loop {
-            self.note_enqueue();
-            match self.sender.try_send(command) {
-                Ok(()) => break,
-                Err(mpsc::TrySendError::Full(returned)) => {
-                    self.rollback_enqueue();
-                    command = returned;
-                    if let Some(error) = self.poison.lock().clone() {
-                        metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
+        if is_leader {
+            loop {
+                let send_result = {
+                    let state = self.control.state.lock();
+                    if let ShutdownState::Complete(result) = &state.shutdown {
+                        return result.clone();
+                    }
+                    if let Some(error) = state.terminal.clone() {
                         return Err(error);
                     }
-                    if started.elapsed() >= self.completion_timeout {
+                    self.note_enqueue();
+                    self.sender.try_send(Command::Shutdown)
+                };
+                match send_result {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        self.rollback_enqueue();
+                        if started.elapsed() >= self.completion_timeout {
+                            return Err(install_poison(
+                                &self.control,
+                                HaError::InvalidBackend(format!(
+                                    "oplog writer shutdown timed out after {:?}",
+                                    self.completion_timeout
+                                )),
+                            ));
+                        }
+                        std::thread::yield_now();
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        self.rollback_enqueue();
                         return Err(install_poison(
-                            &self.poison,
-                            HaError::InvalidBackend(format!(
-                                "oplog writer shutdown timed out after {:?}",
-                                self.completion_timeout
-                            )),
+                            &self.control,
+                            HaError::InvalidBackend(
+                                "oplog writer disconnected during shutdown".into(),
+                            ),
                         ));
                     }
-                    std::thread::yield_now();
-                }
-                Err(mpsc::TrySendError::Disconnected(_)) => {
-                    self.rollback_enqueue();
-                    if let Some(error) = self.poison.lock().clone() {
-                        metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
-                        return Err(error);
-                    }
-                    return Err(install_poison(
-                        &self.poison,
-                        HaError::InvalidBackend("oplog writer disconnected during shutdown".into()),
-                    ));
                 }
             }
         }
 
-        let remaining = self.completion_timeout.saturating_sub(started.elapsed());
-        match blocking_recv_timeout(&result, remaining) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(install_poison(
-                &self.poison,
-                HaError::InvalidBackend(format!(
-                    "oplog writer shutdown timed out after {:?}",
-                    self.completion_timeout
-                )),
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(install_poison(
-                &self.poison,
-                HaError::InvalidBackend("oplog writer shutdown completion disconnected".into()),
-            )),
+        let mut state = self.control.state.lock();
+        loop {
+            if let ShutdownState::Complete(result) = &state.shutdown {
+                return result.clone();
+            }
+            let remaining = self.completion_timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                let error = install_poison_locked(
+                    &self.control,
+                    &mut state,
+                    HaError::InvalidBackend(format!(
+                        "oplog writer shutdown timed out after {:?}",
+                        self.completion_timeout
+                    )),
+                );
+                return Err(error);
+            }
+            self.control.changed.wait_for(&mut state, remaining);
         }
     }
 
@@ -311,43 +438,60 @@ impl SequencedOpLogWorker {
         completion_kind: CompletionKind,
         build: impl FnOnce(mpsc::SyncSender<Result<T, HaError>>) -> Command,
     ) -> Result<T, HaError> {
-        self.check_accepting()?;
         let (completion, result) = mpsc::sync_channel(1);
-        self.note_enqueue();
-        match self.sender.try_send(build(completion)) {
-            Ok(()) => {
-                if persist {
-                    metrics::OPLOG_WRITER_SUBMITTED.inc();
+        {
+            let mut state = self.control.state.lock();
+            if let Some(error) = state.terminal.clone() {
+                metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
+                return Err(error);
+            }
+            if !state.accepting {
+                return Err(HaError::InvalidBackend("oplog writer is shut down".into()));
+            }
+            #[cfg(test)]
+            run_test_pause(&self.test_hooks.after_acceptance);
+            self.note_enqueue();
+            match self.sender.try_send(build(completion)) {
+                Ok(()) => {
+                    if persist {
+                        metrics::OPLOG_WRITER_SUBMITTED.inc();
+                    }
                 }
-            }
-            Err(mpsc::TrySendError::Full(_)) => {
-                self.rollback_enqueue();
-                metrics::OPLOG_WRITER_QUEUE_REJECTIONS.inc();
-                return Err(HaError::InvalidBackend(format!(
-                    "oplog writer queue is full for {operation}"
-                )));
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
-                self.rollback_enqueue();
-                if let Some(error) = self.poison.lock().clone() {
-                    metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
+                Err(mpsc::TrySendError::Full(_)) => {
+                    self.rollback_enqueue();
+                    metrics::OPLOG_WRITER_QUEUE_REJECTIONS.inc();
+                    return Err(HaError::InvalidBackend(format!(
+                        "oplog writer queue is full for {operation}"
+                    )));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.rollback_enqueue();
+                    if let Some(error) = state.terminal.clone() {
+                        metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
+                        return Err(error);
+                    }
+                    let error = install_poison_locked(
+                        &self.control,
+                        &mut state,
+                        HaError::InvalidBackend(format!(
+                            "oplog writer channel disconnected while submitting {operation}"
+                        )),
+                    );
                     return Err(error);
                 }
-                if self.shutting_down.load(Ordering::Acquire) {
-                    return Err(HaError::InvalidBackend("oplog writer is shut down".into()));
-                }
-                return Err(install_poison(
-                    &self.poison,
-                    HaError::InvalidBackend(format!(
-                        "oplog writer channel disconnected while submitting {operation}"
-                    )),
-                ));
             }
         }
 
         match blocking_recv_timeout(&result, self.completion_timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                let mut state = self.control.state.lock();
+                if let Ok(result) = result.try_recv() {
+                    return result;
+                }
+                if let Some(error) = state.terminal.clone() {
+                    return Err(error);
+                }
                 let message = match completion_kind {
                     CompletionKind::Durable => format!(
                         "oplog durable completion timed out after {:?}",
@@ -358,34 +502,26 @@ impl SequencedOpLogWorker {
                         self.completion_timeout
                     ),
                 };
-                Err(install_poison(
-                    &self.poison,
+                Err(install_poison_locked(
+                    &self.control,
+                    &mut state,
                     HaError::InvalidBackend(message),
                 ))
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if let Some(error) = self.poison.lock().clone() {
+                let mut state = self.control.state.lock();
+                if let Some(error) = state.terminal.clone() {
                     return Err(error);
                 }
-                Err(install_poison(
-                    &self.poison,
+                Err(install_poison_locked(
+                    &self.control,
+                    &mut state,
                     HaError::InvalidBackend(format!(
                         "oplog {operation} completion channel disconnected"
                     )),
                 ))
             }
         }
-    }
-
-    fn check_accepting(&self) -> Result<(), HaError> {
-        if let Some(error) = self.poison.lock().clone() {
-            metrics::OPLOG_WRITER_POST_POISON_FAILURES.inc();
-            return Err(error);
-        }
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(HaError::InvalidBackend("oplog writer is shut down".into()));
-        }
-        Ok(())
     }
 
     fn note_enqueue(&self) {
@@ -416,13 +552,26 @@ fn blocking_recv_timeout<T>(
     }
 }
 
-fn install_poison(poison: &Mutex<Option<HaError>>, error: HaError) -> HaError {
-    let mut guard = poison.lock();
-    if let Some(existing) = guard.as_ref() {
+fn install_poison(control: &WorkerControl, error: HaError) -> HaError {
+    let mut state = control.state.lock();
+    install_poison_locked(control, &mut state, error)
+}
+
+fn install_poison_locked(
+    control: &WorkerControl,
+    state: &mut WorkerState,
+    error: HaError,
+) -> HaError {
+    if let Some(existing) = state.terminal.as_ref() {
         return existing.clone();
     }
     metrics::OPLOG_WRITER_POISON_EVENTS.inc();
-    *guard = Some(error.clone());
+    state.terminal = Some(error.clone());
+    state.accepting = false;
+    if matches!(state.shutdown, ShutdownState::Requested) {
+        state.shutdown = ShutdownState::Complete(Err(error.clone()));
+    }
+    control.changed.notify_all();
     error
 }
 
@@ -432,14 +581,18 @@ fn run_worker(
     config: OpLogWorkerConfig,
     latest_assigned: Arc<AtomicU64>,
     latest_committed: Arc<AtomicU64>,
-    poison: Arc<Mutex<Option<HaError>>>,
+    control: Arc<WorkerControl>,
     queue_depth: Arc<AtomicUsize>,
+    #[cfg(test)] test_hooks: Arc<WorkerTestHooks>,
 ) {
     let mut deferred = None;
     loop {
-        if let Some(error) = poison.lock().clone() {
-            fail_deferred_and_queued(deferred.take(), &receiver, &queue_depth, &error);
-            return;
+        {
+            let state = control.state.lock();
+            if let Some(error) = state.terminal.clone() {
+                fail_deferred_and_queued(deferred.take(), &receiver, &queue_depth, &error);
+                return;
+            }
         }
         let first = match deferred.take() {
             Some(command) => command,
@@ -459,9 +612,9 @@ fn run_worker(
                 completion,
             } => {
                 if finish_backend_command(
-                    store.read_since(since_seq, max_count),
+                    execute_backend_call(&control, || store.read_since(since_seq, max_count)),
                     completion,
-                    &poison,
+                    &control,
                     &receiver,
                     &queue_depth,
                 ) {
@@ -471,9 +624,9 @@ fn run_worker(
             }
             Command::MaxSequenceId { completion } => {
                 if finish_backend_command(
-                    store.max_sequence_id(),
+                    execute_backend_call(&control, || store.max_sequence_id()),
                     completion,
-                    &poison,
+                    &control,
                     &receiver,
                     &queue_depth,
                 ) {
@@ -485,11 +638,13 @@ fn run_worker(
                 sequence_id,
                 completion,
             } => {
-                let result = store.update_latest_sequence_id(sequence_id).map(|()| {
-                    latest_assigned.store(sequence_id, Ordering::Release);
-                    latest_committed.store(sequence_id, Ordering::Release);
-                });
-                if finish_backend_command(result, completion, &poison, &receiver, &queue_depth) {
+                let result =
+                    execute_backend_call(&control, || store.update_latest_sequence_id(sequence_id))
+                        .map(|()| {
+                            latest_assigned.store(sequence_id, Ordering::Release);
+                            latest_committed.store(sequence_id, Ordering::Release);
+                        });
+                if finish_backend_command(result, completion, &control, &receiver, &queue_depth) {
                     return;
                 }
                 continue;
@@ -500,9 +655,11 @@ fn run_worker(
                 completion,
             } => {
                 if finish_backend_command(
-                    store.record_snapshot_sequence_id(&snapshot_id, sequence_id),
+                    execute_backend_call(&control, || {
+                        store.record_snapshot_sequence_id(&snapshot_id, sequence_id)
+                    }),
                     completion,
-                    &poison,
+                    &control,
                     &receiver,
                     &queue_depth,
                 ) {
@@ -515,9 +672,9 @@ fn run_worker(
                 completion,
             } => {
                 if finish_backend_command(
-                    store.get_snapshot_sequence_id(&snapshot_id),
+                    execute_backend_call(&control, || store.get_snapshot_sequence_id(&snapshot_id)),
                     completion,
-                    &poison,
+                    &control,
                     &receiver,
                     &queue_depth,
                 ) {
@@ -530,9 +687,9 @@ fn run_worker(
                 completion,
             } => {
                 if finish_backend_command(
-                    store.cleanup_before(before_sequence_id),
+                    execute_backend_call(&control, || store.cleanup_before(before_sequence_id)),
                     completion,
-                    &poison,
+                    &control,
                     &receiver,
                     &queue_depth,
                 ) {
@@ -540,8 +697,13 @@ fn run_worker(
                 }
                 continue;
             }
-            Command::Shutdown { completion } => {
-                let _ = completion.send(Ok(()));
+            Command::Shutdown => {
+                let mut state = control.state.lock();
+                #[cfg(test)]
+                run_test_pause(&test_hooks.before_worker_exit);
+                let result = state.terminal.clone().map_or(Ok(()), Err);
+                state.shutdown = ShutdownState::Complete(result);
+                control.changed.notify_all();
                 return;
             }
         };
@@ -588,14 +750,12 @@ fn run_worker(
         let mut sequences = Vec::with_capacity(batch.len());
         let mut batch_error = None;
         for command in &batch {
-            if let Some(error) = poison.lock().clone() {
-                batch_error = Some(error);
-                break;
-            }
-            match store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: command.producer_view_version,
-                payload: command.payload.clone(),
+            match execute_backend_call(&control, || {
+                store.append(&OpLogRecord {
+                    seq: 0,
+                    producer_view_version: command.producer_view_version,
+                    payload: command.payload.clone(),
+                })
             }) {
                 Ok(sequence_id) => {
                     let expected = latest_assigned
@@ -609,13 +769,13 @@ fn run_worker(
                     let expected = match expected {
                         Ok(expected) => expected,
                         Err(error) => {
-                            batch_error = Some(install_poison(&poison, error));
+                            batch_error = Some(install_poison(&control, error));
                             break;
                         }
                     };
                     if sequence_id != expected {
                         batch_error = Some(install_poison(
-                            &poison,
+                            &control,
                             HaError::InvalidBackend(format!(
                                 "oplog writer expected sequence {expected} but backend assigned {sequence_id}"
                             )),
@@ -626,24 +786,27 @@ fn run_worker(
                     sequences.push(sequence_id);
                 }
                 Err(error) => {
-                    batch_error = Some(install_poison(&poison, error));
+                    batch_error = Some(error);
                     break;
                 }
             }
         }
         if batch_error.is_none() {
-            if let Some(error) = poison.lock().clone() {
+            #[cfg(test)]
+            run_test_pause(&test_hooks.before_flush_call);
+            if let Err(error) = execute_backend_call(&control, || store.flush_durable()) {
                 batch_error = Some(error);
-            } else if let Err(error) = store.flush_durable() {
-                batch_error = Some(install_poison(&poison, error));
             } else if let Some(sequence_id) = sequences.last().copied() {
                 latest_committed.store(sequence_id, Ordering::Release);
-                if let Some(error) = poison.lock().clone() {
-                    batch_error = Some(error);
-                }
             }
         }
 
+        #[cfg(test)]
+        let batch_len = batch.len();
+        let state = control.state.lock();
+        if let Some(error) = state.terminal.clone() {
+            batch_error = Some(error);
+        }
         for (index, command) in batch.into_iter().enumerate() {
             let _ = command.operation;
             metrics::OPLOG_WRITER_DURABLE_WAIT_US
@@ -653,11 +816,42 @@ fn run_worker(
                 None => Ok(sequences[index]),
             };
             let _ = command.completion.send(result);
+            #[cfg(test)]
+            if index == 0 && batch_len > 1 {
+                run_test_pause(&test_hooks.after_first_completion);
+            }
         }
+        #[cfg(test)]
+        run_test_pause(&test_hooks.after_batch_completion);
         if let Some(error) = batch_error {
             fail_deferred_and_queued(deferred.take(), &receiver, &queue_depth, &error);
             return;
         }
+        drop(state);
+    }
+}
+
+fn execute_backend_call<T>(
+    control: &WorkerControl,
+    operation: impl FnOnce() -> Result<T, HaError>,
+) -> Result<T, HaError> {
+    {
+        let mut state = control.state.lock();
+        if let Some(error) = state.terminal.clone() {
+            return Err(error);
+        }
+        state.backend_call_in_progress = true;
+    }
+
+    let result = operation();
+    let mut state = control.state.lock();
+    state.backend_call_in_progress = false;
+    match result {
+        Ok(value) => match state.terminal.clone() {
+            Some(error) => Err(error),
+            None => Ok(value),
+        },
+        Err(error) => Err(install_poison_locked(control, &mut state, error)),
     }
 }
 
@@ -669,17 +863,22 @@ fn note_dequeued(queue_depth: &AtomicUsize) {
 fn finish_backend_command<T>(
     result: Result<T, HaError>,
     completion: mpsc::SyncSender<Result<T, HaError>>,
-    poison: &Mutex<Option<HaError>>,
+    control: &WorkerControl,
     receiver: &mpsc::Receiver<Command>,
     queue_depth: &AtomicUsize,
 ) -> bool {
+    let mut state = control.state.lock();
+    let result = match (state.terminal.clone(), result) {
+        (Some(error), _) => Err(error),
+        (None, result) => result,
+    };
     match result {
         Ok(value) => {
             let _ = completion.send(Ok(value));
             false
         }
         Err(error) => {
-            let error = install_poison(poison, error);
+            let error = install_poison_locked(control, &mut state, error);
             let _ = completion.send(Err(error.clone()));
             fail_deferred_and_queued(None, receiver, queue_depth, &error);
             true
@@ -718,17 +917,17 @@ fn fail_command(command: Command, error: &HaError) {
         }
         Command::UpdateLatestSequenceId { completion, .. }
         | Command::RecordSnapshotSequenceId { completion, .. }
-        | Command::CleanupBefore { completion, .. }
-        | Command::Shutdown { completion } => {
+        | Command::CleanupBefore { completion, .. } => {
             let _ = completion.send(Err(error.clone()));
         }
+        Command::Shutdown => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::{OpLogWorkerConfig, SequencedOpLogWorker};
+    use super::{OpLogWorkerConfig, SequencedOpLogWorker, TestPause};
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Barrier, Condvar, Mutex, mpsc};
     use std::time::{Duration, Instant};
@@ -1063,6 +1262,216 @@ mod tests {
         assert_eq!(second.join().unwrap(), Err(timeout_error));
         let guard = state.0.lock().unwrap();
         assert_eq!((guard.append_calls, guard.flush_calls), (1, 1));
+    }
+
+    #[test]
+    fn fix_round_one_timeout_before_flush_decision_prevents_flush_call() {
+        let (store, state) = CountingGateStore::new(true, None, 0);
+        let mut config = test_config();
+        config.batch_window = Duration::ZERO;
+        config.completion_timeout = Duration::from_millis(80);
+        let worker = Arc::new(SequencedOpLogWorker::start(Box::new(store), config));
+        let pause = Arc::new(TestPause::new());
+        let completed = Arc::new(TestPause::new());
+        *worker.test_hooks.before_flush_call.lock() = Some(Arc::clone(&pause));
+        *worker.test_hooks.after_batch_completion.lock() = Some(Arc::clone(&completed));
+
+        let submit_worker = Arc::clone(&worker);
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let submitter = std::thread::spawn(move || {
+            result_tx
+                .send(submit_worker.submit_durable("pre-flush-timeout".into(), 1, "test"))
+                .unwrap();
+        });
+        assert!(pause.wait_until_reached(Duration::from_secs(1)));
+        let result = result_rx.recv_timeout(Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        pause.release();
+        assert!(completed.wait_until_reached(Duration::from_secs(1)));
+        submitter.join().unwrap();
+
+        assert!(elapsed < Duration::from_millis(200));
+        assert!(
+            result
+                .expect("pre-flush timeout exceeded its completion deadline")
+                .unwrap_err()
+                .to_string()
+                .contains("oplog durable completion timed out after")
+        );
+        let guard = state.0.lock().unwrap();
+        assert_eq!(guard.flush_calls, 0);
+        drop(guard);
+        completed.release();
+    }
+
+    #[test]
+    fn fix_round_one_timeout_during_flush_is_bounded_and_fans_out_one_error() {
+        let (store, state) = CountingGateStore::new(false, None, 0);
+        let mut config = test_config();
+        config.batch_window = Duration::from_millis(20);
+        config.completion_timeout = Duration::from_millis(80);
+        let worker = Arc::new(SequencedOpLogWorker::start(Box::new(store), config));
+        let barrier = Arc::new(Barrier::new(3));
+        let (result_tx, result_rx) = mpsc::channel();
+        let mut submitters = Vec::new();
+
+        for index in 0..2 {
+            let worker = Arc::clone(&worker);
+            let barrier = Arc::clone(&barrier);
+            let result_tx = result_tx.clone();
+            submitters.push(std::thread::spawn(move || {
+                barrier.wait();
+                result_tx
+                    .send(worker.submit_durable(format!("flush-timeout-{index}"), 2, "test"))
+                    .unwrap();
+            }));
+        }
+        drop(result_tx);
+        barrier.wait();
+        wait_for_flush_calls(&state, 1);
+        let started = Instant::now();
+        let first = result_rx.recv_timeout(Duration::from_millis(200));
+        let second = result_rx.recv_timeout(Duration::from_millis(200));
+        let elapsed = started.elapsed();
+        open_flush_gate(&state);
+        for submitter in submitters {
+            submitter.join().unwrap();
+        }
+
+        assert!(elapsed < Duration::from_millis(200));
+        let first = first
+            .expect("first flush waiter exceeded its completion deadline")
+            .unwrap_err();
+        let second = second
+            .expect("second flush waiter exceeded its completion deadline")
+            .unwrap_err();
+        assert_eq!(first, second);
+        assert!(
+            first
+                .to_string()
+                .contains("oplog durable completion timed out after")
+        );
+    }
+
+    #[test]
+    fn fix_round_one_timeout_during_fanout_cannot_split_batch_outcome() {
+        let (store, _state) = CountingGateStore::new(true, None, 0);
+        let mut config = test_config();
+        config.batch_window = Duration::from_millis(20);
+        config.completion_timeout = Duration::from_millis(150);
+        let worker = Arc::new(SequencedOpLogWorker::start(Box::new(store), config));
+        let pause = Arc::new(TestPause::new());
+        *worker.test_hooks.after_first_completion.lock() = Some(Arc::clone(&pause));
+        let barrier = Arc::new(Barrier::new(3));
+        let (result_tx, result_rx) = mpsc::channel();
+        let mut submitters = Vec::new();
+
+        for index in 0..2 {
+            let worker = Arc::clone(&worker);
+            let barrier = Arc::clone(&barrier);
+            let result_tx = result_tx.clone();
+            submitters.push(std::thread::spawn(move || {
+                barrier.wait();
+                result_tx
+                    .send(worker.submit_durable(format!("fanout-{index}"), 3, "test"))
+                    .unwrap();
+            }));
+        }
+        drop(result_tx);
+        barrier.wait();
+        assert!(pause.wait_until_reached(Duration::from_secs(1)));
+
+        let first = result_rx.recv_timeout(Duration::from_millis(50)).unwrap();
+        let early_second = result_rx.recv_timeout(Duration::from_millis(200));
+        let second_was_late = matches!(&early_second, Err(mpsc::RecvTimeoutError::Timeout));
+        pause.release();
+        let second = match early_second {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                result_rx.recv_timeout(Duration::from_secs(1)).unwrap()
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("fanout result channel disconnected")
+            }
+        };
+        for submitter in submitters {
+            submitter.join().unwrap();
+        }
+
+        assert!(second_was_late);
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+    }
+
+    #[test]
+    fn fix_round_one_admission_race_with_worker_exit_balances_queue_depth() {
+        let (store, _state) = CountingGateStore::new(true, None, 0);
+        let mut config = test_config();
+        config.completion_timeout = Duration::from_millis(500);
+        let worker = Arc::new(SequencedOpLogWorker::start(Box::new(store), config));
+        let acceptance_pause = Arc::new(TestPause::new());
+        let exit_pause = Arc::new(TestPause::new());
+        *worker.test_hooks.after_acceptance.lock() = Some(Arc::clone(&acceptance_pause));
+        *worker.test_hooks.before_worker_exit.lock() = Some(Arc::clone(&exit_pause));
+
+        let producer_worker = Arc::clone(&worker);
+        let producer = std::thread::spawn(move || {
+            producer_worker.submit_durable("admission-race".into(), 4, "test")
+        });
+        assert!(acceptance_pause.wait_until_reached(Duration::from_secs(1)));
+
+        let shutdown_worker = Arc::clone(&worker);
+        let shutdown = std::thread::spawn(move || shutdown_worker.shutdown());
+        let exited_early = exit_pause.wait_until_reached(Duration::from_millis(200));
+        acceptance_pause.release();
+        assert!(exited_early || exit_pause.wait_until_reached(Duration::from_secs(1)));
+        exit_pause.release();
+
+        assert!(producer.join().unwrap().is_ok());
+        assert_eq!(shutdown.join().unwrap(), Ok(()));
+        assert_eq!(worker.queue_depth.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn fix_round_one_concurrent_shutdown_callers_wait_for_same_result() {
+        let (store, state) = CountingGateStore::new(false, None, 0);
+        let mut config = test_config();
+        config.completion_timeout = Duration::from_millis(500);
+        let worker = Arc::new(SequencedOpLogWorker::start(Box::new(store), config));
+        let shutdown_pause = Arc::new(TestPause::new());
+        *worker.test_hooks.after_shutdown_start.lock() = Some(Arc::clone(&shutdown_pause));
+
+        let submit_worker = Arc::clone(&worker);
+        let submitter = std::thread::spawn(move || {
+            submit_worker.submit_durable("active-before-shutdown".into(), 5, "test")
+        });
+        wait_for_flush_calls(&state, 1);
+
+        let (result_tx, result_rx) = mpsc::channel();
+        let first_worker = Arc::clone(&worker);
+        let first_tx = result_tx.clone();
+        let first = std::thread::spawn(move || first_tx.send(first_worker.shutdown()).unwrap());
+        assert!(shutdown_pause.wait_until_reached(Duration::from_secs(1)));
+
+        let second_worker = Arc::clone(&worker);
+        let second = std::thread::spawn(move || result_tx.send(second_worker.shutdown()).unwrap());
+        let early = result_rx.recv_timeout(Duration::from_millis(100));
+        shutdown_pause.release();
+        open_flush_gate(&state);
+
+        let mut results = Vec::new();
+        if let Ok(result) = early.as_ref() {
+            results.push(result.clone());
+        }
+        while results.len() < 2 {
+            results.push(result_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        }
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)));
+        assert_eq!(results, vec![Ok(()), Ok(())]);
+        assert!(submitter.join().unwrap().is_ok());
     }
 
     #[test]
