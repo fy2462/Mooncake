@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mooncake_store_client::{ClientBackgroundConfig, ClientBackgroundHandle, MooncakeClient};
+use mooncake_store_client::{MooncakeClient, proto};
 use mooncake_store_core::StoreError;
 use mooncake_store_master::ha::{LeaderCoordinator, MasterView};
 use serde::Serialize;
@@ -70,15 +70,9 @@ fn stable_capacity_recovery_retries_only_capacity_rejections() {
 }
 
 #[test]
-fn large_client_background_configuration_is_health_only() {
-    let config = scenario_client_background_config();
-
-    assert!(config.health_interval < MASTER_CLIENT_TTL);
-    assert!(!config.enable_offloading);
-    assert!(!config.enable_promotion);
-    assert!(!config.enable_task_poll);
-    assert!(!config.report_ssd_capacity);
-    assert!(!config.enable_disk_watermark_eviction);
+fn scenario_client_liveness_pinger_is_faster_than_master_ttl() {
+    assert!(SCENARIO_CLIENT_HEARTBEAT_INTERVAL < MASTER_CLIENT_TTL);
+    assert!(SCENARIO_CLIENT_PING_TIMEOUT < MASTER_CLIENT_TTL);
 }
 
 #[tokio::test]
@@ -217,6 +211,256 @@ fn opted_in_gate_requires_every_external_input() {
         GateConfig::from_map(&env)
             .unwrap_err()
             .contains("MOONCAKE_HA_ETCD_ENDPOINT")
+    );
+}
+
+#[test]
+fn live_test_opt_ins_are_disjoint_for_none_liveness_canonical_and_dual() {
+    let none = BTreeMap::new();
+    assert!(GateConfig::from_map(&none).unwrap().is_none());
+    assert!(liveness_preflight_config_from_map(&none).unwrap().is_none());
+
+    let mut common = BTreeMap::from([
+        (
+            "MOONCAKE_HA_ETCD_ENDPOINT".into(),
+            "http://127.0.0.1:42379".into(),
+        ),
+        (
+            "MOONCAKE_HA_MASTER_BIN".into(),
+            "/tmp/mooncake-master".into(),
+        ),
+        (
+            "MOONCAKE_HA_RESULT".into(),
+            "/tmp/canonical/result.json".into(),
+        ),
+        (
+            "MOONCAKE_HA_ARTIFACT_ROOT".into(),
+            "/tmp/ha-artifacts".into(),
+        ),
+        ("MOONCAKE_HA_SEED".into(), "0x4d4f4f4e48414348".into()),
+    ]);
+
+    common.insert("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT".into(), "1".into());
+    assert!(GateConfig::from_map(&common).unwrap().is_none());
+    let liveness = liveness_preflight_config_from_map(&common)
+        .unwrap()
+        .expect("liveness-only config");
+    assert_eq!(
+        liveness.gate.artifact_root,
+        PathBuf::from("/tmp/ha-artifacts/liveness-preflight")
+    );
+    assert_eq!(
+        liveness.result_path,
+        PathBuf::from("/tmp/ha-artifacts/liveness-preflight/liveness-preflight-result.json")
+    );
+    assert_ne!(
+        liveness.result_path,
+        PathBuf::from("/tmp/canonical/result.json")
+    );
+
+    common.remove("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT");
+    common.insert("MOONCAKE_RUN_HA_CHAOS".into(), "1".into());
+    assert!(GateConfig::from_map(&common).unwrap().is_some());
+    assert!(
+        liveness_preflight_config_from_map(&common)
+            .unwrap()
+            .is_none()
+    );
+
+    common.insert("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT".into(), "1".into());
+    for error in [
+        GateConfig::from_map(&common).unwrap_err(),
+        liveness_preflight_config_from_map(&common).unwrap_err(),
+    ] {
+        assert!(error.contains("mutually exclusive"), "{error}");
+    }
+}
+
+#[test]
+fn liveness_result_publication_combines_operation_and_cleanup_atomically() {
+    let result_dir = tempfile::tempdir().unwrap();
+    let cases = [
+        ("success", None, None, "PASS"),
+        ("operation", Some("sentinel mismatch"), None, "FAIL"),
+        ("cleanup", None, Some("worker join timed out"), "FAIL"),
+        (
+            "combined",
+            Some("sentinel mismatch"),
+            Some("worker join timed out"),
+            "FAIL",
+        ),
+    ];
+
+    for (name, operation_failure, cleanup_failure, expected_status) in cases {
+        let path = result_dir.path().join(format!("{name}.json"));
+        let result = LivenessPreflightResult::new(
+            3,
+            4_000,
+            operation_failure.map(str::to_owned),
+            cleanup_failure.map(str::to_owned),
+        );
+        result.write_atomic(&path).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["status"], expected_status, "case {name}");
+        assert_eq!(
+            value["failure"],
+            operation_failure.map_or(serde_json::Value::Null, serde_json::Value::from),
+            "case {name}"
+        );
+        assert_eq!(
+            value["cleanup_failure"],
+            cleanup_failure.map_or(serde_json::Value::Null, serde_json::Value::from),
+            "case {name}"
+        );
+    }
+}
+
+struct CleanupProbe {
+    resource_active: Arc<std::sync::atomic::AtomicBool>,
+    worker_active: Arc<std::sync::atomic::AtomicBool>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+    cleanup_failure: Option<String>,
+}
+
+impl CleanupProbe {
+    fn new(cleanup_failure: Option<&str>) -> Self {
+        let resource_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let worker_drop = WorkerDropFlag(Arc::clone(&worker_active));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _worker_drop = worker_drop;
+            let _ = shutdown_rx.await;
+        });
+        Self {
+            resource_active,
+            worker_active,
+            shutdown_tx: Some(shutdown_tx),
+            worker: Some(worker),
+            cleanup_failure: cleanup_failure.map(str::to_owned),
+        }
+    }
+}
+
+impl ScenarioOwnedResource for CleanupProbe {
+    async fn tear_down_owned(&mut self) -> Result<(), String> {
+        self.resource_active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            worker.await.unwrap();
+        }
+        self.cleanup_failure.clone().map_or(Ok(()), Err)
+    }
+}
+
+struct WorkerDropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for WorkerDropFlag {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn stuck_liveness_iteration_is_aborted_and_joined_within_cleanup_deadline() {
+    let worker_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let worker_drop = WorkerDropFlag(Arc::clone(&worker_active));
+    let worker = tokio::spawn(async move {
+        let _worker_drop = worker_drop;
+        std::future::pending::<()>().await;
+    });
+    let mut pinger = ScenarioLivenessPinger::from_test_worker(worker);
+
+    let started = Instant::now();
+    let error = pinger
+        .shutdown_before(started + Duration::from_millis(100))
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("was aborted"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!worker_active.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn failure_creating_client_n_cleans_every_already_created_client_and_worker() {
+    let mut created = vec![CleanupProbe::new(None), CleanupProbe::new(None)];
+    let resource_states = created
+        .iter()
+        .map(|probe| Arc::clone(&probe.resource_active))
+        .collect::<Vec<_>>();
+    let worker_states = created
+        .iter()
+        .map(|probe| Arc::clone(&probe.worker_active))
+        .collect::<Vec<_>>();
+
+    let error = retain_created_or_cleanup(
+        &mut created,
+        Err::<CleanupProbe, _>("injected client 2 creation failure".into()),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        error.contains("injected client 2 creation failure"),
+        "{error}"
+    );
+    assert!(
+        resource_states
+            .iter()
+            .all(|state| !state.load(std::sync::atomic::Ordering::SeqCst))
+    );
+    assert!(
+        worker_states
+            .iter()
+            .all(|state| !state.load(std::sync::atomic::Ordering::SeqCst))
+    );
+}
+
+#[tokio::test]
+async fn remount_failure_attempts_cleanup_for_every_client_after_first_cleanup_error() {
+    let mut clients = vec![
+        CleanupProbe::new(Some("injected cleanup failure")),
+        CleanupProbe::new(None),
+        CleanupProbe::new(None),
+    ];
+    let resource_states = clients
+        .iter()
+        .map(|probe| Arc::clone(&probe.resource_active))
+        .collect::<Vec<_>>();
+    let worker_states = clients
+        .iter()
+        .map(|probe| Arc::clone(&probe.worker_active))
+        .collect::<Vec<_>>();
+
+    let failure = finish_owned_operation(
+        &mut clients,
+        Err::<(), _>(scenario_failure(
+            "remount-recover",
+            "injected remount failure",
+        )),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure.stage, "remount-recover");
+    assert!(failure.message.contains("injected remount failure"));
+    assert!(failure.message.contains("injected cleanup failure"));
+    assert!(
+        resource_states
+            .iter()
+            .all(|state| !state.load(std::sync::atomic::Ordering::SeqCst))
+    );
+    assert!(
+        worker_states
+            .iter()
+            .all(|state| !state.load(std::sync::atomic::Ordering::SeqCst))
     );
 }
 
@@ -398,6 +642,9 @@ const LARGE_VALUE_LEN: usize = 3 * 1024 * 1024;
 const MASTER_CLIENT_TTL: Duration = Duration::from_secs(2);
 const MASTER_CLIENT_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 const SCENARIO_CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+const SCENARIO_CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(1);
+const SCENARIO_CLIENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
+const SCENARIO_CLIENT_PINGER_JOIN_GRACE: Duration = Duration::from_secs(2);
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 
@@ -431,15 +678,43 @@ impl GateConfig {
     }
 
     fn from_map(env: &BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        reject_dual_live_opt_ins(env)?;
         if env.get("MOONCAKE_RUN_HA_CHAOS").map(String::as_str) != Some("1") {
             return Ok(None);
         }
 
-        let etcd_endpoint = required_env(env, "MOONCAKE_HA_ETCD_ENDPOINT")?;
-        let master_bin = PathBuf::from(required_env(env, "MOONCAKE_HA_MASTER_BIN")?);
-        let result_path = PathBuf::from(required_env(env, "MOONCAKE_HA_RESULT")?);
-        let artifact_root = PathBuf::from(required_env(env, "MOONCAKE_HA_ARTIFACT_ROOT")?);
-        let seed = parse_seed(&required_env(env, "MOONCAKE_HA_SEED")?)?;
+        required_live_env(env, "MOONCAKE_HA_ETCD_ENDPOINT", "MOONCAKE_RUN_HA_CHAOS")?;
+        required_live_env(env, "MOONCAKE_HA_MASTER_BIN", "MOONCAKE_RUN_HA_CHAOS")?;
+        let result_path = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_HA_RESULT",
+            "MOONCAKE_RUN_HA_CHAOS",
+        )?);
+        let artifact_root = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_HA_ARTIFACT_ROOT",
+            "MOONCAKE_RUN_HA_CHAOS",
+        )?);
+        Self::enabled_from_map(
+            env,
+            result_path,
+            artifact_root,
+            "ha-chaos",
+            "MOONCAKE_RUN_HA_CHAOS",
+        )
+        .map(Some)
+    }
+
+    fn enabled_from_map(
+        env: &BTreeMap<String, String>,
+        result_path: PathBuf,
+        artifact_root: PathBuf,
+        namespace_prefix: &str,
+        opt_in: &str,
+    ) -> Result<Self, String> {
+        let etcd_endpoint = required_live_env(env, "MOONCAKE_HA_ETCD_ENDPOINT", opt_in)?;
+        let master_bin = PathBuf::from(required_live_env(env, "MOONCAKE_HA_MASTER_BIN", opt_in)?);
+        let seed = parse_seed(&required_live_env(env, "MOONCAKE_HA_SEED", opt_in)?)?;
         let rounds = match env.get("MOONCAKE_HA_ROUNDS") {
             Some(value) => value
                 .parse()
@@ -450,12 +725,12 @@ impl GateConfig {
             return Err("MOONCAKE_HA_ROUNDS must be at least 3".into());
         }
         let cluster_namespace = format!(
-            "ha-chaos-{seed:016x}-{}-{}",
+            "{namespace_prefix}-{seed:016x}-{}-{}",
             std::process::id(),
             monotonic_timestamp_ns()?
         );
 
-        Ok(Some(Self {
+        Ok(Self {
             etcd_endpoint,
             master_bin,
             result_path,
@@ -463,12 +738,35 @@ impl GateConfig {
             cluster_namespace,
             seed,
             rounds,
-        }))
+        })
     }
 }
 
-fn liveness_preflight_config_from_env() -> Result<Option<GateConfig>, String> {
-    let mut env = std::env::vars().collect::<BTreeMap<_, _>>();
+#[derive(Debug, Clone)]
+struct LivenessPreflightConfig {
+    gate: GateConfig,
+    result_path: PathBuf,
+}
+
+fn reject_dual_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(), String> {
+    if env.get("MOONCAKE_RUN_HA_CHAOS").map(String::as_str) == Some("1")
+        && env
+            .get("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT")
+            .map(String::as_str)
+            == Some("1")
+    {
+        return Err(
+            "MOONCAKE_RUN_HA_CHAOS and MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT are mutually exclusive"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn liveness_preflight_config_from_map(
+    env: &BTreeMap<String, String>,
+) -> Result<Option<LivenessPreflightConfig>, String> {
+    reject_dual_live_opt_ins(env)?;
     if env
         .get("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT")
         .map(String::as_str)
@@ -476,20 +774,48 @@ fn liveness_preflight_config_from_env() -> Result<Option<GateConfig>, String> {
     {
         return Ok(None);
     }
-    env.insert("MOONCAKE_RUN_HA_CHAOS".into(), "1".into());
-    GateConfig::from_map(&env)
+    let artifact_root = PathBuf::from(required_live_env(
+        env,
+        "MOONCAKE_HA_ARTIFACT_ROOT",
+        "MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT",
+    )?)
+    .join("liveness-preflight");
+    let result_path = artifact_root.join("liveness-preflight-result.json");
+    let gate = GateConfig::enabled_from_map(
+        env,
+        result_path.clone(),
+        artifact_root,
+        "ha-liveness-preflight",
+        "MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT",
+    )?;
+    Ok(Some(LivenessPreflightConfig { gate, result_path }))
 }
 
-fn required_env(env: &BTreeMap<String, String>, name: &str) -> Result<String, String> {
+fn liveness_preflight_config_from_env() -> Result<Option<LivenessPreflightConfig>, String> {
+    liveness_preflight_config_from_map(&std::env::vars().collect())
+}
+
+fn required_live_env(
+    env: &BTreeMap<String, String>,
+    name: &str,
+    opt_in: &str,
+) -> Result<String, String> {
     env.get(name)
         .filter(|value| !value.is_empty())
         .cloned()
-        .ok_or_else(|| format!("{name} is required when MOONCAKE_RUN_HA_CHAOS=1"))
+        .ok_or_else(|| format!("{name} is required when {opt_in}=1"))
 }
 
 fn parse_seed(value: &str) -> Result<u64, String> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     u64::from_str_radix(value, 16).map_err(|_| format!("MOONCAKE_HA_SEED is not a u64: {value}"))
+}
+
+fn write_json_artifact<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("serialize artifact {}: {error}", path.display()))?;
+    std::fs::write(path, bytes)
+        .map_err(|error| format!("write artifact {}: {error}", path.display()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -600,6 +926,68 @@ impl ScenarioResult {
 struct FailureRecord {
     stage: String,
     message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LivenessPreflightResult {
+    schema: &'static str,
+    canonical: bool,
+    status: ResultStatus,
+    sentinel_count: usize,
+    blocked_milliseconds: u128,
+    failure: Option<String>,
+    cleanup_failure: Option<String>,
+}
+
+impl LivenessPreflightResult {
+    fn new(
+        sentinel_count: usize,
+        blocked_milliseconds: u128,
+        failure: Option<String>,
+        cleanup_failure: Option<String>,
+    ) -> Self {
+        let status = if failure.is_none() && cleanup_failure.is_none() {
+            ResultStatus::Pass
+        } else {
+            ResultStatus::Fail
+        };
+        Self {
+            schema: "mooncake-ha-liveness-preflight/v1",
+            canonical: false,
+            status,
+            sentinel_count,
+            blocked_milliseconds,
+            failure,
+            cleanup_failure,
+        }
+    }
+
+    fn write_atomic(&self, result_path: &Path) -> Result<(), String> {
+        let parent = result_path
+            .parent()
+            .ok_or_else(|| format!("result path {} has no parent", result_path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create result directory {}: {error}", parent.display()))?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| format!("create result file in {}: {error}", parent.display()))?;
+        serde_json::to_writer_pretty(&mut temporary, self)
+            .map_err(|error| format!("serialize liveness result: {error}"))?;
+        temporary
+            .write_all(b"\n")
+            .map_err(|error| format!("terminate liveness result: {error}"))?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|error| format!("sync liveness result: {error}"))?;
+        temporary.persist(result_path).map_err(|error| {
+            format!(
+                "publish liveness result to {}: {}",
+                result_path.display(),
+                error.error
+            )
+        })?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1300,61 +1688,200 @@ async fn create_clients(
     require_bounded_client_rpc_configuration()?;
     let mut clients = Vec::with_capacity(count);
     for client_index in 0..count {
-        let reservation = TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|error| format!("reserve TCP endpoint for client {client_index}: {error}"))?;
-        let local_host = reservation
-            .local_addr()
-            .map_err(|error| format!("read TCP endpoint for client {client_index}: {error}"))?
-            .to_string();
-        drop(reservation);
+        let next = async {
+            let reservation = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
+                format!("reserve TCP endpoint for client {client_index}: {error}")
+            })?;
+            let local_host = reservation
+                .local_addr()
+                .map_err(|error| format!("read TCP endpoint for client {client_index}: {error}"))?
+                .to_string();
+            drop(reservation);
 
-        let client = tokio::time::timeout(
-            Duration::from_secs(30),
-            MooncakeClient::create_with_master_candidates(
-                masters,
-                "P2PHANDSHAKE",
-                &local_host,
-                "tcp",
-                "",
-                segment_size,
-                CLIENT_LOCAL_BUFFER_SIZE,
-            ),
-        )
-        .await
-        .map_err(|_| format!("client {client_index} creation timed out"))?
-        .map_err(|error| format!("create TCP client {client_index}: {error}"))?;
-        clients.push(ScenarioClient::new(client));
+            let client = tokio::time::timeout(
+                Duration::from_secs(30),
+                MooncakeClient::create_with_master_candidates(
+                    masters,
+                    "P2PHANDSHAKE",
+                    &local_host,
+                    "tcp",
+                    "",
+                    segment_size,
+                    CLIENT_LOCAL_BUFFER_SIZE,
+                ),
+            )
+            .await
+            .map_err(|_| format!("client {client_index} creation timed out"))?
+            .map_err(|error| format!("create TCP client {client_index}: {error}"))?;
+            Ok(ScenarioClient::new(client))
+        }
+        .await;
+        retain_created_or_cleanup(&mut clients, next).await?;
     }
     Ok(clients)
 }
 
 struct ScenarioClient {
     client: Arc<tokio::sync::Mutex<Option<MooncakeClient>>>,
-    background: Option<ClientBackgroundHandle>,
+    pinger: Option<ScenarioLivenessPinger>,
 }
 
-fn scenario_client_background_config() -> ClientBackgroundConfig {
-    ClientBackgroundConfig {
-        health_interval: SCENARIO_CLIENT_HEARTBEAT_INTERVAL,
-        enable_offloading: false,
-        enable_promotion: false,
-        enable_task_poll: false,
-        report_ssd_capacity: false,
-        enable_disk_watermark_eviction: false,
-        ..ClientBackgroundConfig::default()
+struct ScenarioLivenessPinger {
+    target_tx: tokio::sync::watch::Sender<String>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ScenarioLivenessPinger {
+    fn start(master_addr: String, client_id: proto::Uuid, tenant_id: String) -> Self {
+        let (target_tx, target_rx) = tokio::sync::watch::channel(master_addr);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let join_handle = tokio::spawn(run_scenario_liveness_pinger(
+            target_rx,
+            shutdown_rx,
+            client_id,
+            tenant_id,
+        ));
+        Self {
+            target_tx,
+            shutdown_tx,
+            join_handle: Some(join_handle),
+        }
     }
+
+    fn update_target(&self, master_addr: &str) {
+        self.target_tx.send_replace(master_addr.to_owned());
+    }
+
+    fn request_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    fn from_test_worker(join_handle: tokio::task::JoinHandle<()>) -> Self {
+        let (target_tx, _) = tokio::sync::watch::channel(String::new());
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        Self {
+            target_tx,
+            shutdown_tx,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    async fn shutdown_before(&mut self, aggregate_deadline: Instant) -> Result<(), String> {
+        self.request_shutdown();
+        let Some(mut join_handle) = self.join_handle.take() else {
+            return Ok(());
+        };
+        let join_deadline = std::cmp::min(
+            aggregate_deadline,
+            Instant::now() + SCENARIO_CLIENT_PINGER_JOIN_GRACE,
+        );
+        match tokio::time::timeout_at(join_deadline.into(), &mut join_handle).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(format!("scenario liveness pinger failed to join: {error}")),
+            Err(_) => {
+                join_handle.abort();
+                let aborted = join_handle.await;
+                if !matches!(aborted, Err(ref error) if error.is_cancelled()) {
+                    return Err(format!(
+                        "scenario liveness pinger exceeded join grace and abort did not cancel it: {aborted:?}"
+                    ));
+                }
+                Err("scenario liveness pinger exceeded join grace and was aborted".into())
+            }
+        }
+    }
+}
+
+impl Drop for ScenarioLivenessPinger {
+    fn drop(&mut self) {
+        self.request_shutdown();
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle.abort();
+        }
+    }
+}
+
+async fn run_scenario_liveness_pinger(
+    mut target_rx: tokio::sync::watch::Receiver<String>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    client_id: proto::Uuid,
+    tenant_id: String,
+) {
+    let mut ticker = tokio::time::interval(SCENARIO_CLIENT_HEARTBEAT_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                let master_addr = target_rx.borrow_and_update().clone();
+                tokio::select! {
+                    biased;
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    result = ping_scenario_client(&master_addr, &client_id, &tenant_id) => {
+                        if let Err(error) = result {
+                            tracing::warn!(target: "ha_scenario_liveness", %error, %master_addr, "direct scenario-client ping failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn ping_scenario_client(
+    master_addr: &str,
+    client_id: &proto::Uuid,
+    tenant_id: &str,
+) -> Result<(), String> {
+    tokio::time::timeout(SCENARIO_CLIENT_PING_TIMEOUT, async {
+        let mut master = proto::master_service_client::MasterServiceClient::connect(format!(
+            "http://{master_addr}"
+        ))
+        .await
+        .map_err(|error| format!("connect direct ping channel: {error}"))?;
+        let mut request = tonic::Request::new(proto::PingRequest {
+            client_id: Some(client_id.clone()),
+            mounted_segments: Vec::new(),
+            tenant_id: tenant_id.to_owned(),
+        });
+        request.set_timeout(SCENARIO_CLIENT_PING_TIMEOUT);
+        master
+            .ping(request)
+            .await
+            .map_err(|error| format!("direct ping RPC: {error}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "direct ping exceeded {} ms",
+            SCENARIO_CLIENT_PING_TIMEOUT.as_millis()
+        )
+    })?
 }
 
 impl ScenarioClient {
     fn new(client: MooncakeClient) -> Self {
-        let client = Arc::new(tokio::sync::Mutex::new(Some(client)));
-        let background = MooncakeClient::start_background_workers(
-            Arc::clone(&client),
-            scenario_client_background_config(),
+        let (high, low) = client.client_id().as_u64_pair();
+        let pinger = ScenarioLivenessPinger::start(
+            client.current_master_addr(),
+            proto::Uuid { high, low },
+            client.tenant_id().to_owned(),
         );
+        let client = Arc::new(tokio::sync::Mutex::new(Some(client)));
         Self {
             client,
-            background: Some(background),
+            pinger: Some(pinger),
         }
     }
 
@@ -1382,7 +1909,12 @@ impl ScenarioClient {
             .as_mut()
             .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
             .switch_master(master_addr)
-            .await
+            .await?;
+        self.pinger
+            .as_ref()
+            .ok_or_else(|| StoreError::Internal("scenario liveness pinger was shut down".into()))?
+            .update_target(master_addr);
+        Ok(())
     }
 
     async fn health_check(&self) -> Result<(), StoreError> {
@@ -1426,30 +1958,108 @@ impl ScenarioClient {
     }
 
     async fn tear_down_all(&mut self) -> Result<(), String> {
-        if let Some(background) = self.background.take() {
-            // Client RPCs are required to have positive, at-most-30-second
-            // deadlines before construction, so joining a health iteration is
-            // bounded without abandoning a task that may hold this mutex.
-            background.request_shutdown();
-            background.shutdown().await;
+        let aggregate_deadline = Instant::now() + SCENARIO_CLIENT_CLEANUP_TIMEOUT;
+        let mut first_error = None;
+        if let Some(mut pinger) = self.pinger.take()
+            && let Err(error) = pinger.shutdown_before(aggregate_deadline).await
+        {
+            first_error = Some(error);
         }
-        let mut client = self.client.lock().await;
-        let client_ref = client
-            .as_mut()
-            .ok_or_else(|| "scenario client was already shut down".to_string())?;
-        tokio::time::timeout(Duration::from_secs(30), client_ref.tear_down_all())
-            .await
-            .map_err(|_| "scenario client teardown timed out after 30 seconds".to_string())?
-            .map_err(|error| format!("scenario client teardown failed: {error}"))?;
-        client.take();
-        Ok(())
+
+        let client =
+            match tokio::time::timeout_at(aggregate_deadline.into(), self.client.lock()).await {
+                Ok(mut slot) => slot.take(),
+                Err(_) => {
+                    return Err(first_error.unwrap_or_else(|| {
+                    "scenario client aggregate cleanup deadline expired acquiring foreground mutex"
+                        .into()
+                }));
+                }
+            };
+        let Some(mut client) = client else {
+            return Err(
+                first_error.unwrap_or_else(|| "scenario client was already shut down".to_string())
+            );
+        };
+        match tokio::time::timeout_at(aggregate_deadline.into(), client.tear_down_all()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if first_error.is_none() => {
+                first_error = Some(format!("scenario client teardown failed: {error}"));
+            }
+            Err(_) if first_error.is_none() => {
+                first_error = Some(format!(
+                    "scenario client aggregate cleanup deadline expired after {} ms",
+                    SCENARIO_CLIENT_CLEANUP_TIMEOUT.as_millis()
+                ));
+            }
+            _ => {}
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
 impl Drop for ScenarioClient {
     fn drop(&mut self) {
-        if let Some(background) = &self.background {
-            background.request_shutdown();
+        if let Some(pinger) = &self.pinger {
+            pinger.request_shutdown();
+        }
+    }
+}
+
+trait ScenarioOwnedResource {
+    async fn tear_down_owned(&mut self) -> Result<(), String>;
+}
+
+impl ScenarioOwnedResource for ScenarioClient {
+    async fn tear_down_owned(&mut self) -> Result<(), String> {
+        self.tear_down_all().await
+    }
+}
+
+async fn tear_down_owned_resources<T: ScenarioOwnedResource>(
+    resources: &mut [T],
+) -> Result<(), String> {
+    let mut first_error = None;
+    for (resource_index, resource) in resources.iter_mut().enumerate() {
+        if let Err(error) = resource.tear_down_owned().await
+            && first_error.is_none()
+        {
+            first_error = Some(format!(
+                "tear down owned resource {resource_index}: {error}"
+            ));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+async fn retain_created_or_cleanup<T: ScenarioOwnedResource>(
+    created: &mut Vec<T>,
+    next: Result<T, String>,
+) -> Result<(), String> {
+    match next {
+        Ok(resource) => {
+            created.push(resource);
+            Ok(())
+        }
+        Err(error) => {
+            let cleanup = tear_down_owned_resources(created).await;
+            Err(format!("{error}; partial-client cleanup: {cleanup:?}"))
+        }
+    }
+}
+
+async fn finish_owned_operation<T: ScenarioOwnedResource, R>(
+    resources: &mut [T],
+    operation: Result<R, FailureRecord>,
+) -> Result<R, FailureRecord> {
+    match operation {
+        Ok(value) => Ok(value),
+        Err(mut failure) => {
+            let cleanup = tear_down_owned_resources(resources).await;
+            if let Err(error) = cleanup {
+                failure.message = format!("{}; owned-client cleanup: {error}", failure.message);
+            }
+            Err(failure)
         }
     }
 }
@@ -1506,8 +2116,10 @@ async fn verify_small_clients_remain_registered_and_preserve_sentinels(
         .map_err(|error| format!("small client {client_index} sentinel put failed: {error}"))?;
     }
 
+    let foreground_guard = clients[0].client.lock().await;
     tokio::time::sleep(MASTER_CLIENT_TTL + MASTER_CLIENT_MONITOR_INTERVAL + Duration::from_secs(1))
         .await;
+    drop(foreground_guard);
 
     let expected_segment_count = clients.len();
     for (client_index, client) in clients.iter().enumerate() {
@@ -1547,15 +2159,7 @@ async fn verify_small_clients_remain_registered_and_preserve_sentinels(
 }
 
 async fn tear_down_scenario_clients(clients: &mut [ScenarioClient]) -> Result<(), String> {
-    let mut first_error = None;
-    for (client_index, client) in clients.iter_mut().enumerate() {
-        if let Err(error) = client.tear_down_all().await
-            && first_error.is_none()
-        {
-            first_error = Some(format!("tear down scenario client {client_index}: {error}"));
-        }
-    }
-    first_error.map_or(Ok(()), Err)
+    tear_down_owned_resources(clients).await
 }
 
 async fn recover_scenario_clients(
@@ -2408,91 +3012,98 @@ async fn run_remount_checkpoint(
             .into_iter()
             .filter(|address| address != &initial_view.leader_address),
     );
-    let clients = create_clients(config, &masters, 3, CLIENT_SEGMENT_SIZE)
+    let mut clients = create_clients(config, &masters, 3, CLIENT_SEGMENT_SIZE)
         .await
         .map_err(|error| scenario_failure("remount-setup", error))?;
-    await_mutating_operation(clients[0].put("ha-small-bootstrap", b"bootstrap-value"))
-        .await
-        .map_err(|error| {
-            scenario_failure(
-                "remount-bootstrap-put",
-                format!("bootstrap put failed: {error}"),
-            )
-        })?;
+    let operation = async {
+        await_mutating_operation(clients[0].put("ha-small-bootstrap", b"bootstrap-value"))
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "remount-bootstrap-put",
+                    format!("bootstrap put failed: {error}"),
+                )
+            })?;
 
-    let restarted_index = cluster
-        .index_for_address(&initial_view.leader_address)
-        .ok_or_else(|| {
+        let restarted_index = cluster
+            .index_for_address(&initial_view.leader_address)
+            .ok_or_else(|| {
+                scenario_failure(
+                    "remount-failover",
+                    format!(
+                        "cannot locate initial leader {}",
+                        initial_view.leader_address
+                    ),
+                )
+            })?;
+        cluster.stop(restarted_index).await.map_err(|error| {
             scenario_failure(
                 "remount-failover",
-                format!(
-                    "cannot locate initial leader {}",
-                    initial_view.leader_address
-                ),
+                format!("stop initial leader {restarted_index}: {error}"),
             )
         })?;
-    cluster.stop(restarted_index).await.map_err(|error| {
-        scenario_failure(
-            "remount-failover",
-            format!("stop initial leader {restarted_index}: {error}"),
+        let failover_view = wait_for_stable_leader_without_clients(config, cluster)
+            .await
+            .map_err(|error| scenario_failure("remount-failover", error))?;
+        if failover_view.view_version == initial_view.view_version
+            || failover_view.leader_address == initial_view.leader_address
+        {
+            return Err(scenario_failure(
+                "remount-failover",
+                format!(
+                    "leader did not change: initial={initial_view:?}, failover={failover_view:?}"
+                ),
+            ));
+        }
+        recover_scenario_clients(&clients, &failover_view)
+            .await
+            .map_err(|error| scenario_failure("remount-recover", error))?;
+        let bootstrap = tokio::time::timeout(
+            Duration::from_secs(15),
+            clients[2].get("ha-small-bootstrap"),
         )
-    })?;
-    let failover_view = wait_for_stable_leader_without_clients(config, cluster)
         .await
-        .map_err(|error| scenario_failure("remount-failover", error))?;
-    if failover_view.view_version == initial_view.view_version
-        || failover_view.leader_address == initial_view.leader_address
-    {
-        return Err(scenario_failure(
-            "remount-failover",
-            format!("leader did not change: initial={initial_view:?}, failover={failover_view:?}"),
-        ));
-    }
-    recover_scenario_clients(&clients, &failover_view)
-        .await
-        .map_err(|error| scenario_failure("remount-recover", error))?;
-    let bootstrap = tokio::time::timeout(
-        Duration::from_secs(15),
-        clients[2].get("ha-small-bootstrap"),
-    )
-    .await
-    .map_err(|_| scenario_failure("remount-bootstrap-read", "bootstrap read timed out"))?
-    .map_err(|error| {
-        scenario_failure(
-            "remount-bootstrap-read",
-            format!("bootstrap read failed: {error}"),
-        )
-    })?;
-    if bootstrap != b"bootstrap-value" {
-        return Err(scenario_failure(
-            "remount-bootstrap-read",
-            format!("bootstrap byte mismatch: got {bootstrap:?}"),
-        ));
-    }
+        .map_err(|_| scenario_failure("remount-bootstrap-read", "bootstrap read timed out"))?
+        .map_err(|error| {
+            scenario_failure(
+                "remount-bootstrap-read",
+                format!("bootstrap read failed: {error}"),
+            )
+        })?;
+        if bootstrap != b"bootstrap-value" {
+            return Err(scenario_failure(
+                "remount-bootstrap-read",
+                format!("bootstrap byte mismatch: got {bootstrap:?}"),
+            ));
+        }
 
-    cluster.restart(restarted_index).await.map_err(|error| {
-        scenario_failure(
-            "remount-restart",
-            format!("restart initial leader {restarted_index}: {error}"),
-        )
-    })?;
-    let running = cluster.running_indices();
-    if running != BTreeSet::from([0, 1, 2]) {
-        return Err(scenario_failure(
-            "remount-restart",
-            format!("expected three running Masters after restart, got {running:?}"),
-        ));
+        cluster.restart(restarted_index).await.map_err(|error| {
+            scenario_failure(
+                "remount-restart",
+                format!("restart initial leader {restarted_index}: {error}"),
+            )
+        })?;
+        let running = cluster.running_indices();
+        if running != BTreeSet::from([0, 1, 2]) {
+            return Err(scenario_failure(
+                "remount-restart",
+                format!("expected three running Masters after restart, got {running:?}"),
+            ));
+        }
+        let restored_view = wait_for_stable_leader_without_clients(config, cluster)
+            .await
+            .map_err(|error| scenario_failure("remount-restart", error))?;
+        cluster
+            .require_restarted_victims_survive(&[restarted_index], Duration::from_millis(500))
+            .await
+            .map_err(|error| scenario_failure("remount-restart", error))?;
+        recover_scenario_clients(&clients, &restored_view)
+            .await
+            .map_err(|error| scenario_failure("remount-recover", error))?;
+        Ok((failover_view, restarted_index))
     }
-    let restored_view = wait_for_stable_leader_without_clients(config, cluster)
-        .await
-        .map_err(|error| scenario_failure("remount-restart", error))?;
-    cluster
-        .require_restarted_victims_survive(&[restarted_index], Duration::from_millis(500))
-        .await
-        .map_err(|error| scenario_failure("remount-restart", error))?;
-    recover_scenario_clients(&clients, &restored_view)
-        .await
-        .map_err(|error| scenario_failure("remount-recover", error))?;
+    .await;
+    let (failover_view, restarted_index) = finish_owned_operation(&mut clients, operation).await?;
 
     Ok(RemountCheckpoint {
         clients,
@@ -2504,48 +3115,44 @@ async fn run_remount_checkpoint(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn three_master_small_client_liveness_preflight_preserves_sentinel_bytes() {
-    let Some(config) =
+    let Some(liveness_config) =
         liveness_preflight_config_from_env().expect("valid HA liveness preflight environment")
     else {
         eprintln!("SKIP HA liveness preflight: MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT is not enabled");
         return;
     };
+    let config = &liveness_config.gate;
 
-    let mut cluster = MasterCluster::start(&config)
+    let mut cluster = MasterCluster::start(config)
         .await
         .expect("start three Masters for liveness preflight");
-    let checkpoint = run_remount_checkpoint(&config, &mut cluster)
-        .await
-        .unwrap_or_else(|failure| {
+    let checkpoint = match run_remount_checkpoint(config, &mut cluster).await {
+        Ok(checkpoint) => checkpoint,
+        Err(failure) => {
+            LivenessPreflightResult::new(0, 0, Some(failure.message.clone()), None)
+                .write_atomic(&liveness_config.result_path)
+                .expect("publish failed liveness remount result");
             panic!(
                 "liveness remount checkpoint failed at {}: {}",
                 failure.stage, failure.message
-            )
-        });
+            );
+        }
+    };
     let mut clients = checkpoint.clients;
     let preflight =
         verify_small_clients_remain_registered_and_preserve_sentinels(&clients, config.seed).await;
     let cleanup = tear_down_scenario_clients(&mut clients).await;
-    let preflight_result_path = config.artifact_root.join("liveness-preflight-result.json");
-    std::fs::write(
-        &preflight_result_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "schema": "mooncake-ha-liveness-preflight/v1",
-            "canonical": false,
-            "status": if preflight.is_ok() { "PASS" } else { "FAIL" },
-            "sentinel_count": clients.len(),
-            "idle_milliseconds": (MASTER_CLIENT_TTL
-                + MASTER_CLIENT_MONITOR_INTERVAL
-                + Duration::from_secs(1))
-            .as_millis(),
-            "failure": preflight.as_ref().err(),
-            "cleanup_failure": cleanup.as_ref().err(),
-        }))
-        .expect("serialize liveness preflight result"),
-    )
-    .expect("write liveness preflight result");
+    let result = LivenessPreflightResult::new(
+        clients.len(),
+        (MASTER_CLIENT_TTL + MASTER_CLIENT_MONITOR_INTERVAL + Duration::from_secs(1)).as_millis(),
+        preflight.as_ref().err().cloned(),
+        cleanup.as_ref().err().cloned(),
+    );
+    result
+        .write_atomic(&liveness_config.result_path)
+        .expect("publish liveness preflight result");
 
-    if let Err(error) = preflight {
+    if let Err(error) = &preflight {
         panic!("small-client liveness preflight failed: {error}; cleanup: {cleanup:?}");
     }
     cleanup.expect("tear down liveness preflight clients");
@@ -2588,9 +3195,9 @@ async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
         view.leader_address, view.view_version, next.leader_address, next.view_version, leader
     );
     let checkpoint_path = config.artifact_root.join("lifecycle-checkpoint.json");
-    std::fs::write(
+    let lifecycle_publication = write_json_artifact(
         &checkpoint_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+        &serde_json::json!({
             "status": "PASS",
             "seed": format!("0x{:016x}", config.seed),
             "cluster_namespace": config.cluster_namespace.clone(),
@@ -2605,14 +3212,29 @@ async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
             },
             "restarted_index": leader,
             "running_indices_after_restart": cluster.running_indices(),
-        }))
-        .expect("serialize lifecycle checkpoint"),
-    )
-    .expect("write lifecycle checkpoint");
+        }),
+    );
+    if let Err(error) = lifecycle_publication {
+        let cleanup = tear_down_scenario_clients(&mut clients).await;
+        let failure = scenario_failure(
+            "lifecycle-publication",
+            format!("{error}; client cleanup: {cleanup:?}"),
+        );
+        let publication = publish_failed_gate_result(
+            &config,
+            &cluster,
+            complete_scenarios(ResultStatus::Fail),
+            failure.clone(),
+        );
+        panic!(
+            "HA chaos failed at {}: {}; result publication: {publication:?}",
+            failure.stage, failure.message
+        );
+    }
     let remount_checkpoint_path = config.artifact_root.join("remount-checkpoint.json");
-    std::fs::write(
+    let remount_publication = write_json_artifact(
         &remount_checkpoint_path,
-        serde_json::to_vec_pretty(&serde_json::json!({
+        &serde_json::json!({
             "status": "PASS",
             "key": "ha-small-bootstrap",
             "value": "bootstrap-value",
@@ -2622,12 +3244,44 @@ async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
             "failover_view_version": next.view_version,
             "recovered_leader": next.leader_address,
             "read_client_index": 2,
-        }))
-        .expect("serialize remount checkpoint"),
-    )
-    .expect("write remount checkpoint");
+        }),
+    );
+    if let Err(error) = remount_publication {
+        let cleanup = tear_down_scenario_clients(&mut clients).await;
+        let failure = scenario_failure(
+            "remount-publication",
+            format!("{error}; client cleanup: {cleanup:?}"),
+        );
+        let publication = publish_failed_gate_result(
+            &config,
+            &cluster,
+            complete_scenarios(ResultStatus::Fail),
+            failure.clone(),
+        );
+        panic!(
+            "HA chaos failed at {}: {}; result publication: {publication:?}",
+            failure.stage, failure.message
+        );
+    }
 
-    let schedule = ChaosSchedule::new(config.seed, config.rounds).expect("valid chaos schedule");
+    let schedule = match ChaosSchedule::new(config.seed, config.rounds) {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            let cleanup = tear_down_scenario_clients(&mut clients).await;
+            let failure =
+                scenario_failure("schedule", format!("{error}; client cleanup: {cleanup:?}"));
+            let publication = publish_failed_gate_result(
+                &config,
+                &cluster,
+                complete_scenarios(ResultStatus::Fail),
+                failure.clone(),
+            );
+            panic!(
+                "HA chaos failed at {}: {}; result publication: {publication:?}",
+                failure.stage, failure.message
+            );
+        }
+    };
     let mut scenarios = complete_scenarios(ResultStatus::Fail);
     if let Err(error) =
         verify_small_clients_remain_registered_and_preserve_sentinels(&clients, config.seed).await
