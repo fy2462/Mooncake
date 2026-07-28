@@ -154,6 +154,25 @@ fn top_level_pass_requires_both_scenarios_to_pass() {
     assert!(!result_path.exists());
 }
 
+#[tokio::test]
+async fn master_rpc_probe_rejects_a_tcp_only_listener() {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let acceptor = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let error = probe_master_rpc(&address, Instant::now() + Duration::from_millis(250))
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("Mooncake gRPC probe"), "{error}");
+    acceptor.abort();
+}
+
 fn complete_scenarios(status: ResultStatus) -> BTreeMap<ScenarioKind, ScenarioResult> {
     BTreeMap::from([
         (
@@ -840,22 +859,8 @@ async fn wait_for_stable_leader(
             continue;
         }
 
-        let connect_timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .min(Duration::from_secs(2));
-        if connect_timeout.is_zero()
-            || tokio::time::timeout(
-                connect_timeout,
-                tokio::net::TcpStream::connect(&first.leader_address),
-            )
-            .await
-            .map_err(|_| format!("gRPC bind check timed out for {}", first.leader_address))?
-            .is_err()
-        {
-            last_observation = format!(
-                "stable etcd leader {} has not bound gRPC yet",
-                first.leader_address
-            );
+        if let Err(error) = probe_master_rpc(&first.leader_address, deadline).await {
+            last_observation = error;
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -908,6 +913,47 @@ async fn wait_for_stable_leader(
     Err(format!(
         "stable leader deadline expired: {last_observation}"
     ))
+}
+
+async fn probe_master_rpc(address: &str, deadline: Instant) -> Result<(), String> {
+    let connect_timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_secs(2));
+    if connect_timeout.is_zero() {
+        return Err(format!(
+            "Mooncake gRPC probe deadline expired before connecting to {address}"
+        ));
+    }
+    let mut client = tokio::time::timeout(
+        connect_timeout,
+        mooncake_store_client::proto::master_service_client::MasterServiceClient::connect(format!(
+            "http://{address}"
+        )),
+    )
+    .await
+    .map_err(|_| format!("Mooncake gRPC probe connect timed out for {address}"))?
+    .map_err(|error| format!("Mooncake gRPC probe connect failed for {address}: {error}"))?;
+
+    let rpc_timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_secs(2));
+    if rpc_timeout.is_zero() {
+        return Err(format!(
+            "Mooncake gRPC probe deadline expired before GetStorageConfig on {address}"
+        ));
+    }
+    tokio::time::timeout(
+        rpc_timeout,
+        client.get_storage_config(tonic::Request::new(
+            mooncake_store_client::proto::GetStorageConfigRequest {},
+        )),
+    )
+    .await
+    .map_err(|_| format!("Mooncake gRPC probe GetStorageConfig timed out for {address}"))?
+    .map_err(|error| {
+        format!("Mooncake gRPC probe GetStorageConfig failed for {address}: {error}")
+    })?;
+    Ok(())
 }
 
 async fn read_view_before_deadline(
