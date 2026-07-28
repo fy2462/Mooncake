@@ -461,13 +461,38 @@ mod tests {
 
     #[test]
     fn plain_thread_reuses_current_thread_runtime() {
-        block_on_runtime(async {});
+        block_on_runtime(async {}).unwrap();
         let first_marker = current_thread_runtime_marker_for_test();
 
-        block_on_runtime(async {});
+        block_on_runtime(async {}).unwrap();
         let second_marker = current_thread_runtime_marker_for_test();
 
         assert_eq!(first_marker, second_marker);
+    }
+
+    #[test]
+    fn current_thread_runtime_rejects_sync_bridge_with_a_typed_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let polled = Arc::new(AtomicBool::new(false));
+        let polled_by_future = polled.clone();
+
+        let error = runtime
+            .block_on(async {
+                block_on_runtime(async move {
+                    polled_by_future.store(true, Ordering::Release);
+                    7_u64
+                })
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("current-thread Tokio runtime"));
+        assert!(
+            !polled.load(Ordering::Acquire),
+            "runtime-context rejection must happen before an etcd future can touch the backend"
+        );
     }
 
     #[test]
@@ -497,11 +522,11 @@ impl OpLogStore for EtcdOpLogStore {
     }
 
     fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
-        block_on_runtime(self.read_since_async(since_seq, max_count))
+        block_on_runtime(self.read_since_async(since_seq, max_count))?
     }
 
     fn latest_sequence(&self) -> u64 {
-        match block_on_runtime(self.fetch_latest_sequence()) {
+        match block_on_runtime(self.fetch_latest_sequence()).and_then(|result| result) {
             Ok(sequence) => sequence,
             Err(error) => {
                 warn!("failed to refresh etcd oplog latest sequence: {error}");
@@ -513,7 +538,7 @@ impl OpLogStore for EtcdOpLogStore {
     fn max_sequence_id(&self) -> Result<u64, HaError> {
         self.ensure_not_poisoned()?;
         let mut max_seq = self.last_seq;
-        let mut committed_latest = block_on_runtime(self.fetch_latest_sequence())?;
+        let mut committed_latest = block_on_runtime(self.fetch_latest_sequence())??;
         max_seq = max_seq.max(committed_latest);
 
         let c = self.client.clone();
@@ -535,13 +560,13 @@ impl OpLogStore for EtcdOpLogStore {
                 )
                 .await
                 .map_err(|e| HaError::InvalidBackend(format!("etcd get max oplog: {e}")))
-        })?;
+        })??;
         if let Some(kv) = response.kvs().first() {
             let backend_max = parse_etcd_entry_key_sequence(kv.key())?;
             if backend_max > committed_latest {
                 // A commit may have landed between the two reads. Refresh the
                 // commit pointer once before classifying the entry as orphaned.
-                committed_latest = block_on_runtime(self.fetch_latest_sequence())?;
+                committed_latest = block_on_runtime(self.fetch_latest_sequence())??;
                 if backend_max > committed_latest {
                     return Err(HaError::InvalidBackend(format!(
                         "etcd oplog entry exceeds committed latest pointer: entry_max={backend_max}, latest={committed_latest}"
@@ -596,6 +621,7 @@ impl OpLogStore for EtcdOpLogStore {
                 }
                 Ok(())
             })
+            .and_then(|result| result)
         {
             self.poisoned = Some(error.to_string());
             return Err(error);
@@ -636,7 +662,9 @@ impl OpLogStore for EtcdOpLogStore {
                 ));
             }
             Ok(())
-        }) {
+        })
+        .and_then(|result| result)
+        {
             self.poisoned = Some(error.to_string());
             return Err(error);
         }
@@ -653,7 +681,7 @@ impl OpLogStore for EtcdOpLogStore {
                 .get(key.as_bytes(), None)
                 .await
                 .map_err(|e| HaError::InvalidBackend(format!("etcd get snapshot seq: {e}")))
-        })?;
+        })??;
         parse_snapshot_sequence_value(snapshot_id, response.kvs().first().map(|kv| kv.value()))
     }
 
@@ -678,7 +706,9 @@ impl OpLogStore for EtcdOpLogStore {
                 ));
             }
             Ok(())
-        }) {
+        })
+        .and_then(|result| result)
+        {
             self.poisoned = Some(error.to_string());
             return Err(error);
         }
@@ -686,7 +716,7 @@ impl OpLogStore for EtcdOpLogStore {
     }
 
     fn flush_durable(&mut self) -> Result<(), HaError> {
-        block_on_runtime(self.flush())
+        block_on_runtime(self.flush())?
     }
 
     fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
@@ -765,7 +795,8 @@ impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
                     Some(health_for_watch),
                     move |entry| on_entry(entry),
                     move |err| on_error(err),
-                ));
+                ))
+                .and_then(|result| result);
             });
         }));
         Ok(())
@@ -787,10 +818,24 @@ impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
     }
 }
 
-fn block_on_runtime<F: Future>(future: F) -> F::Output {
+/// Bridge an etcd async operation for synchronous `OpLogStore` methods.
+///
+/// A Tokio multi-thread worker may use `block_in_place`; a plain OS thread
+/// reuses one thread-local current-thread runtime. Blocking the sole executor
+/// thread of an already-running current-thread runtime cannot drive etcd I/O,
+/// so callers get a typed error instead of a Tokio panic or deadlock. Promotion
+/// catch-up is routed to its component-owned plain worker before reaching this
+/// bridge.
+fn block_on_runtime<F: Future>(future: F) -> Result<F::Output, HaError> {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
-        _ => CURRENT_THREAD_RUNTIME.with(|runtime| {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            Ok(tokio::task::block_in_place(|| handle.block_on(future)))
+        }
+        Ok(_) => Err(HaError::InvalidBackend(
+            "etcd synchronous oplog bridge cannot run inside a current-thread Tokio runtime; use an async API or a plain OS thread"
+                .into(),
+        )),
+        Err(_) => CURRENT_THREAD_RUNTIME.with(|runtime| {
             let mut runtime = runtime.borrow_mut();
             let runtime = runtime.get_or_insert_with(|| CurrentThreadRuntime {
                 runtime: tokio::runtime::Builder::new_current_thread()
@@ -801,7 +846,7 @@ fn block_on_runtime<F: Future>(future: F) -> F::Output {
                 marker: NEXT_CURRENT_THREAD_RUNTIME_MARKER
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             });
-            runtime.runtime.block_on(future)
+            Ok(runtime.runtime.block_on(future))
         }),
     }
 }

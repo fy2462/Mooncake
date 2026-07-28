@@ -123,6 +123,109 @@ fn make_notifier_entry_callback(
     })
 }
 
+fn run_promotion_catch_up(applier: &OpLogApplier, store: &dyn OpLogStore) -> Result<(), HaError> {
+    // C++: ResolvePromotionGapsLocked (3 retries, stops when all gaps filled).
+    for _ in 0..3 {
+        let (needed, fetched) = applier.try_resolve_gaps_once(store, 1024);
+        if needed == 0 || fetched >= needed {
+            break;
+        }
+    }
+
+    // C++: FinalCatchUpForPromotionLocked. The Arc-backed Rust store is the
+    // same logical reader C++ recreates for promotion.
+    let mut expected = applier.get_expected_sequence_id();
+    let latest = store.max_sequence_id()?;
+    if latest < expected {
+        return Ok(());
+    }
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(30);
+    for _ in 0..100 {
+        if start.elapsed() >= timeout {
+            return Err(HaError::InvalidBackend(format!(
+                "promotion final catch-up timed out: expected={expected}, latest={latest}"
+            )));
+        }
+        expected = applier.get_expected_sequence_id();
+        if latest < expected {
+            break;
+        }
+        let to_read = latest.saturating_sub(expected).saturating_add(1).min(1000) as usize;
+        if to_read == 0 {
+            break;
+        }
+        let entries = store.read_since(expected, to_read)?;
+        if entries.is_empty() {
+            return Err(HaError::InvalidBackend(format!(
+                "promotion final catch-up returned no entries: expected={expected}, latest={latest}"
+            )));
+        }
+        let before_apply = expected;
+        applier.apply_op_log_entries(&entries);
+        expected = applier.get_expected_sequence_id();
+        if expected <= before_apply {
+            return Err(HaError::InvalidBackend(format!(
+                "promotion final catch-up made no progress: expected={before_apply}, latest={latest}"
+            )));
+        }
+    }
+    expected = applier.get_expected_sequence_id();
+    if expected <= latest {
+        return Err(HaError::InvalidBackend(format!(
+            "promotion final catch-up is incomplete: expected={expected}, latest={latest}"
+        )));
+    }
+    Ok(())
+}
+
+struct PromotionCatchUpWorker {
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PromotionCatchUpWorker {
+    fn join(&mut self) -> Result<(), HaError> {
+        self.handle
+            .take()
+            .expect("promotion catch-up worker joined once")
+            .join()
+            .map_err(|_| HaError::InvalidBackend("promotion catch-up worker panicked".into()))
+    }
+}
+
+impl Drop for PromotionCatchUpWorker {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+async fn run_promotion_catch_up_on_plain_thread(
+    applier: Arc<OpLogApplier>,
+    store: Arc<dyn OpLogStore>,
+) -> Result<(), HaError> {
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let handle = std::thread::Builder::new()
+        .name("mooncake-promotion-catch-up".into())
+        .spawn(move || {
+            let _ = result_tx.send(run_promotion_catch_up(applier.as_ref(), store.as_ref()));
+        })
+        .map_err(|error| {
+            HaError::InvalidBackend(format!(
+                "failed to spawn promotion catch-up worker: {error}"
+            ))
+        })?;
+    let mut worker = PromotionCatchUpWorker {
+        handle: Some(handle),
+    };
+    let result = result_rx.await.map_err(|_| {
+        HaError::InvalidBackend("promotion catch-up worker exited without a result".into())
+    });
+    worker.join()?;
+    result?
+}
+
 impl Default for HotStandbyConfig {
     fn default() -> Self {
         Self {
@@ -212,6 +315,75 @@ mod tests {
         }
 
         fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
+    }
+
+    struct PromotionThreadProbeOpLog {
+        inner: InMemoryOpLog,
+        runtime_thread_calls: Arc<AtomicUsize>,
+        max_sequence_delay: std::time::Duration,
+    }
+
+    impl PromotionThreadProbeOpLog {
+        fn record_runtime_thread_call(&self) {
+            if tokio::runtime::Handle::try_current().is_ok() {
+                self.runtime_thread_calls.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    impl OpLogStore for PromotionThreadProbeOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.record_runtime_thread_call();
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.record_runtime_thread_call();
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.record_runtime_thread_call();
+            std::thread::sleep(self.max_sequence_delay);
             self.inner.max_sequence_id()
         }
 
@@ -646,6 +818,47 @@ mod tests {
                 .contains("injected oplog reconnect failure")
         );
         assert_eq!(service.sync_status().state, StandbyState::Failed);
+    }
+
+    #[test]
+    fn current_thread_promotion_offloads_sync_store_catch_up_and_keeps_reactor_live() {
+        let runtime_thread_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let mut service = HotStandbyService::new(
+                Arc::new(MasterState::empty()),
+                HotStandbyConfig {
+                    enable_oplog_following: true,
+                    oplog_poll_interval_ms: 10,
+                    cluster_id: "current-thread-promotion".into(),
+                    ..Default::default()
+                },
+            );
+            service.set_oplog_store(Box::new(PromotionThreadProbeOpLog {
+                inner: InMemoryOpLog::new(4),
+                runtime_thread_calls: runtime_thread_calls.clone(),
+                max_sequence_delay: std::time::Duration::from_millis(100),
+            }));
+            service.start().await.unwrap();
+
+            let reactor_progressed = Arc::new(AtomicBool::new(false));
+            let reactor_progressed_by_timer = reactor_progressed.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                reactor_progressed_by_timer.store(true, Ordering::Release);
+            });
+
+            assert_eq!(service.promote().await.unwrap(), 0);
+            assert_eq!(runtime_thread_calls.load(Ordering::Acquire), 0);
+            assert!(
+                reactor_progressed.load(Ordering::Acquire),
+                "promotion catch-up must yield the current-thread runtime while the sync store blocks"
+            );
+        });
     }
 
     #[tokio::test]
@@ -1539,68 +1752,12 @@ impl HotStandbyService {
             let _ = handle.join();
         }
 
-        let catch_up_result = (|| -> Result<(), HaError> {
-            // Gap resolution + final catch-up.
-            // C++: ResolvePromotionGapsLocked (3 retries, stops when all gaps filled).
-            if let Some(ref applier) = self.oplog_applier {
-                if let Some(ref store) = self.oplog_store {
-                    for _ in 0..3 {
-                        let (needed, fetched) = applier.try_resolve_gaps_once(store.as_ref(), 1024);
-                        // Match C++: stop when all needed entries were fetched.
-                        if needed == 0 || fetched >= needed {
-                            break;
-                        }
-                    }
-                    // Final catch-up (C++: FinalCatchUpForPromotionLocked).
-                    // Uses same store (shared Arc) — C++ creates a NEW store, but in
-                    // Rust the Arc clone preserves the store reference.
-                    let mut expected = applier.get_expected_sequence_id();
-                    let latest = store.max_sequence_id()?;
-                    if latest >= expected {
-                        let start = std::time::Instant::now();
-                        let timeout = std::time::Duration::from_secs(30);
-                        for _ in 0..100 {
-                            if start.elapsed() >= timeout {
-                                return Err(HaError::InvalidBackend(format!(
-                                    "promotion final catch-up timed out: expected={expected}, latest={latest}"
-                                )));
-                            }
-                            expected = applier.get_expected_sequence_id();
-                            if latest < expected {
-                                break;
-                            }
-                            let to_read =
-                                latest.saturating_sub(expected).saturating_add(1).min(1000)
-                                    as usize;
-                            if to_read == 0 {
-                                break;
-                            }
-                            let entries = store.read_since(expected, to_read)?;
-                            if entries.is_empty() {
-                                return Err(HaError::InvalidBackend(format!(
-                                    "promotion final catch-up returned no entries: expected={expected}, latest={latest}"
-                                )));
-                            }
-                            let before_apply = expected;
-                            applier.apply_op_log_entries(&entries);
-                            expected = applier.get_expected_sequence_id();
-                            if expected <= before_apply {
-                                return Err(HaError::InvalidBackend(format!(
-                                    "promotion final catch-up made no progress: expected={before_apply}, latest={latest}"
-                                )));
-                            }
-                        }
-                        expected = applier.get_expected_sequence_id();
-                        if expected <= latest {
-                            return Err(HaError::InvalidBackend(format!(
-                                "promotion final catch-up is incomplete: expected={expected}, latest={latest}"
-                            )));
-                        }
-                    }
-                }
+        let catch_up_result = match (&self.oplog_applier, &self.oplog_store) {
+            (Some(applier), Some(store)) => {
+                run_promotion_catch_up_on_plain_thread(applier.clone(), store.clone()).await
             }
-            Ok(())
-        })();
+            _ => Ok(()),
+        };
         if let Err(error) = catch_up_result {
             self.state_machine
                 .process_event(StandbyEvent::PromotionFailed);
