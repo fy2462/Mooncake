@@ -1,8 +1,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs::OpenOptions,
+    io::Write,
+    net::TcpListener,
     path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
 };
 
+use mooncake_store_client::MooncakeClient;
+use mooncake_store_master::ha::{LeaderCoordinator, MasterView};
 use serde::Serialize;
 
 #[test]
@@ -194,6 +201,7 @@ struct GateConfig {
     master_bin: PathBuf,
     result_path: PathBuf,
     artifact_root: PathBuf,
+    cluster_namespace: String,
     seed: u64,
     rounds: usize,
 }
@@ -222,12 +230,18 @@ impl GateConfig {
         if rounds < 3 {
             return Err("MOONCAKE_HA_ROUNDS must be at least 3".into());
         }
+        let cluster_namespace = format!(
+            "ha-chaos-{seed:016x}-{}-{}",
+            std::process::id(),
+            monotonic_timestamp_ns()?
+        );
 
         Ok(Some(Self {
             etcd_endpoint,
             master_bin,
             result_path,
             artifact_root,
+            cluster_namespace,
             seed,
             rounds,
         }))
@@ -455,11 +469,479 @@ struct MasterSlot {
     address: String,
     snapshot_dir: PathBuf,
     log_path: PathBuf,
+    command: Vec<String>,
+    seed: u64,
+    child: Option<Child>,
 }
 
 #[derive(Debug)]
 struct MasterCluster {
     slots: Vec<MasterSlot>,
+    cluster_namespace: String,
+}
+
+impl MasterSlot {
+    fn spawn(
+        index: usize,
+        address: String,
+        snapshot_dir: PathBuf,
+        log_path: PathBuf,
+        config: &GateConfig,
+    ) -> Result<Self, String> {
+        let (rpc_address, rpc_port) = address
+            .rsplit_once(':')
+            .ok_or_else(|| format!("invalid Master address: {address}"))?;
+        let command = vec![
+            config.master_bin.display().to_string(),
+            "--enable-ha".into(),
+            "--ha-backend-type".into(),
+            "etcd".into(),
+            "--ha-backend-connstring".into(),
+            config.etcd_endpoint.clone(),
+            "--cluster-id".into(),
+            config.cluster_namespace.clone(),
+            "--ha-lease-ttl-secs".into(),
+            "3".into(),
+            "--rpc-address".into(),
+            rpc_address.into(),
+            "--rpc-port".into(),
+            rpc_port.into(),
+            "--snapshot-backend-type".into(),
+            "local-disk".into(),
+            "--snapshot-backup-dir".into(),
+            snapshot_dir.display().to_string(),
+            "--client-ttl-secs".into(),
+            "2".into(),
+            "--default-kv-lease-ttl-ms".into(),
+            "1".into(),
+        ];
+        let child = Some(spawn_master_child(
+            &command,
+            config.seed,
+            &snapshot_dir,
+            &log_path,
+        )?);
+        Ok(Self {
+            index,
+            address,
+            snapshot_dir,
+            log_path,
+            command,
+            seed: config.seed,
+            child,
+        })
+    }
+
+    async fn stop(&mut self, timeout: Duration) -> Result<(), String> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(error) => {
+                self.child = Some(child);
+                return Err(format!("inspect Master {}: {error}", self.index));
+            }
+        }
+
+        if let Err(error) = send_sigterm(&child) {
+            self.child = Some(child);
+            return Err(error);
+        }
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    self.child = Some(child);
+                    return Err(format!("wait for Master {} TERM: {error}", self.index));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        if let Err(error) = child.kill() {
+            self.child = Some(child);
+            return Err(format!(
+                "kill Master {} after TERM timeout: {error}",
+                self.index
+            ));
+        }
+        let kill_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < kill_deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(error) => {
+                    self.child = Some(child);
+                    return Err(format!("wait for Master {} kill: {error}", self.index));
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let error = format!(
+            "Master {} pid {} did not exit after TERM and kill",
+            self.index,
+            child.id()
+        );
+        self.child = Some(child);
+        Err(error)
+    }
+
+    fn restart(&mut self) -> Result<(), String> {
+        if let Some(child) = self.child.as_mut() {
+            match child
+                .try_wait()
+                .map_err(|error| format!("inspect Master {} for restart: {error}", self.index))?
+            {
+                None => return Err(format!("Master {} is already running", self.index)),
+                Some(_) => self.child = None,
+            }
+        }
+        self.child = Some(spawn_master_child(
+            &self.command,
+            self.seed,
+            &self.snapshot_dir,
+            &self.log_path,
+        )?);
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        self.child.is_some()
+    }
+}
+
+impl Drop for MasterSlot {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = send_sigterm(&child);
+        let term_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < term_deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = child.kill();
+        let kill_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < kill_deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+impl MasterCluster {
+    async fn start(config: &GateConfig) -> Result<Self, String> {
+        let reservations = (0..3)
+            .map(|_| {
+                TcpListener::bind(("127.0.0.1", 0))
+                    .map_err(|error| format!("reserve Master loopback port: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let addresses = reservations
+            .iter()
+            .map(|listener| {
+                listener
+                    .local_addr()
+                    .map(|address| address.to_string())
+                    .map_err(|error| format!("read reserved Master port: {error}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let master_root = config.artifact_root.join("masters");
+        std::fs::create_dir_all(&master_root).map_err(|error| {
+            format!(
+                "create Master artifact directory {}: {error}",
+                master_root.display()
+            )
+        })?;
+        let mut slots = Vec::with_capacity(3);
+        for (index, (reservation, address)) in reservations
+            .into_iter()
+            .zip(addresses.into_iter())
+            .enumerate()
+        {
+            let snapshot_dir = master_root.join(format!("master-{index}-snapshot"));
+            let log_path = master_root.join(format!("master-{index}.log"));
+            drop(reservation);
+            slots.push(MasterSlot::spawn(
+                index,
+                address,
+                snapshot_dir,
+                log_path,
+                config,
+            )?);
+        }
+
+        Ok(Self {
+            slots,
+            cluster_namespace: config.cluster_namespace.clone(),
+        })
+    }
+
+    fn running_indices(&mut self) -> BTreeSet<usize> {
+        for slot in &mut self.slots {
+            if let Some(child) = slot.child.as_mut()
+                && matches!(child.try_wait(), Ok(Some(_)))
+            {
+                slot.child = None;
+            }
+        }
+        self.slots
+            .iter()
+            .filter(|slot| slot.is_running())
+            .map(|slot| slot.index)
+            .collect()
+    }
+
+    fn addresses(&self) -> BTreeSet<String> {
+        self.slots.iter().map(|slot| slot.address.clone()).collect()
+    }
+
+    fn index_for_address(&self, address: &str) -> Option<usize> {
+        self.slots
+            .iter()
+            .find(|slot| slot.address == address)
+            .map(|slot| slot.index)
+    }
+
+    fn is_running_address(&self, address: &str) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| slot.address == address && slot.is_running())
+    }
+
+    async fn stop(&mut self, index: usize) -> Result<(), String> {
+        self.slots
+            .get_mut(index)
+            .ok_or_else(|| format!("Master index {index} is out of range"))?
+            .stop(Duration::from_secs(5))
+            .await
+    }
+
+    async fn restart(&mut self, index: usize) -> Result<(), String> {
+        self.slots
+            .get_mut(index)
+            .ok_or_else(|| format!("Master index {index} is out of range"))?
+            .restart()
+    }
+}
+
+fn spawn_master_child(
+    command: &[String],
+    seed: u64,
+    snapshot_dir: &Path,
+    log_path: &Path,
+) -> Result<Child, String> {
+    std::fs::create_dir_all(snapshot_dir).map_err(|error| {
+        format!(
+            "create Master snapshot directory {}: {error}",
+            snapshot_dir.display()
+        )
+    })?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|error| format!("open Master log {}: {error}", log_path.display()))?;
+    writeln!(
+        log,
+        "\n=== Master spawn ===\nmonotonic_ns={}\nseed=0x{seed:016x}\ncommand={}\n",
+        monotonic_timestamp_ns()?,
+        serde_json::to_string(command)
+            .map_err(|error| format!("serialize Master command: {error}"))?
+    )
+    .map_err(|error| format!("write Master log header {}: {error}", log_path.display()))?;
+    log.flush()
+        .map_err(|error| format!("flush Master log header {}: {error}", log_path.display()))?;
+    let stderr = log
+        .try_clone()
+        .map_err(|error| format!("clone Master log {}: {error}", log_path.display()))?;
+    Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| format!("spawn Master command {command:?}: {error}"))
+}
+
+fn monotonic_timestamp_ns() -> Result<u128, String> {
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime writes to the valid timespec pointer supplied here.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) } != 0 {
+        return Err(format!(
+            "read monotonic clock: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok((timestamp.tv_sec as u128) * 1_000_000_000 + timestamp.tv_nsec as u128)
+}
+
+fn send_sigterm(child: &Child) -> Result<(), String> {
+    let pid = libc::pid_t::try_from(child.id())
+        .map_err(|_| format!("Master pid {} does not fit pid_t", child.id()))?;
+    // SAFETY: pid is taken directly from this owned Child and the signal is SIGTERM.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(format!("send SIGTERM to owned Master pid {pid}: {error}"));
+        }
+    }
+    Ok(())
+}
+
+async fn wait_for_stable_leader(
+    coordinator: &LeaderCoordinator,
+    cluster: &MasterCluster,
+    clients: &mut [MooncakeClient],
+    deadline: Instant,
+) -> Result<MasterView, String> {
+    const QUIET_INTERVAL: Duration = Duration::from_millis(500);
+    let mut last_observation = "no nonempty etcd view observed".to_string();
+
+    while Instant::now() < deadline {
+        let first = read_view_before_deadline(coordinator, deadline).await?;
+        let Some(first) = first else {
+            last_observation = "etcd view is empty".into();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        if !cluster.is_running_address(&first.leader_address) {
+            last_observation = format!(
+                "etcd view {} points to a stopped or unknown Master",
+                first.view_version
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        if Instant::now() + QUIET_INTERVAL >= deadline {
+            break;
+        }
+        tokio::time::sleep(QUIET_INTERVAL).await;
+        let second = read_view_before_deadline(coordinator, deadline).await?;
+        if second.as_ref() != Some(&first) {
+            last_observation =
+                format!("etcd view changed during quiet interval: {first:?} -> {second:?}");
+            continue;
+        }
+
+        let connect_timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .min(Duration::from_secs(2));
+        if connect_timeout.is_zero()
+            || tokio::time::timeout(
+                connect_timeout,
+                tokio::net::TcpStream::connect(&first.leader_address),
+            )
+            .await
+            .map_err(|_| format!("gRPC bind check timed out for {}", first.leader_address))?
+            .is_err()
+        {
+            last_observation = format!(
+                "stable etcd leader {} has not bound gRPC yet",
+                first.leader_address
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+
+        let mut clients_healthy = true;
+        for client in clients.iter_mut() {
+            let operation_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5));
+            let switched = tokio::time::timeout(
+                operation_timeout,
+                client.switch_master(&first.leader_address),
+            )
+            .await;
+            let Ok(Ok(())) = switched else {
+                last_observation = format!(
+                    "client failed to switch to stable leader {}: {switched:?}",
+                    first.leader_address
+                );
+                clients_healthy = false;
+                break;
+            };
+            let health_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5));
+            let health = tokio::time::timeout(health_timeout, client.health_check()).await;
+            let Ok(Ok(())) = health else {
+                last_observation = format!(
+                    "client health check failed on stable leader {}: {health:?}",
+                    first.leader_address
+                );
+                clients_healthy = false;
+                break;
+            };
+            if client.current_master_addr() != first.leader_address {
+                last_observation = format!(
+                    "client health check failed over away from stable leader {} to {}",
+                    first.leader_address,
+                    client.current_master_addr()
+                );
+                clients_healthy = false;
+                break;
+            }
+        }
+        if clients_healthy {
+            return Ok(first);
+        }
+    }
+
+    Err(format!(
+        "stable leader deadline expired: {last_observation}"
+    ))
+}
+
+async fn read_view_before_deadline(
+    coordinator: &LeaderCoordinator,
+    deadline: Instant,
+) -> Result<Option<MasterView>, String> {
+    let timeout = deadline
+        .saturating_duration_since(Instant::now())
+        .min(Duration::from_secs(2));
+    if timeout.is_zero() {
+        return Err("stable leader deadline expired while reading etcd".into());
+    }
+    tokio::time::timeout(timeout, coordinator.read_current_view())
+        .await
+        .map_err(|_| "timed out reading current etcd leader view".to_string())?
+        .map_err(|error| format!("read current etcd leader view: {error}"))
+}
+
+async fn wait_for_stable_leader_without_clients(
+    config: &GateConfig,
+    cluster: &MasterCluster,
+) -> Result<MasterView, String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let coordinator = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        LeaderCoordinator::new_etcd(
+            vec![config.etcd_endpoint.clone()],
+            &cluster.cluster_namespace,
+        ),
+    )
+    .await
+    .map_err(|_| "timed out creating HA test coordinator".to_string())?
+    .map_err(|error| format!("create HA test coordinator: {error}"))?;
+    wait_for_stable_leader(&coordinator, cluster, &mut [], deadline).await
 }
 
 async fn run_scenario(
@@ -474,12 +956,74 @@ async fn run_scenario(
     })
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
-    let Some(_config) = GateConfig::from_env().expect("valid HA chaos environment") else {
+    let Some(config) = GateConfig::from_env().expect("valid HA chaos environment") else {
         eprintln!("SKIP test_ha_chaos_live: MOONCAKE_RUN_HA_CHAOS is not enabled");
         return;
     };
 
-    panic!("three-Master lifecycle is not implemented yet");
+    let mut cluster = MasterCluster::start(&config)
+        .await
+        .expect("start three Masters");
+    assert_eq!(cluster.running_indices(), BTreeSet::from([0, 1, 2]));
+    let view = wait_for_stable_leader_without_clients(&config, &cluster)
+        .await
+        .unwrap();
+    assert!(cluster.addresses().contains(&view.leader_address));
+    let leader = cluster.index_for_address(&view.leader_address).unwrap();
+    cluster.stop(leader).await.unwrap();
+    let next = wait_for_stable_leader_without_clients(&config, &cluster)
+        .await
+        .unwrap();
+    assert_ne!(next.view_version, view.view_version);
+    assert_ne!(next.leader_address, view.leader_address);
+    cluster.restart(leader).await.unwrap();
+    assert_eq!(cluster.running_indices(), BTreeSet::from([0, 1, 2]));
+
+    eprintln!(
+        "PASS lifecycle checkpoint: leader {} view {} failed over to {} view {}; restarted slot {}",
+        view.leader_address, view.view_version, next.leader_address, next.view_version, leader
+    );
+    let checkpoint_path = config.artifact_root.join("lifecycle-checkpoint.json");
+    std::fs::write(
+        &checkpoint_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "status": "PASS",
+            "seed": format!("0x{:016x}", config.seed),
+            "cluster_namespace": config.cluster_namespace.clone(),
+            "masters": cluster.addresses(),
+            "initial_view": {
+                "leader_address": view.leader_address,
+                "view_version": view.view_version,
+            },
+            "failover_view": {
+                "leader_address": next.leader_address,
+                "view_version": next.view_version,
+            },
+            "restarted_index": leader,
+            "running_indices_after_restart": cluster.running_indices(),
+        }))
+        .expect("serialize lifecycle checkpoint"),
+    )
+    .expect("write lifecycle checkpoint");
+    let mut result = GateResult::failed(
+        config.seed,
+        config.etcd_endpoint.clone(),
+        config.cluster_namespace.clone(),
+        cluster.addresses().into_iter().collect(),
+        complete_scenarios(ResultStatus::Fail),
+        FailureRecord {
+            stage: "scenario".into(),
+            message: "small and large HA chaos workloads are not implemented yet".into(),
+        },
+    );
+    result.master_logs = cluster
+        .slots
+        .iter()
+        .map(|slot| slot.log_path.display().to_string())
+        .collect();
+    result
+        .write_atomic(&config.result_path)
+        .expect("publish lifecycle checkpoint result");
 }
