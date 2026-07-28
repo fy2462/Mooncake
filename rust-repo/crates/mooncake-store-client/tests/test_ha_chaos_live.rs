@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use mooncake_store_client::{MooncakeClient, proto};
+use mooncake_store_client::{MooncakeClient, SegmentDetail, proto};
 use mooncake_store_core::StoreError;
 use mooncake_store_master::ha::{LeaderCoordinator, MasterView};
 use serde::Serialize;
@@ -69,10 +69,194 @@ fn stable_capacity_recovery_retries_only_capacity_rejections() {
     )));
 }
 
-#[test]
-fn scenario_client_liveness_pinger_is_faster_than_master_ttl() {
+#[tokio::test]
+async fn scenario_client_liveness_pinger_remounts_before_adopting_promoted_candidate() {
     assert!(SCENARIO_CLIENT_HEARTBEAT_INTERVAL < MASTER_CLIENT_TTL);
-    assert!(SCENARIO_CLIENT_PING_TIMEOUT < MASTER_CLIENT_TTL);
+    assert!(SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT < MASTER_CLIENT_TTL);
+    assert!(SCENARIO_CLIENT_PING_CYCLE_TIMEOUT < MASTER_CLIENT_TTL);
+    assert!(SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT * 3 < SCENARIO_CLIENT_PING_CYCLE_TIMEOUT);
+    assert!(
+        SCENARIO_CLIENT_HEARTBEAT_INTERVAL + SCENARIO_CLIENT_PING_CYCLE_TIMEOUT < MASTER_CLIENT_TTL
+    );
+
+    let native_client_id = uuid::Uuid::from_u128(0x1111);
+    let other_client_id = uuid::Uuid::from_u128(0x2222);
+    let mut details = vec![
+        SegmentDetail {
+            segment_name: "owned-a".into(),
+            segment_id: uuid::Uuid::from_u128(0xa1),
+            client_id: native_client_id,
+            base_address: 101,
+            size_bytes: 201,
+            te_endpoint: "te-a".into(),
+            protocol: "tcp".into(),
+            status: proto::SegmentStatus::Active as i32,
+            allocator_used_bytes: 0,
+            allocator_capacity_bytes: 201,
+            nof: false,
+            host_id: "host-a".into(),
+        },
+        SegmentDetail {
+            segment_name: "owned-b".into(),
+            segment_id: uuid::Uuid::from_u128(0xb2),
+            client_id: native_client_id,
+            base_address: 102,
+            size_bytes: 202,
+            te_endpoint: "te-b".into(),
+            protocol: "rdma".into(),
+            status: proto::SegmentStatus::Active as i32,
+            allocator_used_bytes: 0,
+            allocator_capacity_bytes: 202,
+            nof: false,
+            host_id: "host-b".into(),
+        },
+        SegmentDetail {
+            segment_name: "other-client".into(),
+            segment_id: uuid::Uuid::from_u128(0xc3),
+            client_id: other_client_id,
+            base_address: 103,
+            size_bytes: 203,
+            te_endpoint: "te-c".into(),
+            protocol: "tcp".into(),
+            status: proto::SegmentStatus::Active as i32,
+            allocator_used_bytes: 0,
+            allocator_capacity_bytes: 203,
+            nof: false,
+            host_id: "host-c".into(),
+        },
+        SegmentDetail {
+            segment_name: "owned-nof".into(),
+            segment_id: uuid::Uuid::from_u128(0xd4),
+            client_id: native_client_id,
+            base_address: 104,
+            size_bytes: 204,
+            te_endpoint: "te-d".into(),
+            protocol: "tcp".into(),
+            status: proto::SegmentStatus::Active as i32,
+            allocator_used_bytes: 0,
+            allocator_capacity_bytes: 204,
+            nof: true,
+            host_id: "host-d".into(),
+        },
+    ];
+    let remount_request = scenario_memory_remount_request(native_client_id, &details).unwrap();
+    details[0].segment_name = "mutated-after-capture".into();
+    let (client_high, client_low) = native_client_id.as_u64_pair();
+    assert_eq!(
+        remount_request.client_id,
+        Some(proto::Uuid {
+            high: client_high,
+            low: client_low,
+        })
+    );
+    assert_eq!(remount_request.segment_names, ["owned-a", "owned-b"]);
+    assert_eq!(remount_request.segment_sizes, [201, 202]);
+    assert_eq!(remount_request.base_addrs, [101, 102]);
+    assert_eq!(remount_request.te_endpoints, ["te-a", "te-b"]);
+    assert_eq!(remount_request.protocols, ["tcp", "rdma"]);
+    assert_eq!(remount_request.host_ids, ["host-a", "host-b"]);
+    assert_eq!(
+        remount_request.segment_ids,
+        [uuid::Uuid::from_u128(0xa1), uuid::Uuid::from_u128(0xb2)].map(|segment_id| {
+            let (high, low) = segment_id.as_u64_pair();
+            proto::Uuid { high, low }
+        })
+    );
+
+    let cached_target = "127.0.0.1:51051".to_string();
+    let promoted_target = "127.0.0.1:51052".to_string();
+    let targets = scenario_probe_targets(
+        &cached_target,
+        &[
+            promoted_target.clone(),
+            cached_target.clone(),
+            "127.0.0.1:51053".into(),
+            promoted_target.clone(),
+        ],
+    );
+    assert_eq!(
+        targets,
+        [
+            cached_target.clone(),
+            promoted_target.clone(),
+            "127.0.0.1:51053".into(),
+        ]
+    );
+
+    let client_id = remount_request.client_id.clone().unwrap();
+    let mut failed_cached = ScriptedScenarioPingerRpc::new([Err("cached target stopped".into())]);
+    assert!(
+        probe_scenario_ping_rpc(&mut failed_cached, &client_id, "tenant-a", &remount_request,)
+            .await
+            .unwrap_err()
+            .contains("cached target stopped")
+    );
+
+    let mut promoted = ScriptedScenarioPingerRpc::new([
+        Ok(proto::ClientStatus::NeedRemount as i32),
+        Ok(proto::ClientStatus::Ok as i32),
+    ]);
+    let promoted_outcome =
+        probe_scenario_ping_rpc(&mut promoted, &client_id, "tenant-a", &remount_request)
+            .await
+            .unwrap();
+    assert_eq!(promoted.events, ["Ping", "ReMountSegment", "Ping"]);
+    assert_eq!(promoted.remount_requests, [remount_request.clone()]);
+    let (target_tx, target_rx) = tokio::sync::watch::channel(cached_target.clone());
+    let (observation_tx, observation_rx) = tokio::sync::watch::channel(ScenarioPingerObservation {
+        preferred_target: cached_target.clone(),
+        last_attempt_target: Some(cached_target.clone()),
+        last_outcome: Some("error: cached target stopped".into()),
+        last_registered_target: None,
+    });
+    let mut observation = observation_rx.borrow().clone();
+    assert!(apply_scenario_ping_outcome(
+        &target_tx,
+        &observation_tx,
+        &mut observation,
+        &promoted_target,
+        promoted_outcome,
+    ));
+    assert_eq!(&*target_rx.borrow(), &promoted_target);
+    assert_eq!(
+        observation_rx.borrow().last_registered_target.as_deref(),
+        Some(promoted_target.as_str())
+    );
+
+    let isolated_target = "127.0.0.1:52051".to_string();
+    let (isolated_tx, isolated_rx) = tokio::sync::watch::channel(isolated_target.clone());
+    let (isolated_observation_tx, isolated_observation_rx) =
+        tokio::sync::watch::channel(ScenarioPingerObservation {
+            preferred_target: isolated_target.clone(),
+            last_attempt_target: None,
+            last_outcome: None,
+            last_registered_target: None,
+        });
+    let mut isolated_observation = isolated_observation_rx.borrow().clone();
+    let mut still_unregistered = ScriptedScenarioPingerRpc::new([
+        Ok(proto::ClientStatus::NeedRemount as i32),
+        Ok(proto::ClientStatus::NeedRemount as i32),
+    ]);
+    let need_remount = probe_scenario_ping_rpc(
+        &mut still_unregistered,
+        &client_id,
+        "tenant-a",
+        &remount_request,
+    )
+    .await
+    .unwrap();
+    assert!(!apply_scenario_ping_outcome(
+        &isolated_tx,
+        &isolated_observation_tx,
+        &mut isolated_observation,
+        &promoted_target,
+        need_remount,
+    ));
+    assert_eq!(&*isolated_rx.borrow(), &isolated_target);
+    assert_eq!(
+        isolated_observation_rx.borrow().last_registered_target,
+        None
+    );
 }
 
 #[tokio::test]
@@ -642,7 +826,8 @@ const LARGE_VALUE_LEN: usize = 3 * 1024 * 1024;
 const MASTER_CLIENT_TTL: Duration = Duration::from_secs(2);
 const MASTER_CLIENT_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 const SCENARIO_CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
-const SCENARIO_CLIENT_PING_TIMEOUT: Duration = Duration::from_secs(1);
+const SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200);
+const SCENARIO_CLIENT_PING_CYCLE_TIMEOUT: Duration = Duration::from_millis(750);
 const SCENARIO_CLIENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SCENARIO_CLIENT_PINGER_JOIN_GRACE: Duration = Duration::from_secs(2);
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
@@ -929,6 +1114,18 @@ struct FailureRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct LivenessFailoverEvidence {
+    cached_target: String,
+    promoted_target: String,
+    registered_target: String,
+    lock_to_stop_milliseconds: u128,
+    election_milliseconds: u128,
+    locked_milliseconds: u128,
+    registration_count: usize,
+    byte_comparisons: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct LivenessPreflightResult {
     schema: &'static str,
     canonical: bool,
@@ -937,6 +1134,7 @@ struct LivenessPreflightResult {
     blocked_milliseconds: u128,
     failure: Option<String>,
     cleanup_failure: Option<String>,
+    failover_evidence: Option<LivenessFailoverEvidence>,
 }
 
 impl LivenessPreflightResult {
@@ -959,7 +1157,13 @@ impl LivenessPreflightResult {
             blocked_milliseconds,
             failure,
             cleanup_failure,
+            failover_evidence: None,
         }
+    }
+
+    fn with_failover_evidence(mut self, evidence: LivenessFailoverEvidence) -> Self {
+        self.failover_evidence = Some(evidence);
+        self
     }
 
     fn write_atomic(&self, result_path: &Path) -> Result<(), String> {
@@ -1713,7 +1917,7 @@ async fn create_clients(
             .await
             .map_err(|_| format!("client {client_index} creation timed out"))?
             .map_err(|error| format!("create TCP client {client_index}: {error}"))?;
-            Ok(ScenarioClient::new(client))
+            ScenarioClient::new(client).await
         }
         .await;
         retain_created_or_cleanup(&mut clients, next).await?;
@@ -1726,24 +1930,60 @@ struct ScenarioClient {
     pinger: Option<ScenarioLivenessPinger>,
 }
 
+#[derive(Debug, Clone)]
+struct ScenarioPingerObservation {
+    preferred_target: String,
+    last_attempt_target: Option<String>,
+    last_outcome: Option<String>,
+    last_registered_target: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScenarioPingOutcome {
+    Registered,
+    NeedRemount,
+}
+
 struct ScenarioLivenessPinger {
     target_tx: tokio::sync::watch::Sender<String>,
+    observation_rx: tokio::sync::watch::Receiver<ScenarioPingerObservation>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ScenarioLivenessPinger {
-    fn start(master_addr: String, client_id: proto::Uuid, tenant_id: String) -> Self {
-        let (target_tx, target_rx) = tokio::sync::watch::channel(master_addr);
+    fn start(
+        master_addr: String,
+        master_candidates: Vec<String>,
+        client_id: proto::Uuid,
+        tenant_id: String,
+        remount_request: proto::ReMountSegmentRequest,
+    ) -> Self {
+        let mut deduped_candidates = BTreeSet::from([master_addr.clone()]);
+        deduped_candidates.extend(master_candidates);
+        let master_candidates = deduped_candidates.into_iter().collect();
+        let (target_tx, target_rx) = tokio::sync::watch::channel(master_addr.clone());
+        let (observation_tx, observation_rx) =
+            tokio::sync::watch::channel(ScenarioPingerObservation {
+                preferred_target: master_addr,
+                last_attempt_target: None,
+                last_outcome: None,
+                last_registered_target: None,
+            });
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let join_handle = tokio::spawn(run_scenario_liveness_pinger(
+            target_tx.clone(),
             target_rx,
+            master_candidates,
+            observation_tx,
             shutdown_rx,
             client_id,
             tenant_id,
+            remount_request,
         ));
         Self {
             target_tx,
+            observation_rx,
             shutdown_tx,
             join_handle: Some(join_handle),
         }
@@ -1757,11 +1997,48 @@ impl ScenarioLivenessPinger {
         let _ = self.shutdown_tx.send(true);
     }
 
+    fn preferred_target(&self) -> String {
+        self.target_tx.borrow().clone()
+    }
+
+    async fn wait_for_registered_target(
+        &self,
+        master_addr: &str,
+        deadline: Instant,
+    ) -> Result<ScenarioPingerObservation, String> {
+        let mut observation_rx = self.observation_rx.clone();
+        loop {
+            let observation = observation_rx.borrow().clone();
+            if observation.last_registered_target.as_deref() == Some(master_addr) {
+                return Ok(observation);
+            }
+            tokio::time::timeout_at(deadline.into(), observation_rx.changed())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "pinger did not observe Registered from promoted leader {master_addr} before deadline; last observation: {observation:?}"
+                    )
+                })?
+                .map_err(|_| {
+                    format!(
+                        "pinger observation channel closed before Registered from promoted leader {master_addr}; last observation: {observation:?}"
+                    )
+                })?;
+        }
+    }
+
     fn from_test_worker(join_handle: tokio::task::JoinHandle<()>) -> Self {
         let (target_tx, _) = tokio::sync::watch::channel(String::new());
+        let (_, observation_rx) = tokio::sync::watch::channel(ScenarioPingerObservation {
+            preferred_target: String::new(),
+            last_attempt_target: None,
+            last_outcome: None,
+            last_registered_target: None,
+        });
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
             target_tx,
+            observation_rx,
             shutdown_tx,
             join_handle: Some(join_handle),
         }
@@ -1802,12 +2079,55 @@ impl Drop for ScenarioLivenessPinger {
     }
 }
 
+fn scenario_probe_targets(preferred_target: &str, master_candidates: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut targets = Vec::with_capacity(master_candidates.len().max(1));
+    for target in
+        std::iter::once(preferred_target).chain(master_candidates.iter().map(String::as_str))
+    {
+        if seen.insert(target.to_owned()) {
+            targets.push(target.to_owned());
+        }
+    }
+    targets
+}
+
+fn apply_scenario_ping_outcome(
+    target_tx: &tokio::sync::watch::Sender<String>,
+    observation_tx: &tokio::sync::watch::Sender<ScenarioPingerObservation>,
+    observation: &mut ScenarioPingerObservation,
+    master_addr: &str,
+    outcome: ScenarioPingOutcome,
+) -> bool {
+    observation.last_attempt_target = Some(master_addr.to_owned());
+    let registered = match outcome {
+        ScenarioPingOutcome::Registered => {
+            target_tx.send_replace(master_addr.to_owned());
+            observation.preferred_target = master_addr.to_owned();
+            observation.last_outcome = Some("Registered".into());
+            observation.last_registered_target = Some(master_addr.to_owned());
+            true
+        }
+        ScenarioPingOutcome::NeedRemount => {
+            observation.last_outcome = Some("NeedRemount".into());
+            false
+        }
+    };
+    observation_tx.send_replace(observation.clone());
+    registered
+}
+
 async fn run_scenario_liveness_pinger(
+    target_tx: tokio::sync::watch::Sender<String>,
     mut target_rx: tokio::sync::watch::Receiver<String>,
+    master_candidates: Vec<String>,
+    observation_tx: tokio::sync::watch::Sender<ScenarioPingerObservation>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     client_id: proto::Uuid,
     tenant_id: String,
+    remount_request: proto::ReMountSegmentRequest,
 ) {
+    let mut observation = observation_tx.borrow().clone();
     let mut ticker = tokio::time::interval(SCENARIO_CLIENT_HEARTBEAT_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -1819,17 +2139,59 @@ async fn run_scenario_liveness_pinger(
                 }
             }
             _ = ticker.tick() => {
-                let master_addr = target_rx.borrow_and_update().clone();
-                tokio::select! {
-                    biased;
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
+                let preferred_target = target_rx.borrow_and_update().clone();
+                observation.preferred_target.clone_from(&preferred_target);
+                let probe_targets = scenario_probe_targets(&preferred_target, &master_candidates);
+                let cycle_deadline = Instant::now() + SCENARIO_CLIENT_PING_CYCLE_TIMEOUT;
+
+                for master_addr in probe_targets {
+                    let attempt = tokio::time::timeout_at(
+                        cycle_deadline.into(),
+                        ping_scenario_client(
+                            &master_addr,
+                            &client_id,
+                            &tenant_id,
+                            &remount_request,
+                        ),
+                    );
+                    let result = tokio::select! {
+                        biased;
+                        changed = shutdown_rx.changed() => {
+                            if changed.is_err() || *shutdown_rx.borrow() {
+                                return;
+                            }
+                            continue;
                         }
-                    }
-                    result = ping_scenario_client(&master_addr, &client_id, &tenant_id) => {
-                        if let Err(error) = result {
+                        result = attempt => result,
+                    };
+                    match result {
+                        Ok(Ok(outcome)) => {
+                            let registered = apply_scenario_ping_outcome(
+                                &target_tx,
+                                &observation_tx,
+                                &mut observation,
+                                &master_addr,
+                                outcome,
+                            );
+                            if registered {
+                                break;
+                            }
+                            tracing::warn!(target: "ha_scenario_liveness", %master_addr, "direct scenario-client ping still requires remount after a remount attempt");
+                        }
+                        Ok(Err(error)) => {
+                            observation.last_attempt_target = Some(master_addr.clone());
+                            observation.last_outcome = Some(format!("error: {error}"));
                             tracing::warn!(target: "ha_scenario_liveness", %error, %master_addr, "direct scenario-client ping failed");
+                            observation_tx.send_replace(observation.clone());
+                        }
+                        Err(_) => {
+                            observation.last_attempt_target = Some(master_addr);
+                            observation.last_outcome = Some(format!(
+                                "error: candidate probe cycle exceeded {} ms",
+                                SCENARIO_CLIENT_PING_CYCLE_TIMEOUT.as_millis()
+                            ));
+                            observation_tx.send_replace(observation.clone());
+                            break;
                         }
                     }
                 }
@@ -1838,51 +2200,221 @@ async fn run_scenario_liveness_pinger(
     }
 }
 
+trait ScenarioPingerRpc {
+    async fn ping(&mut self, request: proto::PingRequest) -> Result<i32, String>;
+
+    async fn remount(&mut self, request: proto::ReMountSegmentRequest) -> Result<(), String>;
+}
+
+struct TonicScenarioPingerRpc {
+    master: proto::master_service_client::MasterServiceClient<tonic::transport::Channel>,
+}
+
+impl ScenarioPingerRpc for TonicScenarioPingerRpc {
+    async fn ping(&mut self, request: proto::PingRequest) -> Result<i32, String> {
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT);
+        Ok(self
+            .master
+            .ping(request)
+            .await
+            .map_err(|error| format!("direct ping RPC: {error}"))?
+            .into_inner()
+            .client_status)
+    }
+
+    async fn remount(&mut self, request: proto::ReMountSegmentRequest) -> Result<(), String> {
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT);
+        self.master
+            .re_mount_segment(request)
+            .await
+            .map_err(|error| format!("direct remount RPC after NeedRemount: {error}"))?;
+        Ok(())
+    }
+}
+
+struct ScriptedScenarioPingerRpc {
+    ping_statuses: std::collections::VecDeque<Result<i32, String>>,
+    events: Vec<&'static str>,
+    remount_requests: Vec<proto::ReMountSegmentRequest>,
+}
+
+impl ScriptedScenarioPingerRpc {
+    fn new<const N: usize>(ping_statuses: [Result<i32, String>; N]) -> Self {
+        Self {
+            ping_statuses: ping_statuses.into(),
+            events: Vec::new(),
+            remount_requests: Vec::new(),
+        }
+    }
+}
+
+impl ScenarioPingerRpc for ScriptedScenarioPingerRpc {
+    async fn ping(&mut self, _request: proto::PingRequest) -> Result<i32, String> {
+        self.events.push("Ping");
+        self.ping_statuses
+            .pop_front()
+            .expect("scripted ping status")
+    }
+
+    async fn remount(&mut self, request: proto::ReMountSegmentRequest) -> Result<(), String> {
+        self.events.push("ReMountSegment");
+        self.remount_requests.push(request);
+        Ok(())
+    }
+}
+
+async fn probe_scenario_ping_rpc<R: ScenarioPingerRpc>(
+    rpc: &mut R,
+    client_id: &proto::Uuid,
+    tenant_id: &str,
+    remount_request: &proto::ReMountSegmentRequest,
+) -> Result<ScenarioPingOutcome, String> {
+    let mut status = rpc
+        .ping(proto::PingRequest {
+            client_id: Some(client_id.clone()),
+            mounted_segments: Vec::new(),
+            tenant_id: tenant_id.to_owned(),
+        })
+        .await?;
+    if status == proto::ClientStatus::NeedRemount as i32 {
+        rpc.remount(remount_request.clone()).await?;
+        status = rpc
+            .ping(proto::PingRequest {
+                client_id: Some(client_id.clone()),
+                mounted_segments: Vec::new(),
+                tenant_id: tenant_id.to_owned(),
+            })
+            .await?;
+    }
+    if status == proto::ClientStatus::Ok as i32 {
+        Ok(ScenarioPingOutcome::Registered)
+    } else if status == proto::ClientStatus::NeedRemount as i32 {
+        Ok(ScenarioPingOutcome::NeedRemount)
+    } else {
+        Err(format!(
+            "direct ping returned unknown client status {status}"
+        ))
+    }
+}
+
 async fn ping_scenario_client(
     master_addr: &str,
     client_id: &proto::Uuid,
     tenant_id: &str,
-) -> Result<(), String> {
-    tokio::time::timeout(SCENARIO_CLIENT_PING_TIMEOUT, async {
-        let mut master = proto::master_service_client::MasterServiceClient::connect(format!(
+    remount_request: &proto::ReMountSegmentRequest,
+) -> Result<ScenarioPingOutcome, String> {
+    tokio::time::timeout(SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT, async {
+        let master = proto::master_service_client::MasterServiceClient::connect(format!(
             "http://{master_addr}"
         ))
         .await
         .map_err(|error| format!("connect direct ping channel: {error}"))?;
-        let mut request = tonic::Request::new(proto::PingRequest {
-            client_id: Some(client_id.clone()),
-            mounted_segments: Vec::new(),
-            tenant_id: tenant_id.to_owned(),
-        });
-        request.set_timeout(SCENARIO_CLIENT_PING_TIMEOUT);
-        master
-            .ping(request)
-            .await
-            .map_err(|error| format!("direct ping RPC: {error}"))?;
-        Ok(())
+        let mut rpc = TonicScenarioPingerRpc { master };
+        probe_scenario_ping_rpc(&mut rpc, client_id, tenant_id, remount_request).await
     })
     .await
     .map_err(|_| {
         format!(
             "direct ping exceeded {} ms",
-            SCENARIO_CLIENT_PING_TIMEOUT.as_millis()
+            SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT.as_millis()
         )
     })?
 }
 
+fn scenario_memory_remount_request(
+    native_client_id: uuid::Uuid,
+    segment_details: &[SegmentDetail],
+) -> Result<proto::ReMountSegmentRequest, String> {
+    let memory_segments = segment_details
+        .iter()
+        .filter(|segment| !segment.nof && segment.client_id == native_client_id)
+        .collect::<Vec<_>>();
+    if memory_segments.is_empty() {
+        return Err("no owned Memory segment".into());
+    }
+    let (high, low) = native_client_id.as_u64_pair();
+    Ok(proto::ReMountSegmentRequest {
+        client_id: Some(proto::Uuid { high, low }),
+        segment_names: memory_segments
+            .iter()
+            .map(|segment| segment.segment_name.clone())
+            .collect(),
+        segment_sizes: memory_segments
+            .iter()
+            .map(|segment| segment.size_bytes)
+            .collect(),
+        base_addrs: memory_segments
+            .iter()
+            .map(|segment| segment.base_address)
+            .collect(),
+        te_endpoints: memory_segments
+            .iter()
+            .map(|segment| segment.te_endpoint.clone())
+            .collect(),
+        protocols: memory_segments
+            .iter()
+            .map(|segment| segment.protocol.clone())
+            .collect(),
+        segment_ids: memory_segments
+            .iter()
+            .map(|segment| {
+                let (high, low) = segment.segment_id.as_u64_pair();
+                proto::Uuid { high, low }
+            })
+            .collect(),
+        host_ids: memory_segments
+            .iter()
+            .map(|segment| segment.host_id.clone())
+            .collect(),
+    })
+}
+
 impl ScenarioClient {
-    fn new(client: MooncakeClient) -> Self {
-        let (high, low) = client.client_id().as_u64_pair();
+    async fn new(mut client: MooncakeClient) -> Result<Self, String> {
+        let native_client_id = client.client_id();
+        let (high, low) = native_client_id.as_u64_pair();
+        let client_id = proto::Uuid { high, low };
+        let segment_details = match client.get_segments_detail().await {
+            Ok(segment_details) => segment_details,
+            Err(error) => {
+                let cleanup =
+                    tokio::time::timeout(SCENARIO_CLIENT_CLEANUP_TIMEOUT, client.tear_down_all())
+                        .await;
+                return Err(format!(
+                    "capture scenario client remount descriptors: {error}; cleanup: {cleanup:?}"
+                ));
+            }
+        };
+        let remount_request =
+            match scenario_memory_remount_request(native_client_id, &segment_details) {
+                Ok(remount_request) => remount_request,
+                Err(error) => {
+                    let cleanup = tokio::time::timeout(
+                        SCENARIO_CLIENT_CLEANUP_TIMEOUT,
+                        client.tear_down_all(),
+                    )
+                    .await;
+                    return Err(format!(
+                        "capture scenario client remount descriptors: {error}; cleanup: {cleanup:?}"
+                    ));
+                }
+            };
+        let master_addr = client.current_master_addr();
+        let master_candidates = client.master_candidates();
         let pinger = ScenarioLivenessPinger::start(
-            client.current_master_addr(),
-            proto::Uuid { high, low },
+            master_addr,
+            master_candidates,
+            client_id,
             client.tenant_id().to_owned(),
+            remount_request,
         );
         let client = Arc::new(tokio::sync::Mutex::new(Some(client)));
-        Self {
+        Ok(Self {
             client,
             pinger: Some(pinger),
-        }
+        })
     }
 
     async fn put(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
@@ -2156,6 +2688,207 @@ async fn verify_small_clients_remain_registered_and_preserve_sentinels(
         }
     }
     Ok(())
+}
+
+async fn verify_small_clients_survive_cached_target_loss(
+    config: &GateConfig,
+    cluster: &mut MasterCluster,
+    clients: &[ScenarioClient],
+    seed: u64,
+) -> Result<LivenessFailoverEvidence, String> {
+    let stable_view = wait_for_stable_leader_without_clients(config, cluster).await?;
+    recover_scenario_clients(clients, &stable_view).await?;
+    let sentinels = (0..clients.len())
+        .map(|client_index| {
+            (
+                format!("ha-small-leader-loss-{seed:016x}-{client_index}"),
+                format!("small-leader-loss-value-{client_index}").into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (client_index, (key, value)) in sentinels.iter().enumerate() {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            clients[client_index].put(key, value),
+        )
+        .await
+        .map_err(|_| format!("small client {client_index} leader-loss sentinel put timed out"))?
+        .map_err(|error| {
+            format!("small client {client_index} leader-loss sentinel put failed: {error}")
+        })?;
+    }
+
+    let pinger = clients[0]
+        .pinger
+        .as_ref()
+        .ok_or_else(|| "small client 0 liveness pinger is unavailable".to_string())?;
+    let cached_target = pinger.preferred_target();
+    if cached_target != stable_view.leader_address {
+        return Err(format!(
+            "small client 0 cached pinger target {cached_target} does not match stable leader {}",
+            stable_view.leader_address
+        ));
+    }
+    pinger
+        .wait_for_registered_target(&cached_target, Instant::now() + Duration::from_secs(5))
+        .await
+        .map_err(|error| format!("observe cached target before leader loss: {error}"))?;
+
+    let (acquired_tx, acquired_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let client_slot = Arc::clone(&clients[0].client);
+    let lock_holder = tokio::spawn(async move {
+        let foreground_guard = client_slot.lock().await;
+        let acquired_at = Instant::now();
+        let _ = acquired_tx.send(acquired_at);
+        let _ = release_rx.await;
+        drop(foreground_guard);
+    });
+    let acquired_at = tokio::time::timeout(Duration::from_secs(2), acquired_rx)
+        .await
+        .map_err(|_| "timed out waiting for client 0 foreground mutex acquisition".to_string())?
+        .map_err(|_| "client 0 foreground mutex holder exited before acquisition".to_string())?;
+
+    let operation = async {
+        let stopped_index = cluster
+            .index_for_address(&cached_target)
+            .ok_or_else(|| format!("cached pinger target {cached_target} is not a Master slot"))?;
+        cluster
+            .stop(stopped_index)
+            .await
+            .map_err(|error| format!("stop cached pinger target {cached_target}: {error}"))?;
+        let stopped_at = Instant::now();
+        let promoted_view = wait_for_stable_leader_without_clients(config, cluster)
+            .await
+            .map_err(|error| format!("wait for promoted leader after cached-target stop: {error}"))?;
+        let promoted_at = Instant::now();
+        if promoted_view.leader_address == cached_target {
+            return Err(format!(
+                "leader did not leave stopped cached pinger target {cached_target}"
+            ));
+        }
+
+        for client_index in 1..clients.len() {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                clients[client_index].switch_master(&promoted_view.leader_address),
+            )
+            .await
+            .map_err(|_| {
+                format!("small client {client_index} switch to promoted leader timed out")
+            })?
+            .map_err(|error| {
+                format!("small client {client_index} switch to promoted leader failed: {error}")
+            })?;
+            tokio::time::timeout(Duration::from_secs(5), clients[client_index].health_check())
+                .await
+                .map_err(|_| {
+                    format!("small client {client_index} remount on promoted leader timed out")
+                })?
+                .map_err(|error| {
+                    format!("small client {client_index} remount on promoted leader failed: {error}")
+                })?;
+        }
+
+        let minimum_release_at = acquired_at
+            + MASTER_CLIENT_TTL
+            + MASTER_CLIENT_MONITOR_INTERVAL
+            + Duration::from_secs(1);
+        if Instant::now() < minimum_release_at {
+            tokio::time::sleep_until(minimum_release_at.into()).await;
+        }
+        let observation = pinger
+            .wait_for_registered_target(
+                &promoted_view.leader_address,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await?;
+
+        let registration_count = tokio::time::timeout(
+            Duration::from_secs(10),
+            clients[1].segment_count(),
+        )
+        .await
+        .map_err(|_| "query all registrations through small client 1 timed out".to_string())?
+        .map_err(|error| {
+            format!("query all registrations through small client 1 failed: {error}")
+        })?;
+        if registration_count < clients.len() {
+            return Err(format!(
+                "registration loss while client 0 foreground mutex remained held: expected at least {}, got {registration_count}; pinger observation: {observation:?}",
+                clients.len()
+            ));
+        }
+
+        let mut byte_comparisons = 0;
+        for (source_client, (key, expected)) in sentinels.iter().enumerate() {
+            let read_client = if source_client == 1 { 2 } else { 1 };
+            let actual = tokio::time::timeout(
+                Duration::from_secs(10),
+                clients[read_client].get(key),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "small client {read_client} leader-loss sentinel read for client {source_client} timed out"
+                )
+            })?
+            .map_err(|error| {
+                format!(
+                    "small client {read_client} leader-loss sentinel read for client {source_client} failed: {error}"
+                )
+            })?;
+            if actual != *expected {
+                return Err(format!(
+                    "small client {read_client} leader-loss sentinel read for client {source_client} returned wrong bytes"
+                ));
+            }
+            byte_comparisons += 1;
+        }
+
+        Ok(LivenessFailoverEvidence {
+            cached_target,
+            promoted_target: promoted_view.leader_address.clone(),
+            registered_target: observation
+                .last_registered_target
+                .expect("registered-target observation"),
+            lock_to_stop_milliseconds: stopped_at.duration_since(acquired_at).as_millis(),
+            election_milliseconds: promoted_at.duration_since(stopped_at).as_millis(),
+            locked_milliseconds: acquired_at.elapsed().as_millis(),
+            registration_count,
+            byte_comparisons,
+        })
+    }
+    .await;
+
+    let _ = release_tx.send(());
+    let lock_release = tokio::time::timeout(Duration::from_secs(2), lock_holder)
+        .await
+        .map_err(|_| "client 0 foreground mutex holder did not stop after release".to_string())?
+        .map_err(|error| format!("client 0 foreground mutex holder failed: {error}"));
+    let post_release_recovery = async {
+        let view = wait_for_stable_leader_without_clients(config, cluster).await?;
+        clients[0]
+            .switch_master(&view.leader_address)
+            .await
+            .map_err(|error| format!("recover client 0 after foreground release: {error}"))?;
+        clients[0]
+            .health_check()
+            .await
+            .map_err(|error| format!("remount client 0 after foreground release: {error}"))
+    }
+    .await;
+
+    match (operation, lock_release, post_release_recovery) {
+        (Ok(evidence), Ok(()), Ok(())) => Ok(evidence),
+        (Err(error), lock_release, recovery) => Err(format!(
+            "{error}; foreground lock release: {lock_release:?}; post-release recovery: {recovery:?}"
+        )),
+        (Ok(_), Err(error), recovery) => Err(format!(
+            "foreground lock release failed: {error}; post-release recovery: {recovery:?}"
+        )),
+        (Ok(_), Ok(()), Err(error)) => Err(error),
+    }
 }
 
 async fn tear_down_scenario_clients(clients: &mut [ScenarioClient]) -> Result<(), String> {
@@ -3139,15 +3872,23 @@ async fn three_master_small_client_liveness_preflight_preserves_sentinel_bytes()
         }
     };
     let mut clients = checkpoint.clients;
-    let preflight =
-        verify_small_clients_remain_registered_and_preserve_sentinels(&clients, config.seed).await;
+    let preflight = verify_small_clients_survive_cached_target_loss(
+        config,
+        &mut cluster,
+        &clients,
+        config.seed,
+    )
+    .await;
     let cleanup = tear_down_scenario_clients(&mut clients).await;
-    let result = LivenessPreflightResult::new(
+    let mut result = LivenessPreflightResult::new(
         clients.len(),
         (MASTER_CLIENT_TTL + MASTER_CLIENT_MONITOR_INTERVAL + Duration::from_secs(1)).as_millis(),
         preflight.as_ref().err().cloned(),
         cleanup.as_ref().err().cloned(),
     );
+    if let Ok(evidence) = &preflight {
+        result = result.with_failover_evidence(evidence.clone());
+    }
     result
         .write_atomic(&liveness_config.result_path)
         .expect("publish liveness preflight result");
