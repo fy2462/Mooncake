@@ -11,6 +11,8 @@ etcd_image=${MOONCAKE_HA_ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.0}
 seed=${MOONCAKE_HA_SEED:-0x4d4f4f4e48414348}
 run_id=${MOONCAKE_HA_RUN_ID:-"$(date -u +%Y%m%dT%H%M%SZ)-$$"}
 artifact_root=${MOONCAKE_HA_ARTIFACT_ROOT:-}
+test_timeout_seconds=${MOONCAKE_HA_TEST_TIMEOUT_SECONDS:-900}
+termination_grace_seconds=${MOONCAKE_HA_TERMINATION_GRACE_SECONDS:-5}
 
 require_command() {
   local configured_command=$1
@@ -36,7 +38,16 @@ if ! validate_run_id; then
   echo "invalid MOONCAKE_HA_RUN_ID: $run_id" >&2
   exit 2
 fi
-if ! require_command "$docker_cmd" || ! require_command "$cargo_cmd" || ! require_command python3; then
+if ! [[ $test_timeout_seconds =~ ^[1-9][0-9]*$ ]]; then
+  echo "MOONCAKE_HA_TEST_TIMEOUT_SECONDS must be a positive integer: $test_timeout_seconds" >&2
+  exit 2
+fi
+if ! [[ $termination_grace_seconds =~ ^[1-9][0-9]*$ ]]; then
+  echo "MOONCAKE_HA_TERMINATION_GRACE_SECONDS must be a positive integer: $termination_grace_seconds" >&2
+  exit 2
+fi
+if ! require_command "$docker_cmd" || ! require_command "$cargo_cmd" || \
+  ! require_command python3 || ! require_command setsid; then
   exit 2
 fi
 if ! mkdir -p "$artifact_root"; then
@@ -50,6 +61,9 @@ master_bin="${CARGO_TARGET_DIR:-$rust_root/target}/debug/mooncake-master"
 first_status=0
 etcd_owned=0
 active_pid=""
+active_pgid=""
+watchdog_pid=""
+timeout_marker="$artifact_root/.cargo-test-timeout-$run_id"
 
 exec > >(tee -a "$runner_log") 2>&1
 
@@ -61,6 +75,54 @@ cleanup() {
     etcd_owned=0
   fi
   return "$cleanup_status"
+}
+
+stop_watchdog() {
+  if [[ -n "$watchdog_pid" ]]; then
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    watchdog_pid=""
+  fi
+}
+
+terminate_active_group() {
+  if [[ -n "$active_pgid" ]]; then
+    kill -TERM -- "-$active_pgid" 2>/dev/null || true
+    sleep "$termination_grace_seconds"
+    kill -KILL -- "-$active_pgid" 2>/dev/null || true
+  fi
+  if [[ -n "$active_pid" ]]; then
+    wait "$active_pid" 2>/dev/null || true
+  fi
+  active_pid=""
+  active_pgid=""
+}
+
+publish_timeout_result() {
+  local reason="HA chaos Cargo/test process group exceeded hard timeout of $test_timeout_seconds seconds"
+  echo "$reason" >&2
+  python3 - "$result_path" "$seed" "$reason" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+temporary = path.with_name(f".{path.name}.timeout-{os.getpid()}")
+result = {
+    "schema_version": 1,
+    "status": "FAIL",
+    "seed": sys.argv[2],
+    "masters": [],
+    "scenarios": {
+        "small": {"status": "FAIL", "evidence": {}},
+        "large": {"status": "FAIL", "evidence": {}},
+    },
+    "first_failure": {"stage": "runner_timeout", "message": sys.argv[3]},
+}
+temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+os.replace(temporary, path)
+PY
 }
 
 on_exit() {
@@ -80,11 +142,8 @@ on_exit() {
 
 on_signal() {
   local signal_status=$1
-  if [[ -n "$active_pid" ]]; then
-    kill -TERM "$active_pid" 2>/dev/null || true
-    wait "$active_pid" 2>/dev/null || true
-    active_pid=""
-  fi
+  stop_watchdog
+  terminate_active_group
   if ((first_status == 0)); then
     first_status=$signal_status
   fi
@@ -189,18 +248,59 @@ if ((status != 0)); then
   first_status=$status
   exit "$status"
 fi
+rm -f -- "$timeout_marker"
+status=$?
+if ((status != 0)); then
+  first_status=$status
+  exit "$status"
+fi
 
-MOONCAKE_RUN_HA_CHAOS=1 \
-MOONCAKE_HA_ETCD_ENDPOINT="$etcd_endpoint" \
-MOONCAKE_HA_MASTER_BIN="$master_bin" \
-MOONCAKE_HA_RESULT="$result_path" \
-MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
-MOONCAKE_HA_SEED="$seed" \
-"$cargo_cmd" test -p mooncake-store-client --features link-native --test test_ha_chaos_live &
+setsid env \
+  MOONCAKE_RUN_HA_CHAOS=1 \
+  MOONCAKE_HA_ETCD_ENDPOINT="$etcd_endpoint" \
+  MOONCAKE_HA_MASTER_BIN="$master_bin" \
+  MOONCAKE_HA_RESULT="$result_path" \
+  MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
+  MOONCAKE_HA_SEED="$seed" \
+  "$cargo_cmd" test -p mooncake-store-client --features link-native --test test_ha_chaos_live &
 active_pid=$!
+active_pgid=$active_pid
+python3 - "$test_timeout_seconds" "$termination_grace_seconds" "$active_pgid" "$timeout_marker" <<'PY' &
+import os
+import pathlib
+import signal
+import sys
+import time
+
+timeout_seconds = int(sys.argv[1])
+grace_seconds = int(sys.argv[2])
+process_group = int(sys.argv[3])
+marker = pathlib.Path(sys.argv[4])
+
+time.sleep(timeout_seconds)
+marker.touch()
+try:
+    os.killpg(process_group, signal.SIGTERM)
+except ProcessLookupError:
+    raise SystemExit(0)
+time.sleep(grace_seconds)
+try:
+    os.killpg(process_group, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+PY
+watchdog_pid=$!
 wait "$active_pid"
 status=$?
+stop_watchdog
+if [[ -e "$timeout_marker" ]]; then
+  terminate_active_group
+  publish_timeout_result
+  first_status=124
+  exit 124
+fi
 active_pid=""
+active_pgid=""
 if ((status != 0)); then
   first_status=$status
   exit "$status"

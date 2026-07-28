@@ -41,7 +41,16 @@ case "$1" in
     fi
     exit 0
     ;;
-  rm) exit 0 ;;
+  rm)
+    if [[ -f ${MOONCAKE_HA_DESCENDANT_PID:-} ]]; then
+      descendant_pid=$(<"$MOONCAKE_HA_DESCENDANT_PID")
+      if kill -0 "$descendant_pid" 2>/dev/null; then
+        echo "owned etcd cleanup ran before Cargo descendant $descendant_pid exited" >&2
+        exit 70
+      fi
+    fi
+    exit 0
+    ;;
   *) echo "unexpected docker command: $*" >&2; exit 64 ;;
 esac
 SH
@@ -68,6 +77,15 @@ case "$1" in
       no-output) : ;;
       fail) exit 9 ;;
       term) while :; do sleep 1; done ;;
+      hung-descendant)
+        printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"stale","masters":["stale","stale","stale"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"PASS"}}}' >"$MOONCAKE_HA_RESULT"
+        (
+          trap '' TERM
+          printf '%s\n' "$BASHPID" >"$MOONCAKE_HA_DESCENDANT_PID"
+          while :; do sleep 1; done
+        ) &
+        wait "$!"
+        ;;
       *) echo "unexpected cargo mode: $MOONCAKE_HA_CARGO_MODE" >&2; exit 64 ;;
     esac
     ;;
@@ -90,6 +108,7 @@ run_runner() {
   local docker_mode=$2
   local cargo_mode=$3
   local fast_sleep=${4:-0}
+  local test_timeout_seconds=${5:-30}
   mkdir -p "$artifact_root"
   MOONCAKE_HA_CALLS="$calls" \
   MOONCAKE_HA_DOCKER="$fake_bin/docker" \
@@ -98,6 +117,9 @@ run_runner() {
   MOONCAKE_HA_CARGO_MODE="$cargo_mode" \
   MOONCAKE_HA_FAST_SLEEP="$fast_sleep" \
   MOONCAKE_HA_HEALTH_CALLS="$artifact_root/health-calls" \
+  MOONCAKE_HA_DESCENDANT_PID="$artifact_root/descendant.pid" \
+  MOONCAKE_HA_TEST_TIMEOUT_SECONDS="$test_timeout_seconds" \
+  MOONCAKE_HA_TERMINATION_GRACE_SECONDS=1 \
   MOONCAKE_HA_RUN_ID=contract \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_ETCD_IMAGE=quay.io/coreos/etcd:v3.5.0 \
@@ -140,6 +162,29 @@ grep -F -- 'build -p mooncake-store-master --bin mooncake-master' "$calls"
 grep -F -- 'test -p mooncake-store-client --features link-native --test test_ha_chaos_live' "$calls"
 grep -F -- "test-env run=1 endpoint=http://127.0.0.1:42379 master=$rust_root/target/debug/mooncake-master result=$artifact_root/ha-chaos-result.json root=$artifact_root seed=0x4d4f4f4e48414348" "$calls"
 expect_owned_cleanup
+
+: >"$calls"
+timeout_root="$temp_dir/hung-descendant"
+expect_status 124 run_runner "$timeout_root" success hung-descendant 0 1
+expect_owned_cleanup
+test "$(jq -r .status "$timeout_root/ha-chaos-result.json")" = FAIL
+test "$(jq -r .first_failure.stage "$timeout_root/ha-chaos-result.json")" = runner_timeout
+test "$(jq -r .first_failure.message "$timeout_root/ha-chaos-result.json")" = \
+  'HA chaos Cargo/test process group exceeded hard timeout of 1 seconds'
+descendant_pid=$(<"$timeout_root/descendant.pid")
+for _ in $(seq 1 50); do
+  if ! kill -0 "$descendant_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if kill -0 "$descendant_pid" 2>/dev/null; then
+  echo "runner left timed-out Cargo descendant $descendant_pid alive" >&2
+  kill -KILL "$descendant_pid" 2>/dev/null || true
+  exit 1
+fi
+grep -F -- 'HA chaos Cargo/test process group exceeded hard timeout of 1 seconds' \
+  "$timeout_root/runner.log"
 test "$(jq -r .status "$artifact_root/ha-chaos-result.json")" = PASS
 test -s "$artifact_root/runner.log"
 
