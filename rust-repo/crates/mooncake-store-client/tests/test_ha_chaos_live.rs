@@ -74,6 +74,116 @@ fn failed_result_publishes_the_complete_schema_atomically() {
     assert_eq!(value["scenarios"]["large"]["status"], "FAIL");
 }
 
+#[test]
+fn incomplete_master_result_is_not_published() {
+    let result_dir = tempfile::tempdir().unwrap();
+    let result_path = result_dir.path().join("ha-chaos-result.json");
+    let result = GateResult::failed(
+        0x4d4f_4f4e_4841_4348,
+        "http://127.0.0.1:42379".into(),
+        "ha-chaos-contract".into(),
+        Vec::new(),
+        complete_scenarios(ResultStatus::Fail),
+        FailureRecord {
+            stage: "lifecycle".into(),
+            message: "Masters have not been allocated".into(),
+        },
+    );
+
+    assert!(
+        result
+            .write_atomic(&result_path)
+            .unwrap_err()
+            .contains("exactly three distinct nonempty master addresses")
+    );
+    assert!(!result_path.exists());
+}
+
+#[test]
+fn result_publication_rejects_schema_versions_other_than_one() {
+    let result_dir = tempfile::tempdir().unwrap();
+    let result_path = result_dir.path().join("ha-chaos-result.json");
+    let mut result = complete_failed_result();
+    result.schema_version = 2;
+
+    assert!(
+        result
+            .write_atomic(&result_path)
+            .unwrap_err()
+            .contains("schema version 1")
+    );
+    assert!(!result_path.exists());
+}
+
+#[test]
+fn result_publication_requires_small_and_large_scenarios() {
+    let result_dir = tempfile::tempdir().unwrap();
+    let result_path = result_dir.path().join("ha-chaos-result.json");
+    let mut result = complete_failed_result();
+    result.scenarios.remove(&ScenarioKind::Large);
+
+    assert!(
+        result
+            .write_atomic(&result_path)
+            .unwrap_err()
+            .contains("small and large scenarios")
+    );
+    assert!(!result_path.exists());
+}
+
+#[test]
+fn top_level_pass_requires_both_scenarios_to_pass() {
+    let result_dir = tempfile::tempdir().unwrap();
+    let result_path = result_dir.path().join("ha-chaos-result.json");
+    let mut result = complete_failed_result();
+    result.status = ResultStatus::Pass;
+
+    assert!(
+        result
+            .write_atomic(&result_path)
+            .unwrap_err()
+            .contains("top-level PASS requires both scenarios to PASS")
+    );
+    assert!(!result_path.exists());
+}
+
+fn complete_scenarios(status: ResultStatus) -> BTreeMap<ScenarioKind, ScenarioResult> {
+    BTreeMap::from([
+        (
+            ScenarioKind::Small,
+            ScenarioResult {
+                status,
+                evidence: ScenarioEvidence::default(),
+            },
+        ),
+        (
+            ScenarioKind::Large,
+            ScenarioResult {
+                status,
+                evidence: ScenarioEvidence::default(),
+            },
+        ),
+    ])
+}
+
+fn complete_failed_result() -> GateResult {
+    GateResult::failed(
+        0x4d4f_4f4e_4841_4348,
+        "http://127.0.0.1:42379".into(),
+        "ha-chaos-contract".into(),
+        vec![
+            "127.0.0.1:51051".into(),
+            "127.0.0.1:51052".into(),
+            "127.0.0.1:51053".into(),
+        ],
+        complete_scenarios(ResultStatus::Fail),
+        FailureRecord {
+            stage: "stable-read".into(),
+            message: "expected exact bytes after restart".into(),
+        },
+    )
+}
+
 const CANONICAL_ROUNDS: usize = 4;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
@@ -284,6 +394,8 @@ impl GateResult {
     }
 
     fn write_atomic(&self, result_path: &Path) -> Result<(), String> {
+        self.validate_for_publication()?;
+
         let parent = result_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -303,6 +415,36 @@ impl GateResult {
                 error.error
             )
         })?;
+        Ok(())
+    }
+
+    fn validate_for_publication(&self) -> Result<(), String> {
+        if self.schema_version != 1 {
+            return Err("result publication requires schema version 1".into());
+        }
+        let master_addresses: BTreeSet<_> = self.masters.iter().map(String::as_str).collect();
+        if self.masters.len() != 3
+            || self.masters.iter().any(|master| master.trim().is_empty())
+            || master_addresses.len() != 3
+        {
+            return Err(
+                "result publication requires exactly three distinct nonempty master addresses"
+                    .into(),
+            );
+        }
+        if !self.scenarios.contains_key(&ScenarioKind::Small)
+            || !self.scenarios.contains_key(&ScenarioKind::Large)
+        {
+            return Err("result publication requires small and large scenarios".into());
+        }
+        if self.status == ResultStatus::Pass
+            && self
+                .scenarios
+                .values()
+                .any(|scenario| scenario.status != ResultStatus::Pass)
+        {
+            return Err("top-level PASS requires both scenarios to PASS".into());
+        }
         Ok(())
     }
 }
@@ -334,27 +476,10 @@ async fn run_scenario(
 
 #[tokio::test]
 async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
-    let Some(config) = GateConfig::from_env().expect("valid HA chaos environment") else {
+    let Some(_config) = GateConfig::from_env().expect("valid HA chaos environment") else {
         eprintln!("SKIP test_ha_chaos_live: MOONCAKE_RUN_HA_CHAOS is not enabled");
         return;
     };
 
-    let result = GateResult::failed(
-        config.seed,
-        config.etcd_endpoint.clone(),
-        "unstarted".into(),
-        Vec::new(),
-        BTreeMap::from([
-            (ScenarioKind::Small, ScenarioResult::failed()),
-            (ScenarioKind::Large, ScenarioResult::failed()),
-        ]),
-        FailureRecord {
-            stage: "lifecycle".into(),
-            message: "three-Master lifecycle is not implemented yet".into(),
-        },
-    );
-    result
-        .write_atomic(&config.result_path)
-        .expect("publish default FAIL result");
     panic!("three-Master lifecycle is not implemented yet");
 }
