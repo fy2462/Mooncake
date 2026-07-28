@@ -9,6 +9,7 @@ use std::{
 };
 
 use mooncake_store_client::MooncakeClient;
+use mooncake_store_core::StoreError;
 use mooncake_store_master::ha::{LeaderCoordinator, MasterView};
 use serde::Serialize;
 
@@ -24,6 +25,129 @@ fn canonical_schedule_keeps_one_master_alive_and_rotates_every_index() {
     );
     assert_eq!(schedule.stopped_indices(), BTreeSet::from([0, 1, 2]));
     assert_eq!(schedule.restarted_indices(), BTreeSet::from([0, 1, 2]));
+}
+
+#[tokio::test]
+async fn mutating_operation_waiter_drives_the_future_to_completion() {
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let completed_by_future = completed.clone();
+
+    let value = await_mutating_operation(async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        completed_by_future.store(true, std::sync::atomic::Ordering::SeqCst);
+        17
+    })
+    .await;
+
+    assert_eq!(value, 17);
+    assert!(completed.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
+fn live_clients_require_positive_bounded_internal_rpc_timeouts() {
+    assert_eq!(
+        bounded_rpc_timeout_from_value("MC_RPC_TIMEOUT_MS", None).unwrap(),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        bounded_rpc_timeout_from_value("MC_RPC_TIMEOUT_MS", Some("250")).unwrap(),
+        Duration::from_millis(250)
+    );
+    for value in ["-1", "0", "30001", "not-a-number"] {
+        assert!(
+            bounded_rpc_timeout_from_value("MC_RPC_TIMEOUT_MS", Some(value)).is_err(),
+            "value {value} must not permit an unbounded or invalid live RPC configuration"
+        );
+    }
+}
+
+#[test]
+fn unstable_error_classification_accepts_only_operation_specific_transients() {
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Put,
+        &StoreError::ServiceUnavailable
+    ));
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Put,
+        &StoreError::RpcTimeout("put deadline".into())
+    ));
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Put,
+        &StoreError::NoAvailableHandle
+    ));
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Put,
+        &StoreError::ObjectExists("key".into())
+    ));
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Get,
+        &StoreError::ServiceUnavailable
+    ));
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Get,
+        &StoreError::RpcTimeout("get deadline".into())
+    ));
+    assert!(is_expected_unstable_error(
+        UnstableOperation::Get,
+        &StoreError::KeyNotFound("key".into())
+    ));
+
+    for error in [
+        StoreError::InvalidParams("bad request".into()),
+        StoreError::Internal("corrupt response".into()),
+        StoreError::OperationFailed(-1),
+        StoreError::ReplicaNotReady,
+    ] {
+        assert!(!is_expected_unstable_error(UnstableOperation::Put, &error));
+        assert!(!is_expected_unstable_error(UnstableOperation::Get, &error));
+    }
+    assert!(!is_expected_unstable_error(
+        UnstableOperation::Put,
+        &StoreError::KeyNotFound("key".into())
+    ));
+    assert!(!is_expected_unstable_error(
+        UnstableOperation::Get,
+        &StoreError::ObjectExists("key".into())
+    ));
+    assert!(!is_expected_unstable_error(
+        UnstableOperation::Get,
+        &StoreError::NoAvailableHandle
+    ));
+}
+
+#[tokio::test]
+async fn restart_survival_rejects_an_immediately_exited_child() {
+    let temp = tempfile::tempdir().unwrap();
+    let child = Command::new("sh")
+        .args(["-c", "exit 23"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut cluster = MasterCluster {
+        slots: vec![MasterSlot {
+            index: 0,
+            address: "127.0.0.1:1".into(),
+            snapshot_dir: temp.path().join("snapshot"),
+            log_path: temp.path().join("master.log"),
+            command: vec!["sh".into(), "-c".into(), "exit 23".into()],
+            seed: 1,
+            child: Some(child),
+        }],
+        cluster_namespace: "restart-survival-test".into(),
+    };
+
+    let error = cluster
+        .require_restarted_victims_survive(&[0], Duration::from_millis(50))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.contains("Master 0 exited during restart dwell"),
+        "{error}"
+    );
+    assert!(cluster.slots[0].child.is_none());
 }
 
 #[test]
@@ -757,6 +881,36 @@ impl MasterCluster {
             .ok_or_else(|| format!("Master index {index} is out of range"))?
             .restart()
     }
+
+    async fn require_restarted_victims_survive(
+        &mut self,
+        restarted_indices: &[usize],
+        dwell: Duration,
+    ) -> Result<(), String> {
+        tokio::time::sleep(dwell).await;
+        for &index in restarted_indices {
+            let slot = self
+                .slots
+                .get_mut(index)
+                .ok_or_else(|| format!("Master index {index} is out of range"))?;
+            let Some(child) = slot.child.as_mut() else {
+                return Err(format!("Master {index} has no owned child after restart"));
+            };
+            match child
+                .try_wait()
+                .map_err(|error| format!("inspect restarted Master {index}: {error}"))?
+            {
+                None => {}
+                Some(status) => {
+                    slot.child = None;
+                    return Err(format!(
+                        "Master {index} exited during restart dwell with status {status}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn spawn_master_child(
@@ -992,12 +1146,65 @@ async fn wait_for_stable_leader_without_clients(
     wait_for_stable_leader(&coordinator, cluster, &mut [], deadline).await
 }
 
+async fn await_mutating_operation<F: std::future::Future>(future: F) -> F::Output {
+    future.await
+}
+
+fn bounded_rpc_timeout_from_value(name: &str, value: Option<&str>) -> Result<Duration, String> {
+    const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+    const MAX_TIMEOUT_MS: u64 = 30_000;
+    let timeout_ms = match value {
+        None => DEFAULT_TIMEOUT_MS,
+        Some(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| format!("{name} must be a positive integer no greater than 30000"))?,
+    };
+    if !(1..=MAX_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(format!(
+            "{name} must be between 1 and {MAX_TIMEOUT_MS} milliseconds for HA chaos"
+        ));
+    }
+    Ok(Duration::from_millis(timeout_ms))
+}
+
+fn require_bounded_client_rpc_configuration() -> Result<(), String> {
+    for name in ["MC_RPC_TIMEOUT_MS", "MC_RPC_CONNECT_TIMEOUT_MS"] {
+        let value = std::env::var(name).ok();
+        bounded_rpc_timeout_from_value(name, value.as_deref())?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UnstableOperation {
+    Put,
+    Get,
+}
+
+fn is_expected_unstable_error(operation: UnstableOperation, error: &StoreError) -> bool {
+    match operation {
+        UnstableOperation::Put => matches!(
+            error,
+            StoreError::ServiceUnavailable
+                | StoreError::RpcTimeout(_)
+                | StoreError::NoAvailableHandle
+                | StoreError::ObjectExists(_)
+        ),
+        UnstableOperation::Get => matches!(
+            error,
+            StoreError::ServiceUnavailable | StoreError::RpcTimeout(_) | StoreError::KeyNotFound(_)
+        ),
+    }
+}
+
 async fn create_clients(
     _config: &GateConfig,
     masters: &[String],
     count: usize,
     segment_size: u64,
 ) -> Result<Vec<MooncakeClient>, String> {
+    require_bounded_client_rpc_configuration()?;
     let mut clients = Vec::with_capacity(count);
     for client_index in 0..count {
         let reservation = TcpListener::bind(("127.0.0.1", 0))
@@ -1091,6 +1298,16 @@ fn scenario_failure(stage: &str, message: impl Into<String>) -> FailureRecord {
     }
 }
 
+fn require_scenario_budget(deadline: Instant, stage: &str) -> Result<(), FailureRecord> {
+    if Instant::now() >= deadline {
+        return Err(scenario_failure(
+            stage,
+            "small scenario exceeded its ten-minute bounded budget",
+        ));
+    }
+    Ok(())
+}
+
 fn advance_seeded_index(state: &mut u64, upper_bound: usize) -> usize {
     *state = state
         .wrapping_mul(LCG_MULTIPLIER)
@@ -1150,7 +1367,9 @@ async fn run_small_scenario(
 
     let mut evidence = ScenarioEvidence::default();
     let mut rng = config.seed;
+    let scenario_deadline = Instant::now() + Duration::from_secs(10 * 60);
     for (round_index, round) in schedule.rounds.iter().enumerate() {
+        require_scenario_budget(scenario_deadline, "scenario-deadline")?;
         for &victim in &round.stop {
             cluster.stop(victim).await.map_err(|error| {
                 scenario_failure(
@@ -1171,37 +1390,74 @@ async fn run_small_scenario(
         for _ in 0..UNSTABLE_ATTEMPTS_PER_ROUND {
             let key_index = advance_seeded_index(&mut rng, KEY_COUNT);
             let put_client = advance_seeded_index(&mut rng, clients.len());
-            if matches!(
-                tokio::time::timeout(
-                    Duration::from_secs(1),
-                    clients[put_client].put(&keys[key_index], &expected_values[key_index], None,),
-                )
-                .await,
-                Ok(Ok(()))
-            ) {
-                evidence.successful_unstable_operations += 1;
+            match await_mutating_operation(clients[put_client].put(
+                &keys[key_index],
+                &expected_values[key_index],
+                None,
+            ))
+            .await
+            {
+                Ok(()) => evidence.successful_unstable_operations += 1,
+                Err(error) if is_expected_unstable_error(UnstableOperation::Put, &error) => {}
+                Err(error) => {
+                    return Err(scenario_failure(
+                        "unstable-put",
+                        format!(
+                            "round {round_index} client {put_client} returned unexpected error for {}: {error}",
+                            keys[key_index]
+                        ),
+                    ));
+                }
             }
+            require_scenario_budget(scenario_deadline, "unstable-put")?;
 
             let mut get_client = advance_seeded_index(&mut rng, clients.len());
             if get_client == put_client {
                 get_client = (get_client + 1) % clients.len();
             }
-            if let Ok(Ok(actual)) = tokio::time::timeout(
+            match tokio::time::timeout(
                 Duration::from_secs(1),
                 clients[get_client].get(&keys[key_index]),
             )
             .await
             {
-                evidence.successful_unstable_operations += 1;
-                evidence.byte_comparisons += 1;
-                if actual != expected_values[key_index] {
+                Ok(Ok(actual)) => {
+                    evidence.successful_unstable_operations += 1;
+                    evidence.byte_comparisons += 1;
+                    if actual != expected_values[key_index] {
+                        return Err(scenario_failure(
+                            "unstable-read",
+                            format!(
+                                "round {round_index} client {get_client} returned wrong bytes for {}",
+                                keys[key_index]
+                            ),
+                        ));
+                    }
+                }
+                Ok(Err(error)) if is_expected_unstable_error(UnstableOperation::Get, &error) => {}
+                Ok(Err(error)) => {
                     return Err(scenario_failure(
                         "unstable-read",
                         format!(
-                            "round {round_index} client {get_client} returned wrong bytes for {}",
-                            keys[key_index]
+                            "round {round_index} client {get_client} returned unexpected error for {}: {error}",
+                            keys[key_index],
                         ),
                     ));
+                }
+                Err(_) => {
+                    let timeout = StoreError::RpcTimeout(format!(
+                        "external unstable get deadline for {}",
+                        keys[key_index]
+                    ));
+                    if !is_expected_unstable_error(UnstableOperation::Get, &timeout) {
+                        return Err(scenario_failure(
+                            "unstable-read",
+                            format!(
+                                "round {round_index} client {get_client} timed out reading {}",
+                                keys[key_index]
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -1210,7 +1466,7 @@ async fn run_small_scenario(
             &coordinator,
             cluster,
             &mut [],
-            Instant::now() + Duration::from_secs(45),
+            std::cmp::min(Instant::now() + Duration::from_secs(45), scenario_deadline),
         )
         .await
         .map_err(|error| {
@@ -1228,24 +1484,17 @@ async fn run_small_scenario(
                     format!("round {round_index} failed to recover clients: {error}"),
                 )
             })?;
+        require_scenario_budget(scenario_deadline, "recover")?;
 
         let mut stable_put_clients = Vec::with_capacity(KEY_COUNT);
         for key_index in 0..KEY_COUNT {
             let put_client = advance_seeded_index(&mut rng, clients.len());
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                clients[put_client].put(&keys[key_index], &expected_values[key_index], None),
-            )
+            await_mutating_operation(clients[put_client].put(
+                &keys[key_index],
+                &expected_values[key_index],
+                None,
+            ))
             .await
-            .map_err(|_| {
-                scenario_failure(
-                    "stable-put",
-                    format!(
-                        "round {round_index} client {put_client} timed out putting {}",
-                        keys[key_index]
-                    ),
-                )
-            })?
             .map_err(|error| {
                 scenario_failure(
                     "stable-put",
@@ -1255,6 +1504,7 @@ async fn run_small_scenario(
                     ),
                 )
             })?;
+            require_scenario_budget(scenario_deadline, "stable-put")?;
             stable_put_clients.push(put_client);
         }
 
@@ -1305,14 +1555,12 @@ async fn run_small_scenario(
                     format!("round {round_index} failed to restart Master {victim}: {error}"),
                 )
             })?;
-            evidence.restarts += 1;
-            evidence.restarted_indices.insert(victim);
         }
         let restarted_view = wait_for_stable_leader(
             &coordinator,
             cluster,
             &mut [],
-            Instant::now() + Duration::from_secs(45),
+            std::cmp::min(Instant::now() + Duration::from_secs(45), scenario_deadline),
         )
         .await
         .map_err(|error| {
@@ -1321,6 +1569,20 @@ async fn run_small_scenario(
                 format!("round {round_index} failed to stabilize after restart: {error}"),
             )
         })?;
+        cluster
+            .require_restarted_victims_survive(&round.restart, Duration::from_millis(500))
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "restart",
+                    format!("round {round_index} restarted victim did not survive: {error}"),
+                )
+            })?;
+        require_scenario_budget(scenario_deadline, "restart")?;
+        for &victim in &round.restart {
+            evidence.restarts += 1;
+            evidence.restarted_indices.insert(victim);
+        }
         evidence
             .leader_view_versions
             .push(restarted_view.view_version);
@@ -1429,18 +1691,14 @@ async fn run_remount_checkpoint(
     let mut clients = create_clients(config, &masters, 3, CLIENT_SEGMENT_SIZE)
         .await
         .map_err(|error| scenario_failure("remount-setup", error))?;
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        clients[0].put("ha-small-bootstrap", b"bootstrap-value", None),
-    )
-    .await
-    .map_err(|_| scenario_failure("remount-bootstrap-put", "bootstrap put timed out"))?
-    .map_err(|error| {
-        scenario_failure(
-            "remount-bootstrap-put",
-            format!("bootstrap put failed: {error}"),
-        )
-    })?;
+    await_mutating_operation(clients[0].put("ha-small-bootstrap", b"bootstrap-value", None))
+        .await
+        .map_err(|error| {
+            scenario_failure(
+                "remount-bootstrap-put",
+                format!("bootstrap put failed: {error}"),
+            )
+        })?;
 
     let restarted_index = cluster
         .index_for_address(&initial_view.leader_address)
@@ -1506,6 +1764,10 @@ async fn run_remount_checkpoint(
         ));
     }
     let restored_view = wait_for_stable_leader_without_clients(config, cluster)
+        .await
+        .map_err(|error| scenario_failure("remount-restart", error))?;
+    cluster
+        .require_restarted_victims_survive(&[restarted_index], Duration::from_millis(500))
         .await
         .map_err(|error| scenario_failure("remount-restart", error))?;
     recover_clients(&mut clients, &restored_view)
