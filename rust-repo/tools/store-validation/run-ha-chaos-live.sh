@@ -274,6 +274,7 @@ if ((status != 0)); then
 fi
 
 setsid env \
+  -u MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT \
   MOONCAKE_RUN_HA_CHAOS=1 \
   MOONCAKE_HA_ETCD_ENDPOINT="$etcd_endpoint" \
   MOONCAKE_HA_MASTER_BIN="$master_bin" \

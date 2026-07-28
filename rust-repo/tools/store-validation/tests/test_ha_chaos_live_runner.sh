@@ -62,8 +62,9 @@ printf '%s\n' "$*" >>"$MOONCAKE_HA_CALLS"
 case "$1" in
   build) exit 0 ;;
   test)
-    printf 'test-env run=%s endpoint=%s master=%s result=%s root=%s seed=%s\n' \
-      "${MOONCAKE_RUN_HA_CHAOS:-}" "${MOONCAKE_HA_ETCD_ENDPOINT:-}" \
+    printf 'test-env run=%s liveness=%s endpoint=%s master=%s result=%s root=%s seed=%s\n' \
+      "${MOONCAKE_RUN_HA_CHAOS:-}" "${MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT:-}" \
+      "${MOONCAKE_HA_ETCD_ENDPOINT:-}" \
       "${MOONCAKE_HA_MASTER_BIN:-}" "${MOONCAKE_HA_RESULT:-}" \
       "${MOONCAKE_HA_ARTIFACT_ROOT:-}" "${MOONCAKE_HA_SEED:-}" >>"$MOONCAKE_HA_CALLS"
     case ${MOONCAKE_HA_CARGO_MODE:-pass} in
@@ -161,13 +162,13 @@ expect_status() {
 
 : >"$calls"
 artifact_root="$temp_dir/artifacts"
-run_runner "$artifact_root" success pass
+MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT=1 run_runner "$artifact_root" success pass
 grep -F -- 'run -d --name mc-store-ha-chaos-contract -p 127.0.0.1::2379' "$calls"
 grep -F -- 'port mc-store-ha-chaos-contract 2379/tcp' "$calls"
 grep -F -- 'exec mc-store-ha-chaos-contract etcdctl endpoint health' "$calls"
 grep -F -- 'build -p mooncake-store-master --bin mooncake-master' "$calls"
 grep -F -- 'test -p mooncake-store-client --features link-native --test test_ha_chaos_live' "$calls"
-grep -F -- "test-env run=1 endpoint=http://127.0.0.1:42379 master=$rust_root/target/debug/mooncake-master result=$artifact_root/ha-chaos-result.json root=$artifact_root seed=0x4d4f4f4e48414348" "$calls"
+grep -F -- "test-env run=1 liveness= endpoint=http://127.0.0.1:42379 master=$rust_root/target/debug/mooncake-master result=$artifact_root/ha-chaos-result.json root=$artifact_root seed=0x4d4f4f4e48414348" "$calls"
 expect_owned_cleanup
 
 : >"$calls"
