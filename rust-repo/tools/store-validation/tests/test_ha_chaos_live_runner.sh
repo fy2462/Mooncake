@@ -70,6 +70,12 @@ case "$1" in
       pass)
         printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"PASS"}}}' >"$MOONCAKE_HA_RESULT"
         ;;
+      boundary-pass)
+        exec {boundary_lock_fd}>"$MOONCAKE_HA_ARTIFACT_ROOT/.cargo-test-timeout-lock-contract"
+        flock "$boundary_lock_fd"
+        sleep 2
+        printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"PASS"}}}' >"$MOONCAKE_HA_RESULT"
+        ;;
       malformed) printf '%s\n' '{not json' >"$MOONCAKE_HA_RESULT" ;;
       incomplete)
         printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"FAIL"}}}' >"$MOONCAKE_HA_RESULT"
@@ -109,6 +115,7 @@ run_runner() {
   local cargo_mode=$3
   local fast_sleep=${4:-0}
   local test_timeout_seconds=${5:-30}
+  local termination_grace_seconds=${6:-1}
   mkdir -p "$artifact_root"
   MOONCAKE_HA_CALLS="$calls" \
   MOONCAKE_HA_DOCKER="$fake_bin/docker" \
@@ -119,7 +126,7 @@ run_runner() {
   MOONCAKE_HA_HEALTH_CALLS="$artifact_root/health-calls" \
   MOONCAKE_HA_DESCENDANT_PID="$artifact_root/descendant.pid" \
   MOONCAKE_HA_TEST_TIMEOUT_SECONDS="$test_timeout_seconds" \
-  MOONCAKE_HA_TERMINATION_GRACE_SECONDS=1 \
+  MOONCAKE_HA_TERMINATION_GRACE_SECONDS="$termination_grace_seconds" \
   MOONCAKE_HA_RUN_ID=contract \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_ETCD_IMAGE=quay.io/coreos/etcd:v3.5.0 \
@@ -185,6 +192,16 @@ if kill -0 "$descendant_pid" 2>/dev/null; then
 fi
 grep -F -- 'HA chaos Cargo/test process group exceeded hard timeout of 1 seconds' \
   "$timeout_root/runner.log"
+
+: >"$calls"
+boundary_root="$temp_dir/boundary-pass"
+run_runner "$boundary_root" success boundary-pass 0 1 1
+expect_owned_cleanup
+test "$(jq -r .status "$boundary_root/ha-chaos-result.json")" = PASS
+if grep -Fq -- 'runner_timeout' "$boundary_root/ha-chaos-result.json"; then
+  echo 'normal Cargo completion at the deadline was misclassified as timeout' >&2
+  exit 1
+fi
 test "$(jq -r .status "$artifact_root/ha-chaos-result.json")" = PASS
 test -s "$artifact_root/runner.log"
 
@@ -208,6 +225,17 @@ expect_failure env -u LD_LIBRARY_PATH \
   MOONCAKE_HA_ARTIFACT_ROOT="$temp_dir/missing-library-path" \
   bash "$runner"
 [[ ! -s "$calls" ]]
+
+for timing_case in '86401 1' '30 301' '999999999999999999999999999999 1'; do
+  : >"$calls"
+  read -r invalid_timeout invalid_grace <<<"$timing_case"
+  expect_status 2 run_runner "$temp_dir/timing-$invalid_timeout-$invalid_grace" \
+    success pass 0 "$invalid_timeout" "$invalid_grace"
+  if [[ -s "$calls" ]]; then
+    echo "invalid timing values caused Docker/Cargo side effects: $timing_case" >&2
+    exit 1
+  fi
+done
 
 for cargo_mode in malformed incomplete fail; do
   : >"$calls"

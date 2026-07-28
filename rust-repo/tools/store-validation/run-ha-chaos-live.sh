@@ -13,6 +13,8 @@ run_id=${MOONCAKE_HA_RUN_ID:-"$(date -u +%Y%m%dT%H%M%SZ)-$$"}
 artifact_root=${MOONCAKE_HA_ARTIFACT_ROOT:-}
 test_timeout_seconds=${MOONCAKE_HA_TEST_TIMEOUT_SECONDS:-900}
 termination_grace_seconds=${MOONCAKE_HA_TERMINATION_GRACE_SECONDS:-5}
+max_test_timeout_seconds=86400
+max_termination_grace_seconds=300
 
 require_command() {
   local configured_command=$1
@@ -24,6 +26,18 @@ require_command() {
 
 validate_run_id() {
   [[ $run_id =~ ^[A-Za-z0-9_.-]+$ ]]
+}
+
+validate_bounded_seconds() {
+  local name=$1
+  local value=$2
+  local maximum=$3
+  if ! [[ $value =~ ^[1-9][0-9]*$ ]] ||
+    ((${#value} > ${#maximum})) ||
+    ((${#value} == ${#maximum} && 10#$value > 10#$maximum)); then
+    echo "$name must be an integer from 1 through $maximum: $value" >&2
+    return 1
+  fi
 }
 
 if [[ -z "$artifact_root" ]]; then
@@ -38,12 +52,13 @@ if ! validate_run_id; then
   echo "invalid MOONCAKE_HA_RUN_ID: $run_id" >&2
   exit 2
 fi
-if ! [[ $test_timeout_seconds =~ ^[1-9][0-9]*$ ]]; then
-  echo "MOONCAKE_HA_TEST_TIMEOUT_SECONDS must be a positive integer: $test_timeout_seconds" >&2
+if ! validate_bounded_seconds \
+  MOONCAKE_HA_TEST_TIMEOUT_SECONDS "$test_timeout_seconds" "$max_test_timeout_seconds"; then
   exit 2
 fi
-if ! [[ $termination_grace_seconds =~ ^[1-9][0-9]*$ ]]; then
-  echo "MOONCAKE_HA_TERMINATION_GRACE_SECONDS must be a positive integer: $termination_grace_seconds" >&2
+if ! validate_bounded_seconds \
+  MOONCAKE_HA_TERMINATION_GRACE_SECONDS "$termination_grace_seconds" \
+  "$max_termination_grace_seconds"; then
   exit 2
 fi
 if ! require_command "$docker_cmd" || ! require_command "$cargo_cmd" || \
@@ -62,8 +77,11 @@ first_status=0
 etcd_owned=0
 active_pid=""
 active_pgid=""
-watchdog_pid=""
 timeout_marker="$artifact_root/.cargo-test-timeout-$run_id"
+timeout_lock="$artifact_root/.cargo-test-timeout-lock-$run_id"
+watchdog_error="$artifact_root/.cargo-test-watchdog-error-$run_id"
+cargo_pgid_path="$artifact_root/.cargo-test-pgid-$run_id"
+cargo_status_path="$artifact_root/.cargo-test-status-$run_id"
 
 exec > >(tee -a "$runner_log") 2>&1
 
@@ -75,14 +93,6 @@ cleanup() {
     etcd_owned=0
   fi
   return "$cleanup_status"
-}
-
-stop_watchdog() {
-  if [[ -n "$watchdog_pid" ]]; then
-    kill -TERM "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
-    watchdog_pid=""
-  fi
 }
 
 terminate_active_group() {
@@ -98,10 +108,10 @@ terminate_active_group() {
   active_pgid=""
 }
 
-publish_timeout_result() {
-  local reason="HA chaos Cargo/test process group exceeded hard timeout of $test_timeout_seconds seconds"
-  echo "$reason" >&2
-  python3 - "$result_path" "$seed" "$reason" <<'PY'
+publish_failure_result() {
+  local stage=$1
+  local reason=$2
+  python3 - "$result_path" "$seed" "$stage" "$reason" <<'PY'
 import json
 import os
 import pathlib
@@ -118,11 +128,17 @@ result = {
         "small": {"status": "FAIL", "evidence": {}},
         "large": {"status": "FAIL", "evidence": {}},
     },
-    "first_failure": {"stage": "runner_timeout", "message": sys.argv[3]},
+    "first_failure": {"stage": sys.argv[3], "message": sys.argv[4]},
 }
 temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 os.replace(temporary, path)
 PY
+}
+
+publish_timeout_result() {
+  local reason="HA chaos Cargo/test process group exceeded hard timeout of $test_timeout_seconds seconds"
+  echo "$reason" >&2
+  publish_failure_result runner_timeout "$reason"
 }
 
 on_exit() {
@@ -142,7 +158,6 @@ on_exit() {
 
 on_signal() {
   local signal_status=$1
-  stop_watchdog
   terminate_active_group
   if ((first_status == 0)); then
     first_status=$signal_status
@@ -248,7 +263,14 @@ if ((status != 0)); then
   first_status=$status
   exit "$status"
 fi
-rm -f -- "$timeout_marker"
+rm -f -- "$timeout_marker" "$timeout_lock" "$watchdog_error" \
+  "$cargo_pgid_path" "$cargo_status_path"
+status=$?
+if ((status != 0)); then
+  first_status=$status
+  exit "$status"
+fi
+: >"$timeout_lock"
 status=$?
 if ((status != 0)); then
   first_status=$status
@@ -262,42 +284,115 @@ setsid env \
   MOONCAKE_HA_RESULT="$result_path" \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_SEED="$seed" \
-  "$cargo_cmd" test -p mooncake-store-client --features link-native --test test_ha_chaos_live &
-active_pid=$!
-active_pgid=$active_pid
-python3 - "$test_timeout_seconds" "$termination_grace_seconds" "$active_pgid" "$timeout_marker" <<'PY' &
+  python3 - "$test_timeout_seconds" "$termination_grace_seconds" \
+  "$timeout_marker" "$timeout_lock" "$watchdog_error" "$cargo_pgid_path" \
+  "$cargo_status_path" "$cargo_cmd" test -p mooncake-store-client \
+  --features link-native --test test_ha_chaos_live <<'PY' &
+import fcntl
 import os
 import pathlib
 import signal
+import subprocess
 import sys
 import time
 
 timeout_seconds = int(sys.argv[1])
 grace_seconds = int(sys.argv[2])
-process_group = int(sys.argv[3])
-marker = pathlib.Path(sys.argv[4])
+marker = pathlib.Path(sys.argv[3])
+lock_path = pathlib.Path(sys.argv[4])
+error_path = pathlib.Path(sys.argv[5])
+process_group_path = pathlib.Path(sys.argv[6])
+status_path = pathlib.Path(sys.argv[7])
+command = sys.argv[8:]
+process = None
 
-time.sleep(timeout_seconds)
-marker.touch()
+
+def shell_status(returncode):
+    return returncode if returncode >= 0 else 128 - returncode
+
+
+def record_normal_completion(returncode):
+    status = shell_status(returncode)
+    status_path.write_text(f"{status}\n", encoding="utf-8")
+    raise SystemExit(status)
+
+
+def terminate_process_group():
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    time.sleep(grace_seconds)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
 try:
-    os.killpg(process_group, signal.SIGTERM)
-except ProcessLookupError:
-    raise SystemExit(0)
-time.sleep(grace_seconds)
-try:
-    os.killpg(process_group, signal.SIGKILL)
-except ProcessLookupError:
-    pass
+    process = subprocess.Popen(command, start_new_session=True)
+    process_group_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    try:
+        record_normal_completion(process.wait(timeout=timeout_seconds))
+    except subprocess.TimeoutExpired:
+        pass
+
+    with lock_path.open("w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        returncode = process.poll()
+        if returncode is not None:
+            record_normal_completion(returncode)
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            record_normal_completion(process.wait())
+        marker.touch()
+    terminate_process_group()
+    process.wait()
+    raise SystemExit(124)
+except SystemExit:
+    raise
+except BaseException as error:
+    try:
+        error_path.write_text(f"{type(error).__name__}: {error}\n", encoding="utf-8")
+    finally:
+        terminate_process_group()
+        if process is not None:
+            process.wait()
+    raise SystemExit(125)
 PY
-watchdog_pid=$!
+active_pid=$!
+for _ in $(seq 1 1000); do
+  if [[ -s "$cargo_pgid_path" ]]; then
+    active_pgid=$(<"$cargo_pgid_path")
+    break
+  fi
+  if ! kill -0 "$active_pid" 2>/dev/null; then
+    break
+  fi
+  /bin/sleep 0.01
+done
 wait "$active_pid"
 status=$?
-stop_watchdog
 if [[ -e "$timeout_marker" ]]; then
-  terminate_active_group
+  active_pid=""
+  active_pgid=""
   publish_timeout_result
   first_status=124
   exit 124
+fi
+if [[ -s "$watchdog_error" ]] || [[ ! -s "$cargo_status_path" ]]; then
+  terminate_active_group
+  if [[ -s "$watchdog_error" ]]; then
+    watchdog_reason="HA chaos watchdog failed: $(<"$watchdog_error")"
+  else
+    watchdog_reason="HA chaos watchdog exited unexpectedly with status $status"
+  fi
+  echo "$watchdog_reason" >&2
+  publish_failure_result runner_watchdog "$watchdog_reason"
+  first_status=125
+  exit 125
 fi
 active_pid=""
 active_pgid=""
