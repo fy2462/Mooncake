@@ -241,6 +241,7 @@ pub fn build_runtime_config(
         eviction_high_watermark_ratio: args.eviction_high_watermark_ratio,
         // 每次驱逐释放的内存比例（0.05 = 5%）
         eviction_ratio: args.eviction_ratio,
+        eviction_interval: Duration::from_millis(args.eviction_interval_ms),
         // NoF 使用率和驱逐比例独立于 Memory。
         nof_eviction_high_watermark_ratio: args.nof_eviction_high_watermark_ratio,
         nof_eviction_ratio: args.nof_eviction_ratio,
@@ -467,5 +468,24 @@ pub fn validate_rpc_protocol(protocol: Option<&str>) -> Result<(), Box<dyn std::
             "Rust master control-plane RPC does not support RDMA transport".into(),
         ))),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Args, build_runtime_config};
+
+    #[test]
+    fn master_cli_configures_eviction_interval_in_milliseconds() {
+        let args = Args::try_parse_from(["mooncake-master", "--eviction-interval-ms", "5"])
+            .expect("parse eviction interval option");
+
+        let config = build_runtime_config(&args).expect("build runtime config");
+        assert_eq!(
+            config.eviction_interval,
+            std::time::Duration::from_millis(5)
+        );
     }
 }

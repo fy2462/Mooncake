@@ -30,6 +30,7 @@ fn base_args() -> Args {
         root_fs_dir: String::new(),
         eviction_high_watermark_ratio: 0.95,
         eviction_ratio: 0.05,
+        eviction_interval_ms: 100,
         nof_eviction_high_watermark_ratio: 0.90,
         nof_eviction_ratio: 0.05,
         offload_on_evict: false,

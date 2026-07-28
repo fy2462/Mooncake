@@ -93,6 +93,14 @@ pub struct Args {
     #[arg(long, default_value_t = 0.05)]
     pub eviction_ratio: f64,
 
+    /// Interval between automatic memory-eviction checks in milliseconds.
+    #[arg(
+        long,
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub eviction_interval_ms: u64,
+
     /// NoF usage high watermark; independent from Memory eviction pressure.
     #[arg(long, default_value_t = 0.90)]
     pub nof_eviction_high_watermark_ratio: f64,
