@@ -545,6 +545,9 @@ mod oplog_etcd;
 mod oplog_local;
 mod oplog_manager;
 mod oplog_wire;
+// Task 1 introduces the worker before Task 3 migrates OpLogManager to consume it.
+#[allow(dead_code)]
+mod oplog_worker;
 #[doc(hidden)]
 pub mod test_support;
 

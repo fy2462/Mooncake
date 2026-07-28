@@ -317,6 +317,73 @@ lazy_static! {
         ]
     )
     .unwrap();
+    pub static ref OPLOG_WRITER_SUBMITTED: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_writer_submitted_total",
+        "total durable OpLog records submitted to the writer"
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_QUEUE_REJECTIONS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_writer_queue_rejections_total",
+        "total OpLog writer commands rejected because the queue was full"
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_QUEUE_DEPTH: IntGauge = IntGauge::new(
+        "mooncake_store_oplog_writer_queue_depth",
+        "current number of commands queued for the OpLog writer"
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_BATCH_RECORDS: Histogram = register_histogram!(
+        "mooncake_store_oplog_writer_batch_records",
+        "number of durable OpLog records in each writer batch",
+        vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 100.0]
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_QUEUE_WAIT_US: Histogram = register_histogram!(
+        "mooncake_store_oplog_writer_queue_wait_us",
+        "time OpLog records wait before writer batching in microseconds",
+        vec![
+            100.0,
+            500.0,
+            1_000.0,
+            5_000.0,
+            10_000.0,
+            50_000.0,
+            100_000.0,
+            500_000.0,
+            1_000_000.0,
+            5_000_000.0,
+            20_000_000.0
+        ]
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_DURABLE_WAIT_US: Histogram = register_histogram!(
+        "mooncake_store_oplog_writer_durable_wait_us",
+        "time durable OpLog submissions wait for completion in microseconds",
+        vec![
+            100.0,
+            500.0,
+            1_000.0,
+            5_000.0,
+            10_000.0,
+            50_000.0,
+            100_000.0,
+            500_000.0,
+            1_000_000.0,
+            5_000_000.0,
+            20_000_000.0
+        ]
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_POISON_EVENTS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_writer_poison_events_total",
+        "total terminal OpLog writer poison events"
+    )
+    .unwrap();
+    pub static ref OPLOG_WRITER_POST_POISON_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_writer_post_poison_failures_total",
+        "total OpLog writer commands rejected after terminal poison"
+    )
+    .unwrap();
 }
 
 // =============================================================================
@@ -335,6 +402,11 @@ fn register_counter(c: &IntCounter) {
 /// 重新向 Prometheus 注册仪表值。
 fn register_gauge(g: &IntGauge) {
     let _ = prometheus::register(Box::new(g.clone()));
+}
+
+/// Re-register a histogram with Prometheus.
+fn register_histogram_metric(histogram: &Histogram) {
+    let _ = prometheus::register(Box::new(histogram.clone()));
 }
 
 /// Register all metrics with Prometheus.
@@ -438,6 +510,14 @@ pub fn register_metrics() {
     register_counter(&OPLOG_WATCH_DISCONNECTIONS);
     register_counter(&OPLOG_BATCH_COMMITS);
     register_counter(&OPLOG_SYNC_BATCH_COMMITS);
+    register_counter(&OPLOG_WRITER_SUBMITTED);
+    register_counter(&OPLOG_WRITER_QUEUE_REJECTIONS);
+    register_gauge(&OPLOG_WRITER_QUEUE_DEPTH);
+    register_histogram_metric(&OPLOG_WRITER_BATCH_RECORDS);
+    register_histogram_metric(&OPLOG_WRITER_QUEUE_WAIT_US);
+    register_histogram_metric(&OPLOG_WRITER_DURABLE_WAIT_US);
+    register_counter(&OPLOG_WRITER_POISON_EVENTS);
+    register_counter(&OPLOG_WRITER_POST_POISON_FAILURES);
 }
 
 /// Start the Prometheus metrics HTTP server.
