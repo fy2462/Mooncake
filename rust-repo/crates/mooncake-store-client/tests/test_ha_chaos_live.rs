@@ -5,10 +5,11 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use mooncake_store_client::MooncakeClient;
+use mooncake_store_client::{ClientBackgroundConfig, ClientBackgroundHandle, MooncakeClient};
 use mooncake_store_core::StoreError;
 use mooncake_store_master::ha::{LeaderCoordinator, MasterView};
 use serde::Serialize;
@@ -25,6 +26,59 @@ fn canonical_schedule_keeps_one_master_alive_and_rotates_every_index() {
     );
     assert_eq!(schedule.stopped_indices(), BTreeSet::from([0, 1, 2]));
     assert_eq!(schedule.restarted_indices(), BTreeSet::from([0, 1, 2]));
+}
+
+#[test]
+fn large_profile_exceeds_capacity_and_values_are_key_distinct() {
+    let total_value_bytes = LARGE_KEY_COUNT * LARGE_VALUE_LEN;
+    let total_client_capacity = LARGE_CLIENT_COUNT * LARGE_CLIENT_SEGMENT_SIZE as usize;
+    assert!(
+        total_value_bytes > total_client_capacity,
+        "large profile must exceed aggregate client capacity: {total_value_bytes} <= {total_client_capacity}"
+    );
+
+    let first = expected_large_value(0x4d4f_4f4e_4841_4348, 0, LARGE_VALUE_LEN);
+    let second = expected_large_value(0x4d4f_4f4e_4841_4348, 1, LARGE_VALUE_LEN);
+    for index in [0, LARGE_VALUE_LEN / 2, LARGE_VALUE_LEN - 1] {
+        assert_ne!(
+            first[index], second[index],
+            "adjacent large-object values must differ at byte {index}"
+        );
+    }
+}
+
+#[test]
+fn large_pressure_evidence_requires_an_observable_outcome() {
+    assert!(require_large_pressure_evidence(&ScenarioEvidence::default()).is_err());
+
+    let mut eviction = ScenarioEvidence::default();
+    eviction.eviction_requests = 1;
+    assert!(require_large_pressure_evidence(&eviction).is_ok());
+
+    let mut capacity = ScenarioEvidence::default();
+    capacity.capacity_rejections = 1;
+    assert!(require_large_pressure_evidence(&capacity).is_ok());
+}
+
+#[test]
+fn stable_capacity_recovery_retries_only_capacity_rejections() {
+    assert!(should_retry_stable_put(&StoreError::NoAvailableHandle));
+    assert!(!should_retry_stable_put(&StoreError::ServiceUnavailable));
+    assert!(!should_retry_stable_put(&StoreError::RpcTimeout(
+        "stable put".into()
+    )));
+}
+
+#[test]
+fn large_client_background_configuration_is_health_only() {
+    let config = scenario_client_background_config();
+
+    assert!(config.health_interval < MASTER_CLIENT_TTL);
+    assert!(!config.enable_offloading);
+    assert!(!config.enable_promotion);
+    assert!(!config.enable_task_poll);
+    assert!(!config.report_ssd_capacity);
+    assert!(!config.enable_disk_watermark_eviction);
 }
 
 #[tokio::test]
@@ -337,8 +391,28 @@ fn complete_failed_result() -> GateResult {
 const CANONICAL_ROUNDS: usize = 4;
 const CLIENT_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
 const CLIENT_LOCAL_BUFFER_SIZE: u64 = 8 * 1024 * 1024;
+const LARGE_CLIENT_COUNT: usize = 3;
+const LARGE_CLIENT_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
+const LARGE_KEY_COUNT: usize = 42;
+const LARGE_VALUE_LEN: usize = 3 * 1024 * 1024;
+const MASTER_CLIENT_TTL: Duration = Duration::from_secs(2);
+const MASTER_CLIENT_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
+const SCENARIO_CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
+
+fn expected_large_value(seed: u64, key_index: usize, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|byte_index| {
+            let position = byte_index as u64;
+            let mixed = seed
+                .wrapping_add((key_index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+                .wrapping_add(position.wrapping_mul(0xbf58_476d_1ce4_e5b9))
+                .rotate_left((byte_index & 63) as u32);
+            ((mixed ^ (mixed >> 31) ^ (mixed >> 47)) as u8) ^ (key_index as u8)
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 struct GateConfig {
@@ -391,6 +465,19 @@ impl GateConfig {
             rounds,
         }))
     }
+}
+
+fn liveness_preflight_config_from_env() -> Result<Option<GateConfig>, String> {
+    let mut env = std::env::vars().collect::<BTreeMap<_, _>>();
+    if env
+        .get("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT")
+        .map(String::as_str)
+        != Some("1")
+    {
+        return Ok(None);
+    }
+    env.insert("MOONCAKE_RUN_HA_CHAOS".into(), "1".into());
+    GateConfig::from_map(&env)
 }
 
 fn required_env(env: &BTreeMap<String, String>, name: &str) -> Result<String, String> {
@@ -659,6 +746,12 @@ impl MasterSlot {
             "2".into(),
             "--default-kv-lease-ttl-ms".into(),
             "1".into(),
+            "--eviction-high-watermark-ratio".into(),
+            "0.90".into(),
+            "--eviction-ratio".into(),
+            "0.20".into(),
+            "--eviction-interval-ms".into(),
+            "5".into(),
         ];
         let child = Some(spawn_master_child(
             &command,
@@ -1203,7 +1296,7 @@ async fn create_clients(
     masters: &[String],
     count: usize,
     segment_size: u64,
-) -> Result<Vec<MooncakeClient>, String> {
+) -> Result<Vec<ScenarioClient>, String> {
     require_bounded_client_rpc_configuration()?;
     let mut clients = Vec::with_capacity(count);
     for client_index in 0..count {
@@ -1230,14 +1323,247 @@ async fn create_clients(
         .await
         .map_err(|_| format!("client {client_index} creation timed out"))?
         .map_err(|error| format!("create TCP client {client_index}: {error}"))?;
-        clients.push(client);
+        clients.push(ScenarioClient::new(client));
     }
     Ok(clients)
 }
 
-async fn recover_clients(clients: &mut [MooncakeClient], view: &MasterView) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(30);
+struct ScenarioClient {
+    client: Arc<tokio::sync::Mutex<Option<MooncakeClient>>>,
+    background: Option<ClientBackgroundHandle>,
+}
+
+fn scenario_client_background_config() -> ClientBackgroundConfig {
+    ClientBackgroundConfig {
+        health_interval: SCENARIO_CLIENT_HEARTBEAT_INTERVAL,
+        enable_offloading: false,
+        enable_promotion: false,
+        enable_task_poll: false,
+        report_ssd_capacity: false,
+        enable_disk_watermark_eviction: false,
+        ..ClientBackgroundConfig::default()
+    }
+}
+
+impl ScenarioClient {
+    fn new(client: MooncakeClient) -> Self {
+        let client = Arc::new(tokio::sync::Mutex::new(Some(client)));
+        let background = MooncakeClient::start_background_workers(
+            Arc::clone(&client),
+            scenario_client_background_config(),
+        );
+        Self {
+            client,
+            background: Some(background),
+        }
+    }
+
+    async fn put(&self, key: &str, value: &[u8]) -> Result<(), StoreError> {
+        let mut client = self.client.lock().await;
+        client
+            .as_mut()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .put(key, value, None)
+            .await
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
+        let mut client = self.client.lock().await;
+        client
+            .as_mut()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .get(key)
+            .await
+    }
+
+    async fn switch_master(&self, master_addr: &str) -> Result<(), StoreError> {
+        let mut client = self.client.lock().await;
+        client
+            .as_mut()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .switch_master(master_addr)
+            .await
+    }
+
+    async fn health_check(&self) -> Result<(), StoreError> {
+        let mut client = self.client.lock().await;
+        client
+            .as_mut()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .health_check()
+            .await
+    }
+
+    async fn current_master_addr(&self) -> Result<String, StoreError> {
+        let client = self.client.lock().await;
+        Ok(client
+            .as_ref()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .current_master_addr()
+            .to_owned())
+    }
+
+    async fn memory_usage(&self) -> Result<u64, StoreError> {
+        let mut client = self.client.lock().await;
+        sample_memory_usage(
+            client
+                .as_mut()
+                .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?,
+        )
+        .await
+    }
+
+    async fn segment_count(&self) -> Result<usize, StoreError> {
+        let mut client = self.client.lock().await;
+        Ok(client
+            .as_mut()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .get_segments_detail()
+            .await?
+            .into_iter()
+            .filter(|segment| !segment.nof)
+            .count())
+    }
+
+    async fn tear_down_all(&mut self) -> Result<(), String> {
+        if let Some(background) = self.background.take() {
+            // Client RPCs are required to have positive, at-most-30-second
+            // deadlines before construction, so joining a health iteration is
+            // bounded without abandoning a task that may hold this mutex.
+            background.request_shutdown();
+            background.shutdown().await;
+        }
+        let mut client = self.client.lock().await;
+        let client_ref = client
+            .as_mut()
+            .ok_or_else(|| "scenario client was already shut down".to_string())?;
+        tokio::time::timeout(Duration::from_secs(30), client_ref.tear_down_all())
+            .await
+            .map_err(|_| "scenario client teardown timed out after 30 seconds".to_string())?
+            .map_err(|error| format!("scenario client teardown failed: {error}"))?;
+        client.take();
+        Ok(())
+    }
+}
+
+impl Drop for ScenarioClient {
+    fn drop(&mut self) {
+        if let Some(background) = &self.background {
+            background.request_shutdown();
+        }
+    }
+}
+
+async fn create_large_scenario_clients(
+    config: &GateConfig,
+    masters: &[String],
+) -> Result<Vec<ScenarioClient>, String> {
+    create_clients(
+        config,
+        masters,
+        LARGE_CLIENT_COUNT,
+        LARGE_CLIENT_SEGMENT_SIZE,
+    )
+    .await
+}
+
+async fn verify_large_clients_remain_registered(clients: &[ScenarioClient]) -> Result<(), String> {
+    tokio::time::sleep(MASTER_CLIENT_TTL + Duration::from_secs(1)).await;
+    for (client_index, client) in clients.iter().enumerate() {
+        let segment_count = client
+            .segment_count()
+            .await
+            .map_err(|error| format!("large client {client_index} query after TTL: {error}"))?;
+        if segment_count < LARGE_CLIENT_COUNT {
+            return Err(format!(
+                "large client {client_index} lost registration after TTL: expected at least {LARGE_CLIENT_COUNT} memory segments, got {segment_count}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn verify_small_clients_remain_registered_and_preserve_sentinels(
+    clients: &[ScenarioClient],
+    seed: u64,
+) -> Result<(), String> {
+    let sentinels = (0..clients.len())
+        .map(|client_index| {
+            (
+                format!("ha-small-liveness-{seed:016x}-{client_index}"),
+                format!("small-liveness-value-{client_index}").into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (client_index, (key, value)) in sentinels.iter().enumerate() {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            clients[client_index].put(key, value),
+        )
+        .await
+        .map_err(|_| format!("small client {client_index} sentinel put timed out"))?
+        .map_err(|error| format!("small client {client_index} sentinel put failed: {error}"))?;
+    }
+
+    tokio::time::sleep(MASTER_CLIENT_TTL + MASTER_CLIENT_MONITOR_INTERVAL + Duration::from_secs(1))
+        .await;
+
+    let expected_segment_count = clients.len();
+    for (client_index, client) in clients.iter().enumerate() {
+        let segment_count = tokio::time::timeout(Duration::from_secs(10), client.segment_count())
+            .await
+            .map_err(|_| format!("small client {client_index} segment query timed out"))?
+            .map_err(|error| {
+                format!("small client {client_index} segment query failed: {error}")
+            })?;
+        if segment_count < expected_segment_count {
+            return Err(format!(
+                "small client {client_index} lost registration after TTL: expected at least {} memory segments, got {segment_count}",
+                expected_segment_count
+            ));
+        }
+    }
+
+    for (source_client, (key, expected)) in sentinels.iter().enumerate() {
+        let read_client = (source_client + 1) % clients.len();
+        let actual = tokio::time::timeout(Duration::from_secs(10), clients[read_client].get(key))
+            .await
+            .map_err(|_| {
+                format!("small client {read_client} sentinel read for client {source_client} timed out")
+            })?
+            .map_err(|error| {
+                format!(
+                    "small client {read_client} sentinel read for client {source_client} failed: {error}"
+                )
+            })?;
+        if actual != *expected {
+            return Err(format!(
+                "small client {read_client} sentinel read for client {source_client} returned wrong bytes"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn tear_down_scenario_clients(clients: &mut [ScenarioClient]) -> Result<(), String> {
+    let mut first_error = None;
     for (client_index, client) in clients.iter_mut().enumerate() {
+        if let Err(error) = client.tear_down_all().await
+            && first_error.is_none()
+        {
+            first_error = Some(format!("tear down scenario client {client_index}: {error}"));
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+async fn recover_scenario_clients(
+    clients: &[ScenarioClient],
+    view: &MasterView,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for (client_index, client) in clients.iter().enumerate() {
         loop {
             let switch_timeout = deadline
                 .saturating_duration_since(Instant::now())
@@ -1272,14 +1598,15 @@ async fn recover_clients(clients: &mut [MooncakeClient], view: &MasterView) -> R
                 ));
             }
             match tokio::time::timeout(health_timeout, client.health_check()).await {
-                Ok(Ok(())) if client.current_master_addr() == view.leader_address => break,
-                Ok(Ok(())) | Ok(Err(_)) => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(Ok(()))
+                    if client.current_master_addr().await.map_err(|error| {
+                        format!("client {client_index} read current leader: {error}")
+                    })? == view.leader_address =>
+                {
+                    break;
                 }
+                Ok(Ok(())) | Ok(Err(_)) => tokio::time::sleep(Duration::from_millis(100)).await,
                 Err(_) => {
-                    // Cancelling health_check can interrupt remount_all after it
-                    // marks the remount in progress. Do not reuse that client and
-                    // accidentally treat the next no-op remount as completion.
                     return Err(format!(
                         "client {client_index} health/remount timed out on leader {}",
                         view.leader_address
@@ -1302,7 +1629,51 @@ fn require_scenario_budget(deadline: Instant, stage: &str) -> Result<(), Failure
     if Instant::now() >= deadline {
         return Err(scenario_failure(
             stage,
-            "small scenario exceeded its ten-minute bounded budget",
+            "HA chaos scenario exceeded its ten-minute bounded budget",
+        ));
+    }
+    Ok(())
+}
+
+fn require_large_pressure_evidence(evidence: &ScenarioEvidence) -> Result<(), FailureRecord> {
+    if evidence.eviction_requests == 0 && evidence.capacity_rejections == 0 {
+        return Err(scenario_failure(
+            "evidence",
+            "large scenario produced neither an observed eviction transition nor a capacity rejection",
+        ));
+    }
+    Ok(())
+}
+
+fn should_retry_stable_put(error: &StoreError) -> bool {
+    matches!(error, StoreError::NoAvailableHandle)
+}
+
+async fn sample_memory_usage(client: &mut MooncakeClient) -> Result<u64, StoreError> {
+    let details = client.get_segments_detail().await?;
+    Ok(details
+        .into_iter()
+        .filter(|segment| !segment.nof)
+        .map(|segment| segment.allocator_used_bytes)
+        .sum())
+}
+
+fn record_exact_large_read(
+    evidence: &mut ScenarioEvidence,
+    actual: &[u8],
+    expected: &[u8],
+    stage: &str,
+    context: impl std::fmt::Display,
+) -> Result<(), FailureRecord> {
+    evidence.byte_comparisons += expected.len() as u64;
+    if actual.len() != expected.len() || actual != expected {
+        return Err(scenario_failure(
+            stage,
+            format!(
+                "{context} returned {} bytes that did not match the expected {} bytes",
+                actual.len(),
+                expected.len()
+            ),
         ));
     }
     Ok(())
@@ -1318,7 +1689,7 @@ fn advance_seeded_index(state: &mut u64, upper_bound: usize) -> usize {
 async fn run_small_scenario(
     config: &GateConfig,
     cluster: &mut MasterCluster,
-    clients: &mut [MooncakeClient],
+    clients: &[ScenarioClient],
     schedule: &ChaosSchedule,
 ) -> Result<ScenarioResult, FailureRecord> {
     const KEY_COUNT: usize = 100;
@@ -1390,11 +1761,9 @@ async fn run_small_scenario(
         for _ in 0..UNSTABLE_ATTEMPTS_PER_ROUND {
             let key_index = advance_seeded_index(&mut rng, KEY_COUNT);
             let put_client = advance_seeded_index(&mut rng, clients.len());
-            match await_mutating_operation(clients[put_client].put(
-                &keys[key_index],
-                &expected_values[key_index],
-                None,
-            ))
+            match await_mutating_operation(
+                clients[put_client].put(&keys[key_index], &expected_values[key_index]),
+            )
             .await
             {
                 Ok(()) => evidence.successful_unstable_operations += 1,
@@ -1476,7 +1845,7 @@ async fn run_small_scenario(
             )
         })?;
         evidence.leader_view_versions.push(stable_view.view_version);
-        recover_clients(clients, &stable_view)
+        recover_scenario_clients(clients, &stable_view)
             .await
             .map_err(|error| {
                 scenario_failure(
@@ -1489,11 +1858,9 @@ async fn run_small_scenario(
         let mut stable_put_clients = Vec::with_capacity(KEY_COUNT);
         for key_index in 0..KEY_COUNT {
             let put_client = advance_seeded_index(&mut rng, clients.len());
-            await_mutating_operation(clients[put_client].put(
-                &keys[key_index],
-                &expected_values[key_index],
-                None,
-            ))
+            await_mutating_operation(
+                clients[put_client].put(&keys[key_index], &expected_values[key_index]),
+            )
             .await
             .map_err(|error| {
                 scenario_failure(
@@ -1586,7 +1953,7 @@ async fn run_small_scenario(
         evidence
             .leader_view_versions
             .push(restarted_view.view_version);
-        recover_clients(clients, &restarted_view)
+        recover_scenario_clients(clients, &restarted_view)
             .await
             .map_err(|error| {
                 scenario_failure(
@@ -1629,6 +1996,359 @@ async fn run_small_scenario(
     })
 }
 
+async fn run_large_scenario(
+    config: &GateConfig,
+    cluster: &mut MasterCluster,
+    clients: &[ScenarioClient],
+    schedule: &ChaosSchedule,
+) -> Result<ScenarioResult, FailureRecord> {
+    const UNSTABLE_ATTEMPTS_PER_ROUND: usize = 6;
+    const EVICTION_OBSERVATION_DELAY: Duration = Duration::from_millis(50);
+
+    if clients.len() != LARGE_CLIENT_COUNT {
+        return Err(scenario_failure(
+            "setup",
+            format!(
+                "large scenario requires exactly {LARGE_CLIENT_COUNT} clients, got {}",
+                clients.len()
+            ),
+        ));
+    }
+    if schedule.rounds.len() < CANONICAL_ROUNDS {
+        return Err(scenario_failure(
+            "setup",
+            format!(
+                "large scenario requires at least {CANONICAL_ROUNDS} rounds, got {}",
+                schedule.rounds.len()
+            ),
+        ));
+    }
+
+    let keys = (0..LARGE_KEY_COUNT)
+        .map(|key_index| format!("ha-large-{:016x}-{key_index}", config.seed))
+        .collect::<Vec<_>>();
+    let expected_values = (0..LARGE_KEY_COUNT)
+        .map(|key_index| expected_large_value(config.seed, key_index, LARGE_VALUE_LEN))
+        .collect::<Vec<_>>();
+    let coordinator = tokio::time::timeout(
+        Duration::from_secs(10),
+        LeaderCoordinator::new_etcd(
+            vec![config.etcd_endpoint.clone()],
+            &cluster.cluster_namespace,
+        ),
+    )
+    .await
+    .map_err(|_| scenario_failure("setup", "timed out creating large-scenario coordinator"))?
+    .map_err(|error| {
+        scenario_failure(
+            "setup",
+            format!("create large-scenario coordinator: {error}"),
+        )
+    })?;
+
+    let mut evidence = ScenarioEvidence::default();
+    let mut rng = config.seed;
+    let scenario_deadline = Instant::now() + Duration::from_secs(10 * 60);
+    let mut observed_peak_memory_usage = clients[0]
+        .memory_usage()
+        .await
+        .map_err(|error| scenario_failure("setup", format!("sample memory usage: {error}")))?;
+
+    for (round_index, round) in schedule.rounds.iter().enumerate() {
+        require_scenario_budget(scenario_deadline, "scenario-deadline")?;
+        for &victim in &round.stop {
+            cluster.stop(victim).await.map_err(|error| {
+                scenario_failure(
+                    "stop",
+                    format!("round {round_index} failed to stop Master {victim}: {error}"),
+                )
+            })?;
+            evidence.crashes += 1;
+            evidence.stopped_indices.insert(victim);
+        }
+        if cluster.running_indices().is_empty() {
+            return Err(scenario_failure(
+                "stop",
+                format!("round {round_index} stopped every Master"),
+            ));
+        }
+
+        for _ in 0..UNSTABLE_ATTEMPTS_PER_ROUND {
+            let key_index = advance_seeded_index(&mut rng, LARGE_KEY_COUNT);
+            let put_client = advance_seeded_index(&mut rng, clients.len());
+            match await_mutating_operation(
+                clients[put_client].put(&keys[key_index], &expected_values[key_index]),
+            )
+            .await
+            {
+                Ok(()) => evidence.successful_unstable_operations += 1,
+                Err(StoreError::NoAvailableHandle) => evidence.capacity_rejections += 1,
+                Err(error) if is_expected_unstable_error(UnstableOperation::Put, &error) => {}
+                Err(error) => {
+                    return Err(scenario_failure(
+                        "unstable-put",
+                        format!(
+                            "round {round_index} client {put_client} returned unexpected error for {}: {error}",
+                            keys[key_index]
+                        ),
+                    ));
+                }
+            }
+            require_scenario_budget(scenario_deadline, "unstable-put")?;
+
+            let mut get_client = advance_seeded_index(&mut rng, clients.len());
+            if get_client == put_client {
+                get_client = (get_client + 1) % clients.len();
+            }
+            match clients[get_client].get(&keys[key_index]).await {
+                Ok(actual) => {
+                    evidence.successful_unstable_operations += 1;
+                    record_exact_large_read(
+                        &mut evidence,
+                        &actual,
+                        &expected_values[key_index],
+                        "unstable-read",
+                        format!(
+                            "round {round_index} client {get_client} reading {}",
+                            keys[key_index]
+                        ),
+                    )?;
+                }
+                Err(error) if is_expected_unstable_error(UnstableOperation::Get, &error) => {}
+                Err(error) => {
+                    return Err(scenario_failure(
+                        "unstable-read",
+                        format!(
+                            "round {round_index} client {get_client} returned unexpected error for {}: {error}",
+                            keys[key_index]
+                        ),
+                    ));
+                }
+            }
+            require_scenario_budget(scenario_deadline, "unstable-read")?;
+        }
+
+        let stable_view = wait_for_stable_leader(
+            &coordinator,
+            cluster,
+            &mut [],
+            std::cmp::min(Instant::now() + Duration::from_secs(45), scenario_deadline),
+        )
+        .await
+        .map_err(|error| {
+            scenario_failure(
+                "stabilize",
+                format!("round {round_index} failed to stabilize after crashes: {error}"),
+            )
+        })?;
+        evidence.leader_view_versions.push(stable_view.view_version);
+        recover_scenario_clients(clients, &stable_view)
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "recover",
+                    format!("round {round_index} failed to recover clients: {error}"),
+                )
+            })?;
+
+        let mut stable_put_clients = Vec::with_capacity(LARGE_KEY_COUNT);
+        for key_index in 0..LARGE_KEY_COUNT {
+            let put_client = advance_seeded_index(&mut rng, clients.len());
+            match await_mutating_operation(
+                clients[put_client].put(&keys[key_index], &expected_values[key_index]),
+            )
+            .await
+            {
+                Ok(()) => stable_put_clients.push(put_client),
+                Err(error) if should_retry_stable_put(&error) => {
+                    evidence.capacity_rejections += 1;
+                    tokio::time::sleep(EVICTION_OBSERVATION_DELAY).await;
+                    await_mutating_operation(
+                        clients[put_client].put(&keys[key_index], &expected_values[key_index]),
+                    )
+                    .await
+                    .map_err(|retry_error| {
+                        scenario_failure(
+                            "stable-put",
+                            format!(
+                                "round {round_index} client {put_client} rejected {} for capacity and failed after eviction recovery: {retry_error}",
+                                keys[key_index]
+                            ),
+                        )
+                    })?;
+                    stable_put_clients.push(put_client);
+                }
+                Err(error) => {
+                    return Err(scenario_failure(
+                        "stable-put",
+                        format!(
+                            "round {round_index} client {put_client} failed putting {}: {error}",
+                            keys[key_index]
+                        ),
+                    ));
+                }
+            }
+            require_scenario_budget(scenario_deadline, "stable-put")?;
+        }
+
+        tokio::time::sleep(EVICTION_OBSERVATION_DELAY).await;
+        let memory_usage = clients[0].memory_usage().await.map_err(|error| {
+            scenario_failure(
+                "pressure-observation",
+                format!("round {round_index} sample memory usage: {error}"),
+            )
+        })?;
+        if memory_usage < observed_peak_memory_usage {
+            evidence.eviction_requests += 1;
+        }
+        observed_peak_memory_usage = observed_peak_memory_usage.max(memory_usage);
+
+        for key_index in 0..LARGE_KEY_COUNT {
+            let put_client = stable_put_clients[key_index];
+            let read_client = (put_client + 1) % clients.len();
+            match clients[read_client].get(&keys[key_index]).await {
+                Ok(actual) => {
+                    record_exact_large_read(
+                        &mut evidence,
+                        &actual,
+                        &expected_values[key_index],
+                        "stable-read",
+                        format!(
+                            "round {round_index} client {read_client} reading {}",
+                            keys[key_index]
+                        ),
+                    )?;
+                    evidence.stable_exact_reads += 1;
+                }
+                Err(StoreError::KeyNotFound(_)) => {
+                    await_mutating_operation(
+                        clients[put_client].put(&keys[key_index], &expected_values[key_index]),
+                    )
+                    .await
+                    .map_err(|error| {
+                        scenario_failure(
+                            "stable-rewrite",
+                            format!(
+                                "round {round_index} client {put_client} failed rewriting {}: {error}",
+                                keys[key_index]
+                            ),
+                        )
+                    })?;
+                    let actual = clients[read_client].get(&keys[key_index]).await.map_err(|error| {
+                        scenario_failure(
+                            "stable-read",
+                            format!(
+                                "round {round_index} client {read_client} failed cross-client reread of {}: {error}",
+                                keys[key_index]
+                            ),
+                        )
+                    })?;
+                    record_exact_large_read(
+                        &mut evidence,
+                        &actual,
+                        &expected_values[key_index],
+                        "stable-read",
+                        format!(
+                            "round {round_index} client {read_client} rereading {}",
+                            keys[key_index]
+                        ),
+                    )?;
+                    evidence.stable_exact_reads += 1;
+                }
+                Err(error) => {
+                    return Err(scenario_failure(
+                        "stable-read",
+                        format!(
+                            "round {round_index} client {read_client} failed reading {}: {error}",
+                            keys[key_index]
+                        ),
+                    ));
+                }
+            }
+            require_scenario_budget(scenario_deadline, "stable-read")?;
+        }
+
+        for &victim in &round.restart {
+            cluster.restart(victim).await.map_err(|error| {
+                scenario_failure(
+                    "restart",
+                    format!("round {round_index} failed to restart Master {victim}: {error}"),
+                )
+            })?;
+        }
+        let restarted_view = wait_for_stable_leader(
+            &coordinator,
+            cluster,
+            &mut [],
+            std::cmp::min(Instant::now() + Duration::from_secs(45), scenario_deadline),
+        )
+        .await
+        .map_err(|error| {
+            scenario_failure(
+                "restart",
+                format!("round {round_index} failed to stabilize after restart: {error}"),
+            )
+        })?;
+        cluster
+            .require_restarted_victims_survive(&round.restart, Duration::from_millis(500))
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "restart",
+                    format!("round {round_index} restarted victim did not survive: {error}"),
+                )
+            })?;
+        for &victim in &round.restart {
+            evidence.restarts += 1;
+            evidence.restarted_indices.insert(victim);
+        }
+        evidence
+            .leader_view_versions
+            .push(restarted_view.view_version);
+        recover_scenario_clients(clients, &restarted_view)
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "recover",
+                    format!("round {round_index} failed to recover clients after restart: {error}"),
+                )
+            })?;
+    }
+
+    if evidence.successful_unstable_operations == 0 {
+        return Err(scenario_failure(
+            "evidence",
+            "large scenario produced no successful unstable operations",
+        ));
+    }
+    let minimum_exact_reads = (LARGE_KEY_COUNT * schedule.rounds.len()) as u64;
+    if evidence.stable_exact_reads < minimum_exact_reads {
+        return Err(scenario_failure(
+            "evidence",
+            format!(
+                "large scenario recorded {} stable exact reads, expected at least {minimum_exact_reads}",
+                evidence.stable_exact_reads
+            ),
+        ));
+    }
+    let all_indices = BTreeSet::from([0, 1, 2]);
+    if evidence.stopped_indices != all_indices || evidence.restarted_indices != all_indices {
+        return Err(scenario_failure(
+            "evidence",
+            format!(
+                "large scenario victim coverage mismatch: stopped={:?}, restarted={:?}",
+                evidence.stopped_indices, evidence.restarted_indices
+            ),
+        ));
+    }
+    require_large_pressure_evidence(&evidence)?;
+
+    Ok(ScenarioResult {
+        status: ResultStatus::Pass,
+        evidence,
+    })
+}
+
 fn publish_failed_gate_result(
     config: &GateConfig,
     cluster: &MasterCluster,
@@ -1652,7 +2372,7 @@ fn publish_failed_gate_result(
 }
 
 struct RemountCheckpoint {
-    clients: Vec<MooncakeClient>,
+    clients: Vec<ScenarioClient>,
     initial_view: MasterView,
     failover_view: MasterView,
     restarted_index: usize,
@@ -1688,10 +2408,10 @@ async fn run_remount_checkpoint(
             .into_iter()
             .filter(|address| address != &initial_view.leader_address),
     );
-    let mut clients = create_clients(config, &masters, 3, CLIENT_SEGMENT_SIZE)
+    let clients = create_clients(config, &masters, 3, CLIENT_SEGMENT_SIZE)
         .await
         .map_err(|error| scenario_failure("remount-setup", error))?;
-    await_mutating_operation(clients[0].put("ha-small-bootstrap", b"bootstrap-value", None))
+    await_mutating_operation(clients[0].put("ha-small-bootstrap", b"bootstrap-value"))
         .await
         .map_err(|error| {
             scenario_failure(
@@ -1728,7 +2448,7 @@ async fn run_remount_checkpoint(
             format!("leader did not change: initial={initial_view:?}, failover={failover_view:?}"),
         ));
     }
-    recover_clients(&mut clients, &failover_view)
+    recover_scenario_clients(&clients, &failover_view)
         .await
         .map_err(|error| scenario_failure("remount-recover", error))?;
     let bootstrap = tokio::time::timeout(
@@ -1770,7 +2490,7 @@ async fn run_remount_checkpoint(
         .require_restarted_victims_survive(&[restarted_index], Duration::from_millis(500))
         .await
         .map_err(|error| scenario_failure("remount-restart", error))?;
-    recover_clients(&mut clients, &restored_view)
+    recover_scenario_clients(&clients, &restored_view)
         .await
         .map_err(|error| scenario_failure("remount-recover", error))?;
 
@@ -1780,6 +2500,55 @@ async fn run_remount_checkpoint(
         failover_view,
         restarted_index,
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn three_master_small_client_liveness_preflight_preserves_sentinel_bytes() {
+    let Some(config) =
+        liveness_preflight_config_from_env().expect("valid HA liveness preflight environment")
+    else {
+        eprintln!("SKIP HA liveness preflight: MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT is not enabled");
+        return;
+    };
+
+    let mut cluster = MasterCluster::start(&config)
+        .await
+        .expect("start three Masters for liveness preflight");
+    let checkpoint = run_remount_checkpoint(&config, &mut cluster)
+        .await
+        .unwrap_or_else(|failure| {
+            panic!(
+                "liveness remount checkpoint failed at {}: {}",
+                failure.stage, failure.message
+            )
+        });
+    let mut clients = checkpoint.clients;
+    let preflight =
+        verify_small_clients_remain_registered_and_preserve_sentinels(&clients, config.seed).await;
+    let cleanup = tear_down_scenario_clients(&mut clients).await;
+    let preflight_result_path = config.artifact_root.join("liveness-preflight-result.json");
+    std::fs::write(
+        &preflight_result_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "mooncake-ha-liveness-preflight/v1",
+            "canonical": false,
+            "status": if preflight.is_ok() { "PASS" } else { "FAIL" },
+            "sentinel_count": clients.len(),
+            "idle_milliseconds": (MASTER_CLIENT_TTL
+                + MASTER_CLIENT_MONITOR_INTERVAL
+                + Duration::from_secs(1))
+            .as_millis(),
+            "failure": preflight.as_ref().err(),
+            "cleanup_failure": cleanup.as_ref().err(),
+        }))
+        .expect("serialize liveness preflight result"),
+    )
+    .expect("write liveness preflight result");
+
+    if let Err(error) = preflight {
+        panic!("small-client liveness preflight failed: {error}; cleanup: {cleanup:?}");
+    }
+    cleanup.expect("tear down liveness preflight clients");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -1860,29 +2629,137 @@ async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
 
     let schedule = ChaosSchedule::new(config.seed, config.rounds).expect("valid chaos schedule");
     let mut scenarios = complete_scenarios(ResultStatus::Fail);
-    let small_result =
-        match run_small_scenario(&config, &mut cluster, &mut clients, &schedule).await {
-            Ok(result) => result,
-            Err(failure) => {
-                publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
-                    .expect("publish failed small-scenario result");
-                panic!(
-                    "small HA chaos failed at {}: {}",
-                    failure.stage, failure.message
-                );
-            }
-        };
+    if let Err(error) =
+        verify_small_clients_remain_registered_and_preserve_sentinels(&clients, config.seed).await
+    {
+        let cleanup = tear_down_scenario_clients(&mut clients).await;
+        let failure = scenario_failure(
+            "small-client-liveness",
+            format!("background liveness preflight failed: {error}; cleanup: {cleanup:?}"),
+        );
+        publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+            .expect("publish failed small-client liveness result");
+        panic!(
+            "small HA chaos failed at {}: {}",
+            failure.stage, failure.message
+        );
+    }
+    let small_result = run_small_scenario(&config, &mut cluster, &clients, &schedule).await;
+    let cleanup = tear_down_scenario_clients(&mut clients).await;
+    let small_result = match (small_result, cleanup) {
+        (Ok(result), Ok(())) => result,
+        (Err(failure), cleanup) => {
+            let failure = scenario_failure(
+                &failure.stage,
+                format!("{}; small-client cleanup: {cleanup:?}", failure.message),
+            );
+            publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+                .expect("publish failed small-scenario result");
+            panic!(
+                "small HA chaos failed at {}: {}",
+                failure.stage, failure.message
+            );
+        }
+        (Ok(_), Err(error)) => {
+            let failure = scenario_failure(
+                "small-client-cleanup",
+                format!("small scenario passed but cleanup failed: {error}"),
+            );
+            publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+                .expect("publish failed small-client cleanup result");
+            panic!(
+                "small HA chaos failed at {}: {}",
+                failure.stage, failure.message
+            );
+        }
+    };
     std::fs::write(
         config.artifact_root.join("small-checkpoint.json"),
         serde_json::to_vec_pretty(&small_result).expect("serialize small checkpoint"),
     )
     .expect("write small checkpoint");
     scenarios.insert(ScenarioKind::Small, small_result);
-    publish_failed_gate_result(
-        &config,
-        &cluster,
-        scenarios,
-        scenario_failure("scenario", "large HA chaos workload is not implemented yet"),
+
+    drop(clients);
+
+    let large_view = wait_for_stable_leader_without_clients(&config, &cluster)
+        .await
+        .expect("stabilize Masters before large scenario");
+    let mut masters = vec![large_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &large_view.leader_address),
+    );
+    let mut large_clients = create_large_scenario_clients(&config, &masters)
+        .await
+        .expect("create large-scenario clients");
+    if let Err(error) = verify_large_clients_remain_registered(&large_clients).await {
+        let cleanup = tear_down_scenario_clients(&mut large_clients).await;
+        let failure = scenario_failure(
+            "large-client-liveness",
+            format!("background liveness preflight failed: {error}; cleanup: {cleanup:?}"),
+        );
+        publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+            .expect("publish failed large-scenario result");
+        panic!(
+            "large HA chaos failed at {}: {}",
+            failure.stage, failure.message
+        );
+    }
+    let large_result = run_large_scenario(&config, &mut cluster, &large_clients, &schedule).await;
+    let cleanup = tear_down_scenario_clients(&mut large_clients).await;
+    let large_result = match (large_result, cleanup) {
+        (Ok(result), Ok(())) => result,
+        (Err(failure), cleanup) => {
+            let failure = scenario_failure(
+                &failure.stage,
+                format!("{}; large-client cleanup: {cleanup:?}", failure.message),
+            );
+            publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+                .expect("publish failed large-scenario result");
+            panic!(
+                "large HA chaos failed at {}: {}",
+                failure.stage, failure.message
+            );
+        }
+        (Ok(_), Err(error)) => {
+            let failure = scenario_failure(
+                "large-client-cleanup",
+                format!("large scenario passed but cleanup failed: {error}"),
+            );
+            publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+                .expect("publish failed large-scenario result");
+            panic!(
+                "large HA chaos failed at {}: {}",
+                failure.stage, failure.message
+            );
+        }
+    };
+    std::fs::write(
+        config.artifact_root.join("large-checkpoint.json"),
+        serde_json::to_vec_pretty(&large_result).expect("serialize large checkpoint"),
     )
-    .expect("publish small-scenario checkpoint result");
+    .expect("write large checkpoint");
+    scenarios.insert(ScenarioKind::Large, large_result);
+    let result = GateResult {
+        schema_version: 1,
+        status: ResultStatus::Pass,
+        seed: format!("0x{:016x}", config.seed),
+        etcd_endpoint: config.etcd_endpoint.clone(),
+        cluster_namespace: config.cluster_namespace.clone(),
+        masters: cluster.addresses().into_iter().collect(),
+        scenarios,
+        first_failure: None,
+        master_logs: cluster
+            .slots
+            .iter()
+            .map(|slot| slot.log_path.display().to_string())
+            .collect(),
+        client_logs: Vec::new(),
+    };
+    result
+        .write_atomic(&config.result_path)
+        .expect("publish passed HA chaos result");
 }
