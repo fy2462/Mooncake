@@ -1,7 +1,22 @@
 use super::oplog_wire::*;
 use super::*;
 use etcd_client::{Compare, CompareOp, Txn, TxnOp};
+use std::cell::RefCell;
 use std::future::Future;
+
+struct CurrentThreadRuntime {
+    runtime: tokio::runtime::Runtime,
+    #[cfg(test)]
+    marker: u64,
+}
+
+thread_local! {
+    static CURRENT_THREAD_RUNTIME: RefCell<Option<CurrentThreadRuntime>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+static NEXT_CURRENT_THREAD_RUNTIME_MARKER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 pub struct EtcdOpLogStore {
     client: etcd_client::Client,
@@ -290,6 +305,26 @@ fn validate_buffer_sequence(buffer: &[OpLogRecord]) -> Result<(u64, u64), HaErro
     ))
 }
 
+pub(super) fn assign_buffered_sequences(
+    last_seq: u64,
+    entries: &[OpLogRecord],
+) -> Result<Vec<OpLogRecord>, HaError> {
+    let mut next_seq = last_seq;
+    entries
+        .iter()
+        .cloned()
+        .map(|entry| {
+            next_seq = next_seq.checked_add(1).ok_or_else(|| {
+                HaError::InvalidBackend("oplog sequence exhausted at u64::MAX".into())
+            })?;
+            Ok(OpLogRecord {
+                seq: next_seq,
+                ..entry
+            })
+        })
+        .collect()
+}
+
 fn validate_buffer_producer_view(
     buffer: &[OpLogRecord],
     expected_producer_view_version: u64,
@@ -311,9 +346,9 @@ fn validate_buffer_producer_view(
 #[cfg(test)]
 mod tests {
     use super::{
-        EtcdOpLogStore, decode_etcd_range_entry, parse_latest_sequence_value,
-        parse_snapshot_sequence_value, serialize_etcd_oplog_value, validate_buffer_producer_view,
-        validate_buffer_sequence,
+        EtcdOpLogStore, block_on_runtime, current_thread_runtime_marker_for_test,
+        decode_etcd_range_entry, parse_latest_sequence_value, parse_snapshot_sequence_value,
+        serialize_etcd_oplog_value, validate_buffer_producer_view, validate_buffer_sequence,
     };
     use crate::ha::OpLogRecord;
 
@@ -413,12 +448,23 @@ mod tests {
         };
 
         assert_eq!(
-            validate_buffer_sequence(&[record(4), record(5)]).unwrap(),
-            (3, 5)
+            validate_buffer_sequence(&[record(41), record(42), record(43)]).unwrap(),
+            (40, 43)
         );
         assert!(validate_buffer_sequence(&[]).is_err());
         assert!(validate_buffer_sequence(&[record(0)]).is_err());
-        assert!(validate_buffer_sequence(&[record(1), record(3)]).is_err());
+        assert!(validate_buffer_sequence(&[record(41), record(43)]).is_err());
+    }
+
+    #[test]
+    fn plain_thread_reuses_current_thread_runtime() {
+        block_on_runtime(async {});
+        let first_marker = current_thread_runtime_marker_for_test();
+
+        block_on_runtime(async {});
+        let second_marker = current_thread_runtime_marker_for_test();
+
+        assert_eq!(first_marker, second_marker);
     }
 }
 
@@ -426,14 +472,10 @@ impl OpLogStore for EtcdOpLogStore {
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
         self.ensure_not_poisoned()?;
         self.writer_fence()?;
-        self.last_seq = self.last_seq.checked_add(1).ok_or_else(|| {
-            HaError::InvalidBackend("oplog sequence exhausted at u64::MAX".into())
-        })?;
-        self.buffer.push(OpLogRecord {
-            seq: self.last_seq,
-            ..entry.clone()
-        });
-        block_on_runtime(self.flush())?;
+        let mut assigned = assign_buffered_sequences(self.last_seq, std::slice::from_ref(entry))?;
+        let entry = assigned.pop().expect("one assigned entry");
+        self.last_seq = entry.seq;
+        self.buffer.push(entry);
         Ok(self.last_seq)
     }
 
@@ -714,12 +756,31 @@ impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
 fn block_on_runtime<F: Future>(future: F) -> F::Output {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => tokio::task::block_in_place(|| handle.block_on(future)),
-        _ => tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create temporary tokio runtime")
-            .block_on(future),
+        _ => CURRENT_THREAD_RUNTIME.with(|runtime| {
+            let mut runtime = runtime.borrow_mut();
+            let runtime = runtime.get_or_insert_with(|| CurrentThreadRuntime {
+                runtime: tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create current-thread tokio runtime"),
+                #[cfg(test)]
+                marker: NEXT_CURRENT_THREAD_RUNTIME_MARKER
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            });
+            runtime.runtime.block_on(future)
+        }),
     }
+}
+
+#[cfg(test)]
+fn current_thread_runtime_marker_for_test() -> u64 {
+    CURRENT_THREAD_RUNTIME.with(|runtime| {
+        runtime
+            .borrow()
+            .as_ref()
+            .expect("current-thread runtime was not initialized")
+            .marker
+    })
 }
 
 fn set_etcd_watch_health(

@@ -452,6 +452,41 @@ fn test_etcd_oplog_entry_key_matches_cpp_format() {
 }
 
 #[test]
+fn test_etcd_append_path_builds_contiguous_buffer_without_flushing() {
+    let records = [
+        OpLogRecord {
+            seq: 0,
+            producer_view_version: 7,
+            payload: "first".to_string(),
+        },
+        OpLogRecord {
+            seq: 0,
+            producer_view_version: 7,
+            payload: "second".to_string(),
+        },
+        OpLogRecord {
+            seq: 0,
+            producer_view_version: 7,
+            payload: "third".to_string(),
+        },
+    ];
+
+    let buffered = buffered_etcd_records_for_test(40, &records).unwrap();
+
+    assert_eq!(
+        buffered.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        vec![41, 42, 43]
+    );
+    assert_eq!(
+        buffered
+            .iter()
+            .map(|record| (record.payload.as_str(), record.producer_view_version))
+            .collect::<Vec<_>>(),
+        vec![("first", 7), ("second", 7), ("third", 7)]
+    );
+}
+
+#[test]
 fn test_etcd_oplog_value_writes_cpp_outer_json_for_put_end() {
     let replica = ReplicaDescriptor {
         segment_id: Uuid::new_v4(),

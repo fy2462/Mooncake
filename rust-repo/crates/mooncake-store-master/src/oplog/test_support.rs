@@ -88,3 +88,10 @@ pub fn encode_put_end_msgpack_from_json_for_test(
 pub fn format_etcd_entry_key_for_test(key_prefix: &str, seq: u64) -> String {
     EtcdOpLogStore::format_entry_key(key_prefix, seq)
 }
+
+pub fn buffered_etcd_records_for_test(
+    last_seq: u64,
+    entries: &[OpLogRecord],
+) -> Result<Vec<OpLogRecord>, HaError> {
+    super::oplog_etcd::assign_buffered_sequences(last_seq, entries)
+}
