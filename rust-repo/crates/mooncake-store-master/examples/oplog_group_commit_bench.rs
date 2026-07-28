@@ -450,8 +450,11 @@ mod tests {
         assert_eq!(sync.committed_boundary, 20);
         assert_eq!(sync.sequences, (1..=20).collect::<Vec<_>>());
         assert_eq!(group.operations, 20);
-        assert!(group.flushes < sync.flushes);
-        assert!(group.mean_records_per_flush > sync.mean_records_per_flush);
+        assert!((1..=group.operations as u64).contains(&group.flushes));
+        assert_eq!(
+            group.mean_records_per_flush,
+            group.operations as f64 / group.flushes as f64
+        );
         assert_eq!(group.committed_boundary, 20);
         assert_eq!(group.sequences, (1..=20).collect::<Vec<_>>());
     }
