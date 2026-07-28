@@ -13,14 +13,14 @@ struct TestPauseState {
 }
 
 #[cfg(test)]
-struct TestPause {
+pub(super) struct TestPause {
     state: std::sync::Mutex<TestPauseState>,
     changed: std::sync::Condvar,
 }
 
 #[cfg(test)]
 impl TestPause {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: std::sync::Mutex::new(TestPauseState {
                 reached: false,
@@ -30,7 +30,7 @@ impl TestPause {
         }
     }
 
-    fn pause(&self) {
+    pub(super) fn pause(&self) {
         let mut state = self.state.lock().unwrap();
         state.reached = true;
         self.changed.notify_all();
@@ -39,7 +39,7 @@ impl TestPause {
         }
     }
 
-    fn wait_until_reached(&self, timeout: Duration) -> bool {
+    pub(super) fn wait_until_reached(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut state = self.state.lock().unwrap();
         while !state.reached {
@@ -56,7 +56,7 @@ impl TestPause {
         true
     }
 
-    fn release(&self) {
+    pub(super) fn release(&self) {
         let mut state = self.state.lock().unwrap();
         state.released = true;
         self.changed.notify_all();
@@ -344,6 +344,12 @@ impl SequencedOpLogWorker {
                 completion,
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(super) fn queued_command_count_for_test(&self) -> usize {
+        let _state = self.control.state.lock();
+        self.queue_depth.load(Ordering::Acquire)
     }
 
     pub(crate) fn shutdown(&self) -> Result<(), HaError> {

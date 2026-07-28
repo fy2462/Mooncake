@@ -1,6 +1,10 @@
 use super::oplog_wire::*;
 use super::*;
+#[cfg(test)]
+use crate::oplog::oplog_worker::TestPause;
 use crate::oplog::oplog_worker::{OpLogWorkerConfig, SequencedOpLogWorker};
+#[cfg(test)]
+use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +22,8 @@ pub(crate) struct LeaseRefreshEntry {
 pub struct OpLogManager {
     worker: RwLock<Option<Arc<SequencedOpLogWorker>>>,
     view_version: AtomicU64,
+    #[cfg(test)]
+    before_replacement_worker_publish: Mutex<Option<Arc<TestPause>>>,
 }
 
 impl OpLogManager {
@@ -30,6 +36,8 @@ impl OpLogManager {
                 ))
             })),
             view_version: AtomicU64::new(view_version),
+            #[cfg(test)]
+            before_replacement_worker_publish: Mutex::new(None),
         }
     }
 
@@ -108,14 +116,29 @@ impl OpLogManager {
     }
 
     pub fn replace_with(&self, replacement: OpLogManager) -> Result<(), HaError> {
-        if let Some(worker) = self.worker() {
+        let old_worker = self.worker();
+        let replacement_has_worker = replacement.worker().is_some();
+        if old_worker.is_some() && !replacement_has_worker {
+            return Err(HaError::InvalidBackend(
+                "replacement oplog manager has no worker".into(),
+            ));
+        }
+
+        if let Some(worker) = old_worker {
             worker.shutdown()?;
         }
 
         let replacement_view = replacement.view_version.load(Ordering::Acquire);
         let replacement_worker = replacement.worker.write().take();
-        *self.worker.write() = replacement_worker;
         self.view_version.store(replacement_view, Ordering::Release);
+        #[cfg(test)]
+        {
+            let pause = self.before_replacement_worker_publish.lock().clone();
+            if let Some(pause) = pause {
+                pause.pause();
+            }
+        }
+        *self.worker.write() = replacement_worker;
         Ok(())
     }
 
@@ -779,7 +802,7 @@ impl Drop for OpLogManager {
 mod tests {
     use super::*;
     use std::sync::{Condvar, Mutex, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct SharedOpLog {
         inner: Arc<Mutex<InMemoryOpLog>>,
@@ -1074,6 +1097,87 @@ mod tests {
     }
 
     #[test]
+    fn invalid_replacement_preserves_old_writer_and_cannot_create_noop_gap() {
+        let (old_store, old_records) = SharedOpLog::new(8);
+        let manager = OpLogManager::new(Some(Box::new(old_store)), 7);
+        assert_eq!(
+            manager.record_remove_durable("default\0before-invalid"),
+            Ok(1)
+        );
+
+        let error = manager
+            .replace_with(OpLogManager::new(None, 8))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("replacement oplog manager has no worker"),
+            "{error}"
+        );
+        assert_eq!(
+            manager.record_remove_durable("default\0after-invalid"),
+            Ok(2)
+        );
+        let records = old_records.lock().unwrap().read_since(1, 8).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].producer_view_version, 7);
+        assert_eq!(records[1].producer_view_version, 7);
+    }
+
+    #[test]
+    fn replacement_publishes_view_before_new_worker_is_reachable() {
+        let (old_store, old_records) = SharedOpLog::new(8);
+        let manager = Arc::new(OpLogManager::new(Some(Box::new(old_store)), 7));
+        assert_eq!(manager.record_remove_durable("default\0old"), Ok(1));
+        let old_worker = manager.worker().unwrap();
+
+        let (new_store, new_records) = SharedOpLog::new(8);
+        let publication_pause = Arc::new(TestPause::new());
+        *manager.before_replacement_worker_publish.lock() = Some(Arc::clone(&publication_pause));
+        let replace_manager = Arc::clone(&manager);
+        let replacement = std::thread::spawn(move || {
+            replace_manager.replace_with(OpLogManager::new(Some(Box::new(new_store)), 8))
+        });
+
+        let reached = publication_pause.wait_until_reached(Duration::from_secs(1));
+        let during_publication =
+            reached.then(|| manager.record_remove_durable("default\0during-publication"));
+        publication_pause.release();
+        let replacement_result = replacement.join().unwrap();
+
+        assert!(
+            reached,
+            "replacement never reached its publication boundary"
+        );
+        let error = during_publication.unwrap().unwrap_err();
+        assert!(error.to_string().contains("shut down"), "{error}");
+        assert_eq!(replacement_result, Ok(()));
+        assert!(
+            old_worker
+                .submit_durable("must-not-append".into(), 7, "replacement_test")
+                .is_err()
+        );
+        assert_eq!(
+            old_records.lock().unwrap().read_since(1, 8).unwrap().len(),
+            1
+        );
+        assert!(
+            new_records
+                .lock()
+                .unwrap()
+                .read_since(1, 8)
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(manager.record_remove_durable("default\0new"), Ok(1));
+        let new_records = new_records.lock().unwrap().read_since(1, 8).unwrap();
+        assert_eq!(new_records.len(), 1);
+        assert_eq!(new_records[0].producer_view_version, 8);
+    }
+
+    #[test]
     fn queries_cannot_overtake_an_earlier_durable_record() {
         let flush_gate = Arc::new(FlushGate::default());
         let manager = Arc::new(OpLogManager::new(
@@ -1090,17 +1194,26 @@ mod tests {
         let entered = flush_gate.wait_until_entered(Duration::from_secs(1));
 
         let query_manager = Arc::clone(&manager);
+        let worker = manager.worker().unwrap();
         let (query_tx, query_rx) = mpsc::sync_channel(1);
         let query = std::thread::spawn(move || {
             query_tx.send(query_manager.read_since(1, 8)).unwrap();
         });
-        let query_waited_for_flush = matches!(
-            query_rx.recv_timeout(Duration::from_millis(25)),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let query_was_queued = loop {
+            if worker.queued_command_count_for_test() == 1 {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::yield_now();
+        };
+        let query_waited_for_flush = matches!(query_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
         flush_gate.release();
 
         assert!(entered, "record never reached its durable flush");
+        assert!(query_was_queued, "query was not queued behind the record");
         assert!(query_waited_for_flush, "query overtook the gated record");
         assert_eq!(submitter.join().unwrap(), Ok(1));
         let records = query_rx
@@ -1139,5 +1252,7 @@ mod tests {
         );
         assert_eq!(manager.get_snapshot_sequence_id("../ignored"), Ok(0));
         assert_eq!(manager.cleanup_before(40), Ok(()));
+        assert_eq!(manager.replace_with(OpLogManager::new(None, 2)), Ok(()));
+        assert_eq!(manager.record_remove_durable("default\0still-no-ha"), Ok(0));
     }
 }
