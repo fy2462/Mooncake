@@ -85,6 +85,34 @@ fn observed_primary_sequence(store: &dyn OpLogStore, applied: u64) -> u64 {
         .max(applied)
 }
 
+fn apply_notifier_entry(
+    applier: &OpLogApplier,
+    sync_status: &std::sync::Weak<parking_lot::RwLock<StandbySyncStatus>>,
+    state_machine: &StandbyStateMachine,
+    entry: crate::ha::OpLogRecord,
+) {
+    let before_apply = applier.get_expected_sequence_id();
+    let entry_seq = entry.seq;
+    applier.apply_op_log_entries(&[entry]);
+    let expected = applier.get_expected_sequence_id();
+    let applied = expected.saturating_sub(1);
+    let rejected_expected = entry_seq == before_apply && expected == before_apply;
+    if rejected_expected {
+        state_machine.process_event(StandbyEvent::FatalError);
+    }
+    if let Some(status) = sync_status.upgrade() {
+        let mut status = status.write();
+        status.applied_seq_id = applied;
+        status.primary_seq_id = status.primary_seq_id.max(applied);
+        status.lag_entries = status.primary_seq_id.saturating_sub(applied);
+        if rejected_expected {
+            status.state = StandbyState::Failed;
+            status.is_connected = false;
+            status.is_syncing = false;
+        }
+    }
+}
+
 impl Default for HotStandbyConfig {
     fn default() -> Self {
         Self {
@@ -122,6 +150,10 @@ mod tests {
         inner: InMemoryOpLog,
         remaining_failures: Arc<AtomicUsize>,
         read_attempts: Arc<AtomicUsize>,
+    }
+
+    struct SynchronousBridgeOpLog {
+        inner: InMemoryOpLog,
     }
 
     impl FlakyReadOpLog {
@@ -175,6 +207,61 @@ mod tests {
 
         fn max_sequence_id(&self) -> Result<u64, HaError> {
             self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
+    }
+
+    impl OpLogStore for SynchronousBridgeOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            let handle = tokio::runtime::Handle::try_current()
+                .expect("primary query must execute inside the watch runtime");
+            Ok(tokio::task::block_in_place(|| {
+                handle.block_on(async { self.inner.latest_sequence() })
+            }))
         }
 
         fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
@@ -319,6 +406,47 @@ mod tests {
             &mut notifier,
             std::time::Duration::from_millis(100),
         ));
+    }
+
+    #[test]
+    fn notifier_callback_does_not_reenter_current_thread_runtime() {
+        let result = std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let applier = OpLogApplier::new(Arc::new(MasterState::empty()));
+                let sync_status = Arc::new(parking_lot::RwLock::new(StandbySyncStatus::default()));
+                let state_machine = StandbyStateMachine::new();
+                let mut store = SynchronousBridgeOpLog {
+                    inner: InMemoryOpLog::new(16),
+                };
+                store
+                    .inner
+                    .append_payload(9, r#"{"op":"remove","key":"default\u0000missing"}"#);
+                let entry = store.read_since(1, 1).unwrap().remove(0);
+
+                apply_notifier_entry(
+                    &applier,
+                    &Arc::downgrade(&sync_status),
+                    &state_machine,
+                    entry,
+                );
+
+                assert_eq!(applier.get_expected_sequence_id(), 2);
+                let status = sync_status.read();
+                assert_eq!(status.applied_seq_id, 1);
+                assert_eq!(status.primary_seq_id, 1);
+                assert_eq!(status.lag_entries, 0);
+            });
+        })
+        .join();
+
+        assert!(
+            result.is_ok(),
+            "notifier callback must not synchronously bridge the watch runtime"
+        );
     }
 
     #[tokio::test]
@@ -1219,7 +1347,6 @@ impl HotStandbyService {
                     if let Some(mut notifier) = store.create_change_notifier() {
                         let callback_applier = applier_clone.clone();
                         let callback_status = sync_status_ref.clone();
-                        let callback_store = store.clone();
                         let callback_state_machine = state_machine.clone();
                         let error_state_machine = state_machine.clone();
                         let error_status = sync_status_ref.clone();
@@ -1227,29 +1354,12 @@ impl HotStandbyService {
                         let start_result = notifier.start(
                             start_seq_id,
                             Box::new(move |entry| {
-                                let before_apply = callback_applier.get_expected_sequence_id();
-                                let entry_seq = entry.seq;
-                                callback_applier.apply_op_log_entries(&[entry]);
-                                let expected = callback_applier.get_expected_sequence_id();
-                                let applied = expected.saturating_sub(1);
-                                let primary =
-                                    observed_primary_sequence(callback_store.as_ref(), applied);
-                                let rejected_expected =
-                                    entry_seq == before_apply && expected == before_apply;
-                                if rejected_expected {
-                                    callback_state_machine.process_event(StandbyEvent::FatalError);
-                                }
-                                if let Some(status) = callback_status.upgrade() {
-                                    let mut st = status.write();
-                                    st.applied_seq_id = applied;
-                                    st.primary_seq_id = primary;
-                                    st.lag_entries = primary.saturating_sub(applied);
-                                    if rejected_expected {
-                                        st.state = StandbyState::Failed;
-                                        st.is_connected = false;
-                                        st.is_syncing = false;
-                                    }
-                                }
+                                apply_notifier_entry(
+                                    &callback_applier,
+                                    &callback_status,
+                                    &callback_state_machine,
+                                    entry,
+                                );
                             }),
                             Box::new(move |_err| {
                                 if !error_state_machine.is_in_state(StandbyState::Failed) {

@@ -348,9 +348,12 @@ mod tests {
     use super::{
         EtcdOpLogStore, block_on_runtime, current_thread_runtime_marker_for_test,
         decode_etcd_range_entry, parse_latest_sequence_value, parse_snapshot_sequence_value,
-        serialize_etcd_oplog_value, validate_buffer_producer_view, validate_buffer_sequence,
+        run_notifier_thread, serialize_etcd_oplog_value, validate_buffer_producer_view,
+        validate_buffer_sequence,
     };
     use crate::ha::OpLogRecord;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn inclusive_read_range_starts_at_requested_sequence() {
@@ -465,6 +468,20 @@ mod tests {
         let second_marker = current_thread_runtime_marker_for_test();
 
         assert_eq!(first_marker, second_marker);
+    }
+
+    #[test]
+    fn notifier_thread_unwind_marks_health_unhealthy() {
+        let healthy = Arc::new(AtomicBool::new(true));
+        let thread_health = healthy.clone();
+
+        let result = std::thread::spawn(move || {
+            run_notifier_thread(thread_health, || panic!("injected notifier panic"));
+        })
+        .join();
+
+        assert!(result.is_err());
+        assert!(!healthy.load(Ordering::Acquire));
     }
 }
 
@@ -708,6 +725,22 @@ impl EtcdOpLogChangeNotifier {
     }
 }
 
+fn run_notifier_thread<F>(healthy: std::sync::Arc<std::sync::atomic::AtomicBool>, watch: F)
+where
+    F: FnOnce(),
+{
+    struct HealthGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for HealthGuard {
+        fn drop(&mut self) {
+            self.0.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let _health_guard = HealthGuard(healthy);
+    watch();
+}
+
 impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
     fn start(
         &mut self,
@@ -723,16 +756,17 @@ impl OpLogChangeNotifier for EtcdOpLogChangeNotifier {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
         self.shutdown_tx = Some(shutdown_tx);
         self.thread = Some(std::thread::spawn(move || {
-            let health_for_watch = healthy.clone();
-            let _ = block_on_runtime(store.watch_entries_from_until_with_health(
-                start_seq_id,
-                ETCD_WATCH_SYNC_BATCH_SIZE,
-                shutdown_rx,
-                Some(health_for_watch),
-                move |entry| on_entry(entry),
-                move |err| on_error(err),
-            ));
-            healthy.store(false, std::sync::atomic::Ordering::Release);
+            run_notifier_thread(healthy.clone(), move || {
+                let health_for_watch = healthy.clone();
+                let _ = block_on_runtime(store.watch_entries_from_until_with_health(
+                    start_seq_id,
+                    ETCD_WATCH_SYNC_BATCH_SIZE,
+                    shutdown_rx,
+                    Some(health_for_watch),
+                    move |entry| on_entry(entry),
+                    move |err| on_error(err),
+                ));
+            });
         }));
         Ok(())
     }
