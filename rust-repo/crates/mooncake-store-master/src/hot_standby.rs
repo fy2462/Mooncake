@@ -113,6 +113,16 @@ fn apply_notifier_entry(
     }
 }
 
+fn make_notifier_entry_callback(
+    applier: Arc<OpLogApplier>,
+    sync_status: std::sync::Weak<parking_lot::RwLock<StandbySyncStatus>>,
+    state_machine: Arc<StandbyStateMachine>,
+) -> crate::oplog::OpLogEntryCallback {
+    Box::new(move |entry| {
+        apply_notifier_entry(&applier, &sync_status, &state_machine, entry);
+    })
+}
+
 impl Default for HotStandbyConfig {
     fn default() -> Self {
         Self {
@@ -150,10 +160,6 @@ mod tests {
         inner: InMemoryOpLog,
         remaining_failures: Arc<AtomicUsize>,
         read_attempts: Arc<AtomicUsize>,
-    }
-
-    struct SynchronousBridgeOpLog {
-        inner: InMemoryOpLog,
     }
 
     impl FlakyReadOpLog {
@@ -207,61 +213,6 @@ mod tests {
 
         fn max_sequence_id(&self) -> Result<u64, HaError> {
             self.inner.max_sequence_id()
-        }
-
-        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
-            self.inner.update_latest_sequence_id(sequence_id)
-        }
-
-        fn record_snapshot_sequence_id(
-            &mut self,
-            snapshot_id: &str,
-            sequence_id: u64,
-        ) -> Result<(), HaError> {
-            self.inner
-                .record_snapshot_sequence_id(snapshot_id, sequence_id)
-        }
-
-        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
-            self.inner.get_snapshot_sequence_id(snapshot_id)
-        }
-
-        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
-            self.inner.cleanup_before(before_sequence_id)
-        }
-
-        fn flush_durable(&mut self) -> Result<(), HaError> {
-            self.inner.flush_durable()
-        }
-
-        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
-            self.inner.poll_from(since_seq, max_count)
-        }
-    }
-
-    impl OpLogStore for SynchronousBridgeOpLog {
-        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
-            self.inner.append(entry)
-        }
-
-        fn read_since(
-            &self,
-            since_seq: u64,
-            max_count: usize,
-        ) -> Result<Vec<OpLogRecord>, HaError> {
-            self.inner.read_since(since_seq, max_count)
-        }
-
-        fn latest_sequence(&self) -> u64 {
-            self.inner.latest_sequence()
-        }
-
-        fn max_sequence_id(&self) -> Result<u64, HaError> {
-            let handle = tokio::runtime::Handle::try_current()
-                .expect("primary query must execute inside the watch runtime");
-            Ok(tokio::task::block_in_place(|| {
-                handle.block_on(async { self.inner.latest_sequence() })
-            }))
         }
 
         fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
@@ -416,23 +367,20 @@ mod tests {
                 .build()
                 .unwrap();
             runtime.block_on(async {
-                let applier = OpLogApplier::new(Arc::new(MasterState::empty()));
+                let applier = Arc::new(OpLogApplier::new(Arc::new(MasterState::empty())));
                 let sync_status = Arc::new(parking_lot::RwLock::new(StandbySyncStatus::default()));
-                let state_machine = StandbyStateMachine::new();
-                let mut store = SynchronousBridgeOpLog {
-                    inner: InMemoryOpLog::new(16),
-                };
-                store
-                    .inner
-                    .append_payload(9, r#"{"op":"remove","key":"default\u0000missing"}"#);
-                let entry = store.read_since(1, 1).unwrap().remove(0);
-
-                apply_notifier_entry(
-                    &applier,
-                    &Arc::downgrade(&sync_status),
-                    &state_machine,
-                    entry,
+                let state_machine = Arc::new(StandbyStateMachine::new());
+                let mut on_entry = make_notifier_entry_callback(
+                    applier.clone(),
+                    Arc::downgrade(&sync_status),
+                    state_machine,
                 );
+
+                on_entry(OpLogRecord {
+                    seq: 1,
+                    producer_view_version: 9,
+                    payload: r#"{"op":"remove","key":"default\u0000missing"}"#.to_string(),
+                });
 
                 assert_eq!(applier.get_expected_sequence_id(), 2);
                 let status = sync_status.read();
@@ -1351,16 +1299,14 @@ impl HotStandbyService {
                         let error_state_machine = state_machine.clone();
                         let error_status = sync_status_ref.clone();
                         let start_seq_id = applier_clone.get_expected_sequence_id();
+                        let on_entry = make_notifier_entry_callback(
+                            callback_applier,
+                            callback_status,
+                            callback_state_machine,
+                        );
                         let start_result = notifier.start(
                             start_seq_id,
-                            Box::new(move |entry| {
-                                apply_notifier_entry(
-                                    &callback_applier,
-                                    &callback_status,
-                                    &callback_state_machine,
-                                    entry,
-                                );
-                            }),
+                            on_entry,
                             Box::new(move |_err| {
                                 if !error_state_machine.is_in_state(StandbyState::Failed) {
                                     error_state_machine.process_event(StandbyEvent::WatchBroken);
