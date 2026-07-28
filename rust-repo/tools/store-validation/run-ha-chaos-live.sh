@@ -7,6 +7,7 @@ rust_root=$(cd "$script_dir/../.." && pwd)
 
 docker_cmd=${MOONCAKE_HA_DOCKER:-docker}
 cargo_cmd=${MOONCAKE_HA_CARGO:-cargo}
+python_cmd=${MOONCAKE_HA_PYTHON:-python3}
 etcd_image=${MOONCAKE_HA_ETCD_IMAGE:-quay.io/coreos/etcd:v3.5.0}
 seed=${MOONCAKE_HA_SEED:-0x4d4f4f4e48414348}
 run_id=${MOONCAKE_HA_RUN_ID:-"$(date -u +%Y%m%dT%H%M%SZ)-$$"}
@@ -40,18 +41,123 @@ validate_bounded_seconds() {
   fi
 }
 
+publish_failure_result() {
+  local stage=$1
+  local reason=$2
+  "$python_cmd" - "$result_path" "$seed" "$stage" "$reason" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+temporary = path.with_name(f".{path.name}.runner-{os.getpid()}")
+result = {
+    "schema_version": 1,
+    "status": "FAIL",
+    "seed": sys.argv[2],
+    "masters": [],
+    "scenarios": {
+        "small": {"status": "FAIL", "evidence": {}},
+        "large": {"status": "FAIL", "evidence": {}},
+    },
+    "first_failure": {"stage": sys.argv[3], "message": sys.argv[4]},
+}
+with temporary.open("x", encoding="utf-8") as output:
+    output.write(json.dumps(result, indent=2) + "\n")
+    output.flush()
+    os.fsync(output.fileno())
+os.replace(temporary, path)
+PY
+}
+
+invalidate_known_result() {
+  if [[ -n ${result_path:-} ]]; then
+    rm -f -- "$result_path" 2>/dev/null || true
+  elif [[ -n "$artifact_root" ]]; then
+    rm -f -- "$artifact_root/ha-chaos-result.json" 2>/dev/null || true
+  fi
+}
+
+preflight_on_exit() {
+  local exit_status=$?
+  trap - EXIT
+  if ((exit_status != 0)); then
+    if ((publication_available)); then
+      if ! publish_failure_result "$failure_stage" "$failure_reason"; then
+        invalidate_known_result
+      fi
+    else
+      invalidate_known_result
+    fi
+  fi
+  exit "$exit_status"
+}
+
 if [[ -z "$artifact_root" ]]; then
   echo 'MOONCAKE_HA_ARTIFACT_ROOT is required' >&2
   exit 2
 fi
+if ! mkdir -p "$artifact_root"; then
+  invalidate_known_result
+  exit 2
+fi
+if ! artifact_root=$(cd "$artifact_root" && pwd); then
+  invalidate_known_result
+  exit 2
+fi
+runner_log="$artifact_root/runner.log"
+result_path="$artifact_root/ha-chaos-result.json"
+master_bin="${CARGO_TARGET_DIR:-$rust_root/target}/debug/mooncake-master"
+first_status=0
+etcd_owned=0
+active_pid=""
+active_pgid=""
+failure_stage=runner_start
+failure_reason="HA chaos runner did not complete"
+publication_available=0
+
+trap preflight_on_exit EXIT
+
+failure_stage=runner_preflight_python
+failure_reason="configured Python command is unavailable: $python_cmd"
+if ! require_command "$python_cmd"; then
+  invalidate_known_result
+  exit 2
+fi
+publication_available=1
+
+# Atomically supersede stale state as soon as the result path and publisher are
+# usable. Every later preflight failure upgrades this marker to its exact stage.
+failure_stage=runner_start
+failure_reason="HA chaos runner did not complete"
+if ! publish_failure_result "$failure_stage" "$failure_reason"; then
+  invalidate_known_result
+  exit 2
+fi
+
+failure_stage=runner_preflight_log
+failure_reason="failed to initialize HA chaos runner log"
+if ! : >>"$runner_log"; then
+  exit 2
+fi
+
+failure_stage=runner_preflight_ld_library
+failure_reason="LD_LIBRARY_PATH is required for the native Transfer Engine libraries"
 if [[ -z ${LD_LIBRARY_PATH:-} ]]; then
   echo 'LD_LIBRARY_PATH is required for the native Transfer Engine libraries' >&2
   exit 2
 fi
+
+failure_stage=runner_preflight_run_id
+failure_reason="invalid MOONCAKE_HA_RUN_ID: $run_id"
 if ! validate_run_id; then
   echo "invalid MOONCAKE_HA_RUN_ID: $run_id" >&2
   exit 2
 fi
+
+failure_stage=runner_preflight_timing
+failure_reason="invalid HA chaos timeout configuration"
 if ! validate_bounded_seconds \
   MOONCAKE_HA_TEST_TIMEOUT_SECONDS "$test_timeout_seconds" "$max_test_timeout_seconds"; then
   exit 2
@@ -61,28 +167,19 @@ if ! validate_bounded_seconds \
   "$max_termination_grace_seconds"; then
   exit 2
 fi
+
+failure_stage=runner_preflight_command
+failure_reason="required HA chaos runner command is unavailable"
 if ! require_command "$docker_cmd" || ! require_command "$cargo_cmd" || \
-  ! require_command python3 || ! require_command setsid; then
+  ! require_command setsid || ! require_command tee; then
   exit 2
 fi
-if ! mkdir -p "$artifact_root"; then
-  exit 2
-fi
-artifact_root=$(cd "$artifact_root" && pwd)
-runner_log="$artifact_root/runner.log"
-result_path="$artifact_root/ha-chaos-result.json"
+
 etcd_container="mc-store-ha-chaos-$run_id"
-master_bin="${CARGO_TARGET_DIR:-$rust_root/target}/debug/mooncake-master"
-first_status=0
-etcd_owned=0
-active_pid=""
-active_pgid=""
 timeout_marker="$artifact_root/.cargo-test-timeout-$run_id"
 watchdog_error="$artifact_root/.cargo-test-watchdog-error-$run_id"
 cargo_status_path="$artifact_root/.cargo-test-status-$run_id"
 wrapper_ready_path="$artifact_root/.cargo-test-wrapper-ready-$run_id"
-failure_stage=runner_start
-failure_reason="HA chaos runner did not complete"
 
 exec > >(tee -a "$runner_log") 2>&1
 
@@ -112,38 +209,8 @@ terminate_active_group() {
   active_pgid=""
 }
 
-publish_failure_result() {
-  local stage=$1
-  local reason=$2
-  python3 - "$result_path" "$seed" "$stage" "$reason" <<'PY'
-import json
-import os
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-temporary = path.with_name(f".{path.name}.runner-{os.getpid()}")
-result = {
-    "schema_version": 1,
-    "status": "FAIL",
-    "seed": sys.argv[2],
-    "masters": [],
-    "scenarios": {
-        "small": {"status": "FAIL", "evidence": {}},
-        "large": {"status": "FAIL", "evidence": {}},
-    },
-    "first_failure": {"stage": sys.argv[3], "message": sys.argv[4]},
-}
-with temporary.open("x", encoding="utf-8") as output:
-    output.write(json.dumps(result, indent=2) + "\n")
-    output.flush()
-    os.fsync(output.fileno())
-os.replace(temporary, path)
-PY
-}
-
 has_valid_failure_result() {
-  python3 - "$result_path" <<'PY'
+  "$python_cmd" - "$result_path" <<'PY'
 import json
 import pathlib
 import sys
@@ -236,7 +303,7 @@ wait_for_etcd() {
 }
 
 validate_result() {
-  python3 - "$result_path" "$seed" <<'PY'
+  "$python_cmd" - "$result_path" "$seed" <<'PY'
 import json
 import pathlib
 import sys
@@ -344,13 +411,6 @@ trap on_exit EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
-# Atomically supersede any stale result before Docker, Cargo, or other setup
-# can fail. A later Rust-generated PASS/FAIL replaces this current-run marker.
-if ! publish_failure_result runner_start "$failure_reason"; then
-  first_status=2
-  exit 2
-fi
-
 cd "$rust_root"
 failure_stage=runner_etcd_start
 failure_reason="failed to start the owned etcd container"
@@ -418,7 +478,7 @@ setsid env \
   MOONCAKE_HA_RESULT="$result_path" \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_SEED="$seed" \
-  python3 - "$test_timeout_seconds" "$termination_grace_seconds" \
+  "$python_cmd" - "$test_timeout_seconds" "$termination_grace_seconds" \
   "$timeout_marker" "$watchdog_error" "$cargo_status_path" \
   "$wrapper_ready_path" "$cargo_cmd" test -p mooncake-store-client \
   --features link-native --test test_ha_chaos_live <<'PY' &

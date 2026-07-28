@@ -150,10 +150,15 @@ run_runner() {
   local test_timeout_seconds=${5:-30}
   local termination_grace_seconds=${6:-1}
   local pause_before_cargo=${7:-0}
+  local run_identifier=${8:-contract}
+  local docker_command=${9:-$fake_bin/docker}
+  local cargo_command=${10:-$fake_bin/cargo}
+  local python_command=${11:-python3}
   mkdir -p "$artifact_root"
   MOONCAKE_HA_CALLS="$calls" \
-  MOONCAKE_HA_DOCKER="$fake_bin/docker" \
-  MOONCAKE_HA_CARGO="$fake_bin/cargo" \
+  MOONCAKE_HA_DOCKER="$docker_command" \
+  MOONCAKE_HA_CARGO="$cargo_command" \
+  MOONCAKE_HA_PYTHON="$python_command" \
   MOONCAKE_HA_DOCKER_MODE="$docker_mode" \
   MOONCAKE_HA_CARGO_MODE="$cargo_mode" \
   MOONCAKE_HA_FAST_SLEEP="$fast_sleep" \
@@ -162,7 +167,7 @@ run_runner() {
   MOONCAKE_HA_TEST_TIMEOUT_SECONDS="$test_timeout_seconds" \
   MOONCAKE_HA_TERMINATION_GRACE_SECONDS="$termination_grace_seconds" \
   MOONCAKE_HA_TEST_PAUSE_BEFORE_CARGO="$pause_before_cargo" \
-  MOONCAKE_HA_RUN_ID=contract \
+  MOONCAKE_HA_RUN_ID="$run_identifier" \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_ETCD_IMAGE=quay.io/coreos/etcd:v3.5.0 \
   MOONCAKE_HA_SEED=0x4d4f4f4e48414348 \
@@ -170,6 +175,19 @@ run_runner() {
   RUSTFLAGS="-L native=$temp_dir/native" \
   PATH="$fake_bin:$PATH" \
   bash "$runner"
+}
+
+write_stale_pass() {
+  local root=$1
+  mkdir -p "$root"
+  printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"stale"}' >"$root/ha-chaos-result.json"
+}
+
+expect_runner_fail_result() {
+  local root=$1
+  local stage=$2
+  test "$(jq -r .status "$root/ha-chaos-result.json")" = FAIL
+  test "$(jq -r .first_failure.stage "$root/ha-chaos-result.json")" = "$stage"
 }
 
 expect_failure() {
@@ -267,25 +285,93 @@ test "$(jq -r .status "$health_failure_root/ha-chaos-result.json")" = FAIL
 test "$(jq -r .first_failure.stage "$health_failure_root/ha-chaos-result.json")" = runner_etcd_health
 
 : >"$calls"
-expect_failure env -u LD_LIBRARY_PATH \
+expect_status 2 env \
   MOONCAKE_HA_CALLS="$calls" \
   MOONCAKE_HA_DOCKER="$fake_bin/docker" \
   MOONCAKE_HA_CARGO="$fake_bin/cargo" \
+  MOONCAKE_HA_PYTHON=python3 \
   MOONCAKE_HA_RUN_ID=contract \
-  MOONCAKE_HA_ARTIFACT_ROOT="$temp_dir/missing-library-path" \
+  MOONCAKE_HA_ARTIFACT_ROOT= \
+  LD_LIBRARY_PATH="$temp_dir/native" \
   bash "$runner"
 [[ ! -s "$calls" ]]
+
+: >"$calls"
+unusable_artifact_root="$temp_dir/unusable-artifact-root"
+printf '%s\n' 'not-a-directory' >"$unusable_artifact_root"
+expect_status 2 env \
+  MOONCAKE_HA_CALLS="$calls" \
+  MOONCAKE_HA_DOCKER="$fake_bin/docker" \
+  MOONCAKE_HA_CARGO="$fake_bin/cargo" \
+  MOONCAKE_HA_PYTHON=python3 \
+  MOONCAKE_HA_RUN_ID=contract \
+  MOONCAKE_HA_ARTIFACT_ROOT="$unusable_artifact_root" \
+  LD_LIBRARY_PATH="$temp_dir/native" \
+  bash "$runner"
+[[ ! -s "$calls" ]]
+test "$(<"$unusable_artifact_root")" = not-a-directory
+
+: >"$calls"
+missing_library_root="$temp_dir/missing-library-path"
+write_stale_pass "$missing_library_root"
+expect_status 2 env -u LD_LIBRARY_PATH \
+  MOONCAKE_HA_CALLS="$calls" \
+  MOONCAKE_HA_DOCKER="$fake_bin/docker" \
+  MOONCAKE_HA_CARGO="$fake_bin/cargo" \
+  MOONCAKE_HA_PYTHON=python3 \
+  MOONCAKE_HA_RUN_ID=contract \
+  MOONCAKE_HA_ARTIFACT_ROOT="$missing_library_root" \
+  bash "$runner"
+[[ ! -s "$calls" ]]
+expect_runner_fail_result "$missing_library_root" runner_preflight_ld_library
 
 for timing_case in '86401 1' '30 301' '999999999999999999999999999999 1'; do
   : >"$calls"
   read -r invalid_timeout invalid_grace <<<"$timing_case"
-  expect_status 2 run_runner "$temp_dir/timing-$invalid_timeout-$invalid_grace" \
+  timing_root="$temp_dir/timing-$invalid_timeout-$invalid_grace"
+  write_stale_pass "$timing_root"
+  expect_status 2 run_runner "$timing_root" \
     success pass 0 "$invalid_timeout" "$invalid_grace"
   if [[ -s "$calls" ]]; then
     echo "invalid timing values caused Docker/Cargo side effects: $timing_case" >&2
     exit 1
   fi
+  expect_runner_fail_result "$timing_root" runner_preflight_timing
 done
+
+: >"$calls"
+invalid_run_id_root="$temp_dir/invalid-run-id"
+write_stale_pass "$invalid_run_id_root"
+expect_status 2 run_runner "$invalid_run_id_root" success pass 0 30 1 0 '../invalid'
+[[ ! -s "$calls" ]]
+expect_runner_fail_result "$invalid_run_id_root" runner_preflight_run_id
+
+for missing_command in docker cargo; do
+  : >"$calls"
+  missing_command_root="$temp_dir/missing-$missing_command"
+  write_stale_pass "$missing_command_root"
+  docker_command="$fake_bin/docker"
+  cargo_command="$fake_bin/cargo"
+  if [[ $missing_command == docker ]]; then
+    docker_command="$temp_dir/bin/does-not-exist-docker"
+  else
+    cargo_command="$temp_dir/bin/does-not-exist-cargo"
+  fi
+  expect_status 2 run_runner "$missing_command_root" success pass 0 30 1 0 contract \
+    "$docker_command" "$cargo_command"
+  [[ ! -s "$calls" ]]
+  expect_runner_fail_result "$missing_command_root" runner_preflight_command
+done
+
+: >"$calls"
+missing_python_root="$temp_dir/missing-python"
+write_stale_pass "$missing_python_root"
+expect_status 2 run_runner "$missing_python_root" success pass 0 30 1 0 contract \
+  "$fake_bin/docker" "$fake_bin/cargo" "$temp_dir/bin/does-not-exist-python"
+[[ ! -s "$calls" ]]
+if [[ -e "$missing_python_root/ha-chaos-result.json" ]]; then
+  test "$(jq -r .status "$missing_python_root/ha-chaos-result.json")" != PASS
+fi
 
 for cargo_mode in malformed incomplete fail; do
   : >"$calls"
