@@ -211,6 +211,8 @@ fn complete_failed_result() -> GateResult {
 }
 
 const CANONICAL_ROUNDS: usize = 4;
+const CLIENT_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+const CLIENT_LOCAL_BUFFER_SIZE: u64 = 8 * 1024 * 1024;
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 
@@ -990,15 +992,531 @@ async fn wait_for_stable_leader_without_clients(
     wait_for_stable_leader(&coordinator, cluster, &mut [], deadline).await
 }
 
-async fn run_scenario(
-    kind: ScenarioKind,
+async fn create_clients(
     _config: &GateConfig,
-    _cluster: &mut MasterCluster,
-    _schedule: &ChaosSchedule,
+    masters: &[String],
+    count: usize,
+    segment_size: u64,
+) -> Result<Vec<MooncakeClient>, String> {
+    let mut clients = Vec::with_capacity(count);
+    for client_index in 0..count {
+        let reservation = TcpListener::bind(("127.0.0.1", 0))
+            .map_err(|error| format!("reserve TCP endpoint for client {client_index}: {error}"))?;
+        let local_host = reservation
+            .local_addr()
+            .map_err(|error| format!("read TCP endpoint for client {client_index}: {error}"))?
+            .to_string();
+        drop(reservation);
+
+        let client = tokio::time::timeout(
+            Duration::from_secs(30),
+            MooncakeClient::create_with_master_candidates(
+                masters,
+                "P2PHANDSHAKE",
+                &local_host,
+                "tcp",
+                "",
+                segment_size,
+                CLIENT_LOCAL_BUFFER_SIZE,
+            ),
+        )
+        .await
+        .map_err(|_| format!("client {client_index} creation timed out"))?
+        .map_err(|error| format!("create TCP client {client_index}: {error}"))?;
+        clients.push(client);
+    }
+    Ok(clients)
+}
+
+async fn recover_clients(clients: &mut [MooncakeClient], view: &MasterView) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    for (client_index, client) in clients.iter_mut().enumerate() {
+        loop {
+            let switch_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5));
+            if switch_timeout.is_zero() {
+                return Err(format!(
+                    "client recovery deadline expired before switching client {client_index}"
+                ));
+            }
+            tokio::time::timeout(switch_timeout, client.switch_master(&view.leader_address))
+                .await
+                .map_err(|_| {
+                    format!(
+                        "client {client_index} switch to leader {} timed out",
+                        view.leader_address
+                    )
+                })?
+                .map_err(|error| {
+                    format!(
+                        "client {client_index} switch to leader {} failed: {error}",
+                        view.leader_address
+                    )
+                })?;
+
+            let health_timeout = deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_secs(5));
+            if health_timeout.is_zero() {
+                return Err(format!(
+                    "client {client_index} remount deadline expired on leader {}",
+                    view.leader_address
+                ));
+            }
+            match tokio::time::timeout(health_timeout, client.health_check()).await {
+                Ok(Ok(())) if client.current_master_addr() == view.leader_address => break,
+                Ok(Ok(())) | Ok(Err(_)) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Err(_) => {
+                    // Cancelling health_check can interrupt remount_all after it
+                    // marks the remount in progress. Do not reuse that client and
+                    // accidentally treat the next no-op remount as completion.
+                    return Err(format!(
+                        "client {client_index} health/remount timed out on leader {}",
+                        view.leader_address
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scenario_failure(stage: &str, message: impl Into<String>) -> FailureRecord {
+    FailureRecord {
+        stage: stage.into(),
+        message: message.into(),
+    }
+}
+
+fn advance_seeded_index(state: &mut u64, upper_bound: usize) -> usize {
+    *state = state
+        .wrapping_mul(LCG_MULTIPLIER)
+        .wrapping_add(LCG_INCREMENT);
+    ((*state >> 32) as usize) % upper_bound
+}
+
+async fn run_small_scenario(
+    config: &GateConfig,
+    cluster: &mut MasterCluster,
+    clients: &mut [MooncakeClient],
+    schedule: &ChaosSchedule,
 ) -> Result<ScenarioResult, FailureRecord> {
-    Err(FailureRecord {
-        stage: "scenario".into(),
-        message: format!("{kind:?} scenario has not been implemented"),
+    const KEY_COUNT: usize = 100;
+    const UNSTABLE_ATTEMPTS_PER_ROUND: usize = 6;
+
+    if clients.len() < 3 {
+        return Err(scenario_failure(
+            "setup",
+            format!(
+                "small scenario requires at least three clients, got {}",
+                clients.len()
+            ),
+        ));
+    }
+    if schedule.rounds.len() < CANONICAL_ROUNDS {
+        return Err(scenario_failure(
+            "setup",
+            format!(
+                "small scenario requires at least {CANONICAL_ROUNDS} rounds, got {}",
+                schedule.rounds.len()
+            ),
+        ));
+    }
+
+    let keys = (0..KEY_COUNT)
+        .map(|key_index| format!("ha-small-{:016x}-{key_index}", config.seed))
+        .collect::<Vec<_>>();
+    let expected_values = (0..KEY_COUNT)
+        .map(|key_index| format!("small:0x{:016x}:{key_index}", config.seed).into_bytes())
+        .collect::<Vec<_>>();
+    let coordinator = tokio::time::timeout(
+        Duration::from_secs(10),
+        LeaderCoordinator::new_etcd(
+            vec![config.etcd_endpoint.clone()],
+            &cluster.cluster_namespace,
+        ),
+    )
+    .await
+    .map_err(|_| scenario_failure("setup", "timed out creating small-scenario coordinator"))?
+    .map_err(|error| {
+        scenario_failure(
+            "setup",
+            format!("create small-scenario coordinator: {error}"),
+        )
+    })?;
+
+    let mut evidence = ScenarioEvidence::default();
+    let mut rng = config.seed;
+    for (round_index, round) in schedule.rounds.iter().enumerate() {
+        for &victim in &round.stop {
+            cluster.stop(victim).await.map_err(|error| {
+                scenario_failure(
+                    "stop",
+                    format!("round {round_index} failed to stop Master {victim}: {error}"),
+                )
+            })?;
+            evidence.crashes += 1;
+            evidence.stopped_indices.insert(victim);
+        }
+        if cluster.running_indices().is_empty() {
+            return Err(scenario_failure(
+                "stop",
+                format!("round {round_index} stopped every Master"),
+            ));
+        }
+
+        for _ in 0..UNSTABLE_ATTEMPTS_PER_ROUND {
+            let key_index = advance_seeded_index(&mut rng, KEY_COUNT);
+            let put_client = advance_seeded_index(&mut rng, clients.len());
+            if matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    clients[put_client].put(&keys[key_index], &expected_values[key_index], None,),
+                )
+                .await,
+                Ok(Ok(()))
+            ) {
+                evidence.successful_unstable_operations += 1;
+            }
+
+            let mut get_client = advance_seeded_index(&mut rng, clients.len());
+            if get_client == put_client {
+                get_client = (get_client + 1) % clients.len();
+            }
+            if let Ok(Ok(actual)) = tokio::time::timeout(
+                Duration::from_secs(1),
+                clients[get_client].get(&keys[key_index]),
+            )
+            .await
+            {
+                evidence.successful_unstable_operations += 1;
+                evidence.byte_comparisons += 1;
+                if actual != expected_values[key_index] {
+                    return Err(scenario_failure(
+                        "unstable-read",
+                        format!(
+                            "round {round_index} client {get_client} returned wrong bytes for {}",
+                            keys[key_index]
+                        ),
+                    ));
+                }
+            }
+        }
+
+        let stable_view = wait_for_stable_leader(
+            &coordinator,
+            cluster,
+            &mut [],
+            Instant::now() + Duration::from_secs(45),
+        )
+        .await
+        .map_err(|error| {
+            scenario_failure(
+                "stabilize",
+                format!("round {round_index} failed to stabilize after crashes: {error}"),
+            )
+        })?;
+        evidence.leader_view_versions.push(stable_view.view_version);
+        recover_clients(clients, &stable_view)
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "recover",
+                    format!("round {round_index} failed to recover clients: {error}"),
+                )
+            })?;
+
+        let mut stable_put_clients = Vec::with_capacity(KEY_COUNT);
+        for key_index in 0..KEY_COUNT {
+            let put_client = advance_seeded_index(&mut rng, clients.len());
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                clients[put_client].put(&keys[key_index], &expected_values[key_index], None),
+            )
+            .await
+            .map_err(|_| {
+                scenario_failure(
+                    "stable-put",
+                    format!(
+                        "round {round_index} client {put_client} timed out putting {}",
+                        keys[key_index]
+                    ),
+                )
+            })?
+            .map_err(|error| {
+                scenario_failure(
+                    "stable-put",
+                    format!(
+                        "round {round_index} client {put_client} failed putting {}: {error}",
+                        keys[key_index]
+                    ),
+                )
+            })?;
+            stable_put_clients.push(put_client);
+        }
+
+        for key_index in 0..KEY_COUNT {
+            let put_client = stable_put_clients[key_index];
+            let read_offset = 1 + advance_seeded_index(&mut rng, clients.len() - 1);
+            let read_client = (put_client + read_offset) % clients.len();
+            let actual = tokio::time::timeout(
+                Duration::from_secs(10),
+                clients[read_client].get(&keys[key_index]),
+            )
+            .await
+            .map_err(|_| {
+                scenario_failure(
+                    "stable-read",
+                    format!(
+                        "round {round_index} client {read_client} timed out reading {}",
+                        keys[key_index]
+                    ),
+                )
+            })?
+            .map_err(|error| {
+                scenario_failure(
+                    "stable-read",
+                    format!(
+                        "round {round_index} client {read_client} failed reading {}: {error}",
+                        keys[key_index]
+                    ),
+                )
+            })?;
+            evidence.byte_comparisons += 1;
+            if actual != expected_values[key_index] {
+                return Err(scenario_failure(
+                    "stable-read",
+                    format!(
+                        "round {round_index} client {read_client} returned wrong bytes for {}",
+                        keys[key_index]
+                    ),
+                ));
+            }
+            evidence.stable_exact_reads += 1;
+        }
+
+        for &victim in &round.restart {
+            cluster.restart(victim).await.map_err(|error| {
+                scenario_failure(
+                    "restart",
+                    format!("round {round_index} failed to restart Master {victim}: {error}"),
+                )
+            })?;
+            evidence.restarts += 1;
+            evidence.restarted_indices.insert(victim);
+        }
+        let restarted_view = wait_for_stable_leader(
+            &coordinator,
+            cluster,
+            &mut [],
+            Instant::now() + Duration::from_secs(45),
+        )
+        .await
+        .map_err(|error| {
+            scenario_failure(
+                "restart",
+                format!("round {round_index} failed to stabilize after restart: {error}"),
+            )
+        })?;
+        evidence
+            .leader_view_versions
+            .push(restarted_view.view_version);
+        recover_clients(clients, &restarted_view)
+            .await
+            .map_err(|error| {
+                scenario_failure(
+                    "recover",
+                    format!("round {round_index} failed to recover clients after restart: {error}"),
+                )
+            })?;
+    }
+
+    let all_indices = BTreeSet::from([0, 1, 2]);
+    if evidence.successful_unstable_operations == 0 {
+        return Err(scenario_failure(
+            "evidence",
+            "small scenario produced no successful unstable operations",
+        ));
+    }
+    let minimum_exact_reads = (KEY_COUNT * schedule.rounds.len()) as u64;
+    if evidence.stable_exact_reads < minimum_exact_reads {
+        return Err(scenario_failure(
+            "evidence",
+            format!(
+                "small scenario recorded {} stable exact reads, expected at least {minimum_exact_reads}",
+                evidence.stable_exact_reads
+            ),
+        ));
+    }
+    if evidence.stopped_indices != all_indices || evidence.restarted_indices != all_indices {
+        return Err(scenario_failure(
+            "evidence",
+            format!(
+                "small scenario victim coverage mismatch: stopped={:?}, restarted={:?}",
+                evidence.stopped_indices, evidence.restarted_indices
+            ),
+        ));
+    }
+
+    Ok(ScenarioResult {
+        status: ResultStatus::Pass,
+        evidence,
+    })
+}
+
+fn publish_failed_gate_result(
+    config: &GateConfig,
+    cluster: &MasterCluster,
+    scenarios: BTreeMap<ScenarioKind, ScenarioResult>,
+    failure: FailureRecord,
+) -> Result<(), String> {
+    let mut result = GateResult::failed(
+        config.seed,
+        config.etcd_endpoint.clone(),
+        config.cluster_namespace.clone(),
+        cluster.addresses().into_iter().collect(),
+        scenarios,
+        failure,
+    );
+    result.master_logs = cluster
+        .slots
+        .iter()
+        .map(|slot| slot.log_path.display().to_string())
+        .collect();
+    result.write_atomic(&config.result_path)
+}
+
+struct RemountCheckpoint {
+    clients: Vec<MooncakeClient>,
+    initial_view: MasterView,
+    failover_view: MasterView,
+    restarted_index: usize,
+}
+
+async fn run_remount_checkpoint(
+    config: &GateConfig,
+    cluster: &mut MasterCluster,
+) -> Result<RemountCheckpoint, FailureRecord> {
+    let running = cluster.running_indices();
+    if running != BTreeSet::from([0, 1, 2]) {
+        return Err(scenario_failure(
+            "remount-setup",
+            format!("expected three running Masters, got {running:?}"),
+        ));
+    }
+    let initial_view = wait_for_stable_leader_without_clients(config, cluster)
+        .await
+        .map_err(|error| scenario_failure("remount-setup", error))?;
+    if !cluster.addresses().contains(&initial_view.leader_address) {
+        return Err(scenario_failure(
+            "remount-setup",
+            format!(
+                "initial leader {} is not one of the three Masters",
+                initial_view.leader_address
+            ),
+        ));
+    }
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+    let mut clients = create_clients(config, &masters, 3, CLIENT_SEGMENT_SIZE)
+        .await
+        .map_err(|error| scenario_failure("remount-setup", error))?;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        clients[0].put("ha-small-bootstrap", b"bootstrap-value", None),
+    )
+    .await
+    .map_err(|_| scenario_failure("remount-bootstrap-put", "bootstrap put timed out"))?
+    .map_err(|error| {
+        scenario_failure(
+            "remount-bootstrap-put",
+            format!("bootstrap put failed: {error}"),
+        )
+    })?;
+
+    let restarted_index = cluster
+        .index_for_address(&initial_view.leader_address)
+        .ok_or_else(|| {
+            scenario_failure(
+                "remount-failover",
+                format!(
+                    "cannot locate initial leader {}",
+                    initial_view.leader_address
+                ),
+            )
+        })?;
+    cluster.stop(restarted_index).await.map_err(|error| {
+        scenario_failure(
+            "remount-failover",
+            format!("stop initial leader {restarted_index}: {error}"),
+        )
+    })?;
+    let failover_view = wait_for_stable_leader_without_clients(config, cluster)
+        .await
+        .map_err(|error| scenario_failure("remount-failover", error))?;
+    if failover_view.view_version == initial_view.view_version
+        || failover_view.leader_address == initial_view.leader_address
+    {
+        return Err(scenario_failure(
+            "remount-failover",
+            format!("leader did not change: initial={initial_view:?}, failover={failover_view:?}"),
+        ));
+    }
+    recover_clients(&mut clients, &failover_view)
+        .await
+        .map_err(|error| scenario_failure("remount-recover", error))?;
+    let bootstrap = tokio::time::timeout(
+        Duration::from_secs(15),
+        clients[2].get("ha-small-bootstrap"),
+    )
+    .await
+    .map_err(|_| scenario_failure("remount-bootstrap-read", "bootstrap read timed out"))?
+    .map_err(|error| {
+        scenario_failure(
+            "remount-bootstrap-read",
+            format!("bootstrap read failed: {error}"),
+        )
+    })?;
+    if bootstrap != b"bootstrap-value" {
+        return Err(scenario_failure(
+            "remount-bootstrap-read",
+            format!("bootstrap byte mismatch: got {bootstrap:?}"),
+        ));
+    }
+
+    cluster.restart(restarted_index).await.map_err(|error| {
+        scenario_failure(
+            "remount-restart",
+            format!("restart initial leader {restarted_index}: {error}"),
+        )
+    })?;
+    let running = cluster.running_indices();
+    if running != BTreeSet::from([0, 1, 2]) {
+        return Err(scenario_failure(
+            "remount-restart",
+            format!("expected three running Masters after restart, got {running:?}"),
+        ));
+    }
+    let restored_view = wait_for_stable_leader_without_clients(config, cluster)
+        .await
+        .map_err(|error| scenario_failure("remount-restart", error))?;
+    recover_clients(&mut clients, &restored_view)
+        .await
+        .map_err(|error| scenario_failure("remount-recover", error))?;
+
+    Ok(RemountCheckpoint {
+        clients,
+        initial_view,
+        failover_view,
+        restarted_index,
     })
 }
 
@@ -1012,20 +1530,27 @@ async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
     let mut cluster = MasterCluster::start(&config)
         .await
         .expect("start three Masters");
-    assert_eq!(cluster.running_indices(), BTreeSet::from([0, 1, 2]));
-    let view = wait_for_stable_leader_without_clients(&config, &cluster)
-        .await
-        .unwrap();
-    assert!(cluster.addresses().contains(&view.leader_address));
-    let leader = cluster.index_for_address(&view.leader_address).unwrap();
-    cluster.stop(leader).await.unwrap();
-    let next = wait_for_stable_leader_without_clients(&config, &cluster)
-        .await
-        .unwrap();
-    assert_ne!(next.view_version, view.view_version);
-    assert_ne!(next.leader_address, view.leader_address);
-    cluster.restart(leader).await.unwrap();
-    assert_eq!(cluster.running_indices(), BTreeSet::from([0, 1, 2]));
+    let checkpoint = match run_remount_checkpoint(&config, &mut cluster).await {
+        Ok(checkpoint) => checkpoint,
+        Err(failure) => {
+            let publication = publish_failed_gate_result(
+                &config,
+                &cluster,
+                complete_scenarios(ResultStatus::Fail),
+                failure.clone(),
+            );
+            panic!(
+                "remount checkpoint failed at {}: {}; result publication: {publication:?}",
+                failure.stage, failure.message
+            );
+        }
+    };
+    let RemountCheckpoint {
+        mut clients,
+        initial_view: view,
+        failover_view: next,
+        restarted_index: leader,
+    } = checkpoint;
 
     eprintln!(
         "PASS lifecycle checkpoint: leader {} view {} failed over to {} view {}; restarted slot {}",
@@ -1053,23 +1578,49 @@ async fn three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes() {
         .expect("serialize lifecycle checkpoint"),
     )
     .expect("write lifecycle checkpoint");
-    let mut result = GateResult::failed(
-        config.seed,
-        config.etcd_endpoint.clone(),
-        config.cluster_namespace.clone(),
-        cluster.addresses().into_iter().collect(),
-        complete_scenarios(ResultStatus::Fail),
-        FailureRecord {
-            stage: "scenario".into(),
-            message: "small and large HA chaos workloads are not implemented yet".into(),
-        },
-    );
-    result.master_logs = cluster
-        .slots
-        .iter()
-        .map(|slot| slot.log_path.display().to_string())
-        .collect();
-    result
-        .write_atomic(&config.result_path)
-        .expect("publish lifecycle checkpoint result");
+    let remount_checkpoint_path = config.artifact_root.join("remount-checkpoint.json");
+    std::fs::write(
+        &remount_checkpoint_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "status": "PASS",
+            "key": "ha-small-bootstrap",
+            "value": "bootstrap-value",
+            "client_count": clients.len(),
+            "segment_size": CLIENT_SEGMENT_SIZE,
+            "initial_view_version": view.view_version,
+            "failover_view_version": next.view_version,
+            "recovered_leader": next.leader_address,
+            "read_client_index": 2,
+        }))
+        .expect("serialize remount checkpoint"),
+    )
+    .expect("write remount checkpoint");
+
+    let schedule = ChaosSchedule::new(config.seed, config.rounds).expect("valid chaos schedule");
+    let mut scenarios = complete_scenarios(ResultStatus::Fail);
+    let small_result =
+        match run_small_scenario(&config, &mut cluster, &mut clients, &schedule).await {
+            Ok(result) => result,
+            Err(failure) => {
+                publish_failed_gate_result(&config, &cluster, scenarios, failure.clone())
+                    .expect("publish failed small-scenario result");
+                panic!(
+                    "small HA chaos failed at {}: {}",
+                    failure.stage, failure.message
+                );
+            }
+        };
+    std::fs::write(
+        config.artifact_root.join("small-checkpoint.json"),
+        serde_json::to_vec_pretty(&small_result).expect("serialize small checkpoint"),
+    )
+    .expect("write small checkpoint");
+    scenarios.insert(ScenarioKind::Small, small_result);
+    publish_failed_gate_result(
+        &config,
+        &cluster,
+        scenarios,
+        scenario_failure("scenario", "large HA chaos workload is not implemented yet"),
+    )
+    .expect("publish small-scenario checkpoint result");
 }
