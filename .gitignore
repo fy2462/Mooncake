@@ -219,3 +219,6 @@ core_*
 # MacOS
 .DS_Store
 .envrc
+
+# Agent-isolated development worktrees
+.worktrees/
