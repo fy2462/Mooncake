@@ -4173,7 +4173,7 @@ mod snapshot_restore_tests {
             Some(restored.size)
         );
 
-        let mut manager = crate::oplog::OpLogManager::new(None, 0);
+        let manager = crate::oplog::OpLogManager::new(None, 0);
         manager
             .record_object_image_durable(&scoped_key, &restored)
             .expect("in-place Upsert image must satisfy durable quota validation");

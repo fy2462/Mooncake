@@ -355,7 +355,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let writer = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
         let reader = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
-        let mut writer = OpLogManager::new(Some(Box::new(writer)), 1);
+        let writer = OpLogManager::new(Some(Box::new(writer)), 1);
         let state = Arc::new(MasterState::empty());
         let client_id = Uuid::new_v4();
         let segment = Segment {

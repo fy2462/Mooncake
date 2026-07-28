@@ -2567,7 +2567,7 @@ mod tests {
             state.objects.insert(key.clone(), object);
         }
 
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_lease_refresh_batch_durable(&[
@@ -2589,7 +2589,7 @@ mod tests {
                 },
             ])
             .unwrap();
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
         let applier = OpLogApplier::new(state.clone());
 
         assert_eq!(applier.apply_op_log_entries(&records), 1);
@@ -2716,7 +2716,7 @@ mod tests {
             reserved_quota_charge_bytes: u64::MAX,
         };
 
-        let mut producer =
+        let producer =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         assert!(
             producer
@@ -2732,7 +2732,7 @@ mod tests {
         producer
             .record_object_image_durable(&key, &encodable_object)
             .unwrap();
-        let object_record = producer.store().unwrap().read_since(1, 1).unwrap();
+        let object_record = producer.read_since(1, 1).unwrap();
         let mut object_payload = decode_record_payload_value(&object_record[0].payload).unwrap();
         object_payload["object"]["replicas"] = serde_json::to_value(&object.replicas).unwrap();
         let payload = serde_json::json!({
@@ -2846,12 +2846,12 @@ mod tests {
             existing_move_target: None,
             reserved_quota_charge_bytes: 256,
         };
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_replication_start_durable(&key, &object, &task)
             .unwrap();
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
 
         assert_eq!(applier.apply_op_log_entries(&records), 1);
         let replayed = state.objects.get(&key).unwrap();
@@ -2892,7 +2892,7 @@ mod tests {
         manager
             .record_object_image_durable(&key, &completed)
             .unwrap();
-        let completion = manager.store().unwrap().read_since(2, 1).unwrap();
+        let completion = manager.read_since(2, 1).unwrap();
         assert_eq!(applier.apply_op_log_entries(&completion), 1);
         assert!(!state.replication_tasks.contains_key(&key));
         let quota = state.tenant_quotas.read().get_snapshot(&tenant_id).unwrap();
@@ -2959,12 +2959,12 @@ mod tests {
             existing_move_target: Some(target),
             reserved_quota_charge_bytes: 0,
         };
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_replication_start_durable(&key, &object, &task)
             .unwrap();
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
 
         assert_eq!(applier.apply_op_log_entries(&records), 1);
         let replayed_task = state.replication_tasks.get(&key).unwrap();
@@ -3049,7 +3049,7 @@ mod tests {
             deadline_epoch_ms: 1,
             replicas: vec![delayed_replica],
         };
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_object_delayed_release_batch_durable(
@@ -3059,7 +3059,7 @@ mod tests {
                 &[],
             )
             .unwrap();
-        let scheduled = manager.store().unwrap().read_since(1, 1).unwrap();
+        let scheduled = manager.read_since(1, 1).unwrap();
 
         let mut future_payload =
             crate::oplog::decode_record_payload_value(&scheduled[0].payload).unwrap();
@@ -3083,7 +3083,7 @@ mod tests {
         manager
             .record_object_delayed_release_batch_durable(&key, Some(&object), &[], &[release.id])
             .unwrap();
-        let tombstone = manager.store().unwrap().read_since(2, 1).unwrap();
+        let tombstone = manager.read_since(2, 1).unwrap();
         assert_eq!(applier.apply_op_log_entries(&tombstone), 1);
         assert!(!state.delayed_replica_releases.contains_key(&release.id));
         assert_eq!(state.allocator.read().used_bytes(&segment_id), Some(256));
@@ -3134,12 +3134,12 @@ mod tests {
             disk_cache_total_accounted: false,
             user_key: "delayed-release-in-place-upsert".into(),
         };
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_object_delayed_release_batch_durable(&key, Some(&object), &[], &[])
             .unwrap();
-        let entries = manager.store().unwrap().read_since(1, 1).unwrap();
+        let entries = manager.read_since(1, 1).unwrap();
 
         assert_eq!(applier.apply_op_log_entries(&entries), 1);
         assert!(state.processing_keys.contains_key(&key));
@@ -3189,12 +3189,12 @@ mod tests {
             .to_string(),
             max_retry_attempts: 3,
         };
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_task_state_batch_durable(&[task.clone()], &[])
             .unwrap();
-        let created = manager.store().unwrap().read_since(1, 1).unwrap();
+        let created = manager.read_since(1, 1).unwrap();
         assert_eq!(applier.apply_op_log_entries(&created), 1);
         assert_eq!(
             state.tasks.get(&task_id).unwrap().info.status,
@@ -3206,7 +3206,7 @@ mod tests {
         manager
             .record_task_state_batch_durable(&[task.clone()], &[])
             .unwrap();
-        let claimed = manager.store().unwrap().read_since(2, 1).unwrap();
+        let claimed = manager.read_since(2, 1).unwrap();
         assert_eq!(applier.apply_op_log_entries(&claimed), 1);
         assert_eq!(
             state.tasks.get(&task_id).unwrap().info.status,
@@ -3219,7 +3219,7 @@ mod tests {
         manager
             .record_task_state_batch_durable(&[task], &[])
             .unwrap();
-        let completed = manager.store().unwrap().read_since(3, 1).unwrap();
+        let completed = manager.read_since(3, 1).unwrap();
         assert_eq!(applier.apply_op_log_entries(&completed), 1);
         assert_eq!(
             state.tasks.get(&task_id).unwrap().info.status,
@@ -3229,7 +3229,7 @@ mod tests {
         manager
             .record_task_state_batch_durable(&[], &[task_id])
             .unwrap();
-        let removed = manager.store().unwrap().read_since(4, 1).unwrap();
+        let removed = manager.read_since(4, 1).unwrap();
         assert_eq!(applier.apply_op_log_entries(&removed), 1);
         assert!(!state.tasks.contains_key(&task_id));
     }
@@ -3364,12 +3364,12 @@ mod tests {
         object.lease_timeout = Some(lease_timeout);
         object.soft_pin_timeout = Some(soft_pin_timeout);
         object.group_id = "group-v3".into();
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_object_image_durable(&scoped_key, &object)
             .unwrap();
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
         let state = make_state();
         let applier = OpLogApplier::new(state.clone());
 
@@ -3393,7 +3393,7 @@ mod tests {
         let tenant_id = TenantId::default();
         let mut object = durable_disk_object(tenant_id.clone(), "stable-key");
         let scoped_key = tenant_id.make_scoped_key("stable-key");
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
 
         assert!(
@@ -3420,12 +3420,12 @@ mod tests {
         object.replicas[0].status = mooncake_store_core::ReplicaStatus::Allocating;
         object.quota_committed = false;
         object.put_start_time = Some(SystemTime::UNIX_EPOCH + Duration::from_millis(1_000));
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_object_image_durable(&scoped_key, &object)
             .unwrap();
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
         let state = make_state();
         let applier = OpLogApplier::new(state.clone());
 
@@ -3465,12 +3465,12 @@ mod tests {
             protocol: "rdma".into(),
         };
         object.committed_quota_charge_bytes = object.size;
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_object_image_durable(&scoped_key, &object)
             .expect("committed in-place Upsert image must be durable");
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
         let state = make_state();
         insert_memory_segment(&state, segment_id, client_id, 4096);
         let applier = OpLogApplier::new(state.clone());
@@ -3537,12 +3537,12 @@ mod tests {
         state.objects.insert(scoped_key.clone(), previous);
         let mut replacement = durable_disk_object(tenant_id, "replace-quota-mismatch");
         replacement.group_id = "replacement".into();
-        let mut manager =
+        let manager =
             crate::oplog::OpLogManager::new(Some(Box::new(crate::oplog::InMemoryOpLog::new(8))), 1);
         manager
             .record_object_image_durable(&scoped_key, &replacement)
             .unwrap();
-        let records = manager.store().unwrap().read_since(1, 1).unwrap();
+        let records = manager.read_since(1, 1).unwrap();
         let applier = OpLogApplier::new(state.clone());
 
         assert_eq!(applier.apply_op_log_entries(&records), 0);

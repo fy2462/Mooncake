@@ -279,7 +279,7 @@ async fn test_remove_by_regex_records_remove_oplog() {
     assert_eq!(removed.removed_count, 1);
 
     let guard = service.oplog_manager().lock();
-    let records = guard.store().unwrap().read_since(1, 10).unwrap();
+    let records = guard.read_since(1, 10).unwrap();
     let payloads = records
         .iter()
         .map(|record| record.payload.clone())
@@ -328,7 +328,7 @@ async fn test_offload_success_records_complete_object_image_for_standby() {
         mount_local_disk_and_notify_success(&service, holder_id, "offloaded-key").await;
 
     let guard = service.oplog_manager().lock();
-    let records = guard.store().unwrap().read_since(1, 10).unwrap();
+    let records = guard.read_since(1, 10).unwrap();
     let payload = records
         .iter()
         .rev()
@@ -377,7 +377,7 @@ async fn test_background_eviction_records_remove_for_standby() {
     );
 
     let guard = service.oplog_manager().lock();
-    let records = guard.store().unwrap().read_since(1, 20).unwrap();
+    let records = guard.read_since(1, 20).unwrap();
     let last = records
         .last()
         .expect("eviction must append an oplog record");
@@ -414,7 +414,7 @@ async fn test_expired_put_start_reaper_records_remove_for_standby() {
     service.reap_expired_background_tasks_for_test();
 
     let guard = service.oplog_manager().lock();
-    let records = guard.store().unwrap().read_since(1, 20).unwrap();
+    let records = guard.read_since(1, 20).unwrap();
     let payloads = records
         .iter()
         .map(|record| decode_record_payload_value_for_test(&record.payload).unwrap())
@@ -466,8 +466,6 @@ async fn upsert_preemption_persists_absence_with_retired_inflight_range_atomical
 
     let guard = service.oplog_manager().lock();
     let payloads = guard
-        .store()
-        .unwrap()
         .read_since(1, 32)
         .unwrap()
         .iter()
@@ -500,7 +498,7 @@ async fn test_invalid_handle_cleanup_records_remove_for_standby() {
     service.clear_invalid_handles_for_test();
 
     let guard = service.oplog_manager().lock();
-    let records = guard.store().unwrap().read_since(1, 20).unwrap();
+    let records = guard.read_since(1, 20).unwrap();
     let last = records
         .last()
         .expect("invalid-handle cleanup must append an oplog record");
@@ -547,7 +545,7 @@ async fn test_copy_revoke_records_final_object_image_for_standby() {
     .unwrap();
 
     let guard = service.oplog_manager().lock();
-    let records = guard.store().unwrap().read_since(1, 20).unwrap();
+    let records = guard.read_since(1, 20).unwrap();
     let payloads = records
         .iter()
         .map(|record| decode_record_payload_value_for_test(&record.payload).unwrap())
@@ -611,8 +609,6 @@ async fn test_expired_copy_persists_reservation_before_allocator_release() {
 
     let guard = service.oplog_manager().lock();
     let payloads = guard
-        .store()
-        .unwrap()
         .read_since(1, 32)
         .unwrap()
         .iter()

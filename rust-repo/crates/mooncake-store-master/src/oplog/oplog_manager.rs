@@ -1,5 +1,9 @@
 use super::oplog_wire::*;
 use super::*;
+use crate::oplog::oplog_worker::{OpLogWorkerConfig, SequencedOpLogWorker};
+use parking_lot::RwLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone)]
 pub(crate) struct LeaseRefreshEntry {
@@ -12,107 +16,110 @@ pub(crate) struct LeaseRefreshEntry {
 }
 
 pub struct OpLogManager {
-    store: Option<Box<dyn OpLogStore + Send>>,
-    view_version: u64,
+    worker: RwLock<Option<Arc<SequencedOpLogWorker>>>,
+    view_version: AtomicU64,
 }
 
 impl OpLogManager {
     pub fn new(store: Option<Box<dyn OpLogStore + Send>>, view_version: u64) -> Self {
         Self {
-            store,
-            view_version,
+            worker: RwLock::new(store.map(|store| {
+                Arc::new(SequencedOpLogWorker::start(
+                    store,
+                    OpLogWorkerConfig::default(),
+                ))
+            })),
+            view_version: AtomicU64::new(view_version),
         }
     }
 
     pub fn latest_sequence(&self) -> u64 {
-        self.store
-            .as_ref()
-            .map(|s| s.latest_sequence())
+        self.worker()
+            .map(|worker| worker.latest_committed())
             .unwrap_or(0)
     }
 
     pub fn max_sequence_id(&self) -> Result<u64, HaError> {
-        self.store
-            .as_ref()
-            .map(|s| s.max_sequence_id())
+        self.worker()
+            .map(|worker| worker.max_sequence_id())
             .unwrap_or(Ok(0))
     }
 
-    pub fn set_view_version(&mut self, version: u64) {
-        self.view_version = version;
+    pub fn set_view_version(&self, version: u64) {
+        self.view_version.store(version, Ordering::Release);
     }
 
-    pub fn store(&self) -> Option<&(dyn OpLogStore + Send)> {
-        self.store.as_deref()
+    pub fn read_since(
+        &self,
+        since_seq: u64,
+        max_count: usize,
+    ) -> Result<Vec<OpLogRecord>, HaError> {
+        self.worker()
+            .map(|worker| worker.read_since(since_seq, max_count))
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
-    pub fn into_store(self) -> Option<Box<dyn OpLogStore + Send>> {
-        self.store
+    fn worker(&self) -> Option<Arc<SequencedOpLogWorker>> {
+        self.worker.read().clone()
     }
 
-    fn append_payload(&mut self, payload: String) -> Result<u64, HaError> {
-        let Some(store) = &mut self.store else {
+    fn submit_payload(&self, payload: String, operation: &'static str) -> Result<u64, HaError> {
+        let Some(worker) = self.worker() else {
             return Ok(0);
         };
-        let record = OpLogRecord {
-            seq: 0,
-            producer_view_version: self.view_version,
-            payload,
-        };
-        validate_record_size(&record)?;
-        store.append(&record)
+        let view_version = self.view_version.load(Ordering::Acquire);
+        worker.submit_durable(payload, view_version, operation)
     }
 
-    pub fn append_and_persist(&mut self, payload: String) -> Result<u64, HaError> {
-        let Some(store) = &mut self.store else {
-            return Ok(0);
-        };
-        let record = OpLogRecord {
-            seq: 0,
-            producer_view_version: self.view_version,
-            payload,
-        };
-        validate_record_size(&record)?;
-        // append 只取得全序 sequence；需要 durable 语义的控制面变更必须在向调用者
-        // 报告成功前 flush，否则进程崩溃可能留下“已应答但 standby 无法重放”的空洞。
-        let seq = store.append(&record)?;
-        store.flush_durable()?;
-        Ok(seq)
+    fn append_payload(&self, payload: String) -> Result<u64, HaError> {
+        self.submit_payload(payload, "legacy_record")
     }
 
-    pub fn set_initial_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
-        if let Some(store) = &mut self.store {
-            store.update_latest_sequence_id(sequence_id)?;
-        }
-        Ok(())
+    pub fn append_and_persist(&self, payload: String) -> Result<u64, HaError> {
+        self.submit_payload(payload, "append_and_persist")
     }
 
-    pub fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
-        if let Some(store) = &mut self.store {
-            store.cleanup_before(before_sequence_id)?;
-        }
-        Ok(())
+    pub fn set_initial_sequence_id(&self, sequence_id: u64) -> Result<(), HaError> {
+        self.worker()
+            .map(|worker| worker.update_latest_sequence_id(sequence_id))
+            .unwrap_or(Ok(()))
+    }
+
+    pub fn cleanup_before(&self, before_sequence_id: u64) -> Result<(), HaError> {
+        self.worker()
+            .map(|worker| worker.cleanup_before(before_sequence_id))
+            .unwrap_or(Ok(()))
     }
 
     pub fn record_snapshot_sequence_id(
-        &mut self,
+        &self,
         snapshot_id: &str,
         sequence_id: u64,
     ) -> Result<(), HaError> {
-        if let Some(store) = &mut self.store {
-            store.record_snapshot_sequence_id(snapshot_id, sequence_id)?;
-        }
-        Ok(())
+        self.worker()
+            .map(|worker| worker.record_snapshot_sequence_id(snapshot_id, sequence_id))
+            .unwrap_or(Ok(()))
     }
 
     pub fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
-        self.store
-            .as_ref()
-            .map(|s| s.get_snapshot_sequence_id(snapshot_id))
+        self.worker()
+            .map(|worker| worker.get_snapshot_sequence_id(snapshot_id))
             .unwrap_or(Ok(0))
     }
 
-    pub fn record_put_end(&mut self, key: &str, size: u64) {
+    pub fn replace_with(&self, replacement: OpLogManager) -> Result<(), HaError> {
+        if let Some(worker) = self.worker() {
+            worker.shutdown()?;
+        }
+
+        let replacement_view = replacement.view_version.load(Ordering::Acquire);
+        let replacement_worker = replacement.worker.write().take();
+        *self.worker.write() = replacement_worker;
+        self.view_version.store(replacement_view, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn record_put_end(&self, key: &str, size: u64) {
         if TenantId::parse_scoped_key(key).is_err() {
             warn!("OpLogManager: refusing to record put_end with invalid scoped tenant key");
             return;
@@ -127,7 +134,7 @@ impl OpLogManager {
     /// v1/v2 remain readable for upgrade, while all new Store mutations use
     /// v3 so pin/type/deadline/quota semantics survive promotion.
     pub(crate) fn record_object_image_durable(
-        &mut self,
+        &self,
         key: &str,
         object: &crate::service::ObjectEntry,
     ) -> Result<u64, HaError> {
@@ -141,7 +148,7 @@ impl OpLogManager {
     /// replaying only the object would reserve allocator space without an owner
     /// task, while replaying only the task would point at absent target ranges.
     pub(crate) fn record_replication_start_durable(
-        &mut self,
+        &self,
         key: &str,
         object: &crate::service::ObjectEntry,
         task: &crate::service::ReplicationTaskEntry,
@@ -270,7 +277,7 @@ impl OpLogManager {
     }
 
     pub(crate) fn record_task_state_batch_durable(
-        &mut self,
+        &self,
         upserts: &[crate::service::TaskEntry],
         removes: &[Uuid],
     ) -> Result<u64, HaError> {
@@ -308,7 +315,7 @@ impl OpLogManager {
     /// standby to observe the object removal without retaining the old range,
     /// or to retain a range while the old object still owns it.
     pub(crate) fn record_object_delayed_release_batch_durable(
-        &mut self,
+        &self,
         key: &str,
         object: Option<&crate::service::ObjectEntry>,
         upserts: &[crate::service::state::DelayedReplicaReleaseEntry],
@@ -371,7 +378,7 @@ impl OpLogManager {
     /// encoded as one record so standby replay cannot expose a partially
     /// refreshed group.
     pub(crate) fn record_lease_refresh_batch_durable(
-        &mut self,
+        &self,
         entries: &[LeaseRefreshEntry],
     ) -> Result<u64, HaError> {
         if entries.is_empty() {
@@ -417,7 +424,7 @@ impl OpLogManager {
     }
 
     /// Record a remove mutation: { "op": "remove", "key": "..." }
-    pub fn record_remove(&mut self, key: &str) {
+    pub fn record_remove(&self, key: &str) {
         match encode_msgpack_record_payload_value(
             &json!({"op": "remove", "schema_version": 1, "key": key}),
         ) {
@@ -430,14 +437,14 @@ impl OpLogManager {
         }
     }
 
-    pub fn record_remove_durable(&mut self, key: &str) -> Result<u64, HaError> {
+    pub fn record_remove_durable(&self, key: &str) -> Result<u64, HaError> {
         self.append_and_persist(encode_msgpack_record_payload_value(
             &json!({"op": "remove", "schema_version": 1, "key": key}),
         )?)
     }
 
     /// Record a put_revoke mutation that fully removes an unfinished object.
-    pub fn record_put_revoke(&mut self, key: &str) {
+    pub fn record_put_revoke(&self, key: &str) {
         match encode_msgpack_record_payload_value(
             &json!({"op": "put_revoke", "schema_version": 1, "key": key}),
         ) {
@@ -450,7 +457,7 @@ impl OpLogManager {
         }
     }
 
-    pub fn record_put_revoke_durable(&mut self, key: &str) -> Result<u64, HaError> {
+    pub fn record_put_revoke_durable(&self, key: &str) -> Result<u64, HaError> {
         self.append_and_persist(encode_msgpack_record_payload_value(
             &json!({"op": "put_revoke", "schema_version": 1, "key": key}),
         )?)
@@ -458,7 +465,7 @@ impl OpLogManager {
 
     /// Record a mount-segment mutation.
     pub fn record_mount_segment(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
         base: u64,
@@ -468,50 +475,44 @@ impl OpLogManager {
         host_id: &str,
         client_id: Uuid,
     ) {
-        if let Some(store) = &mut self.store {
-            let mut record = json!({
-                "op": "mount_segment",
-                "schema_version": 1,
-                "segment_name": segment_name,
-                "segment_id": segment_id.to_string(),
-                "base": base,
-                "size": size,
-                "te_endpoint": te_endpoint,
-                "protocol": protocol,
-                "host_id": host_id,
-                "client_id": client_id.to_string()
-            });
-            if mooncake_store_core::stable_memory_segment_id(
-                client_id,
-                segment_name,
-                base,
-                size,
-                te_endpoint,
-                protocol,
-                host_id,
-            ) == segment_id
-            {
-                record["identity_version"] = json!(1);
+        let mut record = json!({
+            "op": "mount_segment",
+            "schema_version": 1,
+            "segment_name": segment_name,
+            "segment_id": segment_id.to_string(),
+            "base": base,
+            "size": size,
+            "te_endpoint": te_endpoint,
+            "protocol": protocol,
+            "host_id": host_id,
+            "client_id": client_id.to_string()
+        });
+        if mooncake_store_core::stable_memory_segment_id(
+            client_id,
+            segment_name,
+            base,
+            size,
+            te_endpoint,
+            protocol,
+            host_id,
+        ) == segment_id
+        {
+            record["identity_version"] = json!(1);
+        }
+        let payload = match encode_msgpack_record_payload_value(&record) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("OpLogManager: failed to encode mount_segment for {segment_name}: {e}");
+                return;
             }
-            let payload = match encode_msgpack_record_payload_value(&record) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    warn!("OpLogManager: failed to encode mount_segment for {segment_name}: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record mount_segment for {segment_name}: {e}");
-            }
+        };
+        if let Err(e) = self.append_payload(payload) {
+            warn!("OpLogManager: failed to record mount_segment for {segment_name}: {e}");
         }
     }
 
     pub fn record_mount_segment_durable(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
         base: u64,
@@ -552,7 +553,7 @@ impl OpLogManager {
     /// unmount. The absolute epoch deadline lets a promoted standby preserve
     /// elapsed grace time rather than restarting the full delay.
     pub fn record_graceful_unmount_segment(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
         client_id: Uuid,
@@ -579,32 +580,26 @@ impl OpLogManager {
     }
 
     /// Record an unmount-segment mutation.
-    pub fn record_unmount_segment(&mut self, segment_name: &str, segment_id: Uuid) {
-        if let Some(store) = &mut self.store {
-            let payload = match encode_msgpack_record_payload_value(&json!({
-                "op": "unmount_segment",
-                "schema_version": 1,
-                "segment_name": segment_name,
-                "segment_id": segment_id.to_string()
-            })) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    warn!("OpLogManager: failed to encode unmount_segment for {segment_name}: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record unmount_segment for {segment_name}: {e}");
+    pub fn record_unmount_segment(&self, segment_name: &str, segment_id: Uuid) {
+        let payload = match encode_msgpack_record_payload_value(&json!({
+            "op": "unmount_segment",
+            "schema_version": 1,
+            "segment_name": segment_name,
+            "segment_id": segment_id.to_string()
+        })) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("OpLogManager: failed to encode unmount_segment for {segment_name}: {e}");
+                return;
             }
+        };
+        if let Err(e) = self.append_payload(payload) {
+            warn!("OpLogManager: failed to record unmount_segment for {segment_name}: {e}");
         }
     }
 
     pub fn record_unmount_segment_durable(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
     ) -> Result<u64, HaError> {
@@ -618,7 +613,7 @@ impl OpLogManager {
 
     /// Record a mount-nof-segment mutation.
     pub fn record_mount_nof_segment(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
         base: u64,
@@ -626,37 +621,29 @@ impl OpLogManager {
         te_endpoint: &str,
         client_id: Uuid,
     ) {
-        if let Some(store) = &mut self.store {
-            let payload = match encode_msgpack_record_payload_value(&json!({
-                "op": "mount_nof_segment",
-                "schema_version": 1,
-                "segment_name": segment_name,
-                "segment_id": segment_id.to_string(),
-                "base": base,
-                "size": size,
-                "te_endpoint": te_endpoint,
-                "client_id": client_id.to_string()
-            })) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    warn!(
-                        "OpLogManager: failed to encode mount_nof_segment for {segment_name}: {e}"
-                    );
-                    return;
-                }
-            };
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record mount_nof_segment for {segment_name}: {e}");
+        let payload = match encode_msgpack_record_payload_value(&json!({
+            "op": "mount_nof_segment",
+            "schema_version": 1,
+            "segment_name": segment_name,
+            "segment_id": segment_id.to_string(),
+            "base": base,
+            "size": size,
+            "te_endpoint": te_endpoint,
+            "client_id": client_id.to_string()
+        })) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("OpLogManager: failed to encode mount_nof_segment for {segment_name}: {e}");
+                return;
             }
+        };
+        if let Err(e) = self.append_payload(payload) {
+            warn!("OpLogManager: failed to record mount_nof_segment for {segment_name}: {e}");
         }
     }
 
     pub fn record_mount_nof_segment_durable(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
         base: u64,
@@ -677,34 +664,26 @@ impl OpLogManager {
     }
 
     /// Record an unmount-nof-segment mutation.
-    pub fn record_unmount_nof_segment(&mut self, segment_name: &str, segment_id: Uuid) {
-        if let Some(store) = &mut self.store {
-            let payload = match encode_msgpack_record_payload_value(&json!({
-                "op": "unmount_nof_segment",
-                "schema_version": 1,
-                "segment_name": segment_name,
-                "segment_id": segment_id.to_string()
-            })) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    warn!(
-                        "OpLogManager: failed to encode unmount_nof_segment for {segment_name}: {e}"
-                    );
-                    return;
-                }
-            };
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record unmount_nof_segment for {segment_name}: {e}");
+    pub fn record_unmount_nof_segment(&self, segment_name: &str, segment_id: Uuid) {
+        let payload = match encode_msgpack_record_payload_value(&json!({
+            "op": "unmount_nof_segment",
+            "schema_version": 1,
+            "segment_name": segment_name,
+            "segment_id": segment_id.to_string()
+        })) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("OpLogManager: failed to encode unmount_nof_segment for {segment_name}: {e}");
+                return;
             }
+        };
+        if let Err(e) = self.append_payload(payload) {
+            warn!("OpLogManager: failed to record unmount_nof_segment for {segment_name}: {e}");
         }
     }
 
     pub fn record_unmount_nof_segment_durable(
-        &mut self,
+        &self,
         segment_name: &str,
         segment_id: Uuid,
     ) -> Result<u64, HaError> {
@@ -720,7 +699,7 @@ impl OpLogManager {
     /// Drain may cover several source segments, so a single record prevents a
     /// promoted standby from observing only a prefix of the transition.
     pub(crate) fn record_segment_status_batch_durable(
-        &mut self,
+        &self,
         entries: &[(Uuid, bool, i32)],
     ) -> Result<u64, HaError> {
         if entries.is_empty() {
@@ -767,27 +746,31 @@ impl OpLogManager {
     }
 
     /// Record a put-start mutation: { "op": "put_start", "key": "...", "client_id": "..." }
-    pub fn record_put_start(&mut self, key: &str, client_id: Uuid) {
-        if let Some(store) = &mut self.store {
-            let payload = match encode_msgpack_record_payload_value(&json!({
-                "op": "put_start",
-                "schema_version": 1,
-                "key": key,
-                "client_id": client_id.to_string()
-            })) {
-                Ok(payload) => payload,
-                Err(e) => {
-                    warn!("OpLogManager: failed to encode put_start for key={key}: {e}");
-                    return;
-                }
-            };
-            if let Err(e) = store.append(&OpLogRecord {
-                seq: 0,
-                producer_view_version: self.view_version,
-                payload,
-            }) {
-                warn!("OpLogManager: failed to record put_start for key={key}: {e}");
+    pub fn record_put_start(&self, key: &str, client_id: Uuid) {
+        let payload = match encode_msgpack_record_payload_value(&json!({
+            "op": "put_start",
+            "schema_version": 1,
+            "key": key,
+            "client_id": client_id.to_string()
+        })) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("OpLogManager: failed to encode put_start for key={key}: {e}");
+                return;
             }
+        };
+        if let Err(e) = self.append_payload(payload) {
+            warn!("OpLogManager: failed to record put_start for key={key}: {e}");
+        }
+    }
+}
+
+impl Drop for OpLogManager {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.get_mut().take()
+            && let Err(error) = worker.shutdown()
+        {
+            warn!("OpLogManager: failed to shut down oplog worker: {error}");
         }
     }
 }
@@ -795,9 +778,184 @@ impl OpLogManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Condvar, Mutex, mpsc};
+    use std::time::Duration;
+
+    struct SharedOpLog {
+        inner: Arc<Mutex<InMemoryOpLog>>,
+    }
+
+    impl SharedOpLog {
+        fn new(max_entries: usize) -> (Self, Arc<Mutex<InMemoryOpLog>>) {
+            let inner = Arc::new(Mutex::new(InMemoryOpLog::new(max_entries)));
+            (
+                Self {
+                    inner: Arc::clone(&inner),
+                },
+                inner,
+            )
+        }
+    }
+
+    impl OpLogStore for SharedOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.lock().unwrap().append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.inner.lock().unwrap().read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.lock().unwrap().latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.lock().unwrap().max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner
+                .lock()
+                .unwrap()
+                .cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.lock().unwrap().flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.lock().unwrap().poll_from(since_seq, max_count)
+        }
+    }
+
+    #[derive(Default)]
+    struct FlushGate {
+        state: Mutex<FlushGateState>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct FlushGateState {
+        entered: bool,
+        released: bool,
+    }
+
+    impl FlushGate {
+        fn block(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.entered = true;
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).unwrap();
+            }
+        }
+
+        fn wait_until_entered(&self, timeout: Duration) -> bool {
+            let state = self.state.lock().unwrap();
+            let (state, _) = self
+                .changed
+                .wait_timeout_while(state, timeout, |state| !state.entered)
+                .unwrap();
+            state.entered
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    struct GateableOpLog {
+        inner: InMemoryOpLog,
+        flush_gate: Arc<FlushGate>,
+    }
+
+    impl OpLogStore for GateableOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.flush_gate.block();
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
+    }
 
     fn recorded_mount_payload(segment_id: Uuid, client_id: Uuid) -> serde_json::Value {
-        let mut manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(8))), 1);
+        let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(8))), 1);
         manager
             .record_mount_segment_durable(
                 "memory-segment",
@@ -810,13 +968,7 @@ mod tests {
                 client_id,
             )
             .unwrap();
-        let record = manager
-            .store()
-            .unwrap()
-            .read_since(1, 1)
-            .unwrap()
-            .pop()
-            .unwrap();
+        let record = manager.read_since(1, 1).unwrap().pop().unwrap();
         decode_record_payload_value(&record.payload).unwrap()
     }
 
@@ -846,7 +998,7 @@ mod tests {
 
     #[test]
     fn malformed_ha_control_records_are_rejected_before_append() {
-        let mut manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(8))), 1);
+        let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(8))), 1);
         let segment_id = Uuid::new_v4();
         let client_id = Uuid::new_v4();
 
@@ -893,5 +1045,99 @@ mod tests {
         );
 
         assert_eq!(manager.latest_sequence(), 0);
+    }
+
+    #[test]
+    fn replacement_stops_old_worker_before_new_view_accepts_records() {
+        let (old_store, old_records) = SharedOpLog::new(8);
+        let manager = OpLogManager::new(Some(Box::new(old_store)), 7);
+        assert_eq!(manager.record_remove_durable("default\0old"), Ok(1));
+        let old_worker = manager.worker().unwrap();
+
+        let (new_store, new_records) = SharedOpLog::new(8);
+        manager
+            .replace_with(OpLogManager::new(Some(Box::new(new_store)), 8))
+            .unwrap();
+
+        let old_error = old_worker
+            .submit_durable("must-not-append".into(), 7, "replacement_test")
+            .unwrap_err();
+        assert!(old_error.to_string().contains("shut down"), "{old_error}");
+        assert_eq!(manager.record_remove_durable("default\0new"), Ok(1));
+
+        let old_records = old_records.lock().unwrap().read_since(1, 8).unwrap();
+        assert_eq!(old_records.len(), 1);
+        assert_eq!(old_records[0].producer_view_version, 7);
+        let new_records = new_records.lock().unwrap().read_since(1, 8).unwrap();
+        assert_eq!(new_records.len(), 1);
+        assert_eq!(new_records[0].producer_view_version, 8);
+    }
+
+    #[test]
+    fn queries_cannot_overtake_an_earlier_durable_record() {
+        let flush_gate = Arc::new(FlushGate::default());
+        let manager = Arc::new(OpLogManager::new(
+            Some(Box::new(GateableOpLog {
+                inner: InMemoryOpLog::new(8),
+                flush_gate: Arc::clone(&flush_gate),
+            })),
+            3,
+        ));
+        let submit_manager = Arc::clone(&manager);
+        let submitter = std::thread::spawn(move || {
+            submit_manager.record_remove_durable("default\0before-query")
+        });
+        let entered = flush_gate.wait_until_entered(Duration::from_secs(1));
+
+        let query_manager = Arc::clone(&manager);
+        let (query_tx, query_rx) = mpsc::sync_channel(1);
+        let query = std::thread::spawn(move || {
+            query_tx.send(query_manager.read_since(1, 8)).unwrap();
+        });
+        let query_waited_for_flush = matches!(
+            query_rx.recv_timeout(Duration::from_millis(25)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        flush_gate.release();
+
+        assert!(entered, "record never reached its durable flush");
+        assert!(query_waited_for_flush, "query overtook the gated record");
+        assert_eq!(submitter.join().unwrap(), Ok(1));
+        let records = query_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        query.join().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_thread_runtime_can_wait_for_dedicated_worker() {
+        let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(8))), 4);
+        let result = tokio::time::timeout(Duration::from_secs(1), async {
+            manager.record_remove_durable("default\0current-thread")
+        })
+        .await;
+
+        assert_eq!(result, Ok(Ok(1)));
+        assert_eq!(manager.latest_sequence(), 1);
+    }
+
+    #[test]
+    fn non_ha_manager_preserves_successful_zero_and_empty_defaults() {
+        let manager = OpLogManager::new(None, 1);
+
+        assert_eq!(manager.record_remove_durable("default\0no-ha"), Ok(0));
+        assert_eq!(manager.latest_sequence(), 0);
+        assert_eq!(manager.max_sequence_id(), Ok(0));
+        assert_eq!(manager.read_since(1, 8), Ok(Vec::new()));
+        assert_eq!(manager.set_initial_sequence_id(40), Ok(()));
+        assert_eq!(
+            manager.record_snapshot_sequence_id("../ignored", 40),
+            Ok(())
+        );
+        assert_eq!(manager.get_snapshot_sequence_id("../ignored"), Ok(0));
+        assert_eq!(manager.cleanup_before(40), Ok(()));
     }
 }

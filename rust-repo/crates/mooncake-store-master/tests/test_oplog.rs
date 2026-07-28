@@ -4,7 +4,104 @@ use mooncake_store_master::ha::{HaError, OpLogRecord};
 use mooncake_store_master::oplog::test_support::*;
 use mooncake_store_master::oplog::{InMemoryOpLog, LocalFsOpLogStore, OpLogManager, OpLogStore};
 use serde_json::json;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 use uuid::Uuid;
+
+#[derive(Default)]
+struct DurableFlushGate {
+    state: Mutex<DurableFlushGateState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct DurableFlushGateState {
+    entered: bool,
+    released: bool,
+}
+
+impl DurableFlushGate {
+    fn block(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.entered = true;
+        self.changed.notify_all();
+        while !state.released {
+            state = self.changed.wait(state).unwrap();
+        }
+    }
+
+    fn wait_until_entered(&self, timeout: Duration) -> bool {
+        let state = self.state.lock().unwrap();
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| !state.entered)
+            .unwrap();
+        state.entered
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.released = true;
+        self.changed.notify_all();
+    }
+}
+
+struct GateableOpLog {
+    inner: InMemoryOpLog,
+    flush_gate: Arc<DurableFlushGate>,
+}
+
+impl OpLogStore for GateableOpLog {
+    fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+        self.inner.append(entry)
+    }
+
+    fn read_since(&self, since_seq: u64, max_count: usize) -> Result<Vec<OpLogRecord>, HaError> {
+        self.inner.read_since(since_seq, max_count)
+    }
+
+    fn latest_sequence(&self) -> u64 {
+        self.inner.latest_sequence()
+    }
+
+    fn max_sequence_id(&self) -> Result<u64, HaError> {
+        self.inner.max_sequence_id()
+    }
+
+    fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+        self.inner.update_latest_sequence_id(sequence_id)
+    }
+
+    fn record_snapshot_sequence_id(
+        &mut self,
+        snapshot_id: &str,
+        sequence_id: u64,
+    ) -> Result<(), HaError> {
+        self.inner
+            .record_snapshot_sequence_id(snapshot_id, sequence_id)
+    }
+
+    fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+        self.inner.get_snapshot_sequence_id(snapshot_id)
+    }
+
+    fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+        self.inner.cleanup_before(before_sequence_id)
+    }
+
+    fn flush_durable(&mut self) -> Result<(), HaError> {
+        self.flush_gate.block();
+        self.inner.flush_durable()
+    }
+
+    fn poll_from(
+        &self,
+        since_seq: u64,
+        max_count: usize,
+    ) -> mooncake_store_master::ha::OpLogPollResult {
+        self.inner.poll_from(since_seq, max_count)
+    }
+}
 
 fn make_entry(seq: u64) -> OpLogRecord {
     OpLogRecord {
@@ -70,12 +167,11 @@ fn test_in_memory_poll_empty() {
 #[test]
 fn test_oplog_manager_records_put_revoke() {
     let store = InMemoryOpLog::new(1000);
-    let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
+    let manager = OpLogManager::new(Some(Box::new(store)), 7);
 
     manager.record_put_revoke("k1");
 
-    let store = manager.into_store().unwrap();
-    let entries = store.read_since(1, 10).unwrap();
+    let entries = manager.read_since(1, 10).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].producer_view_version, 7);
     assert_eq!(
@@ -87,17 +183,40 @@ fn test_oplog_manager_records_put_revoke() {
 #[test]
 fn test_oplog_manager_records_legacy_put_end_completion_marker() {
     let store = InMemoryOpLog::new(1000);
-    let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
+    let manager = OpLogManager::new(Some(Box::new(store)), 7);
 
     manager.record_put_end("tenant-a\0k1", 42);
 
-    let store = manager.into_store().unwrap();
-    let entries = store.read_since(1, 10).unwrap();
+    let entries = manager.read_since(1, 10).unwrap();
     let payload = decode_record_payload_value_for_test(&entries[0].payload).unwrap();
     assert_eq!(
         payload,
         json!({"op": "put_end", "key": "tenant-a\0k1", "size": 42})
     );
+}
+
+#[test]
+fn manager_latest_sequence_moves_only_after_durable_flush() {
+    let flush_gate = Arc::new(DurableFlushGate::default());
+    let manager = Arc::new(OpLogManager::new(
+        Some(Box::new(GateableOpLog {
+            inner: InMemoryOpLog::new(8),
+            flush_gate: Arc::clone(&flush_gate),
+        })),
+        7,
+    ));
+    let submit_manager = Arc::clone(&manager);
+    let submitter =
+        std::thread::spawn(move || submit_manager.record_remove_durable("default\0gated"));
+
+    let entered = flush_gate.wait_until_entered(Duration::from_secs(1));
+    let latest_while_flush_is_gated = manager.latest_sequence();
+    flush_gate.release();
+
+    assert!(entered, "manager record never reached durable flush");
+    assert_eq!(latest_while_flush_is_gated, 0);
+    assert_eq!(submitter.join().unwrap(), Ok(1));
+    assert_eq!(manager.latest_sequence(), 1);
 }
 
 #[test]
@@ -408,7 +527,7 @@ fn test_local_fs_snapshot_sequence_and_cleanup_parity() {
 fn test_manager_append_and_persist_flushes_local_fs() {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
-    let mut manager = OpLogManager::new(Some(Box::new(store)), 7);
+    let manager = OpLogManager::new(Some(Box::new(store)), 7);
 
     let seq = manager.record_remove_durable("k1").unwrap();
     assert_eq!(seq, 1);
