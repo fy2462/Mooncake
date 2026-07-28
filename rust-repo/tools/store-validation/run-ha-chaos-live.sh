@@ -81,6 +81,8 @@ timeout_marker="$artifact_root/.cargo-test-timeout-$run_id"
 watchdog_error="$artifact_root/.cargo-test-watchdog-error-$run_id"
 cargo_status_path="$artifact_root/.cargo-test-status-$run_id"
 wrapper_ready_path="$artifact_root/.cargo-test-wrapper-ready-$run_id"
+failure_stage=runner_start
+failure_reason="HA chaos runner did not complete"
 
 exec > >(tee -a "$runner_log") 2>&1
 
@@ -120,7 +122,7 @@ import pathlib
 import sys
 
 path = pathlib.Path(sys.argv[1])
-temporary = path.with_name(f".{path.name}.timeout-{os.getpid()}")
+temporary = path.with_name(f".{path.name}.runner-{os.getpid()}")
 result = {
     "schema_version": 1,
     "status": "FAIL",
@@ -132,9 +134,50 @@ result = {
     },
     "first_failure": {"stage": sys.argv[3], "message": sys.argv[4]},
 }
-temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+with temporary.open("x", encoding="utf-8") as output:
+    output.write(json.dumps(result, indent=2) + "\n")
+    output.flush()
+    os.fsync(output.fileno())
 os.replace(temporary, path)
 PY
+}
+
+has_valid_failure_result() {
+  python3 - "$result_path" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    result = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+failure = result.get("first_failure") if isinstance(result, dict) else None
+scenarios = result.get("scenarios") if isinstance(result, dict) else None
+valid = (
+    result.get("schema_version") == 1
+    and result.get("status") == "FAIL"
+    and isinstance(result.get("seed"), str)
+    and isinstance(scenarios, dict)
+    and all(isinstance(scenarios.get(name), dict) for name in ("small", "large"))
+    and isinstance(failure, dict)
+    and isinstance(failure.get("stage"), str)
+    and bool(failure["stage"].strip())
+    and failure["stage"] != "runner_start"
+    and isinstance(failure.get("message"), str)
+    and bool(failure["message"].strip())
+)
+raise SystemExit(0 if valid else 1)
+PY
+}
+
+ensure_failure_result() {
+  if has_valid_failure_result; then
+    echo "preserving an existing schema-v1 HA chaos FAIL result" >&2
+    return 0
+  fi
+  publish_failure_result "$failure_stage" "$failure_reason"
 }
 
 publish_timeout_result() {
@@ -146,6 +189,7 @@ publish_timeout_result() {
 on_exit() {
   local exit_status=$?
   local cleanup_status
+  trap - EXIT
   if ((first_status != 0)); then
     exit_status=$first_status
   fi
@@ -153,13 +197,21 @@ on_exit() {
   cleanup_status=$?
   if ((exit_status == 0 && cleanup_status != 0)); then
     exit_status=$cleanup_status
+    failure_stage=runner_cleanup
+    failure_reason="owned etcd cleanup failed with status $cleanup_status"
   fi
-  trap - EXIT
+  if ((exit_status != 0)); then
+    if ! ensure_failure_result; then
+      echo "failed to publish runner-level HA chaos FAIL result" >&2
+    fi
+  fi
   exit "$exit_status"
 }
 
 on_signal() {
   local signal_status=$1
+  failure_stage=runner_signal
+  failure_reason="HA chaos runner received signal with status $signal_status"
   terminate_active_group
   if ((first_status == 0)); then
     first_status=$signal_status
@@ -184,7 +236,7 @@ wait_for_etcd() {
 }
 
 validate_result() {
-  python3 - "$result_path" <<'PY'
+  python3 - "$result_path" "$seed" <<'PY'
 import json
 import pathlib
 import sys
@@ -201,18 +253,90 @@ if result.get("schema_version") != 1:
     raise SystemExit("HA chaos result must have schema_version 1")
 if result.get("status") != "PASS":
     raise SystemExit("HA chaos result status must be PASS")
-if not isinstance(result.get("seed"), str):
+result_seed = result.get("seed")
+if not isinstance(result_seed, str):
     raise SystemExit("HA chaos result must include a string seed")
+try:
+    if int(result_seed, 0) != int(sys.argv[2], 0):
+        raise SystemExit("HA chaos result seed does not match the requested seed")
+except ValueError:
+    raise SystemExit("HA chaos result seed must be an integer string")
 masters = result.get("masters")
-if not isinstance(masters, list) or len(masters) != 3 or not all(isinstance(master, str) for master in masters):
-    raise SystemExit("HA chaos result must include three master addresses")
+if (
+    not isinstance(masters, list)
+    or len(masters) != 3
+    or len(set(masters)) != 3
+    or not all(isinstance(master, str) and master.strip() for master in masters)
+):
+    raise SystemExit("HA chaos result must include three distinct nonempty master addresses")
+if result.get("first_failure") is not None:
+    raise SystemExit("HA chaos PASS result first_failure must be null")
 scenarios = result.get("scenarios")
 if not isinstance(scenarios, dict):
     raise SystemExit("HA chaos result must include scenarios")
+
+def nonnegative_integer(evidence, field, scenario):
+    value = evidence.get(field)
+    if type(value) is not int or value < 0:
+        raise SystemExit(
+            f"HA chaos result scenario {scenario} evidence {field} must be a nonnegative integer"
+        )
+    return value
+
 for name in ("small", "large"):
     scenario = scenarios.get(name)
     if not isinstance(scenario, dict) or scenario.get("status") != "PASS":
         raise SystemExit(f"HA chaos result scenario {name} must PASS")
+    evidence = scenario.get("evidence")
+    if not isinstance(evidence, dict):
+        raise SystemExit(f"HA chaos result scenario {name} must include evidence")
+
+    successful_unstable = nonnegative_integer(
+        evidence, "successful_unstable_operations", name
+    )
+    stable_reads = nonnegative_integer(evidence, "stable_exact_reads", name)
+    byte_comparisons = nonnegative_integer(evidence, "byte_comparisons", name)
+    crashes = nonnegative_integer(evidence, "crashes", name)
+    restarts = nonnegative_integer(evidence, "restarts", name)
+    eviction_requests = nonnegative_integer(evidence, "eviction_requests", name)
+    capacity_rejections = nonnegative_integer(evidence, "capacity_rejections", name)
+
+    if successful_unstable == 0:
+        raise SystemExit(
+            f"HA chaos result scenario {name} must include a successful unstable operation"
+        )
+    minimum_stable_reads = 400 if name == "small" else 168
+    if stable_reads < minimum_stable_reads:
+        raise SystemExit(
+            f"HA chaos result scenario {name} stable reads {stable_reads} are below {minimum_stable_reads}"
+        )
+    bytes_per_read = 1 if name == "small" else 3 * 1024 * 1024
+    if byte_comparisons < stable_reads * bytes_per_read:
+        raise SystemExit(
+            f"HA chaos result scenario {name} byte comparisons do not cover every stable exact read"
+        )
+    if crashes < 4 or restarts != crashes:
+        raise SystemExit(
+            f"HA chaos result scenario {name} must include at least four matched crashes/restarts"
+        )
+    for field in ("stopped_indices", "restarted_indices"):
+        if evidence.get(field) != [0, 1, 2]:
+            raise SystemExit(
+                f"HA chaos result scenario {name} evidence {field} must cover Masters 0, 1, and 2"
+            )
+    leader_views = evidence.get("leader_view_versions")
+    if (
+        not isinstance(leader_views, list)
+        or len(leader_views) < 8
+        or not all(type(view) is int and view > 0 for view in leader_views)
+    ):
+        raise SystemExit(
+            f"HA chaos result scenario {name} must include eight positive leader view observations"
+        )
+    if name == "large" and eviction_requests == 0 and capacity_rejections == 0:
+        raise SystemExit(
+            "HA chaos result large scenario must include eviction or capacity-pressure evidence"
+        )
 PY
 }
 
@@ -220,7 +344,16 @@ trap on_exit EXIT
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# Atomically supersede any stale result before Docker, Cargo, or other setup
+# can fail. A later Rust-generated PASS/FAIL replaces this current-run marker.
+if ! publish_failure_result runner_start "$failure_reason"; then
+  first_status=2
+  exit 2
+fi
+
 cd "$rust_root"
+failure_stage=runner_etcd_start
+failure_reason="failed to start the owned etcd container"
 "$docker_cmd" run -d --name "$etcd_container" \
   -p 127.0.0.1::2379 "$etcd_image" \
   etcd --data-dir=/tmp/etcd-data \
@@ -233,6 +366,8 @@ if ((status != 0)); then
 fi
 etcd_owned=1
 
+failure_stage=runner_etcd_health
+failure_reason="owned etcd did not become healthy"
 wait_for_etcd
 status=$?
 if ((status != 0)); then
@@ -240,6 +375,8 @@ if ((status != 0)); then
   exit "$status"
 fi
 
+failure_stage=runner_etcd_port
+failure_reason="failed to resolve the owned etcd published port"
 published_port=$("$docker_cmd" port "$etcd_container" 2379/tcp)
 status=$?
 if ((status != 0)); then
@@ -252,6 +389,8 @@ if [[ -z "$published_port" ]]; then
 fi
 etcd_endpoint="http://$published_port"
 
+failure_stage=runner_cargo_build
+failure_reason="Mooncake Master Cargo build failed"
 "$cargo_cmd" build -p mooncake-store-master --bin mooncake-master
 status=$?
 if ((status != 0)); then
@@ -259,12 +398,8 @@ if ((status != 0)); then
   exit "$status"
 fi
 
-rm -f -- "$result_path"
-status=$?
-if ((status != 0)); then
-  first_status=$status
-  exit "$status"
-fi
+failure_stage=runner_setup
+failure_reason="failed to reset HA chaos runner control files"
 rm -f -- "$timeout_marker" "$watchdog_error" "$cargo_status_path" \
   "$wrapper_ready_path"
 status=$?
@@ -273,6 +408,8 @@ if ((status != 0)); then
   exit "$status"
 fi
 
+failure_stage=runner_cargo_test
+failure_reason="HA chaos Cargo/test process failed"
 setsid env \
   -u MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT \
   MOONCAKE_RUN_HA_CHAOS=1 \
@@ -385,6 +522,8 @@ if ((status != 0)); then
   exit "$status"
 fi
 
+failure_stage=runner_result_validation
+failure_reason="HA chaos Cargo/test did not publish a complete PASS result"
 if ! validate_result; then
   first_status=1
   exit 1
