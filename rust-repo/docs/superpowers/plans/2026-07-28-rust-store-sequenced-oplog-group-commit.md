@@ -194,7 +194,9 @@
 - Modify: `rust-repo/crates/mooncake-store-master/src/oplog/oplog_worker.rs`
 - Modify: `rust-repo/crates/mooncake-store-master/src/oplog/oplog_manager.rs`
 - Modify: `rust-repo/crates/mooncake-store-master/src/ha/oplog_applier.rs`
+- Modify only the manager-query test hunk, preserving the existing dirty eviction work: `rust-repo/crates/mooncake-store-master/src/service/background_ops.rs`
 - Modify: `rust-repo/crates/mooncake-store-master/tests/test_oplog.rs`
+- Modify: `rust-repo/crates/mooncake-store-master/tests/test_service_cluster_parity_p1_p2.rs`
 
 **Interfaces:**
 - Consumes: `SequencedOpLogWorker` from Task 1.
@@ -203,7 +205,7 @@
 
 - [ ] **Step 1: Convert manager tests to the new read interface and prove RED**
 
-  In `tests/test_oplog.rs`, replace both `into_store()` assertions with `manager.read_since(1, 10)`. Add `manager_latest_sequence_moves_only_after_durable_flush`: gate the backend flush, submit from a thread, assert `latest_sequence() == 0` while gated, release, then assert the call returns sequence 1 and `latest_sequence() == 1`. In `oplog_applier.rs` tests, replace every `manager.store().unwrap().read_since(...)` with `manager.read_since(...)` and keep all exact payload assertions.
+  In `tests/test_oplog.rs`, replace both `into_store()` assertions with `manager.read_since(1, 10)`. Add `manager_latest_sequence_moves_only_after_durable_flush`: gate the backend flush, submit from a thread, assert `latest_sequence() == 0` while gated, release, then assert the call returns sequence 1 and `latest_sequence() == 1`. In `oplog_applier.rs` tests, replace every `manager.store().unwrap().read_since(...)` with `manager.read_since(...)` and keep all exact payload assertions. Apply the same query-only migration to the manager guards in `service/background_ops.rs` and `tests/test_service_cluster_parity_p1_p2.rs`; retain their surrounding service mutex until Task 4 and do not alter the existing eviction changes in `background_ops.rs`.
 
 - [ ] **Step 2: Run focused tests to prove RED**
 
@@ -242,16 +244,20 @@
   cargo test -p mooncake-store-master --lib oplog::oplog_manager::tests -- --nocapture
   cargo test -p mooncake-store-master --lib ha::oplog_applier::tests -- --nocapture
   cargo test -p mooncake-store-master --test test_oplog -- --nocapture
+  cargo test -p mooncake-store-master --test test_service_cluster_parity_p1_p2 --no-run
   rustfmt --edition 2024 --check crates/mooncake-store-master/src/oplog/oplog_worker.rs \
     crates/mooncake-store-master/src/oplog/oplog_manager.rs \
     crates/mooncake-store-master/src/ha/oplog_applier.rs \
-    crates/mooncake-store-master/tests/test_oplog.rs
+    crates/mooncake-store-master/tests/test_oplog.rs \
+    crates/mooncake-store-master/tests/test_service_cluster_parity_p1_p2.rs
   cd ..
   git diff --check
   git add rust-repo/crates/mooncake-store-master/src/oplog/oplog_worker.rs \
     rust-repo/crates/mooncake-store-master/src/oplog/oplog_manager.rs \
     rust-repo/crates/mooncake-store-master/src/ha/oplog_applier.rs \
-    rust-repo/crates/mooncake-store-master/tests/test_oplog.rs
+    rust-repo/crates/mooncake-store-master/tests/test_oplog.rs \
+    rust-repo/crates/mooncake-store-master/tests/test_service_cluster_parity_p1_p2.rs
+  git add -p rust-repo/crates/mooncake-store-master/src/service/background_ops.rs
   git diff --cached --check
   git commit -m '[Store] expose lock-free oplog manager facade'
   ```
