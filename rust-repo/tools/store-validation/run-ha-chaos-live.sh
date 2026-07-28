@@ -78,10 +78,9 @@ etcd_owned=0
 active_pid=""
 active_pgid=""
 timeout_marker="$artifact_root/.cargo-test-timeout-$run_id"
-timeout_lock="$artifact_root/.cargo-test-timeout-lock-$run_id"
 watchdog_error="$artifact_root/.cargo-test-watchdog-error-$run_id"
-cargo_pgid_path="$artifact_root/.cargo-test-pgid-$run_id"
 cargo_status_path="$artifact_root/.cargo-test-status-$run_id"
+wrapper_ready_path="$artifact_root/.cargo-test-wrapper-ready-$run_id"
 
 exec > >(tee -a "$runner_log") 2>&1
 
@@ -97,9 +96,12 @@ cleanup() {
 
 terminate_active_group() {
   if [[ -n "$active_pgid" ]]; then
-    kill -TERM -- "-$active_pgid" 2>/dev/null || true
+    if ! kill -TERM -- "-$active_pgid" 2>/dev/null; then
+      kill -TERM "$active_pid" 2>/dev/null || true
+    fi
     sleep "$termination_grace_seconds"
     kill -KILL -- "-$active_pgid" 2>/dev/null || true
+    kill -KILL "$active_pid" 2>/dev/null || true
   fi
   if [[ -n "$active_pid" ]]; then
     wait "$active_pid" 2>/dev/null || true
@@ -263,14 +265,8 @@ if ((status != 0)); then
   first_status=$status
   exit "$status"
 fi
-rm -f -- "$timeout_marker" "$timeout_lock" "$watchdog_error" \
-  "$cargo_pgid_path" "$cargo_status_path"
-status=$?
-if ((status != 0)); then
-  first_status=$status
-  exit "$status"
-fi
-: >"$timeout_lock"
+rm -f -- "$timeout_marker" "$watchdog_error" "$cargo_status_path" \
+  "$wrapper_ready_path"
 status=$?
 if ((status != 0)); then
   first_status=$status
@@ -285,10 +281,9 @@ setsid env \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_SEED="$seed" \
   python3 - "$test_timeout_seconds" "$termination_grace_seconds" \
-  "$timeout_marker" "$timeout_lock" "$watchdog_error" "$cargo_pgid_path" \
-  "$cargo_status_path" "$cargo_cmd" test -p mooncake-store-client \
+  "$timeout_marker" "$watchdog_error" "$cargo_status_path" \
+  "$wrapper_ready_path" "$cargo_cmd" test -p mooncake-store-client \
   --features link-native --test test_ha_chaos_live <<'PY' &
-import fcntl
 import os
 import pathlib
 import signal
@@ -299,12 +294,12 @@ import time
 timeout_seconds = int(sys.argv[1])
 grace_seconds = int(sys.argv[2])
 marker = pathlib.Path(sys.argv[3])
-lock_path = pathlib.Path(sys.argv[4])
-error_path = pathlib.Path(sys.argv[5])
-process_group_path = pathlib.Path(sys.argv[6])
-status_path = pathlib.Path(sys.argv[7])
-command = sys.argv[8:]
+error_path = pathlib.Path(sys.argv[4])
+status_path = pathlib.Path(sys.argv[5])
+wrapper_ready_path = pathlib.Path(sys.argv[6])
+command = sys.argv[7:]
 process = None
+signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
 
 def shell_status(returncode):
@@ -318,38 +313,36 @@ def record_normal_completion(returncode):
 
 
 def terminate_process_group():
-    if process is None:
-        return
+    process_group = os.getpgrp()
     try:
-        os.killpg(process.pid, signal.SIGTERM)
+        os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
         return
-    time.sleep(grace_seconds)
+    if process is not None:
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            pass
+    else:
+        time.sleep(grace_seconds)
     try:
-        os.killpg(process.pid, signal.SIGKILL)
+        os.killpg(process_group, signal.SIGKILL)
     except ProcessLookupError:
         pass
 
 try:
-    process = subprocess.Popen(command, start_new_session=True)
-    process_group_path.write_text(f"{process.pid}\n", encoding="utf-8")
+    if os.environ.get("MOONCAKE_HA_TEST_PAUSE_BEFORE_CARGO") == "1":
+        wrapper_ready_path.touch()
+        signal.pause()
+        raise SystemExit(143)
+    process = subprocess.Popen(command)
     try:
         record_normal_completion(process.wait(timeout=timeout_seconds))
     except subprocess.TimeoutExpired:
         pass
 
-    with lock_path.open("w", encoding="utf-8") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        returncode = process.poll()
-        if returncode is not None:
-            record_normal_completion(returncode)
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            record_normal_completion(process.wait())
-        marker.touch()
+    marker.touch()
     terminate_process_group()
-    process.wait()
     raise SystemExit(124)
 except SystemExit:
     raise
@@ -362,18 +355,8 @@ except BaseException as error:
             process.wait()
     raise SystemExit(125)
 PY
-active_pid=$!
-for _ in $(seq 1 1000); do
-  if [[ -s "$cargo_pgid_path" ]]; then
-    active_pgid=$(<"$cargo_pgid_path")
-    break
-  fi
-  if ! kill -0 "$active_pid" 2>/dev/null; then
-    break
-  fi
-  /bin/sleep 0.01
-done
-wait "$active_pid"
+active_pid=$! active_pgid=$!
+wait "$active_pid" 2>/dev/null
 status=$?
 if [[ -e "$timeout_marker" ]]; then
   active_pid=""

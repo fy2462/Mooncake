@@ -70,9 +70,7 @@ case "$1" in
       pass)
         printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"PASS"}}}' >"$MOONCAKE_HA_RESULT"
         ;;
-      boundary-pass)
-        exec {boundary_lock_fd}>"$MOONCAKE_HA_ARTIFACT_ROOT/.cargo-test-timeout-lock-contract"
-        flock "$boundary_lock_fd"
+      late-pass)
         sleep 2
         printf '%s\n' '{"schema_version":1,"status":"PASS","seed":"0x4d4f4f4e48414348","masters":["127.0.0.1:51051","127.0.0.1:51052","127.0.0.1:51053"],"scenarios":{"small":{"status":"PASS"},"large":{"status":"PASS"}}}' >"$MOONCAKE_HA_RESULT"
         ;;
@@ -116,6 +114,7 @@ run_runner() {
   local fast_sleep=${4:-0}
   local test_timeout_seconds=${5:-30}
   local termination_grace_seconds=${6:-1}
+  local pause_before_cargo=${7:-0}
   mkdir -p "$artifact_root"
   MOONCAKE_HA_CALLS="$calls" \
   MOONCAKE_HA_DOCKER="$fake_bin/docker" \
@@ -127,6 +126,7 @@ run_runner() {
   MOONCAKE_HA_DESCENDANT_PID="$artifact_root/descendant.pid" \
   MOONCAKE_HA_TEST_TIMEOUT_SECONDS="$test_timeout_seconds" \
   MOONCAKE_HA_TERMINATION_GRACE_SECONDS="$termination_grace_seconds" \
+  MOONCAKE_HA_TEST_PAUSE_BEFORE_CARGO="$pause_before_cargo" \
   MOONCAKE_HA_RUN_ID=contract \
   MOONCAKE_HA_ARTIFACT_ROOT="$artifact_root" \
   MOONCAKE_HA_ETCD_IMAGE=quay.io/coreos/etcd:v3.5.0 \
@@ -194,14 +194,11 @@ grep -F -- 'HA chaos Cargo/test process group exceeded hard timeout of 1 seconds
   "$timeout_root/runner.log"
 
 : >"$calls"
-boundary_root="$temp_dir/boundary-pass"
-run_runner "$boundary_root" success boundary-pass 0 1 1
+late_pass_root="$temp_dir/late-pass"
+expect_status 124 run_runner "$late_pass_root" success late-pass 0 1 1
 expect_owned_cleanup
-test "$(jq -r .status "$boundary_root/ha-chaos-result.json")" = PASS
-if grep -Fq -- 'runner_timeout' "$boundary_root/ha-chaos-result.json"; then
-  echo 'normal Cargo completion at the deadline was misclassified as timeout' >&2
-  exit 1
-fi
+test "$(jq -r .status "$late_pass_root/ha-chaos-result.json")" = FAIL
+test "$(jq -r .first_failure.stage "$late_pass_root/ha-chaos-result.json")" = runner_timeout
 test "$(jq -r .status "$artifact_root/ha-chaos-result.json")" = PASS
 test -s "$artifact_root/runner.log"
 
@@ -250,6 +247,52 @@ if grep -F -- 'rm -f mc-store-ha-chaos-contract' "$calls"; then
   echo 'runner removed a pre-existing container after a name conflict' >&2
   exit 1
 fi
+
+: >"$calls"
+early_term_root="$temp_dir/early-term"
+run_runner "$early_term_root" success term 0 30 1 1 &
+runner_pid=$!
+wrapper_ready="$early_term_root/.cargo-test-wrapper-ready-contract"
+for _ in $(seq 1 50); do
+  if [[ -e "$wrapper_ready" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ ! -e "$wrapper_ready" ]]; then
+  kill -TERM "$runner_pid" 2>/dev/null || true
+  wait "$runner_pid" 2>/dev/null || true
+  echo 'runner did not reach the wrapper-controlled pre-Cargo pause' >&2
+  exit 1
+fi
+if grep -Fq -- 'test -p mooncake-store-client --features link-native --test test_ha_chaos_live' "$calls"; then
+  echo 'Cargo started before the wrapper-controlled pre-Cargo pause' >&2
+  exit 1
+fi
+kill -TERM "$runner_pid"
+for _ in $(seq 1 50); do
+  if ! kill -0 "$runner_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if kill -0 "$runner_pid" 2>/dev/null; then
+  wrapper_pid=$(pgrep -P "$runner_pid" | head -1 || true)
+  if [[ -n "$wrapper_pid" ]]; then
+    kill -KILL -- "-$wrapper_pid" 2>/dev/null || true
+    kill -KILL "$wrapper_pid" 2>/dev/null || true
+  fi
+  kill -KILL "$runner_pid" 2>/dev/null || true
+  wait "$runner_pid" 2>/dev/null || true
+  echo 'runner did not handle TERM before Cargo launch' >&2
+  exit 1
+fi
+set +e
+wait "$runner_pid"
+status=$?
+set -e
+[[ $status -eq 143 ]]
+expect_owned_cleanup
 
 : >"$calls"
 run_runner "$temp_dir/term" success term &
