@@ -5247,6 +5247,87 @@
       "review": {"oracle": "mooncake-store/tests/master_metrics_test.cpp:791-931, NotifyOffloadSuccess, and mooncake-store-master/tests/test_master_metrics.rs cache tests", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=false, offload_force_evict=false, a 2,000-ms lease TTL, 16-MiB Memory, and an offloading-enabled LocalDisk mount, completing key_a1, key_a2, and key_a3 queues exactly those three names immediately at PutEnd.",
+      "boundary": ["master", "offload", "put-end", "local-disk", "queue-timing", "configuration"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboA_OffloadAtPutEnd"},
+      "reason": "No discoverable Rust test proves the exact three-key immediate-PutEnd queue result. Add cpp_parity_combo_a_offload_at_put_end to mooncake-store-master/tests/test_master_eviction_offload.rs; configure enable_offload=true, offload_on_evict=false, offload_force_evict=false, and lease_ttl=2,000 ms, mount one 16-MiB Memory segment plus an offloading-enabled LocalDisk session, then PutStart/PutEnd key_a1, key_a2, and key_a3 in that order. Immediately call OffloadObjectHeartbeat without advancing eviction or reporting LocalDisk completion, and assert exactly three tasks whose key set is {key_a1,key_a2,key_a3}. The existing default offload heartbeat test proves only one key, so it cannot establish the required cardinality/name set.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboA_OffloadAtPutEnd; Rust grpc_objects.rs PutEnd queue branch; Rust test_master_offload.rs heartbeat test", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=false, offload_force_evict=false, a 2,000-ms lease TTL, and no LocalDisk mount, a 240-MiB Memory segment accepts strictly more than 16,384 completed 15-KiB puts across exactly 16,434 attempts.",
+      "boundary": ["master", "eviction", "put-start", "memory-pressure", "configuration", "no-local-disk"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboA_EvictionWorks"},
+      "reason": "No discoverable Rust test runs the C++-sized default-mode PutStart pressure loop or proves its strict overflow threshold. Production prerequisite: provide deterministic test clock/eviction triggering that preserves lease_ttl=2,000 ms, rather than sleeping for correctness. Add cpp_parity_combo_a_eviction_allows_strict_capacity_overflow to mooncake-store-master/tests/test_master_eviction_offload.rs; mount one 240-MiB Memory segment with no LocalDisk, configure enable_offload=true, offload_on_evict=false, offload_force_evict=false, and execute exactly 16,384+50 sequential 15-KiB PutStart/Memory PutEnd attempts. Deterministically advance the injected lease clock and run the pressure-eviction hook whenever allocation needs reclamation; assert completed puts >16,384. A capacity-scaled fixture is allowed only if it documents an exact one-object-per-15-KiB mapping and still proves successful_puts>mapped_capacity. Existing manual one-object eviction cycles are not equivalent.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboA_EvictionWorks and FillSegmentUntilEviction; Rust background_ops.rs pressure eviction", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=true, offload_force_evict=false, a 2,000-ms lease TTL, 16-MiB Memory, and an offloading-enabled LocalDisk mount, completing three keys leaves the heartbeat offload queue empty immediately after PutEnd.",
+      "boundary": ["master", "offload", "put-end", "local-disk", "queue-timing", "configuration"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboB_PutEndSkipsOffloadQueue"},
+      "reason": "No discoverable Rust test proves the exact Combo-B immediate-PutEnd empty queue for three completed keys. Add cpp_parity_combo_b_put_end_skips_offload_queue to mooncake-store-master/tests/test_master_eviction_offload.rs; configure enable_offload=true, offload_on_evict=true, offload_force_evict=false, and lease_ttl=2,000 ms, mount one 16-MiB Memory segment and an offloading-enabled LocalDisk session, then complete key_b1, key_b2, and key_b3. Before any deterministic clock advancement or eviction hook, call OffloadObjectHeartbeat and assert an empty task list. The existing eviction tests enqueue only after a manual/background eviction cycle and therefore do not prove PutEnd timing.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboB_PutEndSkipsOffloadQueue; Rust grpc_objects.rs PutEnd offload_on_evict guard", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=true, offload_force_evict=false, a 2,000-ms lease TTL, 240-MiB Memory, and an offloading-enabled LocalDisk mount, exactly 16,434 15-KiB put attempts include at least one PutStart failure and a subsequent heartbeat has more than zero queued offload tasks.",
+      "boundary": ["master", "offload", "eviction", "put-start", "memory-pressure", "local-disk", "queue-timing"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboB_EvictionTriggersOffload"},
+      "reason": "No discoverable Rust test combines the no-force Combo-B pressure loop, an observed PutStart allocation failure, and post-eviction nonempty heartbeat queue. Production prerequisite: provide deterministic lease-clock advancement and pressure-worker triggering while retaining lease_ttl=2,000 ms. Add cpp_parity_combo_b_pressure_failure_queues_offload to mooncake-store-master/tests/test_master_eviction_offload.rs; mount one 240-MiB Memory segment and offloading-enabled LocalDisk, set enable_offload=true, offload_on_evict=true, offload_force_evict=false, and issue exactly 16,384+50 sequential 15-KiB PutStart/Memory PutEnd attempts. On a failed PutStart, record the failure and deterministically advance/trigger eviction; after the loop assert at least one failed PutStart, then heartbeat and assert tasks.len()>0. Do not assert success_puts, queue names, LocalDisk I/O, or offload completion. Existing single-object and high-watermark tests do not prove this full-capacity failure/queue sequence.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboB_EvictionTriggersOffload; Rust test_master_eviction_offload.rs adjacent eviction tests; Rust background_ops.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=true, offload_force_evict=false, a 2,000-ms lease TTL, 240-MiB Memory, and no LocalDisk mount, exactly 16,434 15-KiB put attempts complete at most 16,384 puts because failed offload admission does not force-delete Memory.",
+      "boundary": ["master", "offload", "eviction", "memory-pressure", "no-local-disk", "data-preservation", "force-evict"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboB_NoFallbackWithoutForceEvict"},
+      "reason": "No discoverable Rust test proves the no-LocalDisk, no-force data-preserving pressure bound. Production prerequisite: provide deterministic lease-clock advancement and pressure-eviction triggering while retaining lease_ttl=2,000 ms. Add cpp_parity_combo_b_no_fallback_without_force_evict to mooncake-store-master/tests/test_master_eviction_offload.rs; mount only one 240-MiB Memory segment, set enable_offload=true, offload_on_evict=true, offload_force_evict=false, make no LocalDisk mount, and issue exactly 16,384+50 sequential 15-KiB PutStart/Memory PutEnd attempts. Deterministically trigger eviction after allocation failures; assert completed puts<=16,384, which proves failed queue admission did not free Memory. A scaled fixture must state its exact capacity mapping and preserve the <= mapped-capacity relation. Existing queue-cap and manual-cycle tests do not cover absent LocalDisk admission failure.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboB_NoFallbackWithoutForceEvict; Rust background_ops.rs offload admission/force branch", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=true, offload_force_evict=true, a 2,000-ms lease TTL, 16-MiB Memory, and an offloading-enabled LocalDisk mount, completing two keys leaves the heartbeat offload queue empty immediately after PutEnd.",
+      "boundary": ["master", "offload", "put-end", "local-disk", "queue-timing", "force-evict", "configuration"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboC_PutEndSkipsOffloadQueue"},
+      "reason": "No discoverable Rust test mentions offload_force_evict=true or proves the Combo-C immediate-PutEnd empty queue. Add cpp_parity_combo_c_put_end_skips_offload_queue to mooncake-store-master/tests/test_master_eviction_offload.rs; configure enable_offload=true, offload_on_evict=true, offload_force_evict=true, and lease_ttl=2,000 ms, mount one 16-MiB Memory segment plus an offloading-enabled LocalDisk session, complete key_c1 then key_c2, and immediately heartbeat before any lease advance or eviction hook. Assert tasks is empty; do not assert later eviction queueing or LocalDisk completion. Source configuration alone is not test coverage.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboC_PutEndSkipsOffloadQueue; Rust state_config.rs and grpc_objects.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=true, offload_force_evict=true, a 2,000-ms lease TTL, 240-MiB Memory, and an offloading-enabled LocalDisk mount, exactly 16,434 15-KiB put attempts complete at least 16,384 puts.",
+      "boundary": ["master", "offload", "eviction", "memory-pressure", "local-disk", "force-evict", "configuration"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboC_EvictionWithForceEvict"},
+      "reason": "No discoverable Rust test exercises offload_force_evict=true under the Combo-C full-capacity pressure fixture. Production prerequisite: provide deterministic lease-clock advancement and pressure-eviction triggering while retaining lease_ttl=2,000 ms. Add cpp_parity_combo_c_force_evict_reaches_capacity to mooncake-store-master/tests/test_master_eviction_offload.rs; mount one 240-MiB Memory segment and offloading-enabled LocalDisk, set enable_offload=true, offload_on_evict=true, offload_force_evict=true, and execute exactly 16,384+50 sequential 15-KiB PutStart/Memory PutEnd attempts, deterministically advancing expiry/running pressure eviction after failed allocations. Assert completed puts>=16,384 only; do not assert queue size, overflow beyond capacity, offload completion, or LocalDisk I/O. A scaled fixture must document an exact mapping and retain >= mapped capacity. Current source fields and non-force manual-cycle tests are not evidence.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboC_EvictionWithForceEvict; Rust background_ops.rs force eviction branch", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=false, offload_force_evict=true, a 2,000-ms lease TTL, 16-MiB Memory, and an offloading-enabled LocalDisk mount, completing two keys queues exactly two offload entries immediately after PutEnd.",
+      "boundary": ["master", "offload", "put-end", "local-disk", "queue-timing", "force-evict", "configuration"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboD_ForceEvictAloneIsIgnored"},
+      "reason": "No discoverable Rust test mentions offload_force_evict=true with offload_on_evict=false or proves the two-entry immediate-PutEnd result. Add cpp_parity_combo_d_force_evict_alone_is_ignored to mooncake-store-master/tests/test_master_eviction_offload.rs; configure enable_offload=true, offload_on_evict=false, offload_force_evict=true, and lease_ttl=2,000 ms, mount one 16-MiB Memory segment plus an offloading-enabled LocalDisk session, complete key_d1 and key_d2, then heartbeat immediately before any eviction hook. Assert exactly two tasks; do not assert their names because the C++ row asserts size only, and do not report LocalDisk completion. Production configuration fields are not test evidence.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboD_ForceEvictAloneIsIgnored; Rust grpc_objects.rs PutEnd queue branch", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With offload enabled, offload_on_evict=false, offload_force_evict=true, a 2,000-ms lease TTL, 240-MiB Memory, and no LocalDisk mount, exactly 16,434 15-KiB put attempts complete strictly more than 16,384 puts.",
+      "boundary": ["master", "eviction", "put-start", "memory-pressure", "no-local-disk", "force-evict", "configuration"],
+      "cpp": {"file": "offload_on_evict_test.cpp", "test": "OffloadOnEvictTest.ComboD_EvictionWorks"},
+      "reason": "No discoverable Rust test exercises the force-alone Combo-D full-capacity pressure result. Production prerequisite: provide deterministic lease-clock advancement and pressure-eviction triggering while retaining lease_ttl=2,000 ms. Add cpp_parity_combo_d_force_evict_alone_allows_strict_capacity_overflow to mooncake-store-master/tests/test_master_eviction_offload.rs; mount one 240-MiB Memory segment with no LocalDisk, set enable_offload=true, offload_on_evict=false, offload_force_evict=true, and execute exactly 16,384+50 sequential 15-KiB PutStart/Memory PutEnd attempts, deterministically advancing expiry/running pressure eviction whenever allocation needs reclamation. Assert completed puts>16,384. A scaled fixture must prove successful_puts>mapped_capacity using an explicit exact mapping. Do not assert queueing, LocalDisk I/O, or completion. Existing default-mode tests neither set force=true nor establish this flag-combination pressure behavior.",
+      "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboD_EvictionWorks and FillSegmentUntilEviction; Rust background_ops.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
