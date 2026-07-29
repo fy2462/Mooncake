@@ -467,22 +467,22 @@
       "status": "missing"
     },
     {
-      "behavior": "Snapshot-only standby startup with no available snapshot succeeds from an empty metadata and sequence baseline.",
-      "boundary": ["master", "ha", "snapshot", "empty-baseline"],
+      "behavior": "With a configured Embedded or Redis catalog provider and no published snapshot, snapshot-only standby startup reaches Watching with empty metadata and latest, applied, and primary sequences all zero.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "empty-baseline"],
       "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartUsesEmptyBaselineWhenSnapshotMissing"},
-      "reason": "",
+      "reason": "Rust tests the empty snapshot-only baseline only with NoopSnapshotProvider and asserts empty objects/segments plus Watching and zero applied/primary sequences; it neither uses a configured CatalogBackedSnapshotProvider (Embedded or Redis) nor asserts the separate latest-applied sequence observable required by the C++ test.",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and missing-snapshot startup", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "If standby startup fails due to invalid snapshot configuration, promotion returns the same failure instead of hiding it.",
-      "boundary": ["master", "ha", "promotion", "error-propagation"],
+      "behavior": "For an Etcd HA specification with snapshot restore and an invalid catalog-store kind, standby startup and later promotion both return InvalidParams.",
+      "boundary": ["master", "ha", "snapshot", "catalog-configuration", "promotion", "error-propagation"],
       "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "StandbyControllerTest.PromoteStandbyReturnsStartFailure"},
-      "reason": "",
+      "reason": "Rust preserves a startup error through promotion, but its discoverable test uses an Unknown HA backend and Redis catalog with a missing connection string; it does not exercise the C++ Etcd HA configuration whose invalid catalog-store kind fails parsing with InvalidParams before the same promotion propagation check.",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and StandbyController", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_controller_promotion_preserves_standby_start_failure"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "An empty tenant identifier normalizes to the canonical default tenant while named tenants retain their value and default classification.",
