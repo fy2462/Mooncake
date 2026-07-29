@@ -3049,7 +3049,7 @@
       "status": "missing"
     },
     {
-      "behavior": "After a successfully read promotion task has allocation rejected, the client attempts best-effort failure notification, does not transfer or commit that key, and continues to allocate later tasks.",
+      "behavior": "When promotion allocation is rejected before any staging allocation or LocalDisk read, the client attempts best-effort failure notification, performs no transfer or success commit for that key, and continues to allocate later tasks.",
       "boundary": ["client", "promotion", "allocation", "failure-notification", "batch-liveness"],
       "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.AllocStartFailureSkipsKey"},
       "reason": "Rust's reached allocation-failure branch sends best-effort failure notification and continues, but no discoverable Rust client-loop test exercises that branch. The C++ comment saying no notify is stale; current C++ source notifies failure.",
