@@ -1235,76 +1235,76 @@
       "status": "covered"
     },
     {
-      "behavior": "The C++ FileUtil string helper writes exact text bytes to a file.",
-      "boundary": ["cpp-only", "utility", "filesystem", "text-write"],
+      "behavior": "Writing `hello mooncake` to the requested path succeeds and a raw binary read of that path returns exactly those text bytes.",
+      "boundary": ["client", "local-disk", "filesystem", "text-write", "raw-content"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_Basic"},
-      "reason": "Rust has no FileUtil wrapper identity; persistence call sites use std::fs/File::write_all directly and test their product-level formats and recovery behavior.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_Basic and Rust std::fs call sites", "reviewed": true},
+      "reason": "No discoverable Rust test writes selected plain text to a selected raw LocalDisk path and reads the same unencoded bytes back; add this portable contract before replacing LocalDisk file I/O with io_uring.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_Basic and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/WriteChunks/SaveStringToFile", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ FileUtil string helper creates missing parent directories before writing.",
-      "boundary": ["cpp-only", "utility", "filesystem", "directory-creation"],
+      "behavior": "Writing exact text to a selected nested path with absent parents succeeds, creates every parent directory, and a raw read returns the same text.",
+      "boundary": ["client", "local-disk", "filesystem", "text-write", "recursive-parents"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_CreatesSubdirectories"},
-      "reason": "Rust call sites invoke std::fs::create_dir_all explicitly before writing; there is no shared FileUtil helper whose wrapper contract can be tested.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_CreatesSubdirectories and Rust create_dir_all call sites", "reviewed": true},
+      "reason": "Rust nested snapshot and persistence tests are indirect and do not assert selected text plus recursively absent parents plus a raw read; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_CreatesSubdirectories and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/EnsureDirExists/SaveStringToFile", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ FileUtil string helper creates a zero-length file for empty content.",
-      "boundary": ["cpp-only", "utility", "filesystem", "empty-write"],
+      "behavior": "Writing an empty string to the requested path succeeds and leaves a readable zero-length file there.",
+      "boundary": ["client", "local-disk", "filesystem", "text-write", "empty-write", "size"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_EmptyContent"},
-      "reason": "Rust relies on the standard File/fs::write empty-slice contract instead of exposing the C++ convenience helper.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_EmptyContent and Rust standard filesystem usage", "reviewed": true},
+      "reason": "No discoverable Rust test asserts that an empty write creates the selected regular file and that its raw content and length are zero; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_EmptyContent and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/WriteChunks/SaveStringToFile", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ FileUtil binary helper preserves arbitrary byte values exactly.",
-      "boundary": ["cpp-only", "utility", "filesystem", "binary-write"],
+      "behavior": "Writing `[0, 1, 2, 128, 254, 255]` to the requested path succeeds and a raw file read returns byte-for-byte equality.",
+      "boundary": ["client", "local-disk", "filesystem", "binary-write", "raw-content"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveBinaryToFile_Basic"},
-      "reason": "Rust writes byte slices through std::fs/File directly and has no FileUtil binary-wrapper API; product serializers have their own round-trip tests.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_Basic and Rust byte-oriented persistence call sites", "reviewed": true},
+      "reason": "LocalStorageBackend round-trips an encoded per-key record rather than asserting raw selected-file bytes including zero and high-byte values; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_Basic and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/WriteChunks/SaveBinaryToFile", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ FileUtil binary helper creates missing parent directories before writing.",
-      "boundary": ["cpp-only", "utility", "filesystem", "binary-write", "directory-creation"],
+      "behavior": "Writing byte `[42]` to a selected nested path with absent parents succeeds, creates every parent directory, and a raw read returns exactly `[42]`.",
+      "boundary": ["client", "local-disk", "filesystem", "binary-write", "recursive-parents", "raw-content"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveBinaryToFile_CreatesSubdirectories"},
-      "reason": "Rust persistence modules explicitly combine std::fs::create_dir_all with byte writes instead of exposing this C++ helper contract.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_CreatesSubdirectories and Rust persistence call sites", "reviewed": true},
+      "reason": "Rust only has separate or indirect evidence for nested directory creation and binary persistence, not the selected nested raw-byte sequence; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_CreatesSubdirectories and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/EnsureDirExists/SaveBinaryToFile", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ EnsureDirExists helper recursively creates a missing directory.",
-      "boundary": ["cpp-only", "utility", "filesystem", "directory-creation"],
+      "behavior": "Ensuring a selected absent path succeeds and makes that path a directory.",
+      "boundary": ["client", "local-disk", "filesystem", "directory-creation", "path-type"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_CreateNew"},
-      "reason": "Rust uses std::fs::create_dir_all directly; there is no repository-specific EnsureDirExists wrapper to preserve.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_CreateNew and Rust create_dir_all call sites", "reviewed": true},
+      "reason": "Rust LocalDisk initialization asserts an internally selected namespace directory but does not directly ensure an arbitrary absent path and assert its type; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_CreateNew and mooncake-store/src/utils/file_util.cpp EnsureDirExists", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ EnsureDirExists helper succeeds idempotently for an existing directory.",
-      "boundary": ["cpp-only", "utility", "filesystem", "idempotence"],
+      "behavior": "Ensuring an already existing directory succeeds without error.",
+      "boundary": ["client", "local-disk", "filesystem", "directory-creation", "idempotence"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_AlreadyExists"},
-      "reason": "Rust delegates this wrapper-level behavior to std::fs::create_dir_all and does not expose an equivalent helper API.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_AlreadyExists and Rust standard filesystem usage", "reviewed": true},
+      "reason": "LocalStorageBackend init idempotence returns through an initialized-state fast path rather than directly revalidating an existing directory; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_AlreadyExists and mooncake-store/src/utils/file_util.cpp EnsureDirExists", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
-      "behavior": "The C++ EnsureDirExists helper rejects a path occupied by a regular file.",
-      "boundary": ["cpp-only", "utility", "filesystem", "type-conflict"],
+      "behavior": "Ensuring a selected path already occupied by a regular file returns an error.",
+      "boundary": ["client", "local-disk", "filesystem", "directory-creation", "type-conflict", "error"],
       "cpp": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_PathIsFile_ReturnsError"},
-      "reason": "Rust call sites receive the standard create_dir_all error directly and have no FileUtil-specific error surface to match.",
-      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_PathIsFile_ReturnsError and Rust standard filesystem usage", "reviewed": true},
+      "reason": "Rust LocalDisk source rejects a non-directory storage path, but no discoverable test exercises a regular file at the selected directory path and asserts the error; add this LocalDisk contract before io_uring file I/O.",
+      "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_PathIsFile_ReturnsError and mooncake-store/src/utils/file_util.cpp EnsureDirExists", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
       "behavior": "Health check reports NOT_INITIALIZED before client setup.",
