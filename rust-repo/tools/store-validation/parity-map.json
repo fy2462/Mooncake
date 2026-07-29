@@ -3110,6 +3110,213 @@
       "review": {"oracle": "file_storage_promotion_test.cpp PostAllocFailuresAllNotifyMaster and mooncake-store/src/file_storage.cpp failure-release branches; Rust storage_local.rs and master test_master_promotion.rs", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "An empty FileStorage permits offloading, while a global key or byte limit smaller than one full configured bucket rejects offloading before work begins.",
+      "boundary": ["client", "file-storage", "bucket-admission"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.IsEnableOffloading"},
+      "reason": "Rust BucketStorageBackend::prepare_write only rejects an actual projected write; it has no whole-maximum-bucket IsEnableOffloading preflight or 9-vs-10/100-vs-969 boundary test.",
+      "review": {"oracle": "file_storage_test.cpp IsEnableOffloading and storage_backend.cpp BucketStorageBackend::IsEnableOffloading", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Batch allocation followed by FileStorage BatchLoad succeeds; the test's intended byte comparison is vacuous because it iterates an empty separate slice map.",
+      "boundary": ["client", "file-storage", "batch-load"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoad"},
+      "reason": "Rust has a one-key write/read roundtrip, but no public multi-key caller-slice BatchLoad test; component evidence is not end-to-end coverage for this boundary.",
+      "review": {"oracle": "file_storage_test.cpp BatchLoad and file_storage.cpp FileStorage::BatchLoad", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Grouping 35 one-byte offload tasks with a ten-key bucket limit emits three full buckets, retains five tasks, then emits four buckets on the next call and clears residue.",
+      "boundary": ["client", "file-storage", "bucket-grouping", "stateful-queue"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_bucket_keys_limit"},
+      "reason": "Rust packs individual writes but has no offload-task grouping API or retained ungrouped queue implementing the two-call 35/5 residue contract.",
+      "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_bucket_keys_limit and storage_backend.cpp grouping path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Grouping 35 one-byte offload tasks with a ten-byte bucket limit emits three full buckets, retains five tasks, then clears that residue on a second call.",
+      "boundary": ["client", "file-storage", "bucket-grouping", "stateful-queue"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_bucket_size_limit"},
+      "reason": "Rust has no task-residue queue or size-driven two-call grouping contract; per-write packing cannot establish this scheduling behavior.",
+      "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_bucket_size_limit and storage_backend.cpp grouping path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Every emitted grouping bucket contains at most nine keys and at most 496 total input bytes when both limits are configured.",
+      "boundary": ["client", "file-storage", "bucket-grouping"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_bucket_size_limit_and_bucket_keys_limit"},
+      "reason": "Rust prepare_write enforces component limits, but no test drives varied task sizes through a grouping result and checks every emitted bucket.",
+      "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_bucket_size_limit_and_bucket_keys_limit and storage_backend.cpp grouping path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Repeated grouping calls with one task, no new tasks, then seven tasks succeed while persistent ungrouped state participates; the C++ test has no count or content oracle.",
+      "boundary": ["client", "file-storage", "bucket-grouping", "stateful-queue"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_ungrouped_offloading_objects"},
+      "reason": "Rust exposes neither an ungrouped-task residue queue nor a no-new-work flush contract.",
+      "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_ungrouped_offloading_objects and storage_backend.cpp grouping path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With no environment overrides, FileStorage and Bucket backend defaults include path, buffer, scan, bucket/global limits, heartbeat, enabled eviction, and 0.90/0.80 watermarks.",
+      "boundary": ["client", "file-storage", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.DefaultValuesWhenNoEnvSet"},
+      "reason": "Rust directly tests some bucket defaults only; it lacks the FileStorage path, local-buffer, scan, heartbeat, global-size, and full watermark default matrix.",
+      "review": {"oracle": "file_storage_test.cpp DefaultValuesWhenNoEnvSet and FileStorageConfig/BucketBackendConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "MOONCAKE_OFFLOAD_FILE_STORAGE_PATH sets the configured storage path.",
+      "boundary": ["client", "local-disk", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ReadStringFromEnv"},
+      "reason": "",
+      "review": {"oracle": "file_storage_test.cpp ReadStringFromEnv and FileStorageConfig::FromEnvironment", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/local_storage_backend/config.rs", "test": "bucket_config_reads_cpp_environment_names"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Integer environment values set the local buffer to 2 GiB, bucket key limit to 1000, and global key limit to 5,000,000.",
+      "boundary": ["client", "file-storage", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ReadInt64FromEnv"},
+      "reason": "Rust proves a bucket-key environment read and a different total-key value, but has no FileStorage local-buffer peer or exact complete three-value configuration test.",
+      "review": {"oracle": "file_storage_test.cpp ReadInt64FromEnv and FileStorageConfig/BucketBackendConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS=5 configures the FileStorage heartbeat interval as uint32.",
+      "boundary": ["file-storage", "heartbeat", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ReadUint32FromEnv"},
+      "reason": "The heartbeat interval configures the C++ FileStorage thread, not classic Rust LocalDisk; later background-adapter semantics are outside this audit boundary.",
+      "review": {"oracle": "file_storage_test.cpp ReadUint32FromEnv and FileStorageConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "Legacy watermark aliases load, preferred offload variables override them, zero disables eviction, and malformed ratio values restore 0.90/0.80 defaults.",
+      "boundary": ["client", "file-storage", "watermark-eviction", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ReadDiskWatermarkConfigFromEnv"},
+      "reason": "Classic LocalDisk lacks a direct test for alias precedence, malformed fallback, and disabled behavior; later background adapter evidence is quarantined.",
+      "review": {"oracle": "file_storage_test.cpp ReadDiskWatermarkConfigFromEnv and FileStorageConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A heartbeat with no offload work still evicts local-disk victims above ultra-low watermarks and Master queries then return OBJECT_NOT_FOUND.",
+      "boundary": ["client", "heartbeat", "watermark-eviction", "master", "local-disk"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.HeartbeatRunsDiskWatermarkEvictionWithoutOffloadWork"},
+      "reason": "Rust backend commit tests delete local victims, but no classic client test proves empty-work heartbeat scheduling plus Master notification and OBJECT_NOT_FOUND outcome.",
+      "review": {"oracle": "file_storage_test.cpp HeartbeatRunsDiskWatermarkEvictionWithoutOffloadWork, file_storage.cpp heartbeat, and storage_backend.cpp eviction", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Evicting two tenant-scoped versions of the same user key removes each tenant's LocalDisk Master metadata without cross-tenant collision.",
+      "boundary": ["client", "master", "tenant", "local-disk", "eviction"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.NotifyEvictedDiskReplicasUsesTenantScopedKeys"},
+      "reason": "Rust tests tenant storage-key encoding only; no classic LocalDisk integration test makes two same-named tenant replicas disappear from Master metadata.",
+      "review": {"oracle": "file_storage_test.cpp NotifyEvictedDiskReplicasUsesTenantScopedKeys and file_storage.cpp NotifyEvictedDiskReplicas", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Malformed bucket/global-size values and a negative unsigned heartbeat value fall back to FileStorage defaults.",
+      "boundary": ["client", "file-storage", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.InvalidIntValueUsesDefault"},
+      "reason": "Rust parser implementation rejects malformed/non-positive bucket values, but no direct test covers this C++-named malformed-input matrix and Rust has no matching heartbeat field.",
+      "review": {"oracle": "file_storage_test.cpp InvalidIntValueUsesDefault and FileStorageConfig/BucketBackendConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The final negative heartbeat environment value falls back to the default; the prior overflow assignment is overwritten and therefore unobserved.",
+      "boundary": ["file-storage", "configuration", "uint32-parser"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.OutOfRangeValueUsesDefault"},
+      "reason": "This is C++ FileStorage uint32 parser behavior; classic Rust LocalDisk has no corresponding heartbeat configuration, and the claimed overflow branch is not actually exercised.",
+      "review": {"oracle": "file_storage_test.cpp OutOfRangeValueUsesDefault and FileStorageConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "An empty MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT value falls back to the default limit of 500.",
+      "boundary": ["client", "local-disk", "configuration"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.EmptyEnvValueUsesDefault"},
+      "reason": "Rust parse_positive_usize rejects empty input, but no discoverable Rust test sets the empty C++ environment name and asserts the resulting default.",
+      "review": {"oracle": "file_storage_test.cpp EmptyEnvValueUsesDefault and BucketBackendConfig::FromEnvironment", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An existing absolute storage path with positive global limits and heartbeat validates successfully.",
+      "boundary": ["client", "file-storage", "configuration-validation"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ValidateSuccessWithValidConfig"},
+      "reason": "Rust separately validates bucket numbers and LocalStorage ownership at initialization, but has no all-in-one FileStorageConfig success validator for path, heartbeat, and global limits.",
+      "review": {"oracle": "file_storage_test.cpp ValidateSuccessWithValidConfig and FileStorageConfig::Validate", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Empty, whitespace, relative, traversal, and nonexistent storage paths fail validation while the existing fixture path succeeds; the /path/./sub case is absent rather than proof that dot components alone are rejected.",
+      "boundary": ["client", "file-storage", "path-validation"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ValidateFailsOnEmptyStoragePath"},
+      "reason": "Rust tests stronger but different unsafe/symlink/unowned directory protections, not the C++ FileStorage root-path validation matrix or its path-form nuances.",
+      "review": {"oracle": "file_storage_test.cpp ValidateFailsOnEmptyStoragePath and FileStorageConfig::ValidatePath", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Zero global key/size/heartbeat limits and invalid watermark ranges or ordering fail FileStorage configuration validation.",
+      "boundary": ["client", "file-storage", "configuration-validation", "watermark-eviction"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ValidateFailsOnInvalidLimits"},
+      "reason": "Rust separately tests bucket nonzero limits and watermark ordering, but lacks a FileStorageConfig with the C++ global-size and heartbeat fields and exact validation matrix.",
+      "review": {"oracle": "file_storage_test.cpp ValidateFailsOnInvalidLimits and FileStorageConfig::Validate", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With the FilePerKey adaptor, 100 offloaded objects batch-load into allocated slices whose bytes exactly equal every source value.",
+      "boundary": ["client", "file-storage", "file-per-key", "batch-load"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoad_WithStorageBackendAdaptor"},
+      "reason": "Rust has exact one-key roundtrip and lifecycle tests but no multi-key caller-slice BatchLoad equivalent covering the 100-object boundary.",
+      "review": {"oracle": "file_storage_test.cpp BatchLoad_WithStorageBackendAdaptor and StorageBackendAdaptor::BatchLoad", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A successful batch read records one read op per slice, summed bytes, exactly one latency observation, and no write metrics when setup bypasses FileStorage.",
+      "boundary": ["client", "file-storage", "metrics", "batch-load"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoadRecordsSsdMetrics"},
+      "reason": "Classic Rust LocalDisk exposes no injectable metric sink or test of successful batch read ops, bytes, and histogram semantics; later adapter evidence is excluded.",
+      "review": {"oracle": "file_storage_test.cpp BatchLoadRecordsSsdMetrics and file_storage.cpp BatchLoad metric updates", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A batch read of two missing keys fails and leaves read ops, read bytes, and latency observations at zero.",
+      "boundary": ["client", "file-storage", "metrics", "batch-load", "failure"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoadFailureDoesNotRecordSsdMetrics"},
+      "reason": "Rust proves only a one-key missing read error and has no classic metric object or failure-no-metrics batch test; later adapter evidence is excluded.",
+      "review": {"oracle": "file_storage_test.cpp BatchLoadFailureDoesNotRecordSsdMetrics and file_storage.cpp BatchLoad failure path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A successful FileStorage batch read with a null optional SSD metrics pointer does not crash.",
+      "boundary": ["file-storage", "metrics", "wrapper-plumbing"],
+      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.NullSsdMetricDoesNotCrash"},
+      "reason": "The optional C++ metric pointer is FileStorage wrapper plumbing absent from classic Rust LocalDisk; ordinary backend read tests cannot establish that null-instrumentation branch.",
+      "review": {"oracle": "file_storage_test.cpp NullSsdMetricDoesNotCrash and file_storage.cpp BatchLoad null metric guard", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
     }
   ],
   "schema_version": 1
