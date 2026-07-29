@@ -2755,6 +2755,78 @@
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp AdmissionHelpersWithoutHotCache and mooncake-store/include/client_service.h", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "After a warmed key is read twice through DummyClient, each buffer has the stored size and bytes, and a successful remove makes the next get_buffer return no buffer.",
+      "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "remove", "data-integrity"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.StableHotCacheEntryShouldBeInvalidatedByRemove"},
+      "reason": "No discoverable Rust test warms a public client get_buffer result, removes the key through that client, and asserts a later get_buffer fails without returning stale bytes.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp StableHotCacheEntryShouldBeInvalidatedByRemove, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/remove.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After fallback reads trigger hot-cache admission, removing the key leaves subsequent dummy get_buffer reads absent both immediately and after an asynchronous fill could have completed.",
+      "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "remove", "concurrency", "stale-read"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.RemoveShouldNotBeResurrectedByAsyncHotCacheFill"},
+      "reason": "No discoverable Rust test races an in-flight ordinary cacheable read/cache publication with remove and then asserts that later reads cannot return resurrected stale bytes; the C++ SHM async-fill mechanism itself is not the required parity boundary.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp RemoveShouldNotBeResurrectedByAsyncHotCacheFill, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An unwarmed key fetched through DummyClient get_buffer returns a non-null owned buffer whose size and bytes exactly equal the stored payload.",
+      "boundary": ["client", "dummy-client", "get-buffer", "allocator-fallback", "data-integrity"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.GetBuffer_AllocatorFallback"},
+      "reason": "Rust MooncakeClient::get_buffer implements an owned BufferHandle, but no discoverable Rust test performs a cold store fetch through that public API and asserts its key, size, and exact payload bytes; the Python dummy does not expose get_buffer.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp GetBuffer_AllocatorFallback, mooncake-store/src/dummy_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A warmed key fetched through DummyClient get_buffer has the stored size and exact bytes on the hot-cache path.",
+      "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "data-integrity"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.GetBuffer_HotCachePath"},
+      "reason": "Discoverable Rust tests prove cached bytes through get and direct LocalHotCache access, but none invokes public get_buffer on a warmed process-local cache and asserts BufferHandle metadata and bytes; C++ SHM pointer identity and zero-copy acquisition are separately deferred.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp GetBuffer_HotCachePath, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A mixed warmed and cold batch returns one non-null buffer per input key in input order, with each buffer's size and bytes matching its key's stored payload.",
+      "boundary": ["client", "dummy-client", "hot-cache", "batch-get-buffer", "ordering", "data-integrity"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.BatchGetBuffer"},
+      "reason": "Rust MooncakeClient::batch_get_buffer preserves per-key results and represents failures as None, but no discoverable Rust test invokes it with mixed warmed and cold keys and asserts ordered BufferHandle key, size, bytes, and per-key miss behavior.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp BatchGetBuffer, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "setup_dummy maps the C++ shared-memory hot cache so a warmed buffer is located in that mapping and its mapped bytes match the payload.",
+      "boundary": ["cpp-only", "dummy-client", "hot-cache", "shared-memory", "memfd", "zero-copy"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.ShmMappingEstablished"},
+      "reason": "This is the deferred C++ cross-process SHM memfd mapping and zero-copy pointer contract. Rust intentionally rejects MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1; hot_cache.rs::shared_memory_mode_fails_closed verifies that fail-closed policy rather than replacing the mapping behavior.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp ShmMappingEstablished, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "Repeated single-key shared-memory hot-cache get_buffer acquisitions are faster than allocator-fallback acquisitions for the same payload size.",
+      "boundary": ["cpp-only", "dummy-client", "hot-cache", "shared-memory", "zero-copy", "performance"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.Perf_HotCacheVsFallback"},
+      "reason": "This compares the deferred C++ SHM zero-copy acquire path against allocator fallback latency. Rust fails closed when MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1, so no corresponding SHM performance requirement is supported.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_HotCacheVsFallback, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "Repeated two-key shared-memory hot-cache batch_get_buffer acquisitions are faster than cold allocator-fallback batch acquisitions for equal payloads.",
+      "boundary": ["cpp-only", "dummy-client", "hot-cache", "shared-memory", "zero-copy", "batch-get-buffer", "performance"],
+      "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.Perf_BatchHotVsCold"},
+      "reason": "This compares the deferred C++ SHM zero-copy batch-acquire path against fallback latency. Rust fails closed when MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1, so no corresponding SHM batch performance requirement is supported.",
+      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_BatchHotVsCold, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
     }
   ],
   "schema_version": 1
