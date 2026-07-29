@@ -160,7 +160,7 @@
       "status": "missing"
     },
     {
-      "behavior": "When one mounted client closes gracefully, another client sees the first client's prior object as OBJECT_NOT_FOUND and receives NO_AVAILABLE_HANDLE for a subsequent put after Master-side cleanup.",
+      "behavior": "Client A mounts, client B successfully puts the object, client A gracefully closes, then client B gets OBJECT_NOT_FOUND followed by NO_AVAILABLE_HANDLE for a subsequent put after Master-side cleanup.",
       "boundary": [
         "client",
         "master",
@@ -172,7 +172,7 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.ClientGracefulClose"
       },
-      "reason": "Rust client teardown and Master cleanup tests exist, but no discoverable live two-client scenario explicitly performs a graceful close and asserts the second client's missing-object then no-available-handle error sequence.",
+      "reason": "Rust client teardown and Master cleanup tests exist, but no discoverable live two-client scenario explicitly has client A mount, client B successfully put the object, client A gracefully close, then client B assert OBJECT_NOT_FOUND followed by NO_AVAILABLE_HANDLE.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, ClientTestWrapper destruction, and Rust test_ha_chaos_live.rs ScenarioClient teardown paths",
         "reviewed": true
