@@ -64,6 +64,145 @@
       "status": "missing"
     },
     {
+      "behavior": "With etcd serving both leader election and the shared oplog, a mounted client writes an object, SIGKILLs the etcd-recorded leader, waits for failover, then successfully puts and exactly reads a new object through the remounted data path.",
+      "boundary": [
+        "client",
+        "master",
+        "ha",
+        "etcd",
+        "shared-oplog",
+        "leader-failover",
+        "hard-crash",
+        "fault-recovery"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_test.cpp",
+        "test": "ChaosTest.LeaderKilledFailover"
+      },
+      "reason": "Rust has etcd-gated live HA tests, but no discoverable live test records a known elected leader, immediately hard-kills that leader, and requires the same client's post-failover put followed by an exact get.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, MasterProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs etcd MasterCluster/run_remount_checkpoint paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With etcd serving both leader election and the shared oplog, a mounted client writes through the known leader, SIGKILLs both known non-leader Masters, and exactly reads the original object while the original leader remains available.",
+      "boundary": [
+        "client",
+        "master",
+        "ha",
+        "etcd",
+        "shared-oplog",
+        "follower-loss",
+        "hard-crash",
+        "availability"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_test.cpp",
+        "test": "ChaosTest.BackupMasterKilled"
+      },
+      "reason": "Rust's etcd-gated chaos schedule stops one or two index-selected slots without recording that both victims were the known non-leaders, and it does not assert the original leader's exact preexisting-object read under that role-aware fault.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, LeaderCoordinator, MasterProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs ChaosSchedule paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With etcd serving both leader election and the shared oplog, exactly one known pre-failure backup remains after SIGKILLing the old leader and other backup; that survivor is promoted and the existing client successfully puts and exactly gets an object.",
+      "boundary": [
+        "client",
+        "master",
+        "ha",
+        "etcd",
+        "shared-oplog",
+        "follower-promotion",
+        "hard-crash",
+        "fault-recovery"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_test.cpp",
+        "test": "ChaosTest.AllMastersOtherThanOneBackedUpKilledFailover"
+      },
+      "reason": "Rust's etcd-gated chaos test can leave one Master running after an index-selected two-slot stop, but no discoverable live test establishes that the sole survivor was a known backup while the old leader was killed, then asserts survivor promotion and post-promotion put/get.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, LeaderCoordinator, MasterProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs ChaosSchedule paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With etcd serving both leader election and the shared oplog, a mounted client survives SIGKILL of all three Masters, restart of all three, a new election, and then successfully puts and exactly gets an object.",
+      "boundary": [
+        "client",
+        "master",
+        "ha",
+        "etcd",
+        "shared-oplog",
+        "total-master-outage",
+        "restart",
+        "fault-recovery"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_test.cpp",
+        "test": "ChaosTest.AllMastersKilledThenRestartFailover"
+      },
+      "reason": "Rust's etcd-gated live schedule intentionally stops at most two Masters and rejects an empty running set, so no discoverable live scenario covers all-three-Master loss, restart of every serving process, and existing-client post-recovery put/get.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, MasterProcessHandler::kill/start, ClientTestWrapper, and Rust test_ha_chaos_live.rs ChaosSchedule/MasterCluster paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When one mounted client closes gracefully, another client sees the first client's prior object as OBJECT_NOT_FOUND and receives NO_AVAILABLE_HANDLE for a subsequent put after Master-side cleanup.",
+      "boundary": [
+        "client",
+        "master",
+        "client-teardown",
+        "segment-cleanup",
+        "cross-client-errors"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_test.cpp",
+        "test": "ChaosTest.ClientGracefulClose"
+      },
+      "reason": "Rust client teardown and Master cleanup tests exist, but no discoverable live two-client scenario explicitly performs a graceful close and asserts the second client's missing-object then no-available-handle error sequence.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, ClientTestWrapper destruction, and Rust test_ha_chaos_live.rs ScenarioClient teardown paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After a separate mount-only client process is SIGKILLed and its live TTL expires, another client sees the prior object as OBJECT_NOT_FOUND and receives NO_AVAILABLE_HANDLE for a subsequent put after Master-side stale-client cleanup.",
+      "boundary": [
+        "client",
+        "master",
+        "client-ttl",
+        "client-process-crash",
+        "segment-cleanup",
+        "cross-client-errors"
+      ],
+      "cpp": {
+        "file": "e2e/chaos_test.cpp",
+        "test": "ChaosTest.ClientKilledFailover"
+      },
+      "reason": "Rust has client-TTL and liveness support, but no discoverable live test SIGKILLs a mounted client process, waits for stale-client reaping, and asserts the other client's missing-object then no-available-handle error sequence.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, ClientProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs client liveness paths",
+        "reviewed": true
+      },
+      "rust": [],
+      "status": "missing"
+    },
+    {
       "behavior": "An RPC bind host already expressed as a bare IPv4 address passes through unchanged and can start the RPC server.",
       "boundary": ["client", "rpc", "configuration"],
       "cpp": {"file": "host_port_fix_test.cpp", "test": "HostPortFixTest.BareHostPassesThrough"},
