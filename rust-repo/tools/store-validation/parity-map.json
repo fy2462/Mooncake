@@ -5571,6 +5571,69 @@
       "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:414-434 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "A one-replica exact payload on a queried nonempty Memory source can be copied to a distinct target through the client/master task path; the task reaches SUCCESS, the target query is nonempty, and Get returns the exact original bytes without asserting final replica count.",
+      "boundary": ["client", "master", "replica-copy", "task-execution", "task-terminal-status", "target-query", "data-integrity"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.ReplicaCopyCompleteFlow"},
+      "reason": "three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments exercises a deliberately full-target failure/release and a three-client combined copy-then-move flow, but it neither creates/queries a task ID nor asserts a task terminal SUCCESS; its extra recovery setup therefore cannot establish this complete C++ row. Production prerequisite: none; the public production create_copy_task/fetch_tasks/execute_task_assignment/query_task path can drive the test deterministically. Add cpp_parity_replica_copy_complete_flow to mooncake-store-client/tests/test_client_inproc_e2e.rs; start one in-process non-HA master and two TCP clients with distinct Memory segments, Put one exact payload with replica_num=1 on client1, Query a nonempty Memory source and derive its segment, choose the distinct client2 segment, create one copy task, deterministically fetch/execute and poll it to terminal SUCCESS, then Query client2 nonempty and Get exactly the original bytes. Do not assert source absence, timing, cleanup, or final replica count.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:343-436 ReplicaCopyCompleteFlow; Rust test_client_inproc_e2e.rs three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A one-replica exact payload on a queried nonempty Memory source can be moved to a distinct target through the client/master task path; the task reaches SUCCESS, the target query is nonempty, and Get returns the exact original bytes, without requiring the comment-only source-removal claim.",
+      "boundary": ["client", "master", "replica-move", "task-execution", "task-terminal-status", "target-query", "data-integrity"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.ReplicaMoveCompleteFlow"},
+      "reason": "three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments proves bytes after a combined copy then move but has the prior full-target failure/release fixture and never asserts a created task's terminal SUCCESS; it cannot cover this independently observable one-move row. Production prerequisite: none; public create_move_task/fetch_tasks/execute_task_assignment/query_task can provide deterministic worker steps and polling. Add cpp_parity_replica_move_complete_flow to mooncake-store-client/tests/test_client_inproc_e2e.rs; start one in-process non-HA master and two TCP clients with distinct Memory segments, Put one exact payload with replica_num=1 on client1, Query a nonempty Memory source and derive it, choose the distinct client2 segment, create one move task, deterministically fetch/execute and poll it to SUCCESS, then Query client2 nonempty and Get exactly the original bytes. Do not require source absence, timing, cleanup, or final replica count.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:439-533 ReplicaMoveCompleteFlow; Rust test_client_inproc_e2e.rs three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A drain job for source 127.0.0.1:18001 to target 127.0.0.1:18002 with max_concurrency=1 starts CREATED while the source is DRAINING; twelve preloaded 128-KiB values migrate and four exact 32-KiB puts during draining route target-only, then SUCCEEDED/DRAINED reports active_units=0, failed_units=0, succeeded_units>=12, migrated_bytes>=twelve preload bytes, and all sixteen target-only exact values survive source-client loss.",
+      "boundary": ["client", "master", "drain-job", "task-execution", "segment-status", "routing", "counters", "data-survival"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.DrainJobCompleteFlow"},
+      "reason": "test_drain_job.rs covers master-only job state and uses report_drain_task to manually mark completion; it does not move client data, route writes while draining, prove the full terminal counter/status matrix, or prove bytes survive source-client loss. Production prerequisite: deterministic production-client drain worker execution and a public client-visible drain-job/status polling path. Add cpp_parity_drain_job_complete_flow to mooncake-store-client/tests/test_client_inproc_e2e.rs; start non-HA master with TCP clients named 127.0.0.1:18001/18002 and Memory segments, Put exactly 12 distinct 128-KiB values to source, create the specified drain job with max_concurrency=1 and assert CREATED/source DRAINING, Put exactly 4 distinct 32-KiB values while draining and assert target present/source absent, drive/poll workers to SUCCEEDED and source DRAINED, assert active=0 failed=0 succeeded>=12 migrated_bytes>=12*128KiB, assert all 16 keys target-only with exact bytes, drop client1/free source storage, and re-Get all 16 exact target bytes. Do not require a sleep, private maps, timings, or extra cleanup.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:536-725 DrainJobCompleteFlow; Rust test_drain_job.rs report_drain_task and test_successful_drain_marks_source_unavailable", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "One exact payload from a queried nonempty Memory source is copied to the dynamically selected non-source target set, reaches task SUCCESS, and every selected target has a nonempty query and exact bytes; with the normal two recognized segment names that set is only the other segment.",
+      "boundary": ["client", "master", "replica-copy", "multi-target-selection", "task-execution", "task-terminal-status", "target-query", "data-integrity"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.ReplicaCopyToMultipleTargets"},
+      "reason": "No discoverable Rust test proves the dynamic conditional target set, a client/master copy task terminal SUCCESS, target visibility, and exact bytes together; the existing three-client test uses one target after failure/release and has no task-status assertion. Production prerequisite: none; public create_copy_task/fetch_tasks/execute_task_assignment/query_task supports deterministic execution. Add cpp_parity_replica_copy_to_multiple_targets to mooncake-store-client/tests/test_client_inproc_e2e.rs; start one non-HA master and two distinct TCP Memory clients, Put one exact replica_num=1 payload, Query its nonempty Memory source, derive the C++ target set (only the other known segment for normal two-segment names; both configured names only for the unrecognized-source branch), create one copy task, fetch/execute and poll to SUCCESS, and for each selected target Query nonempty then Get exact bytes. Do not invent a two-target minimum, final replica count, timings, or cleanup.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:727-824 ReplicaCopyToMultipleTargets; Rust test_client_inproc_e2e.rs three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Three distinct keys with exact payloads Test data for key 0..2 each create a copy task to their dynamically selected non-source target (the final conditional multi-target branch is normally only the other segment); all three tasks reach SUCCESS and every selected target is nonempty and returns its corresponding exact bytes.",
+      "boundary": ["client", "master", "replica-copy", "multi-task", "multi-target-selection", "task-execution", "task-terminal-status", "data-integrity"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.MultipleCopyTasks"},
+      "reason": "Existing Rust client coverage has one combined copy/move sequence and master tests create tasks without client transfer; neither proves three distinct copy tasks, every terminal SUCCESS, conditional final-target selection, and all exact target bytes. Production prerequisite: none; public create_copy_task/fetch_tasks/execute_task_assignment/query_task supports deterministic execution. Add cpp_parity_multiple_copy_tasks to mooncake-store-client/tests/test_client_inproc_e2e.rs; start a non-HA master and two TCP Memory clients, Put exactly three keys with exact Test data for key 0, 1, and 2 payloads, Query each nonempty Memory source, create one copy task per key to the distinct target with the final key using the C++ conditional target branch (normally one other target), enqueue all three, fetch/execute and poll each to SUCCESS, then for every selected target Query nonempty and Get the matching exact payload. Do not assert simultaneous execution, source absence, timing, cleanup, or final replica counts.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:827-1031 MultipleCopyTasks; Rust test_master_tasks.rs task creation and Rust test_client_inproc_e2e.rs three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Three distinct keys with exact payloads Test data for move key 0..2 each create a move task from their queried nonempty Memory source to a distinct target; all three tasks reach SUCCESS and each target query is nonempty and returns its corresponding exact bytes, without asserting source absence.",
+      "boundary": ["client", "master", "replica-move", "multi-task", "task-execution", "task-terminal-status", "target-query", "data-integrity"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.MultipleMoveTasks"},
+      "reason": "Existing Rust client coverage has one combined move after a copy and no terminal task status; master tests create/report state without client data movement. Production prerequisite: none; public create_move_task/fetch_tasks/execute_task_assignment/query_task supports deterministic execution. Add cpp_parity_multiple_move_tasks to mooncake-store-client/tests/test_client_inproc_e2e.rs; start a non-HA master and two TCP Memory clients, Put exactly three keys with exact Test data for move key 0, 1, and 2 payloads, Query each nonempty Memory source, create one distinct-source/target move task per key, enqueue all three, fetch/execute and poll each to SUCCESS, then Query each selected target nonempty and Get its exact corresponding bytes. Do not add source-absence, timings, cleanup, or final replica-count requirements.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:1034-1161 MultipleMoveTasks; Rust test_master_tasks.rs task creation and Rust test_client_inproc_e2e.rs three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Two copy keys with Copy data 0..1 and two move keys with Move data 0..1 enqueue two copy and two move tasks before waiting; all four reach SUCCESS and each dynamically selected copy and move target has a nonempty query, without requiring task-creation threads, target bytes, timing, or final replica counts.",
+      "boundary": ["client", "master", "replica-copy", "replica-move", "mixed-tasks", "enqueue-before-wait", "task-terminal-status", "target-query"],
+      "cpp": {"file": "task_integration_test.cpp", "test": "TaskExecutorIntegrationTest.ConcurrentCopyAndMoveOperations"},
+      "reason": "three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments serializes one copy then one move and lacks task-ID terminal-status assertions, so it does not prove this four-task enqueue-before-wait result. Production prerequisite: none; public create_*_task/fetch_tasks/execute_task_assignment/query_task supports deterministic execution. Add cpp_parity_concurrent_copy_and_move_operations to mooncake-store-client/tests/test_client_inproc_e2e.rs; start a non-HA master and two TCP Memory clients, Put exactly two Copy data 0/1 keys and two Move data 0/1 keys with replica_num=1, Query each source, create and enqueue both copy tasks (first using the C++ conditional multi-target branch, normally only the other target) and both distinct-source/target move tasks before any wait, then fetch/execute and poll all four to SUCCESS and Query every selected copy/move target nonempty. Do not require thread-level creation concurrency, bytes, timing, source absence, cleanup, or exact final replica counts.",
+      "review": {"oracle": "mooncake-store/tests/task_integration_test.cpp:1164-1369 ConcurrentCopyAndMoveOperations; Rust test_client_inproc_e2e.rs three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
