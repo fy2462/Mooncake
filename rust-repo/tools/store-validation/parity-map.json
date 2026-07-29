@@ -3693,6 +3693,96 @@
       "review": {"oracle": "etcd_oplog_store_test.cpp TestReadOpLogSince_LargeDataset and EtcdOpLogStore::ReadOpLogSinceWithRevision; Rust oplog_etcd.rs read_since_with_revision_async", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "A snapshot at sequence 10 establishes expected sequence 11; replaying shared-oplog entries 11 through 20 produces 20 objects and expected sequence 21.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "snapshot", "recovery", "replay"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.SnapshotThenOpLogReplay"},
+      "reason": "Rust test_snapshot_oplog_following_and_promotion_converge_to_one_state uses an in-memory provider/oplog and a sequence-1 static snapshot; no discoverable elected-etcd, shared-oplog test verifies the durable snapshot-10 and replay-11-through-20 recovery boundary.",
+      "review": {"oracle": "ha_recovery_test.cpp SnapshotThenOpLogReplay and OpLogApplier::Recover/ApplyOpLogEntries; Rust hot_standby.rs test_snapshot_oplog_following_and_promotion_converge_to_one_state", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When snapshot loading fails, recovery starts from zero and replays complete shared-oplog history 1 through 20 to materialize 20 objects.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "snapshot", "recovery", "fallback-replay"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.SnapshotLoadFail_FallbackToFullReplay"},
+      "reason": "Rust test_oplog_bootstrap_falls_back_when_snapshot_load_fails proves only startup continuation with an empty InMemoryOpLog; no discoverable elected-etcd/shared-oplog test asserts zero baseline and durable full-history replay after snapshot failure.",
+      "review": {"oracle": "ha_recovery_test.cpp SnapshotLoadFail_FallbackToFullReplay and OpLogApplier::Recover; Rust hot_standby.rs test_oplog_bootstrap_falls_back_when_snapshot_load_fails", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A nonempty snapshot at sequence 10 remains intact when the shared oplog has no entries after that sequence.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "snapshot", "recovery", "quiescence"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.SnapshotWithNoSubsequentOpLog"},
+      "reason": "Rust snapshot-only bootstrap covers an absent snapshot/zero baseline, while its snapshot-following test includes a later entry; no discoverable elected-etcd/shared-oplog test asserts a durable nonempty snapshot with an empty post-snapshot range.",
+      "review": {"oracle": "ha_recovery_test.cpp SnapshotWithNoSubsequentOpLog and MockOpLogStore::ReadOpLogSince; Rust hot_standby.rs snapshot bootstrap/following tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With snapshot sequence 10 and oplog entries 15 through 20, recovery requests missing 11 through 14 after one second, skips them after three seconds, and drains pending entries while preserving snapshot state.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "snapshot", "gap-recovery", "timeout-skip", "pending-drain"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.SnapshotSeqMismatch_GapInOpLog"},
+      "reason": "Semantic gap: C++ OpLogApplier requests then timeout-skips missing entries and drains pending records, whereas Rust buffers future records indefinitely and test_skip_gap proves no application. Rust has neither this policy nor an elected-etcd recovery oracle.",
+      "review": {"oracle": "ha_recovery_test.cpp SnapshotSeqMismatch_GapInOpLog plus oplog_applier.h missing-entry timeouts/oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs test_skip_gap", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Cleanup before sequence 15 removes oplog entries 1 through 14, retains 15 through 20, and leaves snapshot-sequence metadata readable.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "gc", "snapshot-metadata", "range-boundary"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.GC_BasicCleanupSemantics"},
+      "reason": "Rust test_local_fs_snapshot_sequence_and_cleanup_parity checks a LocalFS cleanup boundary and reopened metadata, not elected/fenced etcd cleanup; no discoverable shared-etcd recovery test asserts the deletion and snapshot-metadata oracle.",
+      "review": {"oracle": "ha_recovery_test.cpp GC_BasicCleanupSemantics and MockOpLogStore cleanup/snapshot metadata; Rust tests/test_oplog.rs test_local_fs_snapshot_sequence_and_cleanup_parity and oplog_etcd.rs cleanup_before", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After cleanup before sequence 10, a snapshot at 10 plus shared-oplog entries 11 through 20 restores a newly started standby to 20 objects.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "gc", "snapshot", "new-standby", "recovery"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.GC_NewStandbyAfterCleanup"},
+      "reason": "Rust has separate LocalFS cleanup and in-memory snapshot-following evidence, but no discoverable elected-etcd/shared-oplog test composes GC, durable snapshot bootstrap, new standby recovery, and post-GC replay.",
+      "review": {"oracle": "ha_recovery_test.cpp GC_NewStandbyAfterCleanup and OpLogApplier::Recover/ApplyOpLogEntries; Rust tests/test_oplog.rs cleanup parity and hot_standby.rs snapshot following", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When GC removes sequences 1 through 9 and no snapshot is available, entries 10 through 20 initially pend, then timeout skipping exposes incomplete recovery while applying at most the surviving 11 entries.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "gc", "no-snapshot", "incomplete-recovery", "timeout-skip"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.GC_NoSnapshot_IncompleteRecovery"},
+      "reason": "Semantic gap: C++ deliberately advances through an irrecoverable GC prefix after its skip timeout, exposing loss; Rust test_skip_gap keeps records unapplied and has no elected-etcd test or implementation of incomplete-but-progressing recovery.",
+      "review": {"oracle": "ha_recovery_test.cpp GC_NoSnapshot_IncompleteRecovery plus oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs test_skip_gap", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A standby that has applied through sequence 10 performs final shared-oplog catch-up through 15 before promotion, yielding 15 objects and expected sequence 16.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "promotion", "final-catch-up", "watermark"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.PromotionCatchUp_AllEntriesApplied"},
+      "reason": "Rust localfs_writer_and_standby_sync_mixed_state_then_promote covers LocalFS catch-up, but no discoverable elected-etcd/shared-oplog test controls pending 11-through-15 and asserts the final promotion replay watermark.",
+      "review": {"oracle": "ha_recovery_test.cpp PromotionCatchUp_AllEntriesApplied and OpLogApplier::ApplyOpLogEntries; Rust hot_standby.rs run_promotion_catch_up/localfs_writer_and_standby_sync_mixed_state_then_promote", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When 9 and 10 are pending behind missing 8, a late durable 8 is fetched from the shared oplog and entries 8 through 10 drain before promotion, reaching expected sequence 11 and ten objects.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "promotion", "gap-resolution", "pending-drain"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.PromotionWithPendingGaps"},
+      "reason": "Rust test_pending_gap_applies_when_missing_entries_arrive proves only in-process buffering; production try_resolve_gaps_once has no discoverable elected-etcd promotion test that fetches late 8 from the shared oplog under election fencing.",
+      "review": {"oracle": "ha_recovery_test.cpp PromotionWithPendingGaps and OpLogApplier::ProcessPendingEntries/TryResolveGapsOnceForPromotion; Rust ha/oplog_applier.rs test_pending_gap_applies_when_missing_entries_arrive", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When sequence 8 is absent or GC'd and 9 through 10 are pending, promotion observes an empty gap-resolution fetch, timeout-skips 8, drains pending entries, and does not hang.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "promotion", "unresolvable-gap", "timeout-skip", "pending-drain"],
+      "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.PromotionGapUnresolvable_SkipAndPromote"},
+      "reason": "Semantic gap: C++ skip-and-promote permits progress after an unresolvable gap, while Rust run_promotion_catch_up fails closed on empty reads, no progress, or incomplete replay and test_promotion_fails_closed_when_final_oplog_read_fails asserts Failed. No elected-etcd oracle establishes either policy.",
+      "review": {"oracle": "ha_recovery_test.cpp PromotionGapUnresolvable_SkipAndPromote plus OpLogApplier::TryResolveGapsOnceForPromotion/ProcessPendingEntries; Rust hot_standby.rs run_promotion_catch_up/test_promotion_fails_closed_when_final_oplog_read_fails", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
