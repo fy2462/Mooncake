@@ -2066,6 +2066,94 @@
       "rust": [], "status": "missing"
     },
     {
+      "behavior": "A Kubernetes Lease coordinator acquires 127.0.0.1:8899, reads that leader back, renews, times out after 200 ms with no view change, releases, and then observes a changed view.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "view-change"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sBasicMasterViewOperations"},
+      "reason": "Rust has K8s read/acquire/renew/release and live handover coverage, but no discoverable test reproduces this exact same-coordinator no-change timeout then release/view-change sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sBasicMasterViewOperations; Rust ha/coordinator.rs, coordinator_k8s.rs, test_k8s_ha_live.rs, and main_config.rs", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "After one coordinator acquires, renews, and explicitly releases a Kubernetes Lease, that same coordinator reacquires it for a different address, renews, and releases again.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "reacquire"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sCanReacquireAfterRelease"},
+      "reason": "Rust clears the active owner token on release and implements new K8s Lease transitions, but no discoverable live Rust test exercises the exact same-coordinator release/reacquire/renew sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sCanReacquireAfterRelease; Rust ha/coordinator.rs, coordinator_k8s.rs, and main_config.rs", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "An empty namespace and empty Kubernetes Lease name produce the exact connection string / and are rejected as invalid parameters.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connstring-parser"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringEmptyIsRejected"},
+      "reason": "Rust parser source rejects / because both components are empty, but the discoverable invalid-input test lists empty string, ns-a/, /lease-a, and too/many/parts rather than the exact / spelling. Parser behavior is not production-serving evidence because Kubernetes is rejected before HA serving.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringEmptyIsRejected; Rust coordinator_k8s.rs parse_k8s_lease_connstring and tests/test_coordinator.rs", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
+      "behavior": "A Kubernetes Lease connection string with an empty lease name, default/, is rejected as invalid parameters.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connstring-parser"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringEmptyLeaseNameIsRejected"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringEmptyLeaseNameIsRejected; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_rejects_invalid_values", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_coordinator.rs", "test": "test_parse_k8s_lease_connstring_rejects_invalid_values"}], "status": "covered"
+    },
+    {
+      "behavior": "A Kubernetes Lease connection string with an empty namespace, /lease-name, is rejected as invalid parameters.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connstring-parser"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringEmptyNamespaceIsRejected"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringEmptyNamespaceIsRejected; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_rejects_invalid_values", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_coordinator.rs", "test": "test_parse_k8s_lease_connstring_rejects_invalid_values"}], "status": "covered"
+    },
+    {
+      "behavior": "A Kubernetes Lease connection string with more than one slash, a/b/c, is rejected as invalid parameters.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connstring-parser"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringMultipleSlashesIsRejected"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringMultipleSlashesIsRejected; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_rejects_invalid_values", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_coordinator.rs", "test": "test_parse_k8s_lease_connstring_rejects_invalid_values"}], "status": "covered"
+    },
+    {
+      "behavior": "A name-only Kubernetes Lease connection string defaults its namespace to default and parses successfully.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connstring-parser"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringNoSlashDefaultsNamespace"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringNoSlashDefaultsNamespace; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_accepts_name_only", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_coordinator.rs", "test": "test_parse_k8s_lease_connstring_accepts_name_only"}], "status": "covered"
+    },
+    {
+      "behavior": "With two Kubernetes Lease coordinators, A acquires and renews, B observes A's contended view version, A releases, B observes the change, and B takes over the Lease.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "leadership-handover"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sContendedLeadershipAndHandover"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sContendedLeadershipAndHandover; Rust tests/test_k8s_ha_live.rs test_k8s_ha_live_rbac_watch_backoff_e2e. This is coordinator-only evidence; main_config.rs rejects K8s for production HA serving.", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_k8s_ha_live.rs", "test": "test_k8s_ha_live_rbac_watch_backoff_e2e"}], "status": "covered"
+    },
+    {
+      "behavior": "When explicitly releasing a monitored Kubernetes Lease session, the C++ StartLeadershipMonitor loss callback is not invoked.",
+      "boundary": ["cpp-only", "master", "ha", "k8s", "coordinator-monitor-callback", "not-serving"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sLeadershipMonitorIgnoresExplicitRelease"},
+      "reason": "Rust has no StartLeadershipMonitor callback API or C++ explicit-release callback-suppression contract; it instead demotes through its role channel. This C++ wrapper-specific optional-backend contract is excluded under the K8s fail-fast production-serving boundary.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sLeadershipMonitorIgnoresExplicitRelease; C++ k8s_leader_coordinator.cpp and Rust coordinator.rs/main.rs/main_config.rs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "Direct cancellation of the C++ Kubernetes Lease election outside ReleaseLeadership causes WaitLost and the registered StartLeadershipMonitor loss callback to fire.",
+      "boundary": ["cpp-only", "master", "ha", "k8s", "direct-election-cancel", "not-serving"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sLeadershipMonitorReportsElectionCancellation"},
+      "reason": "Rust exposes no equivalent of the C++ K8sLeaseHelper::CancelElection wrapper or its callback contract; K8s keepalive demotion is role-channel based. This C++ wrapper-specific optional-backend contract is excluded under the K8s fail-fast production-serving boundary.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sLeadershipMonitorReportsElectionCancellation; C++ k8s_lease_helper.cpp/k8s_leader_coordinator.cpp and Rust coordinator_k8s.rs/main_config.rs", "reviewed": true},
+      "rust": [], "status": "not-applicable"
+    },
+    {
+      "behavior": "A reachable enabled Kubernetes client accepts a namespace/lease-name connection string and constructs a coordinator after probing the API.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connection-probe"],
+      "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringValidFormatPassesParsing"},
+      "reason": "Rust accepts namespace/lease-name and lazily constructs a coordinator without an API probe; no discoverable Rust test proves the C++ reachable-client connection-probe sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringValidFormatPassesParsing; Rust coordinator.rs new_k8s, coordinator_k8s.rs k8s_lease_api, tests/test_main_config.rs, and main_config.rs", "reviewed": true},
+      "rust": [], "status": "missing"
+    },
+    {
       "behavior": "An unknown HA backend is rejected as invalid configuration.",
       "boundary": ["master", "ha", "configuration", "unknown-backend"],
       "cpp": {"file": "ha/leadership/ha_backend_availability_test.cpp", "test": "HABackendAvailabilityTest.UnknownBackendIsInvalid"},
