@@ -3405,6 +3405,114 @@
       "review": {"oracle": "file_storage_test.cpp NullSsdMetricDoesNotCrash and file_storage.cpp BatchLoad null metric guard", "reviewed": true},
       "rust": [],
       "status": "not-applicable"
+    },
+    {
+      "behavior": "Binary-safe leased etcd key/value create-get preserves value and revision; keepalive extends the lease then explicit cancellation reports cancellation; revoke deletes its key; deletion watch completes; explicit key-watch cancellation reports cancellation.",
+      "boundary": ["etcd", "coordinator", "backend-client", "lease", "watch"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.EtcdBasicOperations"},
+      "reason": "Rust production uses etcd leases, election, and oplog calls, but no discoverable real-etcd Rust test asserts binary KV values, keepalive cancellation, revoke deletion, deletion watch, and explicit key-watch cancellation.",
+      "review": {"oracle": "high_availability_test.cpp EtcdBasicOperations and EtcdHelper lease/KV/watch calls", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An empty view becomes an acquired leader session; renew preserves its address/version through TTL, a stable 200-ms wait times out, explicit release removes the view, and a different address can reacquire.",
+      "boundary": ["etcd", "coordinator", "leader-election", "master-view", "lease"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.BasicMasterViewOperations"},
+      "reason": "coordinator_etcd.rs implements acquisition, renewal, release, and view reads, but no discoverable real-etcd Rust test asserts this acquire/renew/stable/release/reacquire lifecycle and view timing.",
+      "review": {"oracle": "high_availability_test.cpp BasicMasterViewOperations and LeaderCoordinator lifecycle", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Releasing a leader after about 300 ms makes a five-second view-change wait return changed with no view in under three seconds, driven by deletion observation rather than timeout.",
+      "boundary": ["etcd", "coordinator", "master-view", "watch", "timing"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.WaitForViewChangeReturnsPromptlyOnLeaderLoss"},
+      "reason": "Rust wait_for_view_change polls at 200 ms and no real-etcd test asserts prompt deletion-to-no-view behavior or the C++ watch-driven timing bound; the live chaos test only observes eventual failover.",
+      "review": {"oracle": "high_availability_test.cpp WaitForViewChangeReturnsPromptlyOnLeaderLoss and LeaderCoordinator::WaitForViewChange", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With an unchanged leader, a 500-ms view-change wait returns timed-out/no-change no earlier than 400 ms and before three seconds.",
+      "boundary": ["etcd", "coordinator", "master-view", "watch", "timing"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.WaitForViewChangeTimesOutWhenStable"},
+      "reason": "Rust source has a deadline and 200-ms polling, but no discoverable real-etcd timing test proves the stable-leader timeout oracle.",
+      "review": {"oracle": "high_availability_test.cpp WaitForViewChangeTimesOutWhenStable and LeaderCoordinator::WaitForViewChange", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When a leader exists and no view version is known, view-change wait returns that current view and its version in under one second.",
+      "boundary": ["etcd", "coordinator", "master-view", "discovery", "timing"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.WaitForViewChangeReturnsCurrentViewImmediately"},
+      "reason": "Rust accepts a u64 known version rather than C++ nullopt, and no discoverable real-etcd Rust test uses an equivalent initial version and asserts prompt current-view return.",
+      "review": {"oracle": "high_availability_test.cpp WaitForViewChangeReturnsCurrentViewImmediately and LeaderCoordinator::wait_for_view_change", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After an acquired session starts a leadership monitor, externally stopping that lease keepalive reports lost leadership within five seconds.",
+      "boundary": ["etcd", "coordinator", "leader-election", "keepalive", "leadership-loss"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.LeadershipMonitorReportsKeepAliveLoss"},
+      "reason": "Rust background keepalive demotes a role receiver on stream, send, or acknowledgement failure, but has no loss-reason callback and no discoverable real-etcd test inducing keepalive loss and observing demotion.",
+      "review": {"oracle": "high_availability_test.cpp LeadershipMonitorReportsKeepAliveLoss and coordinator_etcd.rs keepalive task", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Resetting the global etcd Store client preserves later put/get behavior and allows a replacement client to grant and revoke a lease.",
+      "boundary": ["etcd", "backend-client", "client-reset", "lease", "kv"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.EtcdStoreClientResetKeepsBasicOperationsWorking"},
+      "reason": "Rust clones or constructs etcd clients directly; it has no production reset API or test defining replacement-client put/get and lease semantics.",
+      "review": {"oracle": "high_availability_test.cpp EtcdStoreClientResetKeepsBasicOperationsWorking and EtcdHelper::ResetEtcdStoreClient", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Resetting the Store client after keepalive readiness makes the old keepalive finish non-OK within five seconds, after which the replacement client grants and revokes a lease.",
+      "boundary": ["etcd", "backend-client", "client-reset", "keepalive", "task-lifecycle"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.EtcdStoreClientResetStopsOldKeepAlive"},
+      "reason": "Rust has no client-reset or replacement lifecycle and no discoverable test proving old etcd keepalive task termination before a replacement client becomes usable.",
+      "review": {"oracle": "high_availability_test.cpp EtcdStoreClientResetStopsOldKeepAlive and EtcdHelper keepalive/reset calls", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A prefix watch receives an event, client reset produces exactly one broken notification and stops the old watcher, a newly registered watcher receives a later event, and explicit cleanup stops it.",
+      "boundary": ["etcd", "shared-oplog", "prefix-watch", "client-reset", "reconnect"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.EtcdStoreClientResetTriggersPrefixWatchBrokenAndReconnect"},
+      "reason": "Rust oplog notifier source contains watch, reconnect, and health logic, but no discoverable real-etcd test injects a broken stream/client reset, asserts one broken transition and old-watch termination, then proves reconnection delivery.",
+      "review": {"oracle": "high_availability_test.cpp EtcdStoreClientResetTriggersPrefixWatchBrokenAndReconnect and EtcdHelper prefix-watch lifecycle", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A prefix watch receives an event, then explicit cancellation and join stop it without any broken notification.",
+      "boundary": ["etcd", "shared-oplog", "prefix-watch", "cancellation"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.EtcdStorePrefixWatchCancelDoesNotReportBroken"},
+      "reason": "EtcdOpLogChangeNotifier has a stop path, but no discoverable real-etcd Rust test observes normal cancellation and verifies that it emits no unhealthy or broken outcome.",
+      "review": {"oracle": "high_availability_test.cpp EtcdStorePrefixWatchCancelDoesNotReportBroken and EtcdHelper prefix-watch cancellation", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Explicit leadership release while a monitor is running does not invoke the leadership-loss callback within one second.",
+      "boundary": ["etcd", "coordinator", "leader-election", "explicit-release", "leadership-loss"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.LeadershipMonitorIgnoresExplicitRelease"},
+      "reason": "Rust release publishes Standby while keepalive cancellation is separate, but there is no callback distinction and no discoverable real-etcd test proving explicit-release-versus-loss behavior.",
+      "review": {"oracle": "high_availability_test.cpp LeadershipMonitorIgnoresExplicitRelease and LeaderCoordinator::release_leadership", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "etcd persistence supports put/get, create-CAS success then conflict, ordered prefix first/last, an exclusive range containing a and b but not c, and range deletion leaving every key absent.",
+      "boundary": ["etcd", "shared-oplog", "persistence", "cas", "range-ordering"],
+      "cpp": {"file": "ha/leadership/high_availability_test.cpp", "test": "HighAvailabilityTest.OpLogPersistenceInterfaces"},
+      "reason": "Rust EtcdOpLogStore implements fenced ordered transactions and latest-pointer writes, but no discoverable real-etcd test covers these concrete KV/CAS/range/delete persistence-interface oracles.",
+      "review": {"oracle": "high_availability_test.cpp OpLogPersistenceInterfaces and EtcdHelper persistence calls", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
