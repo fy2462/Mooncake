@@ -2114,20 +2114,20 @@
       "rust": [{"file": "mooncake-store-master/tests/test_coordinator.rs", "test": "test_parse_k8s_lease_connstring_rejects_invalid_values"}], "status": "covered"
     },
     {
-      "behavior": "A name-only Kubernetes Lease connection string defaults its namespace to default and parses successfully.",
-      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connstring-parser"],
+      "behavior": "With an enabled and reachable Kubernetes client, a name-only Lease connection string defaults its namespace to default and the factory connects and constructs a coordinator.",
+      "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connection-probe"],
       "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringNoSlashDefaultsNamespace"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringNoSlashDefaultsNamespace; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_accepts_name_only", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_coordinator.rs", "test": "test_parse_k8s_lease_connstring_accepts_name_only"}], "status": "covered"
+      "reason": "Rust's focused test proves only that a name-only Lease defaults to the default namespace; Rust coordinator construction is lazy and no discoverable test reproduces the C++ enabled/reachable-client factory Connect/Init sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringNoSlashDefaultsNamespace; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_accepts_name_only, coordinator.rs new_k8s, and coordinator_k8s.rs k8s_lease_api", "reviewed": true},
+      "rust": [], "status": "missing"
     },
     {
       "behavior": "With two Kubernetes Lease coordinators, A acquires and renews, B observes A's contended view version, A releases, B observes the change, and B takes over the Lease.",
       "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "leadership-handover"],
       "cpp": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sContendedLeadershipAndHandover"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sContendedLeadershipAndHandover; Rust tests/test_k8s_ha_live.rs test_k8s_ha_live_rbac_watch_backoff_e2e. This is coordinator-only evidence; main_config.rs rejects K8s for production HA serving.", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_k8s_ha_live.rs", "test": "test_k8s_ha_live_rbac_watch_backoff_e2e"}], "status": "covered"
+      "reason": "Rust's live K8s test covers A acquisition/renewal, B contention observing leader A, A release, view change, B takeover, and release, but it never asserts that B's contended view_version equals A's acquired session view_version. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sContendedLeadershipAndHandover; Rust tests/test_k8s_ha_live.rs test_k8s_ha_live_rbac_watch_backoff_e2e. This is partial coordinator-only evidence; main_config.rs rejects K8s for production HA serving.", "reviewed": true},
+      "rust": [], "status": "missing"
     },
     {
       "behavior": "When explicitly releasing a monitored Kubernetes Lease session, the C++ StartLeadershipMonitor loss callback is not invoked.",
