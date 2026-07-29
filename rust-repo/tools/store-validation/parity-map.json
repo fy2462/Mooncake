@@ -2296,10 +2296,10 @@
       "behavior": "Encoding and decoding an empty Master state produces non-empty metadata, segment, and task payloads and restores successfully.",
       "boundary": ["master", "ha", "snapshot", "codec", "round-trip"],
       "cpp": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.EncodeDecodeRoundTrip"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeDecodeRoundTrip and Rust catalog provider publish/load", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}],
-      "status": "covered"
+      "reason": "The Rust catalog provider test uses a richer nonempty LoadedSnapshot fixture; it does not assert encoding an empty Master fixture, does not inspect and assert that each raw metadata, segments, and task_manager buffer is nonempty, and loads into a LoadedSnapshot rather than decoding into a fresh MasterService.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeDecodeRoundTrip, src/ha/snapshot/master_snapshot_codec.cpp Encode/Decode, and Rust catalog provider publish/load test", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "After encoding a mounted Memory segment and one completed Memory replica, decoding into a fresh Master restores the segment before metadata and GetReplicaList returns exactly one replica for the key and default tenant.",
