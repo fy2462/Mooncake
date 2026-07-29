@@ -3722,10 +3722,10 @@
       "status": "missing"
     },
     {
-      "behavior": "With snapshot sequence 10 and oplog entries 15 through 20, recovery requests missing 11 through 14 after one second, skips them after three seconds, and drains pending entries while preserving snapshot state.",
-      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "snapshot", "gap-recovery", "timeout-skip", "pending-drain"],
+      "behavior": "With snapshot sequence 10 and oplog entries 15 through 20 pending, one post-timeout ProcessPendingEntries call skips sequence 11, registers sequence 12 as the next gap, and leaves at least the ten snapshot objects intact.",
+      "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "snapshot", "gap-recovery", "per-gap-timeout-skip"],
       "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.SnapshotSeqMismatch_GapInOpLog"},
-      "reason": "Semantic gap: C++ OpLogApplier requests then timeout-skips missing entries and drains pending records, whereas Rust buffers future records indefinitely and test_skip_gap proves no application. Rust has neither this policy nor an elected-etcd recovery oracle.",
+      "reason": "Semantic gap: C++ source requests and timeout-skips each detected missing sequence under a per-gap timer; this test observes only the first skip, not a complete 11-through-14 skip or 15-through-20 drain. Rust buffers future records without timeout skipping, and no elected-etcd recovery oracle covers the observed first-skip policy.",
       "review": {"oracle": "ha_recovery_test.cpp SnapshotSeqMismatch_GapInOpLog plus oplog_applier.h missing-entry timeouts/oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs test_skip_gap", "reviewed": true},
       "rust": [],
       "status": "missing"
@@ -3749,10 +3749,10 @@
       "status": "missing"
     },
     {
-      "behavior": "When GC removes sequences 1 through 9 and no snapshot is available, entries 10 through 20 initially pend, then timeout skipping exposes incomplete recovery while applying at most the surviving 11 entries.",
+      "behavior": "When GC removes sequences 1 through 9 and no snapshot is available, applying surviving entries 10 through 20 initially applies zero; one post-timeout ProcessPendingEntries call skips sequence 1, registers sequence 2, and leaves final metadata size at most 11.",
       "boundary": ["master", "ha", "etcd", "leader-election", "shared-oplog", "gc", "no-snapshot", "incomplete-recovery", "timeout-skip"],
       "cpp": {"file": "ha/oplog/ha_recovery_test.cpp", "test": "HaRecoveryTest.GC_NoSnapshot_IncompleteRecovery"},
-      "reason": "Semantic gap: C++ deliberately advances through an irrecoverable GC prefix after its skip timeout, exposing loss; Rust test_skip_gap keeps records unapplied and has no elected-etcd test or implementation of incomplete-but-progressing recovery.",
+      "reason": "Semantic gap: C++ source can timeout-skip an irrecoverable prefix one detected gap at a time, but this test observes only the first sequence-1 skip and does not prove eventual prefix drain. Rust test_skip_gap keeps future records unapplied with no timeout-skip path, and no elected-etcd test covers the observed first-skip behavior.",
       "review": {"oracle": "ha_recovery_test.cpp GC_NoSnapshot_IncompleteRecovery plus oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs test_skip_gap", "reviewed": true},
       "rust": [],
       "status": "missing"
