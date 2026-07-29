@@ -5328,6 +5328,132 @@
       "review": {"oracle": "mooncake-store/tests/offload_on_evict_test.cpp ComboD_EvictionWorks and FillSegmentUntilEviction; Rust background_ops.rs", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "Mounting one 16-MiB Memory segment returns success and exposes one client-owned registration with the requested identity (ID, name, size, base), active status, and allocatable capacity.",
+      "boundary": ["master", "segment-catalog", "mount", "ownership", "allocator", "query"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.MountSegmentSuccess"},
+      "reason": "No discoverable Rust test proves the complete portable mount result: test_get_segments_detail_includes_memory_and_nof_segments checks selected detail fields but not one client-owned exact-ID registration after a 16-MiB mount. Add cpp_parity_mount_segment_success to mooncake-store-master/tests/test_master_mount.rs; mount one client-owned 16-MiB Memory segment with explicit name, base, endpoint, protocol, and host, capture its returned ID, then GetSegmentsDetail and QuerySegments. Assert exactly one matching active Memory detail with that ID/name/size/base/client, allocator_capacity_bytes=16 MiB, used_bytes=0, and a successful preferred-segment PutStart allocation. Do not assert private manager maps or pointer identity.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp MountSegmentSuccess; Rust test_master_mount.rs test_get_segments_detail_includes_memory_and_nof_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An identical Memory mount retry returns the C++ duplicate error without changing state, while a distinct-ID, same-name 32-MiB adjacent-base segment may coexist under the same client.",
+      "boundary": ["master", "segment-catalog", "mount", "identity", "duplicate", "ownership"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.MountSegmentDuplicate"},
+      "reason": "Rust intentionally treats an identical MountSegment retry as successful idempotent reuse and derives Memory identity from request fields, so test_mount_retry_reuses_memory_segment_identity_without_new_oplog is conflicting evidence, not coverage. Compatibility decision and production prerequisite: expose or document an ID-addressable mount contract that can distinguish a duplicate ID from a new same-name registration without replacing it with name idempotency. Add cpp_parity_mount_segment_duplicate_identity to mooncake-store-master/tests/test_master_mount.rs; issue an initial 16-MiB mount, retry the exact identity and assert the chosen compatibility error plus unchanged one-registration snapshot, then mount a distinct explicit ID with the same name, 32 MiB, and adjacent base for the same client and assert exactly two exact registrations. Until that decision exists, the C++ SEGMENT_ALREADY_EXISTS result is missing.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp MountSegmentDuplicate; Rust test_master_mount.rs test_mount_retry_reuses_memory_segment_identity_without_new_oplog", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After mounting a 16-MiB Memory segment, prepare-unmount reports an exact 16-MiB capacity decrement, commit succeeds, and no client/catalog/allocator registration remains.",
+      "boundary": ["master", "segment-catalog", "unmount", "capacity", "ownership", "query"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.UnmountSegmentSuccess"},
+      "reason": "test_mount_segment_returns_id_usable_for_unmount proves only unmount success and NotFound status afterward; it does not prove the 16-MiB release or absence from all portable detail/query results. Add cpp_parity_unmount_segment_success to mooncake-store-master/tests/test_master_mount.rs; mount one explicit 16-MiB Memory segment, record its returned ID, perform the portable prepare/drain equivalent if retained and then UnmountSegment, and assert successful completion, capacity decrease of exactly 16 MiB in segment detail/allocator totals, and no matching client, catalog, or allocation candidate. Production prerequisite: expose a portable pre/post capacity query if no public result reports the decrement.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp UnmountSegmentSuccess; Rust test_master_mount.rs test_mount_segment_returns_id_usable_for_unmount", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After one successful unmount, a second prepare-unmount returns SEGMENT_NOT_FOUND and leaves the empty registration state unchanged.",
+      "boundary": ["master", "segment-catalog", "unmount", "duplicate", "error", "query"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.UnmountSegmentDuplicate"},
+      "reason": "Rust intentionally makes missing UnmountSegment idempotently successful; test_unmount_segment_missing_is_idempotent therefore conflicts with, and cannot cover, C++ SEGMENT_NOT_FOUND. Compatibility decision and production prerequisite: decide whether the portable API gains a strict prepare-unmount/status endpoint or documents the idempotent divergence. Add cpp_parity_unmount_segment_duplicate to mooncake-store-master/tests/test_master_mount.rs; mount then unmount one 16-MiB segment, repeat the strict prepare/unmount operation, assert the selected exact error and unchanged empty GetSegmentsDetail/GetAllSegments results. Until then this C++ error contract is missing.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp UnmountSegmentDuplicate; Rust test_master_mount.rs test_unmount_segment_missing_is_idempotent", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A mounted segment is active and allocatable; DRAINING then DRAINED each make it non-allocatable, and returning to active restores allocation eligibility.",
+      "boundary": ["master", "segment-status", "allocator", "allocation-eligibility"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.SegmentLifecycleStatusControlsAllocation"},
+      "reason": "test_graceful_unmount_segment_removes_after_delay proves one GracefullyUnmounting allocation rejection, not the Active→DRAINING→DRAINED→Active status sequence or restoration. Add cpp_parity_segment_lifecycle_status_controls_allocation to mooncake-store-master/tests/test_master_mount.rs; mount one 16-MiB segment, use the portable admin status transitions (production prerequisite: expose DRAINING and DRAINED transitions if absent), query status and attempt a preferred PutStart after each Active, DRAINING, DRAINED, Active step, and assert success, rejection, rejection, success respectively. Do not require allocator-map identity.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp SegmentLifecycleStatusControlsAllocation; Rust test_master_mount.rs test_graceful_unmount_segment_removes_after_delay", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Host-aware selection starts with the requested host, excludes a draining or unmounted host segment, and leaves the other active host as the sole candidate.",
+      "boundary": ["master", "allocator", "host-ordering", "segment-status", "unmount"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.HostOrderedSegmentsTracksMountStatusAndUnmount"},
+      "reason": "test_local_first_prefers_explicit_request_host_over_client_segment_name proves only initial host preference; it does not prove two-host ordering plus draining and unmount exclusion. Add cpp_parity_host_ordered_segments_tracks_status_and_unmount to mooncake-store-master/tests/test_allocator.rs; add 16-MiB-equivalent host0/name0 and host1/name1 segments, request host1 for one key and assert host1 first, mark host1 non-allocatable and assert exactly host0, restore host1 then remove it and assert exactly host0. Production prerequisite: make status removal observable through the allocator test seam rather than private service maps.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp HostOrderedSegmentsTracksMountStatusAndUnmount; Rust test_allocator.rs test_local_first_prefers_explicit_request_host_over_client_segment_name", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Two active registrations with the same name and host yield one deduplicated host-selection name, which remains after one registration is unmounted.",
+      "boundary": ["master", "allocator", "host-ordering", "deduplication", "unmount"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.HostOrderedSegmentsKeepsNameUntilLastSameNameSegmentGone"},
+      "reason": "Rust source deduplicates segment names but no discoverable test proves same-host same-name retention after one exact-ID registration is removed. Add cpp_parity_host_ordered_segments_keeps_name_until_last_registration to mooncake-store-master/tests/test_allocator.rs; add two distinct-ID, same-name, same-host 16-MiB-equivalent segments at different bases, assert host ordering returns exactly the one name, remove the first ID, and assert it still returns exactly that name. Production prerequisite: retain exact-ID removal through the allocator test seam.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp HostOrderedSegmentsKeepsNameUntilLastSameNameSegmentGone; Rust allocator/strategies.rs host_ordered_segment_names", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Within one host, host selection sorts two names and deterministically rotates their two-name order from the request key.",
+      "boundary": ["master", "allocator", "host-ordering", "determinism", "key-routing"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.HostOrderedSegmentsRotateWithinSameHostByKey"},
+      "reason": "Rust implements stable_key_hash with DefaultHasher but no discoverable test proves the sorted two-name deterministic rotation. Add cpp_parity_host_ordered_segments_rotates_stably_by_key to mooncake-store-master/tests/test_allocator.rs; add host1_segment_a and host1_segment_b on one host, obtain host-order candidates twice for stable_rotation_key, assert both calls are identical, contain exactly the sorted names in a cyclic rotation, and the second is the other name. The replacement oracle is Rust's documented DefaultHasher stable_key_hash modulo two, not C++ std::hash numeric equality.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp HostOrderedSegmentsRotateWithinSameHostByKey; Rust allocator/strategies.rs stable_key_hash", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A DRAINED segment may still be prepared and committed for unmount, after which all registration and allocation eligibility are gone.",
+      "boundary": ["master", "segment-status", "unmount", "allocator", "query"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.PrepareUnmountDrainedSegment"},
+      "reason": "No discoverable Rust test drives a DRAINED status through successful unmount; graceful-unmount tests cover a different status and delayed protocol. Add cpp_parity_prepare_unmount_drained_segment to mooncake-store-master/tests/test_master_mount.rs; mount one 16-MiB segment, transition it to DRAINED (production prerequisite: portable status transition), assert its preferred allocation is rejected, unmount by exact ID, and assert successful completion with no detail/catalog entry or allocator eligibility. Do not assert private manager state.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp PrepareUnmountDrainedSegment; Rust test_master_mount.rs graceful unmount tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Remounting an already mounted 16-MiB registration together with a new 32-MiB registration succeeds and leaves both exact client-owned registrations allocatable.",
+      "boundary": ["master", "segment-catalog", "remount", "identity", "allocator", "ownership"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.ReMountSegmentSuccess"},
+      "reason": "test_identity_aware_remount_accepts_multiple_mrs_with_same_name proves two-ID remount updates, but not an ordinary initial mount followed by a mixed existing/new remount with exact ownership and allocation checks. Add cpp_parity_remount_segment_success to mooncake-store-master/tests/test_master_mount.rs; MountSegment 16-MiB A, ReMountSegment with A's returned ID plus new 32-MiB B and the same client, then assert exactly A and B IDs/names/sizes/bases/client ownership in detail and successful preferred allocations from each. Do not reduce the row to remount RPC success.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp ReMountSegmentSuccess; Rust test_master_mount.rs test_identity_aware_remount_accepts_multiple_mrs_with_same_name", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After prepare-unmount has made a segment unavailable, remounting that exact segment returns UNAVAILABLE_IN_CURRENT_STATUS; commit then succeeds and removes it.",
+      "boundary": ["master", "segment-catalog", "remount", "unmount", "status", "error"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.ReMountUnmountingSegment"},
+      "reason": "No discoverable Rust test attempts an identity-aware remount while a segment is in the portable graceful-unmount state and checks the exact unavailable error before final removal. Add cpp_parity_remount_unmounting_segment to mooncake-store-master/tests/test_master_mount.rs; mount 16-MiB A, begin its graceful/prepare unmount with a non-expired deterministic deadline, reissue ReMountSegment for A's exact ID and assert the selected UNAVAILABLE-equivalent status, then deterministically commit/advance final unmount and assert no A registration. Production prerequisite: expose deterministic graceful completion without sleeps and decide the precise gRPC error mapping.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp ReMountUnmountingSegment; Rust test_master_mount.rs test_graceful_unmount_segment_removes_after_delay", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Ten distinct 16-MiB segments owned by ten clients are exactly queryable by client and globally by name; each reports used=0 and capacity=16 MiB, while a missing name reports SEGMENT_NOT_FOUND with zero values.",
+      "boundary": ["master", "segment-catalog", "query", "ownership", "capacity", "error"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.QuerySegments"},
+      "reason": "test_get_segments_detail_includes_memory_and_nof_segments covers one Memory detail and no ten-client exact query matrix, aggregate name cardinality, or zero-valued missing result. Add cpp_parity_query_segments_matrix to mooncake-store-master/tests/test_master_mount.rs; mount ten distinct 16-MiB segments with distinct clients and bases, query each client/detail by returned ID and assert exactly its registration, assert GetAllSegments has exactly ten fixture names, assert every query has used=0/capacity=16 MiB, then query a missing name and assert the chosen NotFound plus zero usage/capacity payload. Production prerequisite: provide a public client-segment and aggregate usage query if required fields are not exposed.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp QuerySegments; Rust test_master_mount.rs test_get_segments_detail_includes_memory_and_nof_segments", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A client successfully mounts one offloading-enabled LocalDisk registration and portable state records exactly that client-owned LocalDisk namespace with offloading enabled.",
+      "boundary": ["master", "local-disk", "mount", "offload", "ownership", "recovery-session"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.MountLocalDiskSegmentSuccess"},
+      "reason": "LocalDisk helpers in test_master_offload.rs complete a recovery session for later offload tests but do not assert exactly one client-owned enabled LocalDisk registration at the public boundary. Add cpp_parity_mount_local_disk_segment_success to mooncake-store-master/tests/test_master_offload.rs; begin then commit one LocalDisk recovery session with explicit client, storage, and session IDs and enable_offloading=true, then inspect the public snapshot/detail boundary and assert exactly one binding for that client/storage with the flag true. Do not require C++'s absent storage or generation fields.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp MountLocalDiskSegmentSuccess; Rust test_master_offload.rs mount_local_disk helpers", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A duplicate enabled LocalDisk mount for one client reports the C++ duplicate error without state change, while a distinct client can mount another enabled LocalDisk registration, leaving exactly two.",
+      "boundary": ["master", "local-disk", "mount", "duplicate", "ownership", "recovery-session"],
+      "cpp": {"file": "segment_test.cpp", "test": "SegmentTest.MountLocalDiskSegmentDuplicate"},
+      "reason": "Rust LocalDisk mounting is a false/true recovery-session protocol whose repeated valid requests may be idempotently accepted; existing helper calls do not assert duplicate semantics or two-client cardinality. Compatibility decision and production prerequisite: define externally visible duplicate behavior for a completed same-client/storage/session mount without bypassing recovery validation. Add cpp_parity_mount_local_disk_segment_duplicate to mooncake-store-master/tests/test_master_offload.rs; complete enabled LocalDisk mount for client A, repeat the same valid completion and assert the chosen duplicate/idempotent result plus unchanged one binding, then complete a separate enabled session for client B and assert exactly two client/storage bindings. Until the C++ SEGMENT_ALREADY_EXISTS compatibility decision is made, this row is missing.",
+      "review": {"oracle": "mooncake-store/tests/segment_test.cpp MountLocalDiskSegmentDuplicate; Rust test_master_offload.rs LocalDisk recovery helpers", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
