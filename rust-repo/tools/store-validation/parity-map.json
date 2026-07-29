@@ -3265,10 +3265,10 @@
       "status": "missing"
     },
     {
-      "behavior": "Empty, whitespace, relative, traversal, and nonexistent storage paths fail validation while the existing fixture path succeeds; the /path/./sub case is absent rather than proof that dot components alone are rejected.",
+      "behavior": "Empty, whitespace, relative, traversal, nonexistent paths, and the explicitly tested /path/./sub form fail validation while the existing fixture path succeeds; because that concrete /path/./sub path is also absent, its failure does not isolate whether a dot component alone is prohibited.",
       "boundary": ["client", "file-storage", "path-validation"],
       "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ValidateFailsOnEmptyStoragePath"},
-      "reason": "Rust tests stronger but different unsafe/symlink/unowned directory protections, not the C++ FileStorage root-path validation matrix or its path-form nuances.",
+      "reason": "Rust tests stronger but different unsafe/symlink/unowned directory protections, not the C++ FileStorage root-path validation matrix; its /path/./sub rejection is tested but confounded by that path's absence, so it does not establish dot-component semantics.",
       "review": {"oracle": "file_storage_test.cpp ValidateFailsOnEmptyStoragePath and FileStorageConfig::ValidatePath", "reviewed": true},
       "rust": [],
       "status": "missing"
