@@ -3862,13 +3862,10 @@
       "behavior": "Publishing a valid descriptor makes it the latest snapshot and preserves its id, manifest key, object prefix, sequence, view, and creation time when read back.",
       "boundary": ["master", "ha", "snapshot", "catalog", "embedded"],
       "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.PublishAndGetLatestRoundTrip"},
-      "reason": "",
+      "reason": "The direct Rust round-trip test asserts only snapshot id, sequence, and view; the provider compatibility test does not directly read and assert descriptor manifest_key, object_prefix, and created_at_ms, so neither proves the full C++ descriptor oracle.",
       "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp PublishAndGetLatestRoundTrip and embedded_snapshot_catalog_store.cpp Publish/GetLatest; Rust snapshot.rs EmbeddedSnapshotCatalogStore", "reviewed": true},
-      "rust": [
-        {"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_embedded_snapshot_catalog_round_trip"},
-        {"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}
-      ],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "Reading latest from a catalog with no latest marker succeeds with no snapshot.",
@@ -3916,10 +3913,10 @@
       "status": "missing"
     },
     {
-      "behavior": "Listing skips an unreadable snapshot descriptor while retaining a healthy snapshot in the result.",
+      "behavior": "After two snapshots are published and the newer snapshot's only discoverable descriptor object is removed, listing returns the remaining healthy older snapshot.",
       "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "listing", "error"],
       "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries"},
-      "reason": "Rust skips not-found and corrupt descriptors, but no discoverable test combines an unreadable catalog entry with a healthy entry and asserts the healthy entry remains; its pre-read truncation also differs from C++ limit behavior.",
+      "reason": "The C++ fixture removes the newer descriptor key, leaving that id undiscoverable rather than injecting a failed descriptor read. No discoverable Rust test removes one of two published descriptor keys and asserts healthy-entry retention, and the implementations still differ because C++ discovers ids from any object below a snapshot prefix while Rust discovers descriptor keys only.",
       "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list", "reviewed": true},
       "rust": [],
       "status": "missing"
