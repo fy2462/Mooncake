@@ -2966,6 +2966,51 @@
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_BatchHotVsCold, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
       "rust": [],
       "status": "not-applicable"
+    },
+    {
+      "behavior": "A 4 KiB put publishes a shared DISK replica and the same live client subsequently gets the exact payload; the ordinary get is not required to select DISK while memory remains available.",
+      "boundary": ["client", "master", "shared-disk", "disk-replica", "data-integrity"],
+      "cpp": {"file": "e2e/storage_backend_e2e_test.cpp", "test": "StorageBackendE2ETest.OffloadAndReadback"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp OffloadAndReadback, mooncake-store/src/client_service.cpp PutToLocalFile, and Rust global Disk client paths", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "global_disk_fifo_eviction_removes_only_the_oldest_master_replica"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "After one client puts five 4 KiB objects and each publishes a shared DISK descriptor, a second live client observes every DISK descriptor and gets each exact payload; the ordinary gets are not required to select DISK while writer memory remains available.",
+      "boundary": ["client", "master", "multi-client", "shared-disk", "disk-replica", "data-integrity"],
+      "cpp": {"file": "e2e/storage_backend_e2e_test.cpp", "test": "StorageBackendE2ETest.CrossClientReadback"},
+      "reason": "No discoverable Rust client E2E combines two clients, shared Disk-replica publication/visibility, and exact reader bytes; the global-Disk E2E is single-client, while the two-client roundtrip has no Disk configuration or assertion.",
+      "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp CrossClientReadback, ClientTestWrapper replica queries, Rust test_client_inproc_e2e.rs global-Disk and two-client cases, and Rust global Disk client paths", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After expired memory replicas are evicted under pressure, at least one seed object retains a shared DISK replica but no memory replica, and GetWithExpectedSize returns its exact 256 KiB payload from the disk-only state.",
+      "boundary": ["client", "master", "shared-disk", "disk-replica", "memory-eviction", "disk-only-read", "expected-size", "data-integrity"],
+      "cpp": {"file": "e2e/storage_backend_e2e_test.cpp", "test": "StorageBackendE2ETest.DiskOnlyReadAfterEviction"},
+      "reason": "No discoverable Rust client E2E removes memory after a successful shared-Disk offload and proves a size-checked disk-only read; the global-Disk FIFO E2E evicts Disk metadata while retaining memory for its reads.",
+      "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp DiskOnlyReadAfterEviction, ClientTestWrapper replica queries, Rust test_client_inproc_e2e.rs global-Disk and pressure cases, and Rust transfer_read.rs Disk branch", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After a writer publishes shared DISK replicas and its client TTL expires, a fresh reader still observes DISK and no memory replicas; if GetWithExpectedSize succeeds, its bytes equal the written payload.",
+      "boundary": ["client", "master", "shared-disk", "disk-replica", "writer-death", "client-ttl", "durability"],
+      "cpp": {"file": "e2e/storage_backend_e2e_test.cpp", "test": "StorageBackendE2ETest.DiskReplicaSurvivesWriterDeath"},
+      "reason": "No discoverable Rust shared-Disk client E2E drops the writer, waits liveness cleanup, asserts Disk-only metadata, and exercises a successor read. LocalDisk recovery tests are owner-bound LocalDisk metadata tests and cannot evidence shared-Disk survival after owner death.",
+      "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp DiskReplicaSurvivesWriterDeath, ClientTestWrapper replica queries, Rust storage_local.rs recovery test, and Rust transfer_read.rs Disk versus LocalDisk branches", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With a 6 KiB shared-Disk quota, existing live-memory objects remain exactly readable, at least one shared DISK descriptor survives, and an additional 2 KiB put and get succeeds despite exhausted disk quota.",
+      "boundary": ["client", "master", "shared-disk", "disk-replica", "quota", "eviction", "data-integrity"],
+      "cpp": {"file": "e2e/storage_backend_e2e_test.cpp", "test": "StorageBackendE2ETest.QuotaExhaustionGracefulBehavior"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp QuotaExhaustionGracefulBehavior, mooncake-store/src/client_service.cpp PutToLocalFile, and Rust global Disk client paths", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "global_disk_fifo_eviction_removes_only_the_oldest_master_replica"}],
+      "status": "covered"
     }
   ],
   "schema_version": 1
