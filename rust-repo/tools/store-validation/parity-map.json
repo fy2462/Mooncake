@@ -2034,35 +2034,35 @@
       "rust": [], "status": "not-applicable"
     },
     {
-      "behavior": "A Redis-backed coordinator reads an empty view, acquires and renews leadership, reports contention with the current term, releases, and returns to an empty view.",
-      "boundary": ["master", "ha", "redis", "leadership", "integration"],
+      "behavior": "A Redis coordinator initially reads no view, acquires 127.0.0.1:8899, reads its address and version, renews, reports a contending coordinator with that version, releases, and is subsequently absent.",
+      "boundary": ["master", "ha", "redis", "coordinator-only", "leadership"],
       "cpp": {"file": "ha/leadership/backends/redis/high_availability_redis_test.cpp", "test": "HighAvailabilityTest.RedisBasicMasterViewOperations"},
-      "reason": "Rust implements Redis Lua acquire/renew/release and atomic view reads, but has no test against a live Redis service proving the complete coordinator contract; this validation environment has no redis-server or configured Redis endpoint.",
-      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisBasicMasterViewOperations and Rust coordinator_redis", "reviewed": true},
+      "reason": "Rust has atomic complete-expiring-view reads plus owner-token acquire, renew, release, and contended-view primitives, but no discoverable Rust test runs two Redis coordinators through this complete lifecycle. This is coordinator-only behavior and does not establish Redis serving.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisBasicMasterViewOperations; rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_redis.rs and coordinator.rs", "reviewed": true},
       "rust": [], "status": "missing"
     },
     {
-      "behavior": "Deleting the live Redis master-view key causes the leadership monitor to report lost leadership within its bounded wait.",
-      "boundary": ["master", "ha", "redis", "leadership-monitor", "fault-injection"],
+      "behavior": "After acquire and renew, externally deleting the Redis master-view key makes StartLeadershipMonitor invoke its LeadershipLossReason::kLostLeadership callback within ten seconds.",
+      "boundary": ["master", "ha", "redis", "coordinator-only", "monitor-callback"],
       "cpp": {"file": "ha/leadership/backends/redis/high_availability_redis_test.cpp", "test": "HighAvailabilityTest.RedisLeadershipMonitorReportsDeletedView"},
-      "reason": "Rust keepalive demotes on a missing owner record, but no live-Redis fault test externally deletes the key and observes the role transition; redis-server is unavailable in this validation environment.",
-      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisLeadershipMonitorReportsDeletedView and Rust start_keepalive", "reviewed": true},
-      "rust": [], "status": "missing"
+      "reason": "Not applicable: this is the intrinsic C++ StartLeadershipMonitor callback-and-LeadershipLossReason contract. Rust exposes cancellable keepalive plus role-watch demotion instead, and Redis is rejected before production HA serving because it has no shared ordered oplog.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisLeadershipMonitorReportsDeletedView; Rust coordinator_redis.rs start_keepalive, coordinator.rs role watch, and main_config.rs serving validation", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     },
     {
-      "behavior": "Explicitly releasing a Redis leadership session stops monitoring without emitting a spurious leadership-loss callback.",
-      "boundary": ["master", "ha", "redis", "leadership-monitor", "explicit-release"],
+      "behavior": "After acquire and renew, explicitly releasing the session leaves the C++ StartLeadershipMonitor callback unfired for two seconds.",
+      "boundary": ["master", "ha", "redis", "coordinator-only", "monitor-callback", "explicit-release"],
       "cpp": {"file": "ha/leadership/backends/redis/high_availability_redis_test.cpp", "test": "HighAvailabilityTest.RedisLeadershipMonitorIgnoresExplicitRelease"},
-      "reason": "Rust cancels its keepalive task during coordinator release, but lacks a live-Redis integration test proving explicit release cannot race into a false loss notification; redis-server is unavailable here.",
-      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisLeadershipMonitorIgnoresExplicitRelease and Rust coordinator cancellation", "reviewed": true},
-      "rust": [], "status": "missing"
+      "reason": "Not applicable: this is the intrinsic C++ suppression contract for a loss-reason callback during explicit release. Rust locally publishes Standby and clears active ownership on release, with cancellation represented by LeadershipHandle rather than that callback API; Redis is fail-fast before serving.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisLeadershipMonitorIgnoresExplicitRelease; Rust coordinator.rs release_leadership and LeadershipHandle", "reviewed": true},
+      "rust": [], "status": "not-applicable"
     },
     {
-      "behavior": "After explicit Redis leadership release, the same coordinator can acquire a new term for another address and renew it successfully.",
-      "boundary": ["master", "ha", "redis", "leadership", "reacquire"],
+      "behavior": "One Redis coordinator acquires and renews a first session, explicitly releases it, then acquires 127.0.0.1:9944, renews the new session, and releases it.",
+      "boundary": ["master", "ha", "redis", "coordinator-only", "leadership", "reacquire"],
       "cpp": {"file": "ha/leadership/backends/redis/high_availability_redis_test.cpp", "test": "HighAvailabilityTest.RedisCanRestartRenewAfterExplicitRelease"},
-      "reason": "Rust has no live-Redis regression test for release followed by reacquire and renewed keepalive state; redis-server and an external Redis endpoint are unavailable in this validation environment.",
-      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisCanRestartRenewAfterExplicitRelease and Rust coordinator lifecycle", "reviewed": true},
+      "reason": "Rust clears the active owner token on release and records a new token on acquisition, while Redis acquire increments the view version and renewal fences by owner token; no discoverable Rust Redis test proves same-coordinator release, reacquisition, renewal, and final release against a live service. This is coordinator-only behavior and does not establish Redis serving.",
+      "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisCanRestartRenewAfterExplicitRelease; rust-repo/crates/mooncake-store-master/src/ha/coordinator.rs and coordinator/coordinator_redis.rs", "reviewed": true},
       "rust": [], "status": "missing"
     },
     {
