@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+mock = []
 link-native = []
 link-tent-native = ["link-native"]
 

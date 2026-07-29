@@ -85,9 +85,7 @@ if [[ -z "$native_dir" ]]; then
 fi
 
 record_command store-core cargo test -p mooncake-store-core
-record_command transfer-engine-ffi cargo test -p transfer-engine-ffi --lib -- --skip tent::
-record_command store-master cargo test -p mooncake-store-master
-record_command conductor cargo test -p mooncake-conductor
+record_command transfer-engine-ffi cargo test -p transfer-engine-ffi --no-default-features --features mock
 
 if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
   record_command store-client env \
@@ -98,6 +96,8 @@ if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
 else
   record_blocked store-client libtransfer_engine.so
 fi
+record_command store-master cargo test -p mooncake-store-master
+record_command conductor cargo test -p mooncake-conductor
 if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
   record_command workspace env \
     "CARGO_TARGET_DIR=$native_cargo_target" \
