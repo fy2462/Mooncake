@@ -4342,7 +4342,7 @@
       "status": "missing"
     },
     {
-      "behavior": "Restoring with no backup directory creates no mooncake_snapshot_restore_backup artifact below the snapshot root.",
+      "behavior": "Restoring with no backup directory creates no mooncake_snapshot_restore_backup directory anywhere below the test temporary root.",
       "boundary": ["master", "ha", "snapshot", "restore", "backup", "filesystem", "negative-side-effect"],
       "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreWithoutBackupDir_NoBackupFiles"},
       "reason": "No discoverable Rust test asserts the absence of restore-backup artifacts when backup configuration is empty.",
@@ -4354,10 +4354,10 @@
       "behavior": "When the newest snapshot metadata is corrupted, restore chooses the previous healthy snapshot, retains its key, and does not partially restore the newer key.",
       "boundary": ["master", "ha", "snapshot", "restore", "corruption", "fallback", "recovery"],
       "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted"},
-      "reason": "",
+      "reason": "Rust corrupts the newest manifest and asserts only the older descriptor ID and sequence. It does not corrupt newest metadata, construct a restored service, or assert that the older object is restored while newer object state is absent.",
       "review": {"oracle": "snapshot_child_process_test.cpp RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted and snapshot restore candidate fallback; Rust test_catalog_snapshot.rs test_catalog_provider_falls_back_when_latest_manifest_is_corrupt", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_falls_back_when_latest_manifest_is_corrupt"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "Enabling local snapshots without MOONCAKE_SNAPSHOT_LOCAL_PATH makes service construction throw a runtime error.",
@@ -4390,10 +4390,10 @@
       "behavior": "On restore, an expired complete object is removed while a complete object with a refreshed valid lease remains available.",
       "boundary": ["master", "ha", "snapshot", "restore", "lease", "expiry", "cleanup"],
       "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreCleansExpiredLease"},
-      "reason": "",
+      "reason": "Rust tests an expired unpinned object in one synthetic fixture and a future CurrentV4 hard-pinned object in another fixture. No discoverable Rust test persists both an expired normal object and a refreshed-valid complete normal object, restarts the service, and asserts both cleanup and retention in the same recovery scenario.",
       "review": {"oracle": "snapshot_child_process_test.cpp RestoreCleansExpiredLease and MasterService restore lease cleanup; Rust test_catalog_snapshot.rs test_catalog_provider_skips_expired_unpinned_objects/test_catalog_provider_loads_synthetic_cpp_wire_shapes", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_skips_expired_unpinned_objects"}, {"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_loads_synthetic_cpp_wire_shapes"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "Without a snapshot backup directory, the first failed metadata upload stops persistence and the error excludes segments, task_manager, and manifest failures.",
