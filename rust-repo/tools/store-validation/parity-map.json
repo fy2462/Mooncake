@@ -458,13 +458,13 @@
       "rust": [], "status": "missing"
     },
     {
-      "behavior": "Snapshot-only standby startup restores configured snapshot metadata, discards stale state, and exposes the restored sequence as applied progress.",
-      "boundary": ["master", "ha", "snapshot", "recovery"],
+      "behavior": "With a configured catalog snapshot, snapshot-only standby startup reaches Watching, restores the published metadata key, size, and last sequence, and sets latest, applied, and primary sequence to the descriptor sequence.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "snapshot-only-bootstrap"],
       "cpp": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartBootstrapsFromConfiguredBackend"},
-      "reason": "",
+      "reason": "Rust separately tests catalog-provider decoding/factory persistence and static-provider standby restore, but no discoverable Rust test wires a configured CatalogBackedSnapshotProvider into snapshot-only HotStandbyService startup and asserts the restored object plus latest/applied/primary descriptor sequence contract.",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and HotStandbyService snapshot bootstrap", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/hot_standby.rs", "test": "test_snapshot_bootstrap_replaces_stale_state_and_rebuilds_allocator_holes"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "Snapshot-only standby startup with no available snapshot succeeds from an empty metadata and sequence baseline.",
