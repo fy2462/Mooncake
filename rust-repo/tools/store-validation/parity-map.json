@@ -3011,6 +3011,105 @@
       "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp QuotaExhaustionGracefulBehavior, mooncake-store/src/client_service.cpp PutToLocalFile, and Rust global Disk client paths", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "global_disk_fifo_eviction_removes_only_the_oldest_master_replica"}],
       "status": "covered"
+    },
+    {
+      "behavior": "A successful promotion heartbeat with no tasks returns success without allocation, LocalDisk I/O, transfer, or either promotion notification.",
+      "boundary": ["client", "promotion", "heartbeat", "local-disk"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.EmptyQueueIsNoOp"},
+      "reason": "Rust promote_objects returns Ok(0) for an empty heartbeat response, but no discoverable Rust client-loop test observes that no follow-up allocation, LocalDisk I/O, transfer, or notification occurs.",
+      "review": {"oracle": "file_storage_promotion_test.cpp EmptyQueueIsNoOp; mooncake-store/src/file_storage.cpp ProcessPromotionTasks; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A promotion heartbeat SEGMENT_NOT_FOUND caused by a remount or master restart is a benign no-op and does not allocate or promote an object.",
+      "boundary": ["client", "promotion", "heartbeat", "restart", "rpc-error-policy"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.HeartbeatSegmentNotFoundIsBenign"},
+      "reason": "Rust maps the heartbeat gRPC NotFound status to StoreError and promote_objects propagates it; no client-loop test covers the required benign restart/remount no-op policy.",
+      "review": {"oracle": "file_storage_promotion_test.cpp HeartbeatSegmentNotFoundIsBenign and mooncake-store/src/file_storage.cpp ProcessPromotionTasks; Rust storage_promotion.rs heartbeat mapping and storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A non-benign promotion-heartbeat failure is returned to the caller and no allocation is attempted.",
+      "boundary": ["client", "promotion", "heartbeat", "rpc-error-policy"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.HeartbeatHardErrorPropagates"},
+      "reason": "Rust promotes non-benign heartbeat RPC errors to StoreError just as C++ propagates them, but no discoverable Rust client-loop test asserts propagation together with absence of allocation.",
+      "review": {"oracle": "file_storage_promotion_test.cpp HeartbeatHardErrorPropagates and mooncake-store/src/file_storage.cpp ProcessPromotionTasks; Rust storage_promotion.rs and storage_local.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Tasks with size less than or equal to zero are skipped before LocalDisk I/O, allocation, transfer, or promotion notification, while valid queued tasks remain independently eligible.",
+      "boundary": ["client", "promotion", "input-validation", "local-disk", "batch-liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.NonPositiveSizeSkipped"},
+      "reason": "Rust skips only negative sizes and sends NotifyPromotionFailure for them; zero reaches LocalDisk I/O and allocation. The C++ fixture only returns k_good on this tick, so the source gate—not its weak fixture—defines the oracle; no Rust client-loop test covers it.",
+      "review": {"oracle": "file_storage_promotion_test.cpp NonPositiveSizeSkipped and mooncake-store/src/file_storage.cpp size <= 0 gate; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After a successfully read promotion task has allocation rejected, the client attempts best-effort failure notification, does not transfer or commit that key, and continues to allocate later tasks.",
+      "boundary": ["client", "promotion", "allocation", "failure-notification", "batch-liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.AllocStartFailureSkipsKey"},
+      "reason": "Rust's reached allocation-failure branch sends best-effort failure notification and continues, but no discoverable Rust client-loop test exercises that branch. The C++ comment saying no notify is stale; current C++ source notifies failure.",
+      "review": {"oracle": "file_storage_promotion_test.cpp AllocStartFailureSkipsKey and mooncake-store/src/file_storage.cpp allocation-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After promotion admission, a LocalDisk BatchLoad failure attempts best-effort failure notification, performs no transfer or success commit, and does not abort the remaining promotion work.",
+      "boundary": ["client", "promotion", "local-disk", "failure-notification", "batch-liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.BatchLoadFailureLeavesNoNotify"},
+      "reason": "Rust reads LocalDisk before allocation and propagates a read error from promote_objects without failure notification or continuation. The C++ title/comment are stale: current source does send NotifyPromotionFailure; the test asserts only no success notify.",
+      "review": {"oracle": "file_storage_promotion_test.cpp BatchLoadFailureLeavesNoNotify and mooncake-store/src/file_storage.cpp BatchLoad-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A reached promotion transfer-write failure attempts best-effort failure notification, performs no success commit, and leaves later tasks eligible for processing.",
+      "boundary": ["client", "promotion", "transfer", "failure-notification", "batch-liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.TransferWriteFailureLeavesNoNotify"},
+      "reason": "Rust's reached write-error branch sends best-effort failure notification and continues, but no discoverable Rust client-loop test reaches and asserts it. The C++ fixture permits BatchLoad to fail first, so it does not prove its configured transfer failure was reached.",
+      "review": {"oracle": "file_storage_promotion_test.cpp TransferWriteFailureLeavesNoNotify and mooncake-store/src/file_storage.cpp PromotionWrite-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "If success notification fails after a completed promotion write, the client attempts best-effort failure notification and continues processing later queued tasks.",
+      "boundary": ["client", "promotion", "commit", "failure-notification", "batch-liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.NotifyFailureDoesNotAbortBatch"},
+      "reason": "Rust propagates NotifyPromotionSuccess failure with ? and neither attempts NotifyPromotionFailure nor continues the batch; no Rust client-loop test covers the required release-and-continue contract.",
+      "review": {"oracle": "file_storage_promotion_test.cpp NotifyFailureDoesNotAbortBatch and mooncake-store/src/file_storage.cpp success-notify-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Per-key allocation, LocalDisk load, transfer, and commit failures do not prevent later promotion tasks from being attempted.",
+      "boundary": ["client", "promotion", "local-disk", "transfer", "commit", "batch-liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.PerKeyFailuresAreIndependent"},
+      "reason": "Rust continues after reached allocation and transfer failures but aborts promote_objects on LocalDisk read and success-notify failures, so the general C++ per-key liveness contract is not met and has no client-loop test.",
+      "review": {"oracle": "file_storage_promotion_test.cpp PerKeyFailuresAreIndependent and mooncake-store/src/file_storage.cpp per-task continuation; Rust storage_local.rs promote_objects", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An allocation-start rejection triggers exactly one best-effort failure notification for the tenant/key and no success notification, promptly releasing the in-flight promotion slot.",
+      "boundary": ["client", "promotion", "allocation", "failure-notification", "master-state", "liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.AllocStartFailureNotifiesMaster"},
+      "reason": "Rust's reached allocation-failure branch attempts failure notification, but no discoverable Rust client-loop test proves the automatic tenant/key release notification. Existing master tests cover explicit failure RPC state, not this client-loop branch.",
+      "review": {"oracle": "file_storage_promotion_test.cpp AllocStartFailureNotifiesMaster and mooncake-store/src/file_storage.cpp allocation-failure release; Rust storage_local.rs and master test_master_promotion.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Each reached allocation, LocalDisk load, transfer-write, or success-notify failure attempts one best-effort failure notification so staged state and the in-flight queue slot can be released while later tasks proceed.",
+      "boundary": ["client", "promotion", "local-disk", "transfer", "commit", "failure-notification", "master-state", "liveness"],
+      "cpp": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.PostAllocFailuresAllNotifyMaster"},
+      "reason": "Rust matches reached allocation and transfer failure release branches but not LocalDisk read or success-notify failure release/continuation; no discoverable Rust client-loop test covers this lifecycle. The C++ k_notify_fail fixture lacks backing data, so its source contract rather than claimed reachability is the oracle.",
+      "review": {"oracle": "file_storage_promotion_test.cpp PostAllocFailuresAllNotifyMaster and mooncake-store/src/file_storage.cpp failure-release branches; Rust storage_local.rs and master test_master_promotion.rs", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
