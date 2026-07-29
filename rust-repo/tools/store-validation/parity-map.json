@@ -2337,76 +2337,76 @@
       "status": "missing"
     },
     {
-      "behavior": "A PutStart backed by Memory and global Disk is unreadable until both replicas complete, then returns both as Complete.",
-      "boundary": ["master", "ssd", "put-lifecycle", "memory-disk"],
+      "behavior": "A live LocalDisk/SSD master PutStart returns exactly Memory and Disk replicas, reports REPLICA_IS_NOT_READY until both PutEnd calls, then lists two Complete replicas; its snapshot must restore into a fresh service with matching replica descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-lifecycle", "memory-disk"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutEndBothReplica"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutEndBothReplica and Rust global Disk lifecycle", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
-      "status": "covered"
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity checks the two-replica lifecycle only in process. No discoverable Rust test saves live service state, restores it into a fresh service, reasserts the C++ result/descriptors, or compares the second saved LocalDisk/SSD state.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutEndBothReplica plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Restoring a snapshot containing one complete Memory replica and one complete SSD Disk replica rebuilds both cache-total gauges and keeps the object readable.",
-      "boundary": ["master", "snapshot", "ssd", "metrics", "restore"],
+      "behavior": "A live LocalDisk/SSD snapshot with complete Memory and Disk replicas restores into a fresh service with MEMORY_TOTAL and SSD_TOTAL still one and a readable two-replica list, while preserving the fixture's descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "metrics"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.RestorePreservesCacheTotalMetrics"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RestorePreservesCacheTotalMetrics and Rust restore accounting", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_storage.rs", "test": "test_snapshot_restore_rebuilds_memory_and_disk_cache_total_metrics"}],
-      "status": "covered"
+      "reason": "test_snapshot_restore_rebuilds_memory_and_disk_cache_total_metrics restores a synthetic StorageBackend inventory and checks gauges, not a snapshot saved by a live service. It does not assert the restored RPC list or the fixture's fresh-service and second-save LocalDisk/SSD state equivalence.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RestorePreservesCacheTotalMetrics plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Revoking the unfinished Disk replica after Memory PutEnd leaves one readable complete Memory replica.",
-      "boundary": ["master", "ssd", "put-revoke", "disk"],
+      "behavior": "After Memory PutEnd, revoking the processing Disk replica leaves exactly one readable Memory replica, and snapshot save followed by fresh LocalDisk/SSD service restore preserves that result, replica metadata, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-revoke", "disk"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeDiskReplica"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeDiskReplica and Rust typed revoke", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
-      "status": "covered"
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity verifies the one-Memory-replica result only in process. No discoverable Rust test persists it through a live snapshot, fresh-service restore, and second save while checking the C++ state and metadata oracle.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeDiskReplica plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Revoking the unfinished Memory replica keeps the object not-ready until Disk PutEnd, after which one complete Disk replica is readable.",
-      "boundary": ["master", "ssd", "put-revoke", "memory"],
+      "behavior": "Revoking Memory while Disk is processing returns REPLICA_IS_NOT_READY; after Disk PutEnd it lists exactly one Disk replica, and snapshot save/fresh LocalDisk/SSD restore preserves that error/result, metadata, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-revoke", "memory", "errors"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeMemoryReplica"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeMemoryReplica and Rust typed revoke", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
-      "status": "covered"
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity checks only an unspecified Rust error and the later one-Disk-replica result in process. It neither asserts REPLICA_IS_NOT_READY nor performs the required live snapshot, fresh-service restore, and second-save state comparison.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeMemoryReplica plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Revoking both unfinished Memory and Disk replicas removes the object completely.",
-      "boundary": ["master", "ssd", "put-revoke", "object-removal"],
+      "behavior": "Revoking processing Disk then Memory returns REPLICA_IS_NOT_READY and then OBJECT_NOT_FOUND, and snapshot save/fresh LocalDisk/SSD restore preserves those observable outcomes, replica/segment metadata, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-revoke", "object-removal", "errors"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeBothReplica"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeBothReplica and Rust typed revoke", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
-      "status": "covered"
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity only asserts is_err for both lists in process. No discoverable Rust test checks the two C++ error codes or persists the removal through live snapshot, fresh restore, and the second-save state oracle.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeBothReplica plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Removing an object with complete Memory and Disk replicas removes it from lookup.",
-      "boundary": ["master", "ssd", "remove", "memory-disk"],
+      "behavior": "Force-removing complete Memory and Disk replicas returns OBJECT_NOT_FOUND on lookup, and snapshot save/fresh LocalDisk/SSD restore preserves that deletion together with replica/segment metadata, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "remove", "memory-disk", "errors"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.RemoveKey"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RemoveKey and Rust remove lifecycle", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_memory_and_global_disk_put_revoke_remove_parity"}],
-      "status": "covered"
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity checks only an unspecified in-process list error after removal. It does not assert OBJECT_NOT_FOUND or that deletion survives a live snapshot, fresh-service restore, and second-save metadata/state comparison.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RemoveKey plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Memory pressure can evict the Memory copy while the global Disk copy keeps the object readable and allows the released Memory capacity to be reused.",
-      "boundary": ["master", "ssd", "eviction", "capacity"],
+      "behavior": "A roughly 240-MB LocalDisk/SSD segment accepts and returns more than 16K completed Memory-plus-Disk objects across eviction after lease expiry, and snapshot save/fresh restore preserves the resulting replica descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "eviction", "capacity", "scale"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.EvictObject"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp EvictObject and Rust memory-pressure eviction with global Disk", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_global_disk_keeps_object_readable_after_memory_capacity_eviction"}],
-      "status": "covered"
+      "reason": "test_global_disk_keeps_object_readable_after_memory_capacity_eviction is a one-object in-process eviction test. It does not exercise the target's more-than-16K admission/readability result or persist and restore the evicted LocalDisk/SSD state through the second-save oracle.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp EvictObject plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "For either Memory or Disk, an unfinished sibling replica is discarded at put_start_discard_timeout, released only after the longer grace timeout, and a late PutEnd is an idempotent no-op.",
-      "boundary": ["master", "ssd", "put-timeout", "delayed-release"],
+      "behavior": "For either discarded replica type, a completed sibling makes repeated PutStart return OBJECT_ALREADY_EXISTS before release; timeout discard and late PutEnd leave exactly the expected replica, and snapshot save/fresh LocalDisk/SSD restore preserves that result, metadata, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-timeout", "delayed-release", "errors"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutStartExpires"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires and Rust background reaper", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_master_object.rs", "test": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas"}],
-      "status": "covered"
+      "reason": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas covers both timeout permutations and late PutEnd only in process. It omits the C++ pre-release OBJECT_ALREADY_EXISTS assertion and every live snapshot, fresh-service restore, and second-save LocalDisk/SSD state check.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "A zero-capacity client buffer allocator rejects a nonzero allocation.", "boundary": ["client", "buffer", "allocation"],
