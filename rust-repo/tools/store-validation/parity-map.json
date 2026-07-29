@@ -2337,10 +2337,10 @@
       "status": "missing"
     },
     {
-      "behavior": "A live LocalDisk/SSD master PutStart returns exactly Memory and Disk replicas, reports REPLICA_IS_NOT_READY until both PutEnd calls, then lists two Complete replicas; its snapshot must restore into a fresh service with matching replica descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "behavior": "A live LocalDisk/SSD master PutStart returns exactly Memory and Disk replicas; the single lookup before either PutEnd returns REPLICA_IS_NOT_READY, and after sequential Memory and Disk PutEnd calls the final lookup lists two Complete replicas. Snapshot restore into a fresh service must preserve the final descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
       "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-lifecycle", "memory-disk"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutEndBothReplica"},
-      "reason": "test_memory_and_global_disk_put_revoke_remove_parity checks the two-replica lifecycle only in process. No discoverable Rust test saves live service state, restores it into a fresh service, reasserts the C++ result/descriptors, or compares the second saved LocalDisk/SSD state.",
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity checks the initial lookup only as an unspecified error and the final two Complete replicas only in process. No discoverable Rust test saves that live final state, restores it into a fresh service, reasserts the descriptors/result, or compares the second saved LocalDisk/SSD state.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutEndBothReplica plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
       "rust": [],
       "status": "missing"
@@ -2373,10 +2373,10 @@
       "status": "missing"
     },
     {
-      "behavior": "Revoking processing Disk then Memory returns REPLICA_IS_NOT_READY and then OBJECT_NOT_FOUND, and snapshot save/fresh LocalDisk/SSD restore preserves those observable outcomes, replica/segment metadata, LocalDisk state/tasks, and second-save state.",
+      "behavior": "Revoking the processing Disk replica makes the immediate lookup return REPLICA_IS_NOT_READY; revoking Memory then makes the next lookup return OBJECT_NOT_FOUND. Snapshot save and fresh LocalDisk/SSD restore preserve the resulting object-absent state, segment/accounting, LocalDisk state/tasks, and second-save state.",
       "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-revoke", "object-removal", "errors"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutRevokeBothReplica"},
-      "reason": "test_memory_and_global_disk_put_revoke_remove_parity only asserts is_err for both lists in process. No discoverable Rust test checks the two C++ error codes or persists the removal through live snapshot, fresh restore, and the second-save state oracle.",
+      "reason": "test_memory_and_global_disk_put_revoke_remove_parity performs both revokes before its sole lookup and checks only is_err. It neither queries after the Disk-only revoke for REPLICA_IS_NOT_READY nor distinguishes the final OBJECT_NOT_FOUND, and no discoverable Rust test persists the resulting removal through live snapshot, fresh restore, and the second-save state oracle.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutRevokeBothReplica plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
       "rust": [],
       "status": "missing"
@@ -2391,20 +2391,20 @@
       "status": "missing"
     },
     {
-      "behavior": "A roughly 240-MB LocalDisk/SSD segment accepts and returns more than 16K completed Memory-plus-Disk objects across eviction after lease expiry, and snapshot save/fresh restore preserves the resulting replica descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "behavior": "While filling a roughly 240-MB LocalDisk/SSD segment, more than 16K Memory-plus-Disk puts complete and more than 16K replica-list lookups succeed; both counts are asserted before a final lease-TTL sleep. After that sleep, teardown snapshots the current state and a fresh service must match its descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
       "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "eviction", "capacity", "scale"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.EvictObject"},
-      "reason": "test_global_disk_keeps_object_readable_after_memory_capacity_eviction is a one-object in-process eviction test. It does not exercise the target's more-than-16K admission/readability result or persist and restore the evicted LocalDisk/SSD state through the second-save oracle.",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp EvictObject plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "reason": "test_global_disk_keeps_object_readable_after_memory_capacity_eviction is a one-object in-process eviction test. It does not reproduce the target's more-than-16K pre-sleep admission and lookup counts or snapshot the state reached after the final TTL sleep for fresh-service restore and second-save comparison.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp EvictObject assertions before the final TTL sleep, followed by MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
       "rust": [],
       "status": "missing"
     },
     {
-      "behavior": "For either discarded replica type, a completed sibling makes repeated PutStart return OBJECT_ALREADY_EXISTS before release; timeout discard and late PutEnd leave exactly the expected replica, and snapshot save/fresh LocalDisk/SSD restore preserves that result, metadata, segment/accounting, LocalDisk state/tasks, and second-save state.",
+      "behavior": "For each discarded replica type, PutStart yields two Processing replicas, its sibling completes, a post-discard-timeout PutStart returns OBJECT_ALREADY_EXISTS, and after release timeout a late PutEnd succeeds while lookup shows exactly the expected sibling. Each permutation then waits for the key to expire; teardown snapshots and fresh-restores the resulting post-expiry state and compares its second save.",
       "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "put-timeout", "delayed-release", "errors"],
       "cpp": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.PutStartExpires"},
-      "reason": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas covers both timeout permutations and late PutEnd only in process. It omits the C++ pre-release OBJECT_ALREADY_EXISTS assertion and every live snapshot, fresh-service restore, and second-save LocalDisk/SSD state check.",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
+      "reason": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas covers both timeout permutations, the one-replica result, and late PutEnd only in process. It omits the C++ OBJECT_ALREADY_EXISTS check before release, does not wait for final key expiry, and does not snapshot, fresh-restore, or second-save the resulting post-expiry LocalDisk/SSD state.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires through each final key-expiry wait, followed by MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
       "rust": [],
       "status": "missing"
     },
