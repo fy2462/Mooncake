@@ -12,6 +12,7 @@
         "file": "e2e/e2e_rand_test.cpp",
         "test": "E2ERandTest.RandomSequentialDeletePutGet"
       },
+      "reason": "",
       "review": {
         "oracle": "mooncake-store/tests/e2e/e2e_rand_test.cpp and its ClientTestWrapper/MasterProcessHandler calls",
         "reviewed": true
@@ -1464,6 +1465,7 @@
       "behavior": "A compute-only client sends no storage heartbeat until its first memory segment mount, after which heartbeat starts automatically.",
       "boundary": ["client", "non-ha", "heartbeat", "memory-mount", "lifecycle"],
       "cpp": {"file": "non_ha_reconnect_test.cpp", "test": "NonHAReconnectTest.ZeroSegmentClientStartsHeartbeatOnlyAfterMount"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ZeroSegmentClientStartsHeartbeatOnlyAfterMount and Rust client background/lifecycle code", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "zero_segment_heartbeat_activates_after_first_memory_mount"}], "status": "covered"
     },
@@ -1471,6 +1473,7 @@
       "behavior": "A compute-only client starts storage heartbeat automatically after its first local-disk mount.",
       "boundary": ["client", "non-ha", "heartbeat", "local-disk", "lifecycle"],
       "cpp": {"file": "non_ha_reconnect_test.cpp", "test": "NonHAReconnectTest.ZeroSegmentClientStartsHeartbeatAfterLocalDiskMount"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ZeroSegmentClientStartsHeartbeatAfterLocalDiskMount and Rust storage/background code", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "zero_segment_heartbeat_activates_after_local_disk_mount"}], "status": "covered"
     },
@@ -1478,6 +1481,7 @@
       "behavior": "In non-HA mode, a mounted client reconnects after the Master restarts on the same address and automatically remounts its segment.",
       "boundary": ["client", "non-ha", "reconnect", "master-restart", "remount"],
       "cpp": {"file": "non_ha_reconnect_test.cpp", "test": "NonHAReconnectTest.ClientAutoReconnectAndRemount"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/non_ha_reconnect_test.cpp ClientAutoReconnectAndRemount and Rust health_check/remount_all", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "non_ha_master_restart_remounts_owned_segments_on_the_same_endpoint"}], "status": "covered"
     },
@@ -1485,6 +1489,7 @@
       "behavior": "With P2P handshake and no memcpy override, reading a complete replica mounted by the same client automatically uses the LOCAL_MEMCPY strategy and returns exact bytes.",
       "boundary": ["client", "tcp", "p2p", "local-memcpy", "read-strategy"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.P2PLocalReplicaUsesLocalMemcpy"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp P2PLocalReplicaUsesLocalMemcpy and Rust transfer_read/transfer_local", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "tcp_local_and_remote_reads_report_the_actual_transfer_strategy"}], "status": "covered"
     },
@@ -1492,6 +1497,7 @@
       "behavior": "With metadata discovery, a replica advertised under the client's local host alias is recognized as local even when it differs from the transport endpoint and is read with LOCAL_MEMCPY.",
       "boundary": ["client", "tcp", "metadata", "local-alias", "local-memcpy"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.MetadataLocalReplicaUsesLocalMemcpy"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp MetadataLocalReplicaUsesLocalMemcpy and Rust local endpoint registration", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "http_metadata_local_and_remote_endpoints_choose_exact_transfer_strategy"}], "status": "covered"
     },
@@ -1499,6 +1505,7 @@
       "behavior": "Two P2P clients on the same TCP host but with different endpoints treat each other's replicas as remote and use TransferEngine rather than local memcpy.",
       "boundary": ["client", "tcp", "p2p", "remote-replica", "transfer-engine"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.P2PRemoteReplicaOnSameTcpHostUsesTransferEngine"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp P2PRemoteReplicaOnSameTcpHostUsesTransferEngine and Rust replica locality", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "tcp_local_and_remote_reads_report_the_actual_transfer_strategy"}], "status": "covered"
     },
@@ -1506,6 +1513,7 @@
       "behavior": "Two metadata-discovered clients on the same TCP host but with different host aliases treat each other's replicas as remote and use TransferEngine.",
       "boundary": ["client", "tcp", "metadata", "remote-replica", "transfer-engine"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "TcpLocalMemcpyAutoEnableTest.MetadataRemoteReplicaOnSameTcpHostUsesTransferEngine"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp MetadataRemoteReplicaOnSameTcpHostUsesTransferEngine and Rust transfer strategy selection", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "http_metadata_local_and_remote_endpoints_choose_exact_transfer_strategy"}], "status": "covered"
     },
@@ -1513,6 +1521,7 @@
       "behavior": "For both P2P and metadata handshakes, a hot-cache hit redirects a nominally remote memory replica to LOCAL_MEMCPY and returns the cached bytes.",
       "boundary": ["client", "hot-cache", "p2p", "metadata", "local-memcpy"],
       "cpp": {"file": "client_tcp_local_memcpy_test.cpp", "test": "HotCacheRedirectStrategyTest.CacheHitUsesLocalMemcpy"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_tcp_local_memcpy_test.cpp CacheHitUsesLocalMemcpy and Rust hot_cache/read path", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "hot_cache_hit_bypasses_missing_master_metadata_in_both_handshake_modes"}], "status": "covered"
     },
@@ -1873,6 +1882,7 @@
       "behavior": "Only identical non-empty endpoint identities are same-process; same-host endpoints with different ports remain remote.",
       "boundary": ["client", "transfer", "endpoint-identity", "same-host", "safety"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.IsSameProcessEndpoint"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp IsSameProcessEndpoint and Rust local_endpoints strategy selection", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/src/client/transfer_local.rs", "test": "same_process_endpoint_requires_identical_non_empty_identity"}], "status": "covered"
     },
@@ -2420,14 +2430,331 @@
     {
       "behavior": "Replica copy retries can recover after target capacity is released, permanently full targets reach a failed task state, and successful multi-client copy/move preserves placement and bytes.", "boundary": ["client", "master", "task-worker", "copy", "move", "capacity-retry", "multi-node"],
       "cpp": {"file": "client_integration_test.cpp", "test": "ClientIntegrationTest.ReplicaCopyAndMoveOperations"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp ReplicaCopyAndMoveOperations and Rust three-client P2P transfer/task implementation", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "three_tcp_clients_copy_and_move_preserve_bytes_across_distinct_segments"}, {"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "permanently_full_copy_target_reaches_failed_task_after_bounded_retries"}], "status": "covered"
     },
     {
       "behavior": "File-per-key FIFO eviction notifies Master so the oldest object's Disk replica disappears while newer Disk replicas remain routable.", "boundary": ["client", "master", "disk", "fifo-eviction", "notification", "end-to-end"],
       "cpp": {"file": "client_integration_test.cpp", "test": "EvictionNotificationTest.DiskReplicaRemovedAfterEviction"},
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/client_integration_test.cpp DiskReplicaRemovedAfterEviction and Rust local-storage eviction notification paths", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "global_disk_fifo_eviction_removes_only_the_oldest_master_replica"}], "status": "covered"
+    },
+    {
+      "behavior": "A positive cache capacity is divided into 16 MiB default blocks, yielding the corresponding block count.",
+      "boundary": ["client", "hot-cache", "configuration", "block-sizing"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.Construction"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp Construction and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/hot_cache.rs", "test": "environment_settings_default_to_cpp_block_and_admission_values"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A cache constructed with an explicit block size divides capacity by that size and exposes the chosen block size.",
+      "boundary": ["client", "hot-cache", "configuration", "custom-block-size"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.ConstructionWithCustomBlockSize"},
+      "reason": "No discoverable Rust test asserts the custom block-size configuration's resulting block count and exposed block size.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp ConstructionWithCustomBlockSize and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A zero-capacity C++ LocalHotCache has zero available blocks.",
+      "boundary": ["client", "hot-cache", "configuration", "zero-capacity"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.ZeroSizeCache"},
+      "reason": "Rust LocalHotCache::new clamps zero capacity to 4096 bytes, and no Rust test asserts the C++ zero-block construction behavior.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp ZeroSizeCache and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Writing one valid key/value makes that exact value retrievable from the process-local cache.",
+      "boundary": ["client", "hot-cache", "put", "get"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyBasic"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyBasic and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_hot_cache.rs", "test": "test_hot_cache_basic_put_get"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Multiple independently written cache keys remain retrievable with their own exact values when capacity is sufficient.",
+      "boundary": ["client", "hot-cache", "put", "multiple-keys"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyMultipleKeys"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyMultipleKeys and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_hot_cache.rs", "test": "test_hot_cache_multiple_entries"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Submitting an already cached key touches its LRU state without replacing the originally cached bytes.",
+      "boundary": ["client", "hot-cache", "put", "lru", "duplicate-key"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyTouchExisting"},
+      "reason": "Rust's discoverable overwrite test asserts replacement bytes instead of the C++ touch-without-overwrite behavior.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyTouchExisting and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Hot-cache insertion rejects null input, zero-length input, and an object larger than a fixed block.",
+      "boundary": ["client", "hot-cache", "validation", "object-size"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyInvalidParams"},
+      "reason": "Rust only has a discoverable oversized-value assertion; it does not assert the C++ null and zero-length rejection behavior.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyInvalidParams and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A value larger than an explicitly configured cache block is rejected and not cached.",
+      "boundary": ["client", "hot-cache", "validation", "custom-block-size"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyInvalidParamsWithCustomBlockSize"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyInvalidParamsWithCustomBlockSize and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/hot_cache.rs", "test": "cache_rejects_values_larger_than_cpp_compatible_block"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "When a full two-block cache receives a third key, it evicts the least-recently-used key while retaining newer keys.",
+      "boundary": ["client", "hot-cache", "eviction", "lru"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.LRUEviction"},
+      "reason": "No discoverable Rust test asserts the victim identity required by strict least-recently-used eviction.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp LRUEviction and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Reading a cached key refreshes its LRU position so the other key is evicted first.",
+      "boundary": ["client", "hot-cache", "get", "eviction", "lru"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.GetHotKeyUpdatesLRU"},
+      "reason": "No discoverable Rust test asserts that a cache get refreshes eviction order; Rust LocalHotCache get returns a copy without an LRU touch assertion.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp GetHotKeyUpdatesLRU and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A lookup for an absent hot-cache key reports a miss.",
+      "boundary": ["client", "hot-cache", "get", "miss"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.GetHotKeyMiss"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp GetHotKeyMiss and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_hot_cache.rs", "test": "test_hot_cache_miss"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "An acquired C++ HotMemBlock remains non-evictable until ReleaseHotKey drops its reference, after which the block can be reused.",
+      "boundary": ["cpp-only", "hot-cache", "raw-pointer", "refcount", "block-lifecycle"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.GetHotKeyProtectsBlockFromReuse"},
+      "reason": "This exercises the C++ HotMemBlock pointer/refcount ownership mechanism. Rust get returns an owned Vec and exposes no pinned cache-block or release API to mirror it.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp GetHotKeyProtectsBlockFromReuse and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "A stale asynchronous fill token captured before key invalidation cannot republish removed data, while a current token can publish it.",
+      "boundary": ["client", "hot-cache", "invalidation", "async-fill", "concurrency"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyWithTokenRejectsStaleFill"},
+      "reason": "No discoverable Rust test races invalidation with an asynchronous hot-cache fill and proves stale data cannot be resurrected.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyWithTokenRejectsStaleFill and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A submitted background hot-cache fill eventually publishes the submitted bytes for retrieval.",
+      "boundary": ["client", "hot-cache", "async-fill", "worker"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.LocalHotCacheHandlerBasic"},
+      "reason": "No discoverable Rust test asserts queued background cache-fill completion and later retrieval of the submitted bytes.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp LocalHotCacheHandlerBasic and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The C++ LocalHotCacheHandler refuses a submission when constructed without a cache instance.",
+      "boundary": ["cpp-only", "hot-cache", "handler", "null-pointer"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.LocalHotCacheHandlerNullCache"},
+      "reason": "Rust has no public LocalHotCacheHandler or nullable cache-pointer constructor; fills are performed through owned Arc cache references.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp LocalHotCacheHandlerNullCache and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "After a smaller value is evicted from a one-block cache, the recycled block accepts a larger value that still fits the block and returns its exact bytes.",
+      "boundary": ["client", "hot-cache", "eviction", "block-capacity", "async-fill"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.RecycledBlockAcceptsLargerObject"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp RecycledBlockAcceptsLargerObject and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_hot_cache.rs", "test": "test_hot_cache_accepts_larger_value_after_reuse"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Concurrent cache writers and readers with sufficient capacity preserve every written key's readable bytes.",
+      "boundary": ["client", "hot-cache", "concurrency", "put", "get"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.ConcurrentAccess"},
+      "reason": "No discoverable Rust test performs concurrent LocalHotCache put/get operations and asserts all operations and bytes succeed.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp ConcurrentAccess and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A valid 32 MiB environment setting enables the client hot cache with two default 16 MiB blocks.",
+      "boundary": ["client", "hot-cache", "environment", "configuration"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_ValidSize"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_ValidSize and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/hot_cache.rs", "test": "environment_settings_default_to_cpp_block_and_admission_values"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "An invalid hot-cache size environment value leaves the client cache disabled with zero blocks.",
+      "boundary": ["client", "hot-cache", "environment", "validation"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_InvalidEnvVar"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_InvalidEnvVar and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/hot_cache.rs", "test": "invalid_or_missing_total_size_disables_cache"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A zero hot-cache size environment value leaves the client cache disabled with zero blocks.",
+      "boundary": ["client", "hot-cache", "environment", "zero-size"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_ZeroSize"},
+      "reason": "No discoverable Rust test passes a zero hot-cache size through LocalHotCacheSettings and asserts that the cache is disabled.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_ZeroSize and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A negative hot-cache size environment value leaves the client cache disabled with zero blocks.",
+      "boundary": ["client", "hot-cache", "environment", "validation"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_NegativeSize"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_NegativeSize and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/hot_cache.rs", "test": "invalid_or_missing_total_size_disables_cache"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A positive total cache size smaller than the default 16 MiB block leaves the C++ client hot cache disabled.",
+      "boundary": ["client", "hot-cache", "environment", "block-sizing"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_LessThanOneBlock"},
+      "reason": "No discoverable Rust test asserts the C++ client-visible disabled-cache outcome when total cache size is smaller than the default block size.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_LessThanOneBlock and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A positive total cache size smaller than a configured custom block leaves the C++ client hot cache disabled.",
+      "boundary": ["client", "hot-cache", "environment", "custom-block-size"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_LessThanOneBlock_CustomBlockSize"},
+      "reason": "No discoverable Rust test asserts the C++ client-visible disabled-cache outcome for a total size smaller than a custom block size.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_LessThanOneBlock_CustomBlockSize and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With no hot-cache size environment variable, the client leaves the local hot cache disabled with zero blocks.",
+      "boundary": ["client", "hot-cache", "environment", "disabled"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.InitLocalHotCacheViaClientCreate_NoEnvVar"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp InitLocalHotCacheViaClientCreate_NoEnvVar and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/src/hot_cache.rs", "test": "invalid_or_missing_total_size_disables_cache"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A client with the local hot cache enabled returns bytes identical to a stored object through Get.",
+      "boundary": ["client", "hot-cache", "get", "data-integrity"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.GetWithHotCacheEnabled"},
+      "reason": "",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp GetWithHotCacheEnabled and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "hot_cache_hit_bypasses_missing_master_metadata_in_both_handshake_modes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "A client with the local hot cache enabled returns every BatchGet key's exact bytes.",
+      "boundary": ["client", "hot-cache", "batch-get", "data-integrity"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.BatchGetWithHotCacheEnabled"},
+      "reason": "No discoverable Rust test enables a local hot cache and asserts BatchGet returns each requested cached or fetched value in the batch.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp BatchGetWithHotCacheEnabled and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A released accessed block receives its deferred LRU touch before eviction, so it survives while the least-recently-used untouched block is evicted.",
+      "boundary": ["client", "hot-cache", "eviction", "lru", "deferred-touch"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.DeferredLRUTouchOrdering"},
+      "reason": "No discoverable Rust test asserts deferred cache-access touch ordering and its resulting eviction victim.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp DeferredLRUTouchOrdering and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Concurrent readers can repeatedly retrieve an existing hot-cache key without failed lookups or crashes.",
+      "boundary": ["client", "hot-cache", "concurrency", "get"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.ConcurrentGetHotKeySharedLock"},
+      "reason": "No discoverable Rust test concurrently reads the same LocalHotCache key and asserts every lookup succeeds.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp ConcurrentGetHotKeySharedLock and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A C++ BufferHandle view of a hot-cache block retains the block reference until the view is destroyed.",
+      "boundary": ["cpp-only", "hot-cache", "buffer-handle", "raw-pointer", "refcount"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.HotCacheRefCountViewMode"},
+      "reason": "This is the C++ zero-copy raw-pointer BufferHandle/refcount lifecycle. Rust hot-cache reads return owned Vec values and expose no equivalent view or reference-count contract.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp HotCacheRefCountViewMode and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "A C++ transfer can write directly into a free cache block and return a BufferHandle view over the published bytes.",
+      "boundary": ["cpp-only", "hot-cache", "buffer-handle", "raw-pointer", "zero-copy"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.CacheBlockWriteAndRetrieve"},
+      "reason": "This exercises C++ direct raw-block writes and BufferHandle view ownership; Rust LocalHotCache accepts slices and returns owned Vec values rather than exposing a writable cache-block pointer.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp CacheBlockWriteAndRetrieve and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "A cache-hit Get returns cached bytes without incrementing frequency-admission state for that key.",
+      "boundary": ["client", "hot-cache", "admission", "cache-hit"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.AdmissionSketchNotIncrementedOnCacheHit"},
+      "reason": "No discoverable Rust integration test asserts hot_cache_admission_count remains unchanged across repeated client cache-hit reads.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp AdmissionSketchNotIncrementedOnCacheHit and mooncake-store/src/client_service.cpp", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A Count-Min Sketch increments per-key estimates, reports unseen keys as zero, and halves all counters on explicit decay.",
+      "boundary": ["client", "hot-cache", "admission", "count-min-sketch"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.CountMinSketchBasic"},
+      "reason": "Rust's discoverable admission test covers threshold increments and saturation, but not the C++ explicit-decay and multi-key count assertions.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp CountMinSketchBasic and mooncake-store/include/count_min_sketch.h", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A Count-Min Sketch automatically halves counters after its width-times-depth increment threshold while returning the pre-decay estimate.",
+      "boundary": ["client", "hot-cache", "admission", "count-min-sketch", "decay"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.CountMinSketchAutoDecay"},
+      "reason": "Rust HotCacheAdmission has no automatic counter-aging behavior, and no discoverable Rust test asserts the C++ threshold-triggered decay result.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp CountMinSketchAutoDecay and mooncake-store/include/count_min_sketch.h", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A C++ CountMinSketch constructed with zero dimensions normalizes to its private default dimensions and remains usable.",
+      "boundary": ["cpp-only", "hot-cache", "admission", "count-min-sketch", "constructor"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.CountMinSketchZeroDimensions"},
+      "reason": "Rust HotCacheAdmission uses fixed private dimensions and has no public dimension-configurable CountMinSketch constructor; this is a C++-only helper construction mechanism.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp CountMinSketchZeroDimensions and mooncake-store/include/count_min_sketch.h", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "With no local hot cache, admission count is zero and admission decisions are false regardless of cache-used input.",
+      "boundary": ["client", "hot-cache", "admission", "disabled"],
+      "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.AdmissionHelpersWithoutHotCache"},
+      "reason": "No discoverable Rust test creates a client without a hot cache and asserts both zero admission count and false admission decisions.",
+      "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp AdmissionHelpersWithoutHotCache and mooncake-store/include/client_service.h", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
