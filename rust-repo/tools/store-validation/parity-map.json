@@ -2580,16 +2580,16 @@
       "behavior": "After a smaller value is evicted from a one-block cache, the recycled block accepts a larger value that still fits the block and returns its exact bytes.",
       "boundary": ["client", "hot-cache", "eviction", "block-capacity", "async-fill"],
       "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.RecycledBlockAcceptsLargerObject"},
-      "reason": "",
+      "reason": "No discoverable Rust test drives queued asynchronous LocalHotCacheHandler fill through one-block physical reuse and then verifies the larger recycled value.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp RecycledBlockAcceptsLargerObject and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/tests/test_hot_cache.rs", "test": "test_hot_cache_accepts_larger_value_after_reuse"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "Concurrent cache writers and readers with sufficient capacity preserve every written key's readable bytes.",
+      "behavior": "Concurrent 1024-byte cache put/get operations all report success and each retrieved value's checked first byte identifies its writer.",
       "boundary": ["client", "hot-cache", "concurrency", "put", "get"],
       "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.ConcurrentAccess"},
-      "reason": "No discoverable Rust test performs concurrent LocalHotCache put/get operations and asserts all operations and bytes succeed.",
+      "reason": "No discoverable Rust test performs concurrent 1024-byte LocalHotCache put/get operations and asserts all successes plus the checked first-byte identity.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp ConcurrentAccess and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
       "rust": [],
       "status": "missing"
@@ -2739,10 +2739,10 @@
       "status": "missing"
     },
     {
-      "behavior": "A C++ CountMinSketch constructed with zero dimensions normalizes to its private default dimensions and remains usable.",
+      "behavior": "A C++ CountMinSketch constructed with zero dimensions normalizes to its default dimensions and remains usable.",
       "boundary": ["cpp-only", "hot-cache", "admission", "count-min-sketch", "constructor"],
       "cpp": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.CountMinSketchZeroDimensions"},
-      "reason": "Rust HotCacheAdmission uses fixed private dimensions and has no public dimension-configurable CountMinSketch constructor; this is a C++-only helper construction mechanism.",
+      "reason": "Rust's fixed internal admission sketch exposes no public dimension-configurable CountMinSketch constructor; this is a C++-only helper construction mechanism.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp CountMinSketchZeroDimensions and mooncake-store/include/count_min_sketch.h", "reviewed": true},
       "rust": [],
       "status": "not-applicable"
