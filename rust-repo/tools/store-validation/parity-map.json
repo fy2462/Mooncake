@@ -3857,7 +3857,118 @@
     {"behavior":"Once a leader-label set succeeds and desired state is unchanged, the reconciler makes no further apply calls across repeated retry intervals.","boundary":["master","ha","k8s","leader-label","reconciler","quiescence","optional-component"],"cpp":{"file":"ha/leadership/leader_label_reconciler_test.cpp","test":"LeaderLabelReconcilerTest.StopsCallingOnceConverged"},"reason":"Rust source suppresses patches after applied equals desired, but no discoverable Rust test instruments calls after a successful set and proves no extra patches occur over retry intervals.","review":{"oracle":"leader_label_reconciler_test.cpp StopsCallingOnceConverged and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"A disabled C++ reconciler ignores a leader request, making zero apply calls and leaving no applied state.","boundary":["master","ha","k8s","leader-label","reconciler","disabled","no-identity","optional-component"],"cpp":{"file":"ha/leadership/leader_label_reconciler_test.cpp","test":"LeaderLabelReconcilerTest.DisabledNeverApplies"},"reason":"Rust represents disabled behavior as no K8s pod identity or a non-K8s coordinator, both source-only no-ops; no discoverable Rust test calls set_k8s_leader_label and asserts no task or API effect. This is component configuration behavior, not K8s serving parity.","review":{"oracle":"leader_label_reconciler_test.cpp DisabledNeverApplies and leader_label_reconciler.h SetLeader; Rust coordinator.rs set_k8s_leader_label and coordinator_k8s.rs set_k8s_leader_label","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"If a leader-label set commits remotely but reports an error, changing desired state to clear before the slow retry commits the clear and does not leave a stale leader label.","boundary":["master","ha","k8s","leader-label","reconciler","ambiguous-outcome","set","clear","routing-safety","optional-component"],"cpp":{"file":"ha/leadership/leader_label_reconciler_test.cpp","test":"LeaderLabelReconcilerTest.AmbiguousSetFailureDoesNotLeaveStaleLeader"},"reason":"Rust resets applied state after a patch error and can wake on desired-state change source-only, but has no injectable patch seam or discoverable Rust test for commit-then-set-error followed by clear before retry expiry.","review":{"oracle":"leader_label_reconciler_test.cpp AmbiguousSetFailureDoesNotLeaveStaleLeader and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler","reviewed":true},"rust":[],"status":"missing"},
-    {"behavior":"If a leader-label clear commits remotely but reports an error, changing desired state to set before the slow retry commits the set and does not leave the current leader unlabeled.","boundary":["master","ha","k8s","leader-label","reconciler","ambiguous-outcome","clear","set","routing-safety","optional-component"],"cpp":{"file":"ha/leadership/leader_label_reconciler_test.cpp","test":"LeaderLabelReconcilerTest.AmbiguousClearFailureDoesNotLeaveMissingLabel"},"reason":"Rust resets applied state after a patch error and can wake on desired-state change source-only, but has no injectable patch seam or discoverable Rust test for commit-then-clear-error followed by set before retry expiry.","review":{"oracle":"leader_label_reconciler_test.cpp AmbiguousClearFailureDoesNotLeaveMissingLabel and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler","reviewed":true},"rust":[],"status":"missing"}
+    {"behavior":"If a leader-label clear commits remotely but reports an error, changing desired state to set before the slow retry commits the set and does not leave the current leader unlabeled.","boundary":["master","ha","k8s","leader-label","reconciler","ambiguous-outcome","clear","set","routing-safety","optional-component"],"cpp":{"file":"ha/leadership/leader_label_reconciler_test.cpp","test":"LeaderLabelReconcilerTest.AmbiguousClearFailureDoesNotLeaveMissingLabel"},"reason":"Rust resets applied state after a patch error and can wake on desired-state change source-only, but has no injectable patch seam or discoverable Rust test for commit-then-clear-error followed by set before retry expiry.","review":{"oracle":"leader_label_reconciler_test.cpp AmbiguousClearFailureDoesNotLeaveMissingLabel and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler","reviewed":true},"rust":[],"status":"missing"},
+    {
+      "behavior": "Publishing a valid descriptor makes it the latest snapshot and preserves its id, manifest key, object prefix, sequence, view, and creation time when read back.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.PublishAndGetLatestRoundTrip"},
+      "reason": "",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp PublishAndGetLatestRoundTrip and embedded_snapshot_catalog_store.cpp Publish/GetLatest; Rust snapshot.rs EmbeddedSnapshotCatalogStore", "reviewed": true},
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_embedded_snapshot_catalog_round_trip"},
+        {"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}
+      ],
+      "status": "covered"
+    },
+    {
+      "behavior": "Reading latest from a catalog with no latest marker succeeds with no snapshot.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "not-found"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.GetLatestReturnsEmptyWhenMarkerMissing"},
+      "reason": "Rust get_latest maps a not-found latest marker to Ok(None), but no discoverable Rust test starts from an initially absent marker and asserts that direct catalog result.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp GetLatestReturnsEmptyWhenMarkerMissing and embedded_snapshot_catalog_store.cpp GetLatest; Rust snapshot.rs get_latest", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A non-not-found failure while reading the latest marker returns the persistent-read error.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "error"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.GetLatestReturnsErrorOnBackendReadFailure"},
+      "reason": "Rust propagates a non-not-found object-store download failure, but no discoverable fault-injecting Rust test forces latest-marker read failure and asserts the error.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp GetLatestReturnsErrorOnBackendReadFailure and embedded_snapshot_catalog_store.cpp GetLatest; Rust snapshot.rs get_latest", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "ASCII whitespace surrounding a latest marker is ignored before the referenced descriptor is loaded.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "marker-parsing"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.GetLatestTrimsWhitespaceMarker"},
+      "reason": "Semantic difference: Rust trim accepts broader Unicode whitespace, and its whitespace-only marker test returns an error whereas C++ TrimAsciiWhitespace returns an empty latest result; no exact Rust padded-ASCII-marker test exists.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp GetLatestTrimsWhitespaceMarker and embedded_snapshot_catalog_store.cpp GetLatest/TrimAsciiWhitespace; Rust snapshot.rs get_latest and test_embedded_snapshot_catalog_rejects_empty_latest_marker", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Listing valid snapshots sorts ids descending and returns the requested number while ignoring unrelated paths.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "listing", "ordering", "limit"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.ListReturnsSnapshotsInDescendingOrder"},
+      "reason": "Semantic difference: Rust sorts descriptor ids descending but truncates ids before descriptor reads, while C++ keeps scanning until it has limit healthy descriptors; its one-entry round trip is not this ordering/limit oracle.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp ListReturnsSnapshotsInDescendingOrder and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Listing discovers a snapshot id from an object below its prefix, skips it when its descriptor is absent, and succeeds with the remaining entries.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "listing", "missing-descriptor"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.ListSkipsSnapshotsWhenDescriptorMissing"},
+      "reason": "Semantic difference: C++ discovers ids from any object under the snapshot prefix, whereas Rust discovers only descriptor.txt keys and therefore does not attempt this missing descriptor read; no exact Rust test exists.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp ListSkipsSnapshotsWhenDescriptorMissing and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Listing skips an unreadable snapshot descriptor while retaining a healthy snapshot in the result.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "listing", "error"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries"},
+      "reason": "Rust skips not-found and corrupt descriptors, but no discoverable test combines an unreadable catalog entry with a healthy entry and asserts the healthy entry remains; its pre-read truncation also differs from C++ limit behavior.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Listing on a catalog constructed without an object store returns INVALID_PARAMS.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "construction", "invalid-params"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreStandaloneTest.ListReturnsInvalidParamsWhenObjectStoreMissing"},
+      "reason": "Semantic difference: C++ accepts a nullable object-store pointer and returns INVALID_PARAMS, while Rust construction requires Arc<dyn SnapshotObjectStore>, making null impossible; this API/error contract is not C++-only filesystem machinery.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp ListReturnsInvalidParamsWhenObjectStoreMissing and embedded_snapshot_catalog_store.cpp ValidateObjectStore/List; Rust snapshot.rs EmbeddedSnapshotCatalogStore constructors", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Deleting one snapshot removes every object under its prefix and leaves other published snapshots listable.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "delete", "prefix-cleanup"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.DeleteRemovesSnapshotObjectsByPrefix"},
+      "reason": "",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp DeleteRemovesSnapshotObjectsByPrefix and embedded_snapshot_catalog_store.cpp Delete; Rust catalog_snapshot.rs provider pruning", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_prunes_old_snapshots"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Deleting the current latest snapshot selects the next newest snapshot as the latest marker.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "delete", "latest-marker", "fallback"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.DeleteLatestFallsBackToPreviousSnapshot"},
+      "reason": "Semantic difference: C++ rewrites latest.txt to the prior descriptor, while Rust deletes latest.txt and provider recovery uses list() candidates; provider fallback is not the direct catalog GetLatest contract.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp DeleteLatestFallsBackToPreviousSnapshot and embedded_snapshot_catalog_store.cpp Delete/GetLatest; Rust snapshot.rs delete and catalog_snapshot.rs provider recovery", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Deleting the only latest snapshot clears the latest marker so a later latest read returns no snapshot.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "delete", "latest-marker"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.DeleteLastSnapshotClearsLatestMarker"},
+      "reason": "",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp DeleteLastSnapshotClearsLatestMarker and embedded_snapshot_catalog_store.cpp Delete/GetLatest; Rust test_embedded_snapshot_catalog_round_trip", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_embedded_snapshot_catalog_round_trip"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Publishing or deleting an invalid snapshot id returns INVALID_PARAMS, and an invalid latest marker makes the latest read fail with INVALID_PARAMS.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded", "validation", "invalid-id"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp", "test": "EmbeddedSnapshotCatalogStoreTest.RejectsInvalidSnapshotIds"},
+      "reason": "Rust validate_snapshot_id enforces the same 19-byte ASCII digit/underscore shape for publish, delete, and get_latest, but no discoverable test directly exercises invalid publish, invalid delete, and invalid latest marker together.",
+      "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp RejectsInvalidSnapshotIds and embedded_snapshot_catalog_store.cpp validation paths; Rust snapshot.rs validate_snapshot_id/publish/delete/get_latest", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    }
   ],
   "schema_version": 1
 }
