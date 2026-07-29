@@ -23,6 +23,7 @@ pub mod remote_config;
 mod replicate_config;
 mod tensor_codec;
 mod tensor_parallelism;
+#[cfg(feature = "link-tent-native")]
 mod transfer_engine;
 
 use pyo3::prelude::*;
@@ -161,11 +162,17 @@ fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tensor_parallelism::TensorParallelismPy>()?;
     m.add_class::<tensor_parallelism::ReadTargetPy>()?;
     m.add_class::<tensor_parallelism::WriterPartitionPy>()?;
+    #[cfg(feature = "link-tent-native")]
     m.add_class::<transfer_engine::PyTransferIntent>()?;
+    #[cfg(feature = "link-tent-native")]
     m.add_class::<transfer_engine::PyTransferPriority>()?;
+    #[cfg(feature = "link-tent-native")]
     m.add_class::<transfer_engine::PyTentMetricsStatus>()?;
+    #[cfg(feature = "link-tent-native")]
     m.add_class::<transfer_engine::PyTransferStatus>()?;
+    #[cfg(feature = "link-tent-native")]
     m.add_class::<transfer_engine::PyTransferRequest>()?;
+    #[cfg(feature = "link-tent-native")]
     m.add_class::<transfer_engine::PyTransferEngine>()?;
     m.add_function(wrap_pyfunction!(tensor_codec::tensor_metadata_size, m)?)?;
     m.add_function(wrap_pyfunction!(tensor_codec::serialize_tensor, m)?)?;

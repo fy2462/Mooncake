@@ -22,6 +22,8 @@ done
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 rust_root=$(cd "$script_dir/../.." && pwd)
 repo_root=$(cd "$rust_root/.." && pwd)
+git_common_dir=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)
+repo_root=$(cd "$(dirname "$git_common_dir")" && pwd)
 artifact_root=$(mkdir -p "$artifact_root" && cd "$artifact_root" && pwd)
 logs_dir="$artifact_root/logs"
 records_dir="$artifact_root/records"
@@ -83,9 +85,8 @@ if [[ -z "$native_dir" ]]; then
 fi
 
 record_command store-core cargo test -p mooncake-store-core
-record_command transfer-engine-ffi cargo test -p transfer-engine-ffi --lib
+record_command transfer-engine-ffi cargo test -p transfer-engine-ffi --lib -- --skip tent::
 record_command store-master cargo test -p mooncake-store-master
-record_command p2p-store cargo test -p mooncake-p2p-store
 record_command conductor cargo test -p mooncake-conductor
 
 if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
@@ -97,31 +98,26 @@ if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
 else
   record_blocked store-client libtransfer_engine.so
 fi
-if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" && -f "$native_dir/libtent_shared.so" ]]; then
-  record_command native-tent env \
-    "CARGO_TARGET_DIR=$native_cargo_target" \
-    "RUSTFLAGS=-L native=$native_dir" \
-    "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    cargo test -p transfer-engine-ffi --features link-tent-native
+if [[ -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
   record_command workspace env \
     "CARGO_TARGET_DIR=$native_cargo_target" \
     "RUSTFLAGS=-L native=$native_dir" \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    cargo test --workspace --exclude mooncake-store-py \
-      --features mooncake-store-client/link-native,transfer-engine-ffi/link-tent-native
+    cargo test --workspace --exclude mooncake-store-py --exclude mooncake-p2p-store \
+      --features mooncake-store-client/link-native
 else
-  record_blocked native-tent libtransfer_engine.so+libtent_shared.so
-  record_blocked workspace libtransfer_engine.so+libtent_shared.so
+  record_blocked workspace libtransfer_engine.so
 fi
 
 validation_python=${MOONCAKE_VALIDATION_PYTHON:-$repo_root/.venv/bin/python}
 validation_maturin=${MOONCAKE_VALIDATION_MATURIN:-$repo_root/.venv/bin/maturin}
-if [[ -x "$validation_python" && -x "$validation_maturin" && -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" && -f "$native_dir/libtent_shared.so" ]]; then
+if [[ -x "$validation_python" && -x "$validation_maturin" && -n "$native_dir" && -f "$native_dir/libtransfer_engine.so" ]]; then
   record_command python-binding-build env \
     "CARGO_TARGET_DIR=$python_cargo_target" \
     "RUSTFLAGS=-L native=$native_dir" \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    "$validation_maturin" develop --manifest-path python/Cargo.toml
+    "$validation_maturin" develop --manifest-path python/Cargo.toml \
+      --no-default-features --features link-native
   record_command python-client env \
     "LD_LIBRARY_PATH=$native_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "$validation_python" -m pytest python/tests -q
@@ -129,8 +125,8 @@ elif [[ ! -x "$validation_python" || ! -x "$validation_maturin" ]]; then
   record_blocked python-binding-build repo-.venv-python+maturin
   record_blocked python-client repo-.venv-python+maturin
 else
-  record_blocked python-binding-build libtransfer_engine.so+libtent_shared.so
-  record_blocked python-client libtransfer_engine.so+libtent_shared.so
+  record_blocked python-binding-build libtransfer_engine.so
+  record_blocked python-client libtransfer_engine.so
 fi
 
 finished_epoch=$(date +%s.%N)

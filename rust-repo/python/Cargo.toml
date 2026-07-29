@@ -14,7 +14,10 @@ default = ["link-native"]
 s3 = ["mooncake-store-client/s3"]
 link-native = [
     "mooncake-store-client/link-native",
-    "mooncake-p2p-store/link-native",
+    "transfer-engine-ffi/link-native",
+]
+link-tent-native = [
+    "link-native",
     "transfer-engine-ffi/link-tent-native",
 ]
 
