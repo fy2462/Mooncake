@@ -4111,10 +4111,10 @@
       "behavior": "Uploading a string to a nested key then downloading that key succeeds and returns exactly the original string.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "string", "round-trip"],
       "cpp": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.UploadDownloadString_Roundtrip"},
-      "reason": "",
+      "reason": "test_snapshot_catalog_uses_object_store_abstraction publishes a catalog descriptor and only then directly downloads the resulting descriptor key. The test does not directly call upload_string with a chosen value and download_string for the same key to assert that value unchanged; inferring the upload call and its input from catalog source is not test evidence for the C++ direct round trip.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadDownloadString_Roundtrip and local_file_snapshot_object_store.cpp UploadString/DownloadString; Rust test_ha.rs test_snapshot_catalog_uses_object_store_abstraction", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_snapshot_catalog_uses_object_store_abstraction"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "After uploading two strings below snap/20240101/ and one below snap/20240102/, recursively listing the narrow prefix succeeds with exactly two keys and listing snap/ succeeds with exactly three keys.",
@@ -4147,10 +4147,10 @@
       "behavior": "Uploading a one-byte buffer to a/b/c/deep_file creates missing parent directories, succeeds, and a direct download returns that exact byte.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "buffer", "nested-path", "directory-creation"],
       "cpp": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.UploadBuffer_CreatesSubdirectories"},
-      "reason": "",
+      "reason": "No discoverable Rust test directly uploads the byte buffer {42} with upload_buffer to a/b/c/deep_file and directly downloads that buffer to assert exact equality. Catalog publication uses a different descriptor path and payload through an indirect source call chain, which is not test evidence for this direct buffer/path oracle.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadBuffer_CreatesSubdirectories and local_file_snapshot_object_store.cpp UploadBuffer/EnsureDirectoryExists; Rust snapshot.rs LocalFileSnapshotObjectStore::upload_buffer and test_ha.rs test_snapshot_catalog_uses_object_store_abstraction", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_ha.rs", "test": "test_snapshot_catalog_uses_object_store_abstraction"}],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "Constructing a local object store with an empty base path throws a runtime error.",
