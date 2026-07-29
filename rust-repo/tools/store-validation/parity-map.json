@@ -3965,6 +3965,69 @@
       "review": {"oracle": "embedded_snapshot_catalog_store_test.cpp RejectsInvalidSnapshotIds and embedded_snapshot_catalog_store.cpp validation paths; Rust snapshot.rs validate_snapshot_id/publish/delete/get_latest", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "Deleting the latest of two published Redis catalog snapshots promotes the remaining older snapshot as latest, leaves it as the sole list entry, and deletes the removed snapshot's payload prefix.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "delete", "latest-marker", "fallback", "prefix-cleanup"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreTest.DeleteUpdatesLatestAndDeletesPayloadPrefix"},
+      "reason": "Semantic difference: C++ atomically promotes the greatest remaining sorted-set id when deleting latest, while Rust deletes the latest key without a fallback. Rust has no discoverable Redis-catalog test for latest deletion, remaining-list visibility, or payload-prefix cleanup.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp DeleteUpdatesLatestAndDeletesPayloadPrefix and redis_snapshot_catalog_store.cpp Delete/delete Lua script; Rust snapshot.rs RedisSnapshotCatalogStore::delete", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Getting latest from an empty Redis snapshot catalog succeeds and returns no descriptor.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "get-latest", "empty-catalog"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreTest.GetLatestReturnsEmptyWhenCatalogMissing"},
+      "reason": "Rust source also maps a missing Redis latest key to Ok(None), but no discoverable Rust test constructs a RedisSnapshotCatalogStore and asserts this empty-catalog result.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp GetLatestReturnsEmptyWhenCatalogMissing and redis_snapshot_catalog_store.cpp GetLatest; Rust snapshot.rs RedisSnapshotCatalogStore::get_latest", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After publishing a snapshot, getting latest returns PERSISTENT_FAIL when the Redis latest id remains but its descriptor object is missing.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "get-latest", "missing-descriptor", "error"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreTest.GetLatestReturnsErrorWhenDescriptorMissing"},
+      "reason": "Semantic difference: C++ converts the missing descriptor download to PERSISTENT_FAIL, whereas Rust recognizes an object-store not-found error and returns Ok(None). No discoverable Rust Redis-catalog test asserts either outcome.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp GetLatestReturnsErrorWhenDescriptorMissing and redis_snapshot_catalog_store.cpp GetLatest/LoadSnapshotDescriptor; Rust snapshot.rs RedisSnapshotCatalogStore::get_latest", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Listing a Redis catalog whose indexed snapshot descriptor is missing succeeds with an empty result.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "listing", "missing-descriptor"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreTest.ListSkipsSnapshotsWhenDescriptorMissing"},
+      "reason": "Rust source likewise skips a recognized not-found descriptor while listing, but no discoverable Rust test constructs a Redis snapshot catalog, leaves a stale indexed id, and asserts the empty result.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp ListSkipsSnapshotsWhenDescriptorMissing and redis_snapshot_catalog_store.cpp List; Rust snapshot.rs RedisSnapshotCatalogStore::list", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Listing a Redis catalog constructed with no object store returns INVALID_PARAMS.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "construction", "invalid-params"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreStandaloneTest.ListReturnsInvalidParamsWhenObjectStoreMissing"},
+      "reason": "C++-only raw-null-pointer guard: the Rust constructor requires Arc<dyn SnapshotObjectStore>, so safe Rust cannot construct an equivalent absent object-store client to observe this INVALID_PARAMS branch.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp ListReturnsInvalidParamsWhenObjectStoreMissing and redis_snapshot_catalog_store.cpp List null guard; Rust snapshot.rs RedisSnapshotCatalogStore::new", "reviewed": true},
+      "rust": [],
+      "status": "not-applicable"
+    },
+    {
+      "behavior": "When two Redis-indexed snapshots exist and the newer descriptor is removed, listing skips that unreadable entry and returns the healthy older descriptor.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "listing", "missing-descriptor", "healthy-entry-retention"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreTest.ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries"},
+      "reason": "No discoverable Rust Redis-catalog test removes one descriptor from two indexed snapshots and asserts healthy-entry retention. The C++ implementation skips every descriptor load failure, while Rust skips not-found and corrupt descriptors but propagates other object-store read failures; this fixture only exercises not-found.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries and redis_snapshot_catalog_store.cpp List/LoadSnapshotDescriptor; Rust snapshot.rs RedisSnapshotCatalogStore::list", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Publishing two Redis snapshot descriptors makes the second snapshot latest, returns both descriptors from an unlimited list in newest-first order, and preserves asserted descriptor fields.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "redis", "publish", "get-latest", "listing", "ordering", "round-trip"],
+      "cpp": {"file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp", "test": "RedisSnapshotCatalogStoreTest.PublishListAndGetLatestRoundTrip"},
+      "reason": "No discoverable Rust test exercises Redis-catalog publish, latest, descriptor round trip, or List(0). Source review also found a latent ordering-contract difference: C++ scores the index from snapshot id while Rust uses created_at_ms, although this fixture gives both descriptors the same created_at_ms and does not independently distinguish the rules.",
+      "review": {"oracle": "redis_snapshot_catalog_store_test.cpp PublishListAndGetLatestRoundTrip and redis_snapshot_catalog_store.cpp Publish/List; Rust snapshot.rs RedisSnapshotCatalogStore::publish/get_latest/list", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
