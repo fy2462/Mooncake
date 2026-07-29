@@ -5454,6 +5454,123 @@
       "review": {"oracle": "mooncake-store/tests/segment_test.cpp MountLocalDiskSegmentDuplicate; Rust test_master_offload.rs LocalDisk recovery helpers", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "A fresh SSD metrics boundary reports zero read/write bytes and operations, zero total bytes and operations, and zero observations in every read and write latency bucket.",
+      "boundary": ["client", "metrics", "ssd", "fresh-state", "counters", "histograms"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.InitialValuesTest"},
+      "reason": "Production prerequisite: none; the registered ClientMetrics SSD counters and histograms already provide this boundary. Add cpp_parity_ssd_metrics_initial_values_are_zero to mooncake-store-client/src/client/metrics.rs; create a fresh ClientMetrics with no labels, assert read/write/total byte and op counters are exactly 0, then collect the read and write histograms through their public Prometheus families and assert every emitted le bucket has cumulative count 0. persistent_registry_exports_cpp_metric_names_and_summary does not assert any fresh SSD counter or bucket value.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:20-42 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Two successful SSD reads of 3 operations/1 MiB/1,500 us and 5 operations/2 MiB/3,000 us accumulate to exactly 8 operations and 3 MiB while write bytes and operations remain zero.",
+      "boundary": ["client", "metrics", "ssd", "read", "counters", "latency"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.ReadMetricsTest"},
+      "reason": "Production prerequisite: none; exercise the existing observe_ssd_read boundary. Add cpp_parity_ssd_read_metrics_accumulate_without_writes to mooncake-store-client/src/client/metrics.rs; create fresh metrics, call observe_ssd_read(1 MiB, 3, 1500 us) then observe_ssd_read(2 MiB, 5, 3000 us), and assert exactly read_ops=8, read_bytes=3 MiB, write_ops=0, and write_bytes=0. The existing persistent_registry_exports_cpp_metric_names_and_summary records one write and only checks a write-family substring, so it proves none of this two-read accumulation matrix.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:44-68 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "One successful SSD write of 10 operations/5 MiB/50,000 us reports exactly those write values while read bytes and operations remain zero.",
+      "boundary": ["client", "metrics", "ssd", "write", "counters", "latency"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.WriteMetricsTest"},
+      "reason": "Production prerequisite: none; exercise the existing observe_ssd_write boundary. Add cpp_parity_ssd_write_metrics_leave_reads_zero to mooncake-store-client/src/client/metrics.rs; create fresh metrics, call observe_ssd_write(5 MiB, 10, 50000 us), and assert exactly write_ops=10, write_bytes=5 MiB, read_ops=0, and read_bytes=0. persistent_registry_exports_cpp_metric_names_and_summary uses 1 op/2,048 bytes and asserts only serialized write bytes plus a summary substring, not these exact counters or read isolation.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:70-86 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A 3-operation/1 MiB SSD read at 1,500 us and a 5-operation/2 MiB SSD write at 3,000 us yield exactly 8 total operations and 3 MiB total bytes, two total-latency observations, and summary text containing SSD Total: and Total:.",
+      "boundary": ["client", "metrics", "ssd", "total", "histogram", "summary"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.TotalMetricsTest"},
+      "reason": "Production prerequisite: none; the existing observe_ssd_read/observe_ssd_write paths update the total counters and histogram. Add cpp_parity_ssd_total_metrics_aggregate_read_and_write to mooncake-store-client/src/client/metrics.rs; on fresh metrics call observe_ssd_read(1 MiB, 3, 1500 us) and observe_ssd_write(2 MiB, 5, 3000 us), assert total_ops=8 and total_bytes=3 MiB, assert the public total-latency histogram sample count is exactly 2, then assert summary() contains `SSD Total:` and `Total:`. No discoverable Rust test asserts this complete total matrix.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:88-129 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An SSD failure with no metric observation leaves all read/write byte and operation counters at zero; a subsequent successful 1-operation/4,096-byte/100-us read changes only read operations and bytes to exactly 1 and 4,096.",
+      "boundary": ["client", "metrics", "ssd", "success-only", "counters"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.FailureNotCountedTest"},
+      "reason": "Production prerequisite: none; a failed operation is represented by not calling the successful-observation boundary. Add cpp_parity_ssd_failure_is_not_counted_before_success to mooncake-store-client/src/client/metrics.rs; create fresh metrics, model the failed operation with no observe_ssd call and assert all read/write bytes and ops are 0, then call observe_ssd_read(4096, 1, 100 us) and assert read_ops=1/read_bytes=4096 while write_ops/write_bytes remain 0. Existing tests do not establish this no-observation-then-success result.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:131-151 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Eight concurrent workers each recording 1,000 read and write SSD observations produce exactly 8,000 read operations/8,000*4,096 read bytes, 8,000 write operations/8,000*8,192 write bytes, and 16,000 total operations/8,000*(4,096+8,192) total bytes.",
+      "boundary": ["client", "metrics", "ssd", "concurrency", "counters", "thread-safety"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.ConcurrentTest"},
+      "reason": "Production prerequisite: none; the existing Prometheus metric handles are shareable, but no test proves this exact SSD result. Add cpp_parity_ssd_concurrent_observations_have_exact_totals to mooncake-store-client/src/client/metrics.rs; wrap fresh ClientMetrics in Arc, spawn exactly 8 std::threads, have each call observe_ssd_read(4096, 1, 500 us) and observe_ssd_write(8192, 1, 1000 us) exactly 1,000 times, join, and assert the six exact C++ counter totals. Do not require C++ thread types or real SSD I/O.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:153-187 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After specified SSD read/write/total observations, Prometheus serialization contains the ten C++-asserted read/write byte and operation, read/write latency, total byte/operation/latency, and read-latency-summary metric names.",
+      "boundary": ["client", "metrics", "ssd", "prometheus", "serialization", "compatibility-names"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.SerializeTest"},
+      "reason": "Production prerequisite: register and update the single C++-asserted `mooncake_ssd_read_latency_summary_us` Prometheus summary family in ClientMetrics; the other nine asserted families already exist. Add cpp_parity_ssd_serialization_contains_cpp_metric_names to mooncake-store-client/src/client/metrics.rs; create fresh metrics, observe read (1024,5,200 us), write (2048,3,1000 us), and the corresponding total path through those existing helpers, render Prometheus, and assert it contains exactly the ten names asserted by C++: read/write bytes, read/write ops, read/write latency, total bytes/ops/latency, and read latency summary. Do not require ordering or the unasserted write/total summary names. persistent_registry_exports_cpp_metric_names_and_summary checks only mooncake_ssd_write_bytes_total, so it is insufficient.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:189-233 and mooncake-store/include/client_metric.h:SsdMetric::serialize", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The SSD summary initially contains its header, zero read/write bytes, Read: No data and Write: No data without throughput= or IOPS=; after 5 MiB/100-op read and 10 MiB/50-op write plus 50*500-us, 40*2,000-us, and 10*50,000-us read latencies, it contains those byte/op values, throughput, /s, IOPS, and p50/p90/p99 tokens.",
+      "boundary": ["client", "metrics", "ssd", "summary", "throughput", "quantiles"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.SummaryMetricsTest"},
+      "reason": "Production prerequisite: extend ClientMetrics::summary SSD sections to emit per-read/write/total throughput and IOPS only for nonzero bytes and histogram-derived p50/p90/p99 tokens; retain no-data output for empty histograms and use a deterministic elapsed-time seam only if needed. Add cpp_parity_ssd_summary_empty_and_populated_tokens to mooncake-store-client/src/client/metrics.rs; on fresh metrics assert the exact required empty SSD header/zero-byte/No-data substrings and absence of throughput=/IOPS=, then call observe_ssd_read(5 MiB,100,500 us) once plus 49 times with (0,0,500 us), 40 times with (0,0,2000 us), and 10 times with (0,0,50000 us), then call observe_ssd_write(10 MiB,50,1000 us) once; assert the C++-required 5.00 MB, 10.00 MB, ops=100, ops=50, throughput=, /s, IOPS=, p50=, p90=, and p99= tokens without asserting rate values. Current Rust summary emits p95/max and omits SSD throughput/IOPS.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:235-288 and mooncake-store/include/client_metric.h:SsdMetric::summary_metrics", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With 10 MiB/1,000-op reads, 20 MiB/2,000-op writes, and 30 MiB/3,000-op totals after nonzero elapsed time, the SSD summary contains exactly three throughput= and exactly three IOPS= tokens for read, write, and total.",
+      "boundary": ["client", "metrics", "ssd", "summary", "throughput", "iops", "total"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.ThroughputCalculationTest"},
+      "reason": "Production prerequisite: the same SSD per-read/write/total throughput and IOPS summary formatter required by SummaryMetricsTest, with a deterministic nonzero elapsed-time seam rather than a sleep. Add cpp_parity_ssd_summary_has_three_throughput_and_iops_sections to mooncake-store-client/src/client/metrics.rs; use that seam, observe read (10 MiB,1000,1000 us) and write (20 MiB,2000,2000 us) so existing helpers create 30 MiB/3000-op totals and total latency observations, call summary(), and count exactly three `throughput=` and exactly three `IOPS=` occurrences. Do not assert exact rates, a sleep duration, or ordering.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:290-339 and mooncake-store/include/client_metric.h:SsdMetric::summary_metrics", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An SSD read recorded through the aggregate client metrics boundary appears in aggregate Prometheus text as mooncake_ssd_read_ops_total and in aggregate summary text under SSD Metrics Summary.",
+      "boundary": ["client", "metrics", "ssd", "aggregate", "prometheus", "summary"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.IntegrationWithClientMetric"},
+      "reason": "Production prerequisite: none; ClientMetrics is the Rust aggregate boundary. Add cpp_parity_client_metrics_integrates_ssd_read to mooncake-store-client/src/client/metrics.rs; create fresh metrics, call observe_ssd_read(1 MiB,10,1500 us), render aggregate Prometheus text and assert `mooncake_ssd_read_ops_total`, then call summary() and assert `SSD Metrics Summary`. persistent_registry_exports_cpp_metric_names_and_summary records a write and asserts mooncake_ssd_write_bytes_total instead, so it does not prove this read-operation integration row.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:341-362 and mooncake-store/src/client_metric.cpp:ClientMetric serialization/summary", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "SSD Prometheus serialization from metrics constructed with instance_id=test123 and cluster_id=cluster_abc contains both exact labels after one read observation.",
+      "boundary": ["client", "metrics", "ssd", "prometheus", "static-labels"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.SerializeWithDynamicLabels"},
+      "reason": "Production prerequisite: none; ClientMetrics already accepts static labels, but discoverable tests do not inspect them on an SSD family. Add cpp_parity_ssd_prometheus_serializes_dynamic_labels to mooncake-store-client/src/client/metrics.rs; construct ClientMetrics with exactly instance_id=test123 and cluster_id=cluster_abc, call observe_ssd_read(0,1,100 us), render Prometheus, and assert the SSD read metric line contains both `instance_id=\"test123\"` and `cluster_id=\"cluster_abc\"` without asserting label order. persistent_registry_exports_cpp_metric_names_and_summary supplies only cluster_id=test-cluster, and the all-static-label test inspects non-SSD families.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:364-382 and mooncake-store/include/client_metric.h:SsdMetric labels", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "SSD read latency observations at 25, 50, 30,000,000, and 60,000,000 us serialize with le=50 cumulative count 2, le=30,000,000 count 3 whose final real-bucket increment is one, +Inf count 4 whose overflow increment is one, and latency count 4.",
+      "boundary": ["client", "metrics", "ssd", "latency", "histogram", "buckets", "prometheus"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.LatencyBucketBoundaryTest"},
+      "reason": "Production prerequisite: none; SSD_LATENCY_BUCKETS_US already has the portable 50 and 30,000,000-us bounds. Add cpp_parity_ssd_latency_bucket_boundaries to mooncake-store-client/src/client/metrics.rs; create fresh metrics, call observe_ssd_read(0,0,25 us), (0,0,50 us), (0,0,30000000 us), and (0,0,60000000 us), render Prometheus, and assert the read histogram's le=\"50\" cumulative count is 2, le=\"10000000\" cumulative count is 2, le=\"30000000\" cumulative count is 3 (so its final real bucket has one), +Inf cumulative count is 4 (so overflow has one), and `_count 4` is present. This uses public cumulative Prometheus buckets rather than a private collector vector.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:384-419 and mooncake-store/include/client_metric.h:kSsdLatencyBucket", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A successful empty SSD read batch with zero keys and zero bytes leaves read operations and bytes at zero while recording exactly one 10-us read-latency observation.",
+      "boundary": ["client", "metrics", "ssd", "empty-batch", "counters", "histogram"],
+      "cpp": {"file": "ssd_metrics_test.cpp", "test": "SsdMetricsTest.EmptyBatchMetricsTest"},
+      "reason": "Production prerequisite: none; existing observe_ssd_read accepts zero bytes and keys while observing latency. Add cpp_parity_empty_ssd_batch_records_latency_only to mooncake-store-client/src/client/metrics.rs; create fresh metrics, call observe_ssd_read(0,0,10 us), assert read_ops=0 and read_bytes=0, and assert the public read-latency histogram sample count is exactly 1. No existing Rust test asserts this zero-counter/nonzero-latency result.",
+      "review": {"oracle": "mooncake-store/tests/ssd_metrics_test.cpp:421-440 and mooncake-store/include/client_metric.h:SsdMetric", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
