@@ -4028,6 +4028,78 @@
       "review": {"oracle": "redis_snapshot_catalog_store_test.cpp PublishListAndGetLatestRoundTrip and redis_snapshot_catalog_store.cpp Publish/List; Rust snapshot.rs RedisSnapshotCatalogStore::publish/get_latest/list", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "Loading the latest snapshot from a catalog with no latest marker succeeds and returns an empty optional snapshot.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "embedded-or-redis", "empty-catalog"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotReturnsEmptyWhenCatalogMissing"},
+      "reason": "Rust restore_descriptors source can yield no candidates for an empty Embedded catalog, but no discoverable Rust provider test constructs an initially markerless catalog and asserts Ok(None). The C++ TEST_P body runs for Embedded and, when STORE_USE_REDIS is enabled with an endpoint, Redis; Rust's nearby fixtures are Embedded only, so they do not cover either exact empty-marker oracle or the C++ backend matrix. Etcd is not involved in snapshot-catalog selection.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotReturnsEmptyWhenCatalogMissing, fixture BuildCatalogBackendParams in snapshot_test_utils.h, and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot; Rust catalog_snapshot.rs restore_descriptors/load_latest_snapshot", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A published default snapshot round-trips its id and sequence plus one object with the asserted client id, size, sequence, complete disk replica path, and disk object size.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "object-store", "round-trip", "replica"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotRoundTrip"},
+      "reason": "test_catalog_provider_loads_synthetic_cpp_wire_shapes reads Rust-synthesized C++-shaped bytes through Embedded storage, but asserts a Memory replica and Rust-specific fields rather than this C++ test's one complete disk replica, disk path/object size, client id, and exact default object contract. test_catalog_provider_publishes_cpp_compatible_snapshot_payloads is likewise a Rust producer/reload case. Neither test uses a C++-emitted payload or Redis, so the C++ Embedded/optional-Redis parameter matrix remains partial.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotRoundTrip, PublishSnapshotPayload/ExpectLoadsDefaultObject in snapshot_test_utils.h, and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot; Rust test_catalog_snapshot.rs synthetic fixture/provider tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A snapshot metadata layout with data_type immediately after replica_count loads the same default object with its complete disk replica intact.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "metadata-wire-format", "data-type", "replica"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotWithDataTypeField"},
+      "reason": "test_catalog_provider_decodes_all_cxx_metadata_shapes iterates a Rust-synthesized V2DataType payload and asserts Rust retention of Kvcache, hard_pinned=false, and an empty group. The C++ oracle instead requires successful restoration of the default object and its complete disk replica, while its direct provider implementation discards optional metadata fields. No discoverable Rust test asserts that exact disk-replica result from a C++ payload or runs a Redis catalog provider; source decoding alone is partial.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotWithDataTypeField, SnapshotMetadataFormat::kDataTypeOnly/ExpectLoadsDefaultObject in snapshot_test_utils.h, and DeserializeStandbySnapshotMetadata; Rust test_catalog_provider_decodes_all_cxx_metadata_shapes", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A snapshot metadata layout with a trailing hard_pinned flag and no data_type loads the same default object with its complete disk replica intact.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "metadata-wire-format", "hard-pinned", "replica"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotWithHardPinnedField"},
+      "reason": "test_catalog_provider_decodes_all_cxx_metadata_shapes uses an Embedded Rust-synthesized V2HardPinned payload and checks that Rust retains hard_pinned=true. It does not assert the C++ body's default disk-replica fields, and C++ itself deliberately restores only the legacy standby fields rather than exposing hard_pinned. There is no discoverable C++-emitted-fixture or Redis-provider assertion; source parsing is not coverage of the parameterized C++ oracle.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotWithHardPinnedField, SnapshotMetadataFormat::kHardPinnedOnly/ExpectLoadsDefaultObject in snapshot_test_utils.h, and DeserializeStandbySnapshotMetadata; Rust test_catalog_provider_decodes_all_cxx_metadata_shapes", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A snapshot metadata layout with data_type and trailing hard_pinned loads the same default object with its complete disk replica intact.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "metadata-wire-format", "data-type", "hard-pinned", "replica"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotWithDataTypeAndHardPinned"},
+      "reason": "The discoverable Rust shape-loop covers a Rust-synthesized V3DataTypeHardPinned payload and its Rust-only retained optional values, not this C++ oracle's exact default object and complete disk replica fields. C++ accepts the wire shape while discarding those optional fields. The Rust test is Embedded only and no C++ producer fixture or Redis provider execution exists, so it is partial evidence rather than covered parity.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotWithDataTypeAndHardPinned, SnapshotMetadataFormat::kDataTypeAndHardPinned/ExpectLoadsDefaultObject in snapshot_test_utils.h, and DeserializeStandbySnapshotMetadata; Rust test_catalog_provider_decodes_all_cxx_metadata_shapes", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "The current metadata layout with data_type, hard_pinned, and group_id loads the same default object with its complete disk replica intact.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "metadata-wire-format", "data-type", "hard-pinned", "group-id", "replica"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotWithGroupId"},
+      "reason": "test_catalog_provider_decodes_all_cxx_metadata_shapes checks Rust retention of the CurrentV4 optional values from an Embedded Rust-synthesized fixture. The C++ test's observable contract is successful default-object restoration with a complete disk replica; its provider does not expose data_type, hard_pinned, or group_id in StandbyObjectMetadata. No discoverable test proves that exact result from C++ bytes or for the optional Redis parameter, so the Rust test is partial only.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotWithGroupId, SnapshotMetadataFormat::kWithGroupId/ExpectLoadsDefaultObject in snapshot_test_utils.h, and DeserializeStandbySnapshotMetadata; Rust test_catalog_provider_decodes_all_cxx_metadata_shapes", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A metadata entry declaring UINT32_MAX replicas while packing no replicas is rejected with DESERIALIZE_FAIL rather than overflowing its format-length arithmetic.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "metadata-wire-format", "replica-count", "overflow", "error"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.RejectsOverflowingReplicaCount"},
+      "reason": "Rust decode_object has usize conversion and checked_add guards, but no discoverable Rust test builds this seven-field, UINT32_MAX-declared replica payload through CatalogBackedSnapshotProvider and asserts a Rust-native error. The C++ assertion requires exactly DESERIALIZE_FAIL. The C++ body is parameterized over Embedded and optional Redis while Rust has no corresponding provider test for either backend, so source guards are insufficient.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp RejectsOverflowingReplicaCount, BuildMetadataPayloadWithDeclaredReplicaCount in snapshot_test_utils.h, and DeserializeStandbySnapshotMetadata; Rust catalog_snapshot.rs decode_object checked_add/field-count validation", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Requesting a cluster id different from the provider's configured cluster rejects the load with INVALID_PARAMS before catalog access.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "cluster-id", "invalid-params"],
+      "cpp": {"file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp", "test": "CatalogBackedSnapshotProviderTest.RejectsClusterMismatch"},
+      "reason": "test_catalog_provider_rejects_cluster_mismatch uses an Embedded fixture and asserts only is_err(); it does not assert Rust's HaError::InvalidParams variant or prove rejection before catalog access, as the C++ test requires INVALID_PARAMS. This intrinsic provider guard does not need etcd, but the C++ TEST_P is still instantiated for Embedded and optional Redis, and no exact Rust assertion covers the full observable oracle.",
+      "review": {"oracle": "catalog_backed_snapshot_provider_test.cpp RejectsClusterMismatch and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot cluster guard; Rust catalog_snapshot.rs validate_cluster_id and test_catalog_provider_rejects_cluster_mismatch", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
