@@ -1731,28 +1731,22 @@
       "rust": [], "status": "not-applicable"
     },
     {
-      "behavior": "Writing the requested payload at the descriptor's current offset succeeds, reports exactly its requested byte count, and leaves the PosixFile error code at OK; the direct path retries interrupted or short scalar writes to completion.",
+      "behavior": "Writing the requested payload succeeds, returns exactly the requested length, and leaves the PosixFile error code at OK.",
       "boundary": ["client", "local-storage", "posix", "write"],
       "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.BasicWrite"},
-      "reason": "",
+      "reason": "Rust LocalStorageBackend round-trip and scan-size tests exercise higher-level object persistence, but do not directly assert the PosixFile current-offset write, returned byte count, and direct-file success contract. This is an io_uring pre-TDD parity backlog item.",
       "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp BasicWrite, mooncake-store/src/posix_file.cpp write, and Rust LocalStorageBackend tests", "reviewed": true},
-      "rust": [
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_write_and_read_roundtrip"},
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_scan_meta_returns_keys_and_sizes"}
-      ],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
-      "behavior": "After seeking to offset zero, reading the requested payload length succeeds, reports that exact count, returns exactly those bytes, and leaves the PosixFile error code at OK; EOF before the requested length is a read failure on the direct path.",
+      "behavior": "After seeking to offset zero, reading the requested payload succeeds, returns exactly the requested length and bytes, and leaves the PosixFile error code at OK.",
       "boundary": ["client", "local-storage", "posix", "read"],
       "cpp": {"file": "posix_file_test.cpp", "test": "PosixFileTest.BasicRead"},
-      "reason": "",
+      "reason": "Rust LocalStorageBackend round-trip and lifecycle tests exercise higher-level object recovery, but no discoverable direct-file test asserts offset-zero positioning, the requested and returned byte counts, exact bytes, and the corresponding success state together. This is an io_uring pre-TDD parity backlog item.",
       "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp BasicRead, mooncake-store/src/posix_file.cpp read, and Rust LocalStorageBackend tests", "reviewed": true},
-      "rust": [
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_write_and_read_roundtrip"},
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_full_local_storage_lifecycle"}
-      ],
-      "status": "covered"
+      "rust": [],
+      "status": "missing"
     },
     {
       "behavior": "One positioned pwritev at offset zero concatenates two iovecs, succeeds, returns their summed length, and leaves the PosixFile error code at OK.",
