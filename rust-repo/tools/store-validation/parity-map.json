@@ -4187,6 +4187,231 @@
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadBuffer_EmptyBuffer and local_file_snapshot_object_store.cpp UploadBuffer; Rust snapshot.rs LocalFileSnapshotObjectStore::upload_buffer", "reviewed": true},
       "rust": [],
       "status": "missing"
+    },
+    {
+      "behavior": "A generated snapshot timestamp matches the YYYYMMDD_HHMMSS_mmm format.",
+      "boundary": ["master", "ha", "snapshot", "timestamp", "identifier"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.FormatTimestamp_MatchesExpectedFormat"},
+      "reason": "Rust generate_snapshot_id has analogous formatting, but no discoverable Rust test asserts the required timestamp-format regular expression.",
+      "review": {"oracle": "snapshot_child_process_test.cpp FormatTimestamp_MatchesExpectedFormat and master_snapshot_manager.cpp FormatTimestamp; Rust catalog_snapshot.rs generate_snapshot_id", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A forked snapshot child that exits with code 0 is reaped and recorded as a successful persistence outcome without a fatal failure.",
+      "boundary": ["master", "ha", "snapshot", "child-process", "reap", "exit-code", "success-accounting"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.HandleChildExit_NormalSuccess"},
+      "reason": "No discoverable Rust test creates and reaps a snapshot child process, asserts zero-exit handling, and observes the success outcome or accounting; spawn_blocking is not an exit-code contract.",
+      "review": {"oracle": "snapshot_child_process_test.cpp HandleChildExit_NormalSuccess and master_snapshot_manager.cpp HandleChildExit; Rust service/mod.rs snapshot spawn_blocking path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A forked snapshot child that exits with code 1 is reaped and recorded as a failed persistence outcome without a fatal failure.",
+      "boundary": ["master", "ha", "snapshot", "child-process", "reap", "exit-code", "failure-accounting"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.HandleChildExit_NormalFailure"},
+      "reason": "No discoverable Rust test asserts a nonzero snapshot child exit-code outcome and its failure accounting; a task Result is not the same process-boundary behavior.",
+      "review": {"oracle": "snapshot_child_process_test.cpp HandleChildExit_NormalFailure and master_snapshot_manager.cpp HandleChildExit; Rust service/mod.rs snapshot spawn_blocking path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A SIGKILL-terminated snapshot child is reaped and recorded as a failed persistence outcome without a fatal failure.",
+      "boundary": ["master", "ha", "snapshot", "child-process", "signal", "reap", "failure-accounting"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.HandleChildExit_Signaled"},
+      "reason": "No discoverable Rust test kills and reaps a snapshot subprocess and asserts signaled-exit failure handling.",
+      "review": {"oracle": "snapshot_child_process_test.cpp HandleChildExit_Signaled and master_snapshot_manager.cpp HandleChildExit; Rust service/mod.rs snapshot spawn_blocking path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When a snapshot child times out, the parent sends SIGTERM, escalates to SIGKILL if required, and leaves no running child unreaped.",
+      "boundary": ["master", "ha", "snapshot", "child-process", "timeout", "signal", "termination", "reap"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.HandleChildTimeout_KillsSleepingChild"},
+      "reason": "Rust cooperatively cancels a timed-out detached spawn_blocking writer, but no discoverable test proves process termination or reaping after timeout.",
+      "review": {"oracle": "snapshot_child_process_test.cpp HandleChildTimeout_KillsSleepingChild and master_snapshot_manager.cpp HandleChildTimeout; Rust service/mod.rs snapshot timeout/cancellation path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Catalog retention removes older snapshot object trees and leaves the two newest snapshots available.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "retention", "object-store", "deletion"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.CleanupOldSnapshot_KeepsRecentDeletesOld"},
+      "reason": "",
+      "review": {"oracle": "snapshot_child_process_test.cpp CleanupOldSnapshot_KeepsRecentDeletesOld and master_snapshot_repository.cpp CleanupOldSnapshots; Rust test_catalog_snapshot.rs test_catalog_provider_prunes_old_snapshots", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_prunes_old_snapshots"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Uploading a snapshot payload to the object store succeeds and a later download returns the exact bytes written.",
+      "boundary": ["master", "ha", "snapshot", "object-store", "payload", "upload", "download", "round-trip"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.UploadSnapshotPayloadFile_Success"},
+      "reason": "",
+      "review": {"oracle": "snapshot_child_process_test.cpp UploadSnapshotPayloadFile_Success and master_snapshot_repository.cpp UploadPayloadFile; Rust test_catalog_snapshot.rs test_catalog_provider_publishes_cpp_compatible_snapshot_payloads", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_publishes_cpp_compatible_snapshot_payloads"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Destroying a service with periodic snapshots enabled interrupts its interval wait and completes shutdown in under five seconds.",
+      "boundary": ["master", "ha", "snapshot", "scheduler", "shutdown", "lifecycle", "latency"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.DestructorInterruptsSnapshotThreadSleep"},
+      "reason": "Rust has a scheduler shutdown-select path, but no discoverable test measures bounded shutdown while a scheduled snapshot wait is pending.",
+      "review": {"oracle": "snapshot_child_process_test.cpp DestructorInterruptsSnapshotThreadSleep and master_snapshot_manager.cpp Stop/SnapshotThreadFunc; Rust main_server.rs scheduler shutdown path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An enabled periodic snapshot service writes a latest.txt marker within five seconds.",
+      "boundary": ["master", "ha", "snapshot", "scheduler", "automatic-persistence", "latest-marker"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.AutoSnapshot_GeneratesFiles"},
+      "reason": "Rust schedules native/catalog snapshots, but no discoverable test runs that scheduler and observes automatic catalog publication or a latest marker.",
+      "review": {"oracle": "snapshot_child_process_test.cpp AutoSnapshot_GeneratesFiles and master_snapshot_manager.cpp SnapshotThreadFunc; Rust main_server.rs scheduled snapshot path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Persisting state publishes a descriptor with the requested ID, derived manifest key and object prefix, sequence 0, configured producer view, and creation time bounded by the call.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "descriptor", "publication", "metadata"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.PersistState_PublishesSnapshotDescriptor"},
+      "reason": "The Rust catalog test asserts ID, sequence, producer view, and a manifest payload, but not the descriptor object-prefix/path fields or creation time bounded by publication.",
+      "review": {"oracle": "snapshot_child_process_test.cpp PersistState_PublishesSnapshotDescriptor and master_snapshot_manager.cpp BuildSnapshotDescriptor/PersistState; Rust test_catalog_snapshot.rs test_catalog_provider_publishes_cpp_compatible_snapshot_payloads", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Persisting a caller-supplied frozen descriptor publishes every supplied ID, paths, sequence, view, and creation time unchanged.",
+      "boundary": ["master", "ha", "snapshot", "catalog", "descriptor", "immutability", "publication"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.PersistState_UsesFrozenSnapshotDescriptor"},
+      "reason": "No discoverable Rust test publishes a caller-supplied frozen descriptor and reloads every fixed field unchanged.",
+      "review": {"oracle": "snapshot_child_process_test.cpp PersistState_UsesFrozenSnapshotDescriptor and master_snapshot_manager.cpp PersistState(descriptor); Rust catalog_snapshot.rs publisher", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "A persisted grouped object whose group hashes to a different shard remains reachable by key after restart and can be removed.",
+      "boundary": ["master", "ha", "snapshot", "restore", "group-routing", "cross-shard", "remove"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreRebuildsGroupedObjectRouting"},
+      "reason": "Rust tests decode a C++ group_id but do not restore, find, and remove a grouped key whose routing group maps to a different shard.",
+      "review": {"oracle": "snapshot_child_process_test.cpp RestoreRebuildsGroupedObjectRouting and MasterService snapshot restore/routing paths; Rust test_catalog_snapshot.rs C++ metadata fixtures", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Legacy metadata that omits group_id deserializes successfully and restores the object as ungrouped.",
+      "boundary": ["master", "ha", "snapshot", "restore", "metadata", "legacy-compatibility", "group-routing"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.DeserializeLegacyMetadataWithoutGroupIdRestoresUngroupedObject"},
+      "reason": "",
+      "review": {"oracle": "snapshot_child_process_test.cpp DeserializeLegacyMetadataWithoutGroupIdRestoresUngroupedObject and MetadataSerializer::Deserialize; Rust test_catalog_snapshot.rs test_catalog_provider_decodes_all_cxx_metadata_shapes", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_decodes_all_cxx_metadata_shapes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Metadata containing an invalid client UUID deserializes successfully while skipping the bad object's record.",
+      "boundary": ["master", "ha", "snapshot", "restore", "metadata", "invalid-input", "recovery", "record-skipping"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.DeserializeMetadataSkipsInvalidClientId"},
+      "reason": "No discoverable Rust test asserts successful snapshot load while skipping only a record with an invalid client UUID; rejecting corrupt snapshot data is a different outcome.",
+      "review": {"oracle": "snapshot_child_process_test.cpp DeserializeMetadataSkipsInvalidClientId and MasterService::MetadataSerializer::Deserialize; Rust snapshot restore malformed-data tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "An empty HA etcd connstring falls back to legacy etcd_endpoints in both wrapped and service configuration.",
+      "boundary": ["master", "ha", "etcd", "configuration", "legacy-fallback"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.LegacyEtcdConnstringFallbackIsPreserved"},
+      "reason": "",
+      "review": {"oracle": "snapshot_child_process_test.cpp LegacyEtcdConnstringFallbackIsPreserved and MasterServiceConfig construction; Rust test_main_config.rs test_build_ha_spec_etcd_falls_back_to_etcd_endpoints", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_main_config.rs", "test": "test_build_ha_spec_etcd_falls_back_to_etcd_endpoints"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "With an etcd-backed oplog at sequence 123, persistence publishes a descriptor whose included sequence is 123, producer view is 19, and creation time is positive.",
+      "boundary": ["master", "ha", "snapshot", "etcd", "oplog", "descriptor", "publication"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.PersistState_UsesEtcdOplogBoundaryInSnapshotDescriptor"},
+      "reason": "Rust source captures an oplog latest sequence and unit tests publish supplied sequence/view values, but no discoverable etcd-backed snapshot-publication test asserts the oplog boundary descriptor.",
+      "review": {"oracle": "snapshot_child_process_test.cpp PersistState_UsesEtcdOplogBoundaryInSnapshotDescriptor and master_snapshot_manager.cpp ResolveSnapshotSequenceId/BuildSnapshotDescriptor; Rust service/mod.rs latest_sequence path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Restoring a catalog snapshot with a backup directory creates backup copies of manifest.txt, metadata, segments, and task_manager.",
+      "boundary": ["master", "ha", "snapshot", "restore", "backup", "filesystem", "artifacts"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreWithBackupDir_CreatesBackupFiles"},
+      "reason": "No discoverable Rust test asserts the C++ catalog restore backup set of all four payload artifacts.",
+      "review": {"oracle": "snapshot_child_process_test.cpp RestoreWithBackupDir_CreatesBackupFiles and MasterService restore backup path; Rust service/mod.rs native snapshot backup path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "Restoring with no backup directory creates no mooncake_snapshot_restore_backup artifact below the snapshot root.",
+      "boundary": ["master", "ha", "snapshot", "restore", "backup", "filesystem", "negative-side-effect"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreWithoutBackupDir_NoBackupFiles"},
+      "reason": "No discoverable Rust test asserts the absence of restore-backup artifacts when backup configuration is empty.",
+      "review": {"oracle": "snapshot_child_process_test.cpp RestoreWithoutBackupDir_NoBackupFiles and MasterService restore backup path", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "When the newest snapshot metadata is corrupted, restore chooses the previous healthy snapshot, retains its key, and does not partially restore the newer key.",
+      "boundary": ["master", "ha", "snapshot", "restore", "corruption", "fallback", "recovery"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted"},
+      "reason": "",
+      "review": {"oracle": "snapshot_child_process_test.cpp RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted and snapshot restore candidate fallback; Rust test_catalog_snapshot.rs test_catalog_provider_falls_back_when_latest_manifest_is_corrupt", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_falls_back_when_latest_manifest_is_corrupt"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Enabling local snapshots without MOONCAKE_SNAPSHOT_LOCAL_PATH makes service construction throw a runtime error.",
+      "boundary": ["master", "ha", "snapshot", "configuration", "environment", "local-store", "construction", "error"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.EnableSnapshotWithoutEnvVar_Throws"},
+      "reason": "No discoverable Rust test removes a local snapshot environment setting, enables the backend, and asserts construction failure; this is not an environment-based not-applicable case.",
+      "review": {"oracle": "snapshot_child_process_test.cpp EnableSnapshotWithoutEnvVar_Throws and LocalFileSnapshotObjectStore construction; Rust main configuration tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With local snapshots disabled and MOONCAKE_SNAPSHOT_LOCAL_PATH absent, service construction succeeds because the backend is not created.",
+      "boundary": ["master", "ha", "snapshot", "configuration", "environment", "lazy-initialization", "construction"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.DisableSnapshotWithoutEnvVar_NoThrow"},
+      "reason": "No discoverable Rust test toggles disabled snapshots under an absent local-store environment and asserts the lazy no-throw construction behavior.",
+      "review": {"oracle": "snapshot_child_process_test.cpp DisableSnapshotWithoutEnvVar_NoThrow and MasterService snapshot backend initialization; Rust main configuration tests", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "After restart, a complete object remains restored while a PutStart-only non-complete replica is removed from metadata.",
+      "boundary": ["master", "ha", "snapshot", "restore", "replica-status", "cleanup", "recovery"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreCleansNonCompleteReplica"},
+      "reason": "No discoverable Rust test persists a complete object plus a PutStart-only pending replica, restarts, and asserts that only the pending record is removed.",
+      "review": {"oracle": "snapshot_child_process_test.cpp RestoreCleansNonCompleteReplica and MasterService restore cleanup path; Rust service/mod.rs replica filtering", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "On restore, an expired complete object is removed while a complete object with a refreshed valid lease remains available.",
+      "boundary": ["master", "ha", "snapshot", "restore", "lease", "expiry", "cleanup"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreCleansExpiredLease"},
+      "reason": "",
+      "review": {"oracle": "snapshot_child_process_test.cpp RestoreCleansExpiredLease and MasterService restore lease cleanup; Rust test_catalog_snapshot.rs test_catalog_provider_skips_expired_unpinned_objects/test_catalog_provider_loads_synthetic_cpp_wire_shapes", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_skips_expired_unpinned_objects"}, {"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "test_catalog_provider_loads_synthetic_cpp_wire_shapes"}],
+      "status": "covered"
+    },
+    {
+      "behavior": "Without a snapshot backup directory, the first failed metadata upload stops persistence and the error excludes segments, task_manager, and manifest failures.",
+      "boundary": ["master", "ha", "snapshot", "persistence", "upload", "failure", "fail-fast", "ordering"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.PersistState_FailFast_StopsOnFirstError"},
+      "reason": "No discoverable Rust test injects catalog payload-write failure and asserts the first-error-only, ordered multi-payload contract.",
+      "review": {"oracle": "snapshot_child_process_test.cpp PersistState_FailFast_StopsOnFirstError and master_snapshot_manager.cpp PersistState upload sequence; Rust snapshot writer", "reviewed": true},
+      "rust": [],
+      "status": "missing"
+    },
+    {
+      "behavior": "With a snapshot backup directory, failed uploads report all four payload failures and save metadata, segments, task_manager, and manifest.txt under mooncake_snapshot_save_backup.",
+      "boundary": ["master", "ha", "snapshot", "persistence", "upload", "failure", "backup", "artifacts", "recovery"],
+      "cpp": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.UploadFail_WithBackupDir_SavesAllFiles"},
+      "reason": "No discoverable Rust test injects catalog upload failure and verifies all-payload error aggregation plus all backup artifacts.",
+      "review": {"oracle": "snapshot_child_process_test.cpp UploadFail_WithBackupDir_SavesAllFiles and master_snapshot_manager.cpp PersistState/master_snapshot_repository.cpp UploadPayloadFile", "reviewed": true},
+      "rust": [],
+      "status": "missing"
     }
   ],
   "schema_version": 1
