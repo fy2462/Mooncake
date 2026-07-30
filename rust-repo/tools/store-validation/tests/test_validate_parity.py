@@ -1,3 +1,8 @@
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from inventory import TestRef
@@ -19,6 +24,12 @@ STORE_SUITE = {
     "framework": "gtest",
     "reference_root": "mooncake-store/tests",
 }
+TRANSFER_ENGINE_SUITE = {
+    "id": "transfer-engine-cpp",
+    "framework": "gtest",
+    "reference_root": "mooncake-transfer-engine/tests",
+}
+TOOL_ROOT = Path(__file__).parents[1]
 
 
 def rust_value(reference: TestRef) -> dict[str, str]:
@@ -262,6 +273,117 @@ class ValidateParityTest(unittest.TestCase):
             {RUST_REF},
         )
         self.assertEqual(findings, [])
+
+    def test_cli_validates_multiple_suite_manifests_and_reports_aggregate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            store_root = repo / "mooncake-store/tests"
+            transfer_root = repo / "mooncake-transfer-engine/tests"
+            rust_root = repo / "rust-repo/crates/mooncake-store-core/src"
+            store_root.mkdir(parents=True)
+            transfer_root.mkdir(parents=True)
+            rust_root.mkdir(parents=True)
+            (store_root / "store_test.cpp").write_text(
+                "TEST(StoreTest, Put) {}\n", encoding="utf-8"
+            )
+            (transfer_root / "transfer_test.cpp").write_text(
+                "TEST(TransferTest, Submit) {}\n", encoding="utf-8"
+            )
+            (rust_root / "lib.rs").write_text(
+                "#[test]\nfn shared_evidence() {}\n", encoding="utf-8"
+            )
+            rust = {
+                "file": "mooncake-store-core/src/lib.rs",
+                "test": "shared_evidence",
+            }
+            store_manifest = manifest(
+                [
+                    entry(
+                        reference=TestRef("gtest", "store_test.cpp", "StoreTest.Put"),
+                        rust=[rust],
+                    )
+                ]
+            )
+            transfer_manifest = manifest(
+                [
+                    entry(
+                        reference=TestRef(
+                            "gtest", "transfer_test.cpp", "TransferTest.Submit"
+                        ),
+                        rust=[rust],
+                    )
+                ],
+                suite=TRANSFER_ENGINE_SUITE,
+            )
+            store_path = repo / "store.json"
+            transfer_path = repo / "transfer.json"
+            store_path.write_text(json.dumps(store_manifest), encoding="utf-8")
+            transfer_path.write_text(json.dumps(transfer_manifest), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(TOOL_ROOT / "validate_parity.py"),
+                    "--manifest",
+                    str(store_path),
+                    "--manifest",
+                    str(transfer_path),
+                    "--repo-root",
+                    str(repo),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("summary suite=store-cpp reference-total=1", result.stdout)
+        self.assertIn(
+            "summary suite=transfer-engine-cpp reference-total=1", result.stdout
+        )
+        self.assertIn("summary aggregate reference-total=2", result.stdout)
+        self.assertIn("unique-rust-tests=1", result.stdout)
+
+    def test_cli_rejects_duplicate_suite_manifests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "mooncake-store/tests").mkdir(parents=True)
+            (repo / "rust-repo/crates").mkdir(parents=True)
+            path = repo / "store.json"
+            path.write_text(json.dumps(manifest([])), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(TOOL_ROOT / "validate_parity.py"),
+                    "--manifest",
+                    str(path),
+                    "--manifest",
+                    str(path),
+                    "--repo-root",
+                    str(repo),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("duplicate-suite-manifest", result.stdout + result.stderr)
+
+    def test_cli_reports_a_missing_requested_manifest_as_input_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(TOOL_ROOT / "validate_parity.py"),
+                    "--manifest",
+                    str(Path(directory) / "missing.json"),
+                    "--repo-root",
+                    directory,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("parity validation error", result.stderr)
 
 
 if __name__ == "__main__":

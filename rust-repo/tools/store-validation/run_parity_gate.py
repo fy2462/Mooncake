@@ -14,8 +14,9 @@ import sys
 import time
 from typing import Any, Sequence
 
-from inventory import TestRef, discover_cpp_tests, discover_rust_tests
+from inventory import TestRef, discover_rust_tests
 from result import build_gate_result, utc_now, write_json_atomic
+from suites import SUITES, discover_suite_tests
 from validate_parity import validate_manifest
 
 
@@ -123,6 +124,26 @@ def plan_parity_run(
     )
 
 
+def plan_parity_runs(
+    manifests: list[dict[str, Any]],
+    rust_inventory: set[TestRef],
+) -> ParityPlan:
+    entries: list[dict[str, Any]] = []
+    for manifest in manifests:
+        suite_value = manifest.get("suite")
+        suite_id = suite_value.get("id") if isinstance(suite_value, dict) else "invalid"
+        for entry in manifest.get("entries", []):
+            if not isinstance(entry, dict):
+                entries.append(entry)
+                continue
+            enriched = dict(entry)
+            reference = dict(entry.get("reference", {}))
+            reference["suite"] = suite_id
+            enriched["reference"] = reference
+            entries.append(enriched)
+    return plan_parity_run({"entries": entries}, rust_inventory)
+
+
 def _version(argv: Sequence[str]) -> str:
     try:
         output = subprocess.run(
@@ -208,7 +229,7 @@ def execute_plan(
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, action="append", required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--artifact-root", type=Path, required=True)
     return parser.parse_args(argv)
@@ -219,23 +240,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_root = args.repo_root.resolve()
     rust_root = repo_root / "rust-repo"
     try:
-        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        cpp_inventory = set(discover_cpp_tests(repo_root / "mooncake-store/tests"))
+        manifests = [
+            json.loads(path.read_text(encoding="utf-8")) for path in args.manifest
+        ]
         rust_inventory = set(discover_rust_tests(rust_root / "crates"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         print(f"parity gate error: {error}", file=sys.stderr)
         return 2
 
-    findings = validate_manifest(manifest, cpp_inventory, rust_inventory)
-    if findings:
-        for finding in findings:
-            print(
-                f"ERROR {finding.code} {finding.reference}: {finding.message}",
-                file=sys.stderr,
-            )
+    suite_ids = [
+        value.get("id") if isinstance(value, dict) else None
+        for manifest in manifests
+        for value in [manifest.get("suite")]
+    ]
+    if len(suite_ids) != len(set(suite_ids)):
+        print("parity gate error: duplicate suite manifest", file=sys.stderr)
         return 2
 
-    plan = plan_parity_run(manifest, rust_inventory)
+    has_findings = False
+    for manifest in manifests:
+        suite_value = manifest.get("suite")
+        suite_id = suite_value.get("id") if isinstance(suite_value, dict) else None
+        suite = SUITES.get(suite_id) if isinstance(suite_id, str) else None
+        reference_inventory = (
+            set(discover_suite_tests(repo_root, suite)) if suite is not None else set()
+        )
+        findings = validate_manifest(manifest, reference_inventory, rust_inventory)
+        has_findings |= bool(findings)
+        for finding in findings:
+            print(
+                f"ERROR suite={suite_id or 'invalid'} {finding.code} "
+                f"{finding.reference}: {finding.message}",
+                file=sys.stderr,
+            )
+    if has_findings:
+        return 2
+
+    plan = plan_parity_runs(manifests, rust_inventory)
     result = execute_plan(plan, rust_root, args.artifact_root.resolve())
     output = args.artifact_root.resolve() / "parity.result.json"
     write_json_atomic(output, result)

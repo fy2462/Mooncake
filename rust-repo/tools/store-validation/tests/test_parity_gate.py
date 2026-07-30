@@ -9,6 +9,7 @@ from run_parity_gate import (
     PlannedCommand,
     execute_plan,
     plan_parity_run,
+    plan_parity_runs,
 )
 
 
@@ -100,6 +101,23 @@ class ParityGateTest(unittest.TestCase):
         self.assertEqual(
             [reference["test"] for reference in plan.commands[0].references],
             ["AllocatorTest.Allocate", "AllocatorTest.Reallocate"],
+        )
+
+    def test_shared_evidence_across_manifests_runs_once_with_suite_context(self):
+        transfer_manifest = manifest([entry(reference_test="TransferTest.Submit")])
+        transfer_manifest["suite"] = {
+            "id": "transfer-engine-cpp",
+            "framework": "gtest",
+            "reference_root": "mooncake-transfer-engine/tests",
+        }
+        plan = plan_parity_runs(
+            [manifest([entry()]), transfer_manifest],
+            self.inventory,
+        )
+        self.assertEqual(len(plan.commands), 1)
+        self.assertEqual(
+            [reference["suite"] for reference in plan.commands[0].references],
+            ["store-cpp", "transfer-engine-cpp"],
         )
 
     def test_aggregate_evidence_produces_one_command_per_rust_test(self):

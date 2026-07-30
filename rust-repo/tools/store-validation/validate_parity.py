@@ -11,8 +11,8 @@ from pathlib import Path, PurePosixPath
 import sys
 from typing import Any
 
-from inventory import TestRef, discover_cpp_tests, discover_rust_tests
-from suites import SUITES
+from inventory import TestRef, discover_rust_tests
+from suites import SUITES, discover_suite_tests
 
 
 ALLOWED_STATUSES = {"covered", "missing", "not-applicable", "blocked"}
@@ -119,6 +119,19 @@ def summarize_manifest(manifest: dict[str, Any]) -> dict[str, int]:
         "blocked": statuses.get("blocked", 0),
         "not_applicable": statuses.get("not-applicable", 0),
     }
+
+
+def summarize_manifests(manifests: list[dict[str, Any]]) -> dict[str, int]:
+    return summarize_manifest(
+        {
+            "entries": [
+                entry
+                for manifest in manifests
+                for entry in manifest.get("entries", [])
+                if isinstance(entry, dict)
+            ]
+        }
+    )
 
 
 def validate_manifest(
@@ -384,9 +397,8 @@ def validate_manifest(
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--cpp-root", type=Path, required=True)
-    parser.add_argument("--rust-root", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, action="append", required=True)
+    parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--require-complete", action="store_true")
     parser.add_argument(
         "--list-status", choices=sorted(ALLOWED_STATUSES), action="append", default=[]
@@ -397,33 +409,78 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
-        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        reference_refs = set(discover_cpp_tests(args.cpp_root))
-        rust_refs = set(discover_rust_tests(args.rust_root))
+        manifests = [
+            json.loads(path.read_text(encoding="utf-8")) for path in args.manifest
+        ]
+        repo_root = args.repo_root.resolve()
+        rust_refs = set(discover_rust_tests(repo_root / "rust-repo/crates"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         print(f"parity validation error: {error}", file=sys.stderr)
         return 2
 
-    findings = validate_manifest(manifest, reference_refs, rust_refs)
-    for finding in findings:
-        print(f"ERROR {finding.code} {finding.reference}: {finding.message}")
+    suite_ids = [
+        value.get("id") if isinstance(value, dict) else None
+        for manifest in manifests
+        for value in [manifest.get("suite")]
+    ]
+    duplicate_suites = sorted(
+        suite_id
+        for suite_id, count in Counter(suite_ids).items()
+        if suite_id is not None and count > 1
+    )
+    if duplicate_suites:
+        print(
+            "ERROR duplicate-suite-manifest: " + ", ".join(duplicate_suites),
+            file=sys.stderr,
+        )
+        return 2
 
-    entries = manifest.get("entries", [])
-    summary = summarize_manifest(manifest)
+    findings: list[Finding] = []
+    for manifest in manifests:
+        suite_value = manifest.get("suite")
+        suite_id = suite_value.get("id") if isinstance(suite_value, dict) else None
+        suite = SUITES.get(suite_id) if isinstance(suite_id, str) else None
+        reference_refs = (
+            set(discover_suite_tests(repo_root, suite)) if suite is not None else set()
+        )
+        suite_findings = validate_manifest(manifest, reference_refs, rust_refs)
+        findings.extend(suite_findings)
+        for finding in suite_findings:
+            print(
+                f"ERROR suite={suite_id or 'invalid'} {finding.code} "
+                f"{finding.reference}: {finding.message}"
+            )
+        summary = summarize_manifest(manifest)
+        print(
+            f"summary suite={suite_id or 'invalid'} "
+            + " ".join(
+                f"{key.replace('_', '-')}={value}" for key, value in summary.items()
+            )
+        )
+
+    summary = summarize_manifests(manifests)
     print(
-        "summary "
+        "summary aggregate "
         + " ".join(f"{key.replace('_', '-')}={value}" for key, value in summary.items())
     )
 
     requested_statuses = set(args.list_status)
-    for entry in entries if isinstance(entries, list) else []:
-        if not isinstance(entry, dict) or entry.get("status") not in requested_statuses:
-            continue
-        reference = entry.get("reference", {})
-        print(
-            f"{entry.get('status')} {reference.get('file', '')}:"
-            f"{reference.get('test', '')}: {entry.get('reason', '')}"
-        )
+    for manifest in manifests:
+        suite_value = manifest.get("suite")
+        suite_id = suite_value.get("id") if isinstance(suite_value, dict) else "invalid"
+        entries = manifest.get("entries", [])
+        for entry in entries if isinstance(entries, list) else []:
+            if (
+                not isinstance(entry, dict)
+                or entry.get("status") not in requested_statuses
+            ):
+                continue
+            reference = entry.get("reference", {})
+            print(
+                f"{entry.get('status')} suite={suite_id} "
+                f"{reference.get('file', '')}:{reference.get('test', '')}: "
+                f"{entry.get('reason', '')}"
+            )
 
     if findings:
         return 2
