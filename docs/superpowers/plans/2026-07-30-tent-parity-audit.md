@@ -1,19 +1,19 @@
-# TENT 319-Test Semantic Parity Audit Plan
+# TENT 352-Test Semantic Parity Audit Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > `superpowers:executing-plans` to implement this plan task-by-task. Execute
 > inline in the existing worktree; do not delegate source review to subagents.
 
 **Goal:** Produce a source-reviewed schema-v2 parity manifest for every one of
-the 319 GoogleTest declarations under `mooncake-transfer-engine/tent/tests`,
+the 352 GoogleTest declarations under `mooncake-transfer-engine/tent/tests`,
 using complete Rust-observable evidence from `transfer-engine-ffi` and the
 approved Store crates, then establish the exact covered/missing/blocked/N/A
 baseline before any Rust remediation.
 
-**Architecture:** Freeze the 319-test source inventory, audit nine stable
+**Architecture:** Freeze the 352-test source inventory, audit nine stable
 behavior groups, and record complete executed C++ oracles in ignored local
 drafts. A Rust test may support many reference rows and several Rust tests may
-jointly support one row. Materialize the tracked manifest only after all 319
+jointly support one row. Materialize the tracked manifest only after all 352
 identities have been reviewed exactly once.
 
 **Tech Stack:** Read-only C++ source inspection, Rust source/test inspection,
@@ -45,7 +45,7 @@ and repository pre-commit hooks.
   prerequisite. Missing hardware cannot turn absent Rust logic into blocked.
 - `not-applicable` requires a validator-approved category and source proof that
   no suitable Rust-observable Store/TENT FFI product boundary exists.
-- Do not change Rust behavior until the 319-row manifest validates.
+- Do not change Rust behavior until the 352-row manifest validates.
 - Store LocalDisk `io_uring` remains gated until Store, Transfer Engine, TENT,
   and wheel correctness audits and applicable remediation all pass.
 
@@ -61,47 +61,48 @@ and repository pre-commit hooks.
 
 **Interfaces:**
 - Consumes: trusted suite definition `SUITES["tent-cpp"]`.
-- Produces: exact 319-reference identity set and approved Rust evidence set.
+- Produces: exact 352-reference identity set and approved Rust evidence set.
 
-- [ ] Run `discover_suite_tests` and assert 319 unique GoogleTest identities
-      across 35 files.
+- [ ] Run `discover_suite_tests` and assert 352 unique GoogleTest identities
+      across 36 files.
 - [ ] Run `discover_rust_tests` over `rust-repo/crates` and retain only the four
       approved package identities.
-- [ ] Record the nine audit groups below and assert their total is 319.
+- [ ] Record the nine audit groups below and assert their total is 352.
 - [ ] Record both staged and unstaged immutable-reference diffs for
       `mooncake-transfer-engine` and `mooncake-wheel/tests`.
 
 | Group | Tests |
 |---|---:|
-| Admission, bandwidth arbitration, causal chains, and coalescing | 39 |
+| Admission, promotion, bandwidth arbitration, causal chains, and coalescing | 61 |
 | Intent, QoS, receiver credit, merge, progress, and queue dispatch | 54 |
 | Metrics configuration, HTTP exposure, and recording | 39 |
 | Engine configuration overrides, transport hints, and selection | 46 |
 | Endpoint lifecycle/store, failover, fault proxy, and rail monitor | 63 |
 | QP layout, RDMA cancellation, and RDMA transport | 17 |
-| IP/segment/platform and SHM/Sunrise/TCP transports | 39 |
+| IP/segment/platform and SHM/Sunrise/TCP transports | 50 |
 | Thread-local storage and RW spin lock | 10 |
 | TPU PJRT shim and transport | 12 |
 
 ### Task 2: Audit admission, arbitration, causal, and coalescing behavior
 
 **Files:**
-- Read: `admission_queue_test.cpp` (22)
-- Read: `bw_arbitration_test.cpp` (3)
+- Read: `admission_queue_test.cpp` (35)
+- Read: `bw_arbitration_test.cpp` (7)
 - Read: `causal_chain_test.cpp` (4)
 - Read: `coalesce_regions_test.cpp` (10)
+- Read: `promotion_policy_test.cpp` (5)
 - Create locally: `tent-admission-arbitration-audit.md`
 
 **Interfaces:**
 - Consumes: TENT scheduler/admission C++ test bodies and Rust TENT request
   option/priority evidence.
-- Produces: 39 reviewed draft rows.
+- Produces: 61 reviewed draft rows.
 
 - [ ] Trace deadlines, promotion, queue capacity, ordering, bandwidth weights,
       causal dependencies, cancellation, and region merge/split assertions.
 - [ ] Require exact boundary values and ordering for covered rows; enum or ABI
       layout checks alone remain partial.
-- [ ] Verify the draft identity set is exactly the 39 discovered references.
+- [ ] Verify the draft identity set is exactly the 61 discovered references.
 
 ### Task 3: Audit intent, QoS, credit, merge, progress, and dispatch behavior
 
@@ -116,7 +117,7 @@ and repository pre-commit hooks.
 
 **Interfaces:**
 - Consumes: TENT intent/priority/request v2 Rust types and native queue tests.
-- Produces: 54 reviewed draft rows; cumulative 93.
+- Produces: 54 reviewed draft rows; cumulative 115.
 
 - [ ] Review intent conversion, QoS contract defaults/overrides, credit
       accounting, merge safety, worker progress, queue dispatch, cancellation,
@@ -135,7 +136,7 @@ and repository pre-commit hooks.
 
 **Interfaces:**
 - Consumes: TENT metrics C ABI and Rust `TentMetricsStatus`/NIC-stat tests.
-- Produces: 39 reviewed draft rows; cumulative 132.
+- Produces: 39 reviewed draft rows; cumulative 154.
 
 - [ ] Review configuration precedence and invalid inputs, HTTP lifecycle and
       payloads, metric names/labels/counters, log-only fallback, availability,
@@ -155,7 +156,7 @@ and repository pre-commit hooks.
 **Interfaces:**
 - Consumes: TENT configuration C API, Rust `TentTransport`, and Rust transport
   hint conversion tests.
-- Produces: 46 reviewed draft rows; cumulative 178.
+- Produces: 46 reviewed draft rows; cumulative 200.
 
 - [ ] Review precedence, parsing, invalid/empty values, provider choice,
       fallback ordering, locality, capability, and explicit-hint behavior.
@@ -177,7 +178,7 @@ and repository pre-commit hooks.
 **Interfaces:**
 - Consumes: TENT open/close/transfer/status/cancel FFI methods and native
   endpoint/fault injection helpers.
-- Produces: 63 reviewed draft rows; cumulative 241.
+- Produces: 63 reviewed draft rows; cumulative 263.
 
 - [ ] Review endpoint construction/destruction, concurrent reuse, stale state,
       failover ordering, retry budgets, proxy faults, rail health transitions,
@@ -197,7 +198,7 @@ and repository pre-commit hooks.
 
 **Interfaces:**
 - Consumes: TENT batch/cancel/status FFI and private QP layout state.
-- Produces: 17 reviewed draft rows; cumulative 258.
+- Produces: 17 reviewed draft rows; cumulative 280.
 
 - [ ] Review QP pool sizing/indexing/isolation, cancel races and terminal
       status, native RDMA registration/transfer/data integrity, and cleanup.
@@ -213,13 +214,13 @@ and repository pre-commit hooks.
 - Read: `rocm_platform_test.cpp` (13)
 - Read: `shm_transport_test.cpp` (1)
 - Read: `sunrise_link_transport_test.cpp` (3)
-- Read: `tcp_transport_test.cpp` (1)
+- Read: `tcp_transport_test.cpp` (12)
 - Create locally: `tent-platform-transports-audit.md`
 
 **Interfaces:**
 - Consumes: public TENT segment/register/transfer FFI and platform/private
   utility helpers.
-- Produces: 39 reviewed draft rows; cumulative 297.
+- Produces: 50 reviewed draft rows; cumulative 330.
 
 - [ ] Review IP parsing/normalization, segment ownership/lifetime, ROCm pointer
       and device behavior, SHM/Sunrise/TCP transfer statuses, byte integrity,
@@ -237,7 +238,7 @@ and repository pre-commit hooks.
 
 **Interfaces:**
 - Consumes: C++ helper implementations and any exact Rust wrapper boundary.
-- Produces: 10 reviewed draft rows; cumulative 307.
+- Produces: 10 reviewed draft rows; cumulative 340.
 
 - [ ] Review thread identity/isolation/destruction and reader/writer exclusion
       or progress assertions.
@@ -254,13 +255,13 @@ and repository pre-commit hooks.
 
 **Interfaces:**
 - Consumes: TENT TPU transport selector/transfer FFI and PJRT shim internals.
-- Produces: 12 reviewed draft rows and the final 319-row exact set.
+- Produces: 12 reviewed draft rows and the final 352-row exact set.
 
 - [ ] Review shim initialization/error mapping, device/buffer handling,
       registration, transfer/status/data integrity, and cleanup.
 - [ ] Separate private PJRT shim state from TENT FFI-observable transport
       outcomes; do not use missing TPU hardware as false blocked coverage.
-- [ ] Assert exactly 319 unique reviewed identities, zero omissions, zero stale
+- [ ] Assert exactly 352 unique reviewed identities, zero omissions, zero stale
       rows, and zero duplicates.
 
 ### Task 11: Materialize and validate the TENT manifest
@@ -277,10 +278,10 @@ and repository pre-commit hooks.
 - [ ] Render all reviewed rows in stable `(reference.file, reference.test)`
       order using suite `{id: tent-cpp, framework: gtest,
       reference_root: mooncake-transfer-engine/tent/tests}`.
-- [ ] Validate TENT alone; require exit 0 and `reference-total=319` without
+- [ ] Validate TENT alone; require exit 0 and `reference-total=352` without
       structural findings.
 - [ ] Validate Store + Transfer Engine + TENT; require distinct suite summaries
-      and aggregate `reference-total=2066`.
+      and aggregate `reference-total=2099`.
 - [ ] Run `--require-complete`; require exit 1 if and only if missing/blocked
       remains, while structural findings return 2.
 - [ ] Call `plan_parity_runs` source-only and prove shared Rust evidence is
@@ -296,7 +297,7 @@ and repository pre-commit hooks.
 - Verify: `rust-repo/tools/store-validation/transfer-engine-parity-map.json`
 
 **Interfaces:**
-- Consumes: structurally valid 319-row TENT manifest.
+- Consumes: structurally valid 352-row TENT manifest.
 - Produces: committed, reproducible TENT audit baseline.
 
 - [ ] Run all validation-tool unit tests and Python compilation.
@@ -312,7 +313,7 @@ and repository pre-commit hooks.
 
 ## Phase Acceptance Criteria
 
-- Exactly 319 discovered TENT tests have exactly one reviewed manifest row.
+- Exactly 352 discovered TENT tests have exactly one reviewed manifest row.
 - Covered rows cite only discoverable approved Rust tests whose aggregate
   assertions prove the complete reference oracle.
 - Missing rows name the exact unproved assertion/scenario and claim no Rust

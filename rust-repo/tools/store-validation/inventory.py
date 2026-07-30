@@ -46,7 +46,22 @@ def _strip_c_like_comments(text: str, *, single_quoted_strings: bool = True) -> 
         char = text[index]
         next_char = text[index + 1] if index + 1 < len(text) else ""
         if state == "code":
-            if char == '"' or (single_quoted_strings and char == "'"):
+            digit_separator = False
+            if single_quoted_strings and char == "'" and index > 0:
+                previous_char = text[index - 1]
+                if (
+                    previous_char in "0123456789abcdefABCDEF"
+                    and next_char in "0123456789abcdefABCDEF"
+                ):
+                    token_start = index - 1
+                    while token_start > 0 and (
+                        text[token_start - 1].isalnum() or text[token_start - 1] in "._"
+                    ):
+                        token_start -= 1
+                    digit_separator = text[token_start] in "0123456789"
+            if char == '"' or (
+                single_quoted_strings and char == "'" and not digit_separator
+            ):
                 state = "string"
                 quote = char
                 output.append(char)

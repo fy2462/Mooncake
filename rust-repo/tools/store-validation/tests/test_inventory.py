@@ -23,6 +23,33 @@ class InventoryTest(unittest.TestCase):
             ],
         )
 
+    def test_discovers_google_tests_after_cpp_digit_separator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "digit_separator_test.cpp"
+            fixture.write_text(
+                "constexpr auto kDeadlineNs = 1'000;\n"
+                "TEST(DeadlineTest, DiscoveredAfterLiteral) {}\n"
+                "constexpr char kLetter = u8'a';\n"
+                "TEST(DeadlineTest, DiscoveredAfterPrefixedCharacter) {}\n",
+                encoding="utf-8",
+            )
+
+            refs = discover_cpp_tests(Path(directory))
+
+        self.assertEqual(
+            [(ref.file, ref.name) for ref in refs],
+            [
+                (
+                    "digit_separator_test.cpp",
+                    "DeadlineTest.DiscoveredAfterLiteral",
+                ),
+                (
+                    "digit_separator_test.cpp",
+                    "DeadlineTest.DiscoveredAfterPrefixedCharacter",
+                ),
+            ],
+        )
+
     def test_discovers_rust_test_functions_and_ignores_helpers(self):
         refs = discover_rust_tests(FIXTURES)
         self.assertEqual(
