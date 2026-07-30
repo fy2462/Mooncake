@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+from collections.abc import Collection
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -14,6 +16,7 @@ from typing import Iterable
 
 CPP_SUFFIXES = {".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"}
 RUST_SUFFIXES = {".rs"}
+PYTHON_SUFFIXES = {".py"}
 CPP_TEST_RE = re.compile(
     r"\bTEST(?:_F|_P)?\s*\(\s*([A-Za-z_]\w*)\s*,\s*([A-Za-z_]\w*)\s*\)",
     re.MULTILINE,
@@ -119,6 +122,47 @@ def discover_rust_tests(root: Path) -> list[TestRef]:
         refs.extend(
             TestRef("rust", relative, name) for name in RUST_TEST_RE.findall(text)
         )
+    return sorted(set(refs))
+
+
+def _python_base_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_python_base_name(node.value)}.{node.attr}"
+    return ""
+
+
+def discover_python_tests(
+    root: Path,
+    excluded_files: Collection[str] = (),
+) -> list[TestRef]:
+    """Discover pytest/unittest declarations without importing test modules."""
+    excluded = set(excluded_files)
+    refs: list[TestRef] = []
+    for path in _iter_files(root, PYTHON_SUFFIXES):
+        relative = path.relative_to(root).as_posix()
+        if relative in excluded:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if node.name.startswith("test_"):
+                    refs.append(TestRef("python", relative, node.name))
+                continue
+            if not isinstance(node, ast.ClassDef):
+                continue
+            is_test_class = node.name.startswith("Test") or any(
+                _python_base_name(base).endswith("TestCase") for base in node.bases
+            )
+            if not is_test_class:
+                continue
+            refs.extend(
+                TestRef("python", relative, f"{node.name}.{child.name}")
+                for child in node.body
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name.startswith("test_")
+            )
     return sorted(set(refs))
 
 

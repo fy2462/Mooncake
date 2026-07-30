@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 
+import inventory
 from inventory import discover_cpp_tests, discover_rust_tests
 
 
@@ -32,6 +33,39 @@ class InventoryTest(unittest.TestCase):
                 ("rust_tests.rs", "tokio_restart_recovers_catalog"),
             ],
         )
+
+    def test_discovers_python_test_declarations_without_importing_modules(self):
+        refs = inventory.discover_python_tests(
+            FIXTURES,
+            excluded_files={"test_release_wheel_tags.py"},
+        )
+        self.assertIn(
+            inventory.TestRef("python", "python_tests.py", "test_function"),
+            refs,
+        )
+        self.assertIn(
+            inventory.TestRef("python", "python_tests.py", "TestClient.test_method"),
+            refs,
+        )
+        self.assertNotIn("test_nested", {ref.name for ref in refs})
+        self.assertNotIn(
+            "HelperClient.test_method_on_non_test_class",
+            {ref.name for ref in refs},
+        )
+
+    def test_python_discovery_honors_explicit_file_exclusions(self):
+        included = inventory.discover_python_tests(FIXTURES)
+        excluded = inventory.discover_python_tests(
+            FIXTURES,
+            excluded_files={"test_release_wheel_tags.py"},
+        )
+        release_ref = inventory.TestRef(
+            "python",
+            "test_release_wheel_tags.py",
+            "test_release_packaging_only",
+        )
+        self.assertIn(release_ref, included)
+        self.assertNotIn(release_ref, excluded)
 
     def test_cli_returns_two_for_an_unreadable_root(self):
         with tempfile.TemporaryDirectory() as directory:
