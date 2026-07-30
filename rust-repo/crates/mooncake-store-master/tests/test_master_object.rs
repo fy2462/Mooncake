@@ -10,6 +10,284 @@ use tokio::sync::Barrier;
 use tonic::Request;
 use uuid::Uuid;
 
+async fn mount_batch_clear_segment(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+    index: u64,
+) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 1024 * 1024,
+            base_addr: 0x100000000 + index * 0x200000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn put_complete_batch_clear_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    replica_num: usize,
+    preferred_segment: &str,
+) -> Vec<proto::ReplicaDescriptor> {
+    let started = MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: replica_num as u32,
+                preferred_segment: preferred_segment.into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(started.replicas.len(), replica_num);
+
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    started.replicas
+}
+
+async fn batch_clear(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    keys: &[&str],
+    segment_name: &str,
+) -> Vec<String> {
+    MasterService::batch_replica_clear(
+        service,
+        Request::new(proto::BatchReplicaClearRequest {
+            object_keys: keys.iter().map(|key| (*key).to_string()).collect(),
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .cleared_keys
+}
+
+async fn object_exists(service: &MasterServiceImpl, key: &str) -> bool {
+    MasterService::exist_key(
+        service,
+        Request::new(proto::ExistKeyRequest {
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .exists
+}
+
+#[tokio::test]
+async fn batch_replica_clear_empty_input_parity() {
+    let service = MasterServiceImpl::new(None, None);
+    let cleared = batch_clear(&service, Uuid::new_v4(), &[], "").await;
+    assert!(cleared.is_empty());
+}
+
+#[tokio::test]
+async fn batch_replica_clear_missing_keys_parity() {
+    let service = MasterServiceImpl::new(None, None);
+    let cleared = batch_clear(
+        &service,
+        Uuid::new_v4(),
+        &["missing_key1", "missing_key2"],
+        "",
+    )
+    .await;
+    assert!(cleared.is_empty());
+}
+
+#[tokio::test]
+async fn batch_replica_clear_skips_active_lease_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "active-lease:1", 0).await;
+    put_complete_batch_clear_object(&service, client_id, "active-lease-key", 1, "active-lease:1")
+        .await;
+
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "active-lease-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(replicas.replicas.len(), 1);
+
+    assert!(
+        batch_clear(&service, client_id, &["active-lease-key"], "")
+            .await
+            .is_empty()
+    );
+    assert!(object_exists(&service, "active-lease-key").await);
+}
+
+#[tokio::test]
+async fn batch_replica_clear_rejects_nonowner_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let owner_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, owner_id, "owner:1", 0).await;
+    put_complete_batch_clear_object(&service, owner_id, "owner-key", 1, "owner:1").await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert!(
+        batch_clear(&service, Uuid::new_v4(), &["owner-key"], "")
+            .await
+            .is_empty()
+    );
+    assert!(object_exists(&service, "owner-key").await);
+}
+
+#[tokio::test]
+async fn batch_replica_clear_all_segments_five_keys_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "all-segments:1", 0).await;
+    let keys = [
+        "clear-key-1",
+        "clear-key-2",
+        "clear-key-3",
+        "clear-key-4",
+        "clear-key-5",
+    ];
+    for key in keys {
+        put_complete_batch_clear_object(&service, client_id, key, 1, "all-segments:1").await;
+        assert!(object_exists(&service, key).await);
+    }
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert_eq!(batch_clear(&service, client_id, &keys, "").await, keys);
+    for key in keys {
+        assert!(!object_exists(&service, key).await);
+    }
+}
+
+#[tokio::test]
+async fn batch_replica_clear_specific_segment_polling_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "specific:1", 0).await;
+    mount_batch_clear_segment(&service, client_id, "specific:2", 1).await;
+    let replicas =
+        put_complete_batch_clear_object(&service, client_id, "specific-key", 1, "specific:1").await;
+    assert_eq!(replicas[0].segment_name, "specific:1");
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let cleared = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let cleared = batch_clear(&service, client_id, &["specific-key"], "specific:1").await;
+            if !cleared.is_empty() {
+                break cleared;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("named-segment replica did not become clearable within five seconds");
+
+    assert_eq!(cleared, ["specific-key"]);
+    assert!(!object_exists(&service, "specific-key").await);
+}
+
+#[tokio::test]
+async fn batch_replica_clear_skips_empty_and_missing_strings_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "empty-strings:1", 0).await;
+    put_complete_batch_clear_object(&service, client_id, "valid_key", 1, "empty-strings:1").await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert_eq!(
+        batch_clear(
+            &service,
+            client_id,
+            &["", "valid_key", "", "another_empty"],
+            "",
+        )
+        .await,
+        ["valid_key"]
+    );
+}
+
+#[tokio::test]
+async fn batch_replica_clear_mixed_owner_missing_empty_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    let other_client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "mixed-owner:1", 0).await;
+    mount_batch_clear_segment(&service, other_client_id, "mixed-owner:2", 1).await;
+    for key in ["key1", "key2"] {
+        put_complete_batch_clear_object(&service, client_id, key, 1, "mixed-owner:1").await;
+    }
+    put_complete_batch_clear_object(&service, other_client_id, "key3", 1, "mixed-owner:2").await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert_eq!(
+        batch_clear(
+            &service,
+            client_id,
+            &["key1", "key2", "key3", "nonexistent", ""],
+            "",
+        )
+        .await,
+        ["key1", "key2"]
+    );
+    assert!(!object_exists(&service, "key1").await);
+    assert!(!object_exists(&service, "key2").await);
+    assert!(object_exists(&service, "key3").await);
+}
+
 #[tokio::test]
 async fn put_start_preserves_default_and_non_default_object_data_types() {
     let service = MasterServiceImpl::new(None, None);
