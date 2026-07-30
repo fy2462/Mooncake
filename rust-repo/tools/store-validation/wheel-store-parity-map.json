@@ -60,7 +60,7 @@
         "wheel",
         "store"
       ],
-      "reason": "The cited approved Rust test proves the complete source-reviewed wheel oracle.",
+      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
       "reference": {
         "file": "test_batch_replica_clear.py",
         "test": "TestBatchReplicaClearSingleStore.test_clear_after_lease_expiry"
@@ -75,7 +75,8 @@
           "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
         }
       ],
-      "status": "covered"
+      "status": "blocked",
+      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
     },
     {
       "behavior": "Empty input returns an empty list. The Rust client E2E invokes an empty slice and asserts an empty successful result.",
@@ -83,7 +84,7 @@
         "wheel",
         "store"
       ],
-      "reason": "The cited approved Rust test proves the complete source-reviewed wheel oracle.",
+      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
       "reference": {
         "file": "test_batch_replica_clear.py",
         "test": "TestBatchReplicaClearSingleStore.test_clear_empty_keys"
@@ -98,7 +99,8 @@
           "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
         }
       ],
-      "status": "covered"
+      "status": "blocked",
+      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
     },
     {
       "behavior": "One call clears all 50 expired keys and returns every key. Rust batch-clear evidence covers at most two keys per call, not this cardinality.",
@@ -142,7 +144,7 @@
         "wheel",
         "store"
       ],
-      "reason": "The cited approved Rust test proves the complete source-reviewed wheel oracle.",
+      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
       "reference": {
         "file": "test_batch_replica_clear.py",
         "test": "TestBatchReplicaClearSingleStore.test_clear_nonexistent_keys"
@@ -157,7 +159,8 @@
           "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
         }
       ],
-      "status": "covered"
+      "status": "blocked",
+      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
     },
     {
       "behavior": "After expiry one key returns as the sole cleared result and is no longer readable. The Rust client E2E clears one expired key, asserts the exact one-key result, and later asserts it absent.",
@@ -165,7 +168,7 @@
         "wheel",
         "store"
       ],
-      "reason": "The cited approved Rust test proves the complete source-reviewed wheel oracle.",
+      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
       "reference": {
         "file": "test_batch_replica_clear.py",
         "test": "TestBatchReplicaClearSingleStore.test_clear_single_key"
@@ -180,7 +183,8 @@
           "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
         }
       ],
-      "status": "covered"
+      "status": "blocked",
+      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
     },
     {
       "behavior": "Three active-lease keys must be skipped with an empty return and remain readable with exact bytes. No approved Rust test issues batch replica clear before lease expiry and proves unchanged data.",
