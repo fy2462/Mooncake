@@ -355,6 +355,23 @@ def validate_manifest(
                         "only not-applicable entries may set review.na_category",
                     )
                 )
+            if status in {"covered", "blocked"}:
+                if review.get("primary_reviewed") is not True:
+                    findings.append(
+                        _finding(
+                            "missing-primary-review",
+                            reference,
+                            f"{status} entries require review.primary_reviewed=true",
+                        )
+                    )
+            elif "primary_reviewed" in review:
+                findings.append(
+                    _finding(
+                        "unexpected-primary-review",
+                        reference,
+                        "only covered or blocked entries may set review.primary_reviewed",
+                    )
+                )
 
     for rust_key, owners in sorted(primary_owners.items()):
         if len(owners) > 1:

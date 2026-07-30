@@ -31,6 +31,12 @@ def entry(
     rust: list[dict[str, str]] | None = None,
     reason: str = "",
 ) -> dict:
+    review = {
+        "oracle": "allocator_test.cpp and allocation_strategy.cpp",
+        "reviewed": True,
+    }
+    if status in {"covered", "blocked"}:
+        review["primary_reviewed"] = True
     return {
         "cpp": {"file": CPP_REF.file, "test": CPP_REF.name},
         "behavior": "A freed allocator range can be reused without losing capacity.",
@@ -40,14 +46,42 @@ def entry(
             [{"file": RUST_REF.file, "test": RUST_REF.name}] if rust is None else rust
         ),
         "reason": reason,
-        "review": {
-            "oracle": "allocator_test.cpp and allocation_strategy.cpp",
-            "reviewed": True,
-        },
+        "review": review,
     }
 
 
 class ValidateParityTest(unittest.TestCase):
+    def test_covered_and_blocked_require_primary_review(self):
+        for status in ("covered", "blocked"):
+            candidate = entry(
+                status=status,
+                reason=(
+                    "The existing primary is externally blocked."
+                    if status == "blocked"
+                    else ""
+                ),
+            )
+            if status == "blocked":
+                candidate["prerequisite"] = "CUDA-capable GPU"
+            candidate["review"].pop("primary_reviewed")
+            with self.subTest(status=status):
+                self.assertIn(
+                    "missing-primary-review",
+                    finding_codes(candidate, {RUST_REF}),
+                )
+
+    def test_missing_row_rejects_stale_primary_review(self):
+        missing = entry(
+            status="missing",
+            rust=[],
+            reason="No unique primary exists yet.",
+        )
+        missing["review"]["primary_reviewed"] = True
+        self.assertIn(
+            "unexpected-primary-review",
+            finding_codes(missing, set()),
+        )
+
     def test_rejects_unmapped_cpp_test(self):
         findings = validate_manifest(
             {"schema_version": 1, "entries": []}, {CPP_REF}, set()
