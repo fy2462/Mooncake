@@ -64,6 +64,35 @@ def _rust_key(value: Any) -> tuple[str, str] | None:
     return file_name, test_name
 
 
+def summarize_manifest(manifest: dict[str, Any]) -> dict[str, int]:
+    entries = [
+        entry for entry in manifest.get("entries", []) if isinstance(entry, dict)
+    ]
+    statuses = Counter(entry.get("status") for entry in entries)
+    primary_owners: Counter[tuple[str, str]] = Counter()
+    for entry in entries:
+        if entry.get("status") not in {"covered", "blocked"}:
+            continue
+        rust_keys = {
+            rust_key
+            for value in entry.get("rust", [])
+            if (rust_key := _rust_key(value)) is not None
+        }
+        primary_owners.update(rust_keys)
+    return {
+        "cpp_total": len(entries),
+        "applicable": sum(
+            statuses.get(status, 0) for status in ("covered", "missing", "blocked")
+        ),
+        "unique_primary": len(primary_owners),
+        "duplicate_primary": sum(count > 1 for count in primary_owners.values()),
+        "covered": statuses.get("covered", 0),
+        "missing": statuses.get("missing", 0),
+        "blocked": statuses.get("blocked", 0),
+        "not_applicable": statuses.get("not-applicable", 0),
+    }
+
+
 def validate_manifest(
     manifest: dict[str, Any],
     cpp_refs: set[TestRef],
@@ -87,6 +116,7 @@ def validate_manifest(
         _cpp_key(entry) if isinstance(entry, dict) else None for entry in entries
     ]
     counts = Counter(key for key in entry_keys if key is not None)
+    primary_owners: dict[tuple[str, str], list[str]] = {}
 
     for key in sorted(cpp_inventory - set(counts)):
         findings.append(
@@ -197,26 +227,73 @@ def validate_manifest(
                     )
                 )
 
+        if status in {"covered", "blocked"}:
+            for rust_key in set(rust_keys):
+                primary_owners.setdefault(rust_key, []).append(reference)
+
         reason = raw_entry.get("reason")
         if not isinstance(reason, str):
             findings.append(
                 _finding("invalid-reason", reference, "reason must be a string")
             )
             reason = ""
-        if status == "covered" and not rust_keys:
-            findings.append(
-                _finding(
-                    "covered-without-rust-test",
-                    reference,
-                    "covered entries require at least one Rust test",
+        if status == "covered":
+            if not rust_keys:
+                findings.append(
+                    _finding(
+                        "covered-without-rust-test",
+                        reference,
+                        "covered entries require exactly one Rust primary test",
+                    )
                 )
-            )
-        if status != "covered" and rust_keys:
+            elif len(rust_keys) > 1:
+                findings.append(
+                    _finding(
+                        "multiple-primary-rust-tests",
+                        reference,
+                        "covered entries require exactly one Rust primary test",
+                    )
+                )
+        elif status == "blocked":
+            if not rust_keys:
+                findings.append(
+                    _finding(
+                        "blocked-without-rust-test",
+                        reference,
+                        "blocked entries require exactly one existing Rust primary test",
+                    )
+                )
+            elif len(rust_keys) > 1:
+                findings.append(
+                    _finding(
+                        "multiple-primary-rust-tests",
+                        reference,
+                        "blocked entries require exactly one Rust primary test",
+                    )
+                )
+            prerequisite = raw_entry.get("prerequisite")
+            if not isinstance(prerequisite, str) or not prerequisite.strip():
+                findings.append(
+                    _finding(
+                        "missing-blocked-prerequisite",
+                        reference,
+                        "blocked entries require a named external prerequisite",
+                    )
+                )
+        elif status in {"missing", "not-applicable"} and rust_keys:
             findings.append(
                 _finding(
                     "noncovered-with-rust-test",
                     reference,
-                    f"{status} entries must not claim executable Rust coverage",
+                    f"{status} entries must not claim a Rust primary test",
+                )
+            )
+        if status != "blocked" and "prerequisite" in raw_entry:
+            findings.append(
+                _finding(
+                    "unexpected-blocked-prerequisite",
+                    reference,
+                    "only blocked entries may set prerequisite",
                 )
             )
         if status in {"missing", "not-applicable", "blocked"} and not reason.strip():
@@ -279,6 +356,16 @@ def validate_manifest(
                     )
                 )
 
+    for rust_key, owners in sorted(primary_owners.items()):
+        if len(owners) > 1:
+            findings.append(
+                _finding(
+                    "duplicate-primary-rust-test",
+                    f"{rust_key[0]}:{rust_key[1]}",
+                    "Rust primary test is reused by " + ", ".join(sorted(owners)),
+                )
+            )
+
     return sorted(set(findings))
 
 
@@ -309,13 +396,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR {finding.code} {finding.reference}: {finding.message}")
 
     entries = manifest.get("entries", [])
-    statuses = Counter(
-        entry.get("status") for entry in entries if isinstance(entry, dict)
-    )
+    summary = summarize_manifest(manifest)
     print(
         "summary "
         + " ".join(
-            f"{status}={statuses.get(status, 0)}" for status in sorted(ALLOWED_STATUSES)
+            f"{label}={summary[key]}"
+            for label, key in (
+                ("cpp-total", "cpp_total"),
+                ("applicable", "applicable"),
+                ("unique-primary", "unique_primary"),
+                ("duplicate-primary", "duplicate_primary"),
+                ("covered", "covered"),
+                ("missing", "missing"),
+                ("blocked", "blocked"),
+                ("not-applicable", "not_applicable"),
+            )
         )
     )
     for status in args.list_status:
@@ -329,9 +424,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if findings:
         return 1
-    if args.require_complete and (
-        statuses.get("missing", 0) or statuses.get("blocked", 0)
-    ):
+    if args.require_complete and (summary["missing"] or summary["blocked"]):
         return 1
     return 0
 

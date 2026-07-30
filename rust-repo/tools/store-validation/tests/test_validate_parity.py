@@ -1,6 +1,7 @@
 import unittest
 
 from inventory import TestRef
+import validate_parity
 from validate_parity import validate_manifest
 
 
@@ -8,6 +9,20 @@ CPP_REF = TestRef("gtest", "allocator_test.cpp", "AllocatorTest.Reuse")
 RUST_REF = TestRef(
     "rust", "mooncake-store-master/tests/test_allocator.rs", "reuse_freed_range"
 )
+RUST_REF_2 = TestRef(
+    "rust", "mooncake-store-master/tests/test_allocator.rs", "reuse_adjacent_range"
+)
+
+
+def rust_value(reference: TestRef) -> dict[str, str]:
+    return {"file": reference.file, "test": reference.name}
+
+
+def finding_codes(candidate: dict, rust_refs: set[TestRef]) -> set[str]:
+    findings = validate_manifest(
+        {"schema_version": 1, "entries": [candidate]}, {CPP_REF}, rust_refs
+    )
+    return {item.code for item in findings}
 
 
 def entry(
@@ -84,6 +99,96 @@ class ValidateParityTest(unittest.TestCase):
             {"schema_version": 1, "entries": [covered]}, {CPP_REF}, {RUST_REF}
         )
         self.assertIn("unexpected-na-category", {item.code for item in findings})
+
+    def test_covered_entry_rejects_multiple_primary_tests(self):
+        covered = entry(rust=[rust_value(RUST_REF), rust_value(RUST_REF_2)])
+        codes = finding_codes(covered, {RUST_REF, RUST_REF_2})
+        self.assertIn("multiple-primary-rust-tests", codes)
+
+    def test_blocked_entry_requires_one_discoverable_primary_and_prerequisite(self):
+        blocked = entry(status="blocked", rust=[], reason="GPU execution is blocked.")
+        codes = finding_codes(blocked, set())
+        self.assertIn("blocked-without-rust-test", codes)
+        self.assertIn("missing-blocked-prerequisite", codes)
+
+    def test_blocked_entry_accepts_one_primary_and_explicit_prerequisite(self):
+        blocked = entry(
+            status="blocked",
+            reason="The parity test exists but cannot execute on this host.",
+        )
+        blocked["prerequisite"] = "CUDA-capable GPU"
+        findings = validate_manifest(
+            {"schema_version": 1, "entries": [blocked]}, {CPP_REF}, {RUST_REF}
+        )
+        self.assertEqual(findings, [])
+
+    def test_missing_and_not_applicable_entries_reject_primary_tests(self):
+        for status in ("missing", "not-applicable"):
+            candidate = entry(
+                status=status,
+                reason="This disposition must not claim a primary Rust test.",
+            )
+            if status == "not-applicable":
+                candidate["review"]["na_category"] = "absent-rust-product-boundary"
+            with self.subTest(status=status):
+                self.assertIn(
+                    "noncovered-with-rust-test",
+                    finding_codes(candidate, {RUST_REF}),
+                )
+
+    def test_rejects_primary_reused_by_multiple_cpp_rows(self):
+        second_cpp_ref = TestRef("gtest", "client_test.cpp", "ClientTest.Timeout")
+        second = entry()
+        second["cpp"] = {"file": second_cpp_ref.file, "test": second_cpp_ref.name}
+        findings = validate_manifest(
+            {"schema_version": 1, "entries": [entry(), second]},
+            {CPP_REF, second_cpp_ref},
+            {RUST_REF},
+        )
+        self.assertIn("duplicate-primary-rust-test", {item.code for item in findings})
+
+    def test_summary_reports_one_to_one_counts(self):
+        second_covered = entry()
+        second_covered["cpp"] = {
+            "file": "client_test.cpp",
+            "test": "ClientTest.Timeout",
+        }
+        missing = entry(
+            status="missing",
+            rust=[],
+            reason="No unique Rust primary test exists.",
+        )
+        missing["cpp"] = {
+            "file": "master_test.cpp",
+            "test": "MasterTest.Missing",
+        }
+        not_applicable = entry(
+            status="not-applicable",
+            rust=[],
+            reason="The C++ helper has no Rust product boundary.",
+        )
+        not_applicable["cpp"] = {
+            "file": "wrapper_test.cpp",
+            "test": "WrapperTest.MoveOnly",
+        }
+        not_applicable["review"]["na_category"] = "absent-rust-product-boundary"
+        manifest = {
+            "schema_version": 1,
+            "entries": [entry(), second_covered, missing, not_applicable],
+        }
+        self.assertEqual(
+            validate_parity.summarize_manifest(manifest),
+            {
+                "cpp_total": 4,
+                "applicable": 3,
+                "unique_primary": 1,
+                "duplicate_primary": 1,
+                "covered": 2,
+                "missing": 1,
+                "blocked": 0,
+                "not_applicable": 1,
+            },
+        )
 
     def test_rejects_duplicate_and_stale_cpp_references(self):
         duplicate = entry()
