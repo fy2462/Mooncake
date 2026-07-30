@@ -116,6 +116,15 @@ The following categories may qualify:
    internal API. For example, Redis/K8s leadership-monitor internals may be N/A
    under the approved etcd-only serving policy, while Rust's externally
    observable fail-fast rejection still requires its own Rust test.
+6. **No executable C++ oracle.** The discovered C++ case is disabled or contains
+   no assertion, returned status, state transition, or other pass/fail result
+   that can define a Rust acceptance test. A descriptive test name or comment
+   alone does not create an oracle.
+7. **Explicitly excluded performance scope.** The C++ case measures only a
+   performance requirement for a component that the user explicitly excluded
+   from optimization scope. Correctness cases for the same component remain
+   applicable; this category cannot hide a correctness assertion or the
+   approved Store LocalDisk `io_uring` performance work.
 
 Architecture differences alone are insufficient. If Rust exposes an
 equivalent user-visible return value, state transition, persistence result,

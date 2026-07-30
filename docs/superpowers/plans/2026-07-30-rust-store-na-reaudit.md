@@ -17,7 +17,8 @@
 - Never build, link, load, or execute C++ Store code. C++ source is a read-only behavioral oracle.
 - Production HA serving remains etcd-only. Redis/K8s internal leadership behavior may be N/A only when the Rust fail-fast product boundary is separately tested or backlogged.
 - Difficulty, duration, unavailable hardware, missing libraries, missing implementation, and architectural difference with a Rust-visible result are not N/A reasons.
-- Retained N/A categories are exactly `language-unrepresentable`, `absent-rust-product-boundary`, `cpp-build-or-abi`, `noncanonical-duplicate-source`, and `excluded-component-internal`.
+- Retained N/A categories are exactly `language-unrepresentable`, `absent-rust-product-boundary`, `cpp-build-or-abi`, `noncanonical-duplicate-source`, `excluded-component-internal`, `no-executable-cpp-oracle`, and `excluded-performance-scope`.
+- `no-executable-cpp-oracle` is limited to a disabled or assertion-free C++ body with no returned status, state transition, or other pass/fail result. `excluded-performance-scope` is limited to performance-only cases for TENT, accelerator DLPack, or SHM hot cache; it never excludes correctness behavior or Store LocalDisk `io_uring` performance.
 - A row changed to `covered` must cite exactly one complete, independently discoverable, globally unique Rust primary test. Otherwise mark it `missing` with a concrete unique test name.
 - Use `/home/fy2462/Mooncake/.venv/bin/python`; `.venv` is the repository Python environment.
 - Use `apply_patch` for every file edit. Preserve unrelated user changes.
@@ -423,6 +424,8 @@ ALLOWED_NA_CATEGORIES = frozenset(
         "cpp-build-or-abi",
         "noncanonical-duplicate-source",
         "excluded-component-internal",
+        "no-executable-cpp-oracle",
+        "excluded-performance-scope",
     }
 )
 ```
