@@ -12,6 +12,24 @@ state or boundary does not exist in the Rust product.
 The C++ Store remains a read-only source oracle. No C++ Store target is built,
 linked, loaded, or executed as acceptance evidence.
 
+## C and C++ Source Immutability
+
+All C and C++ sources and headers are strictly read-only throughout this work.
+This includes `.c`, `.cc`, `.cpp`, `.cxx`, `.cu`, `.cuh`, `.h`, `.hh`, and
+`.hpp` files in Store, Transfer Engine, tests, examples, and support modules.
+They may be inspected to derive Rust behavior, but they must never be edited,
+formatted, generated, staged, or committed.
+
+Commands with repository-wide write side effects are prohibited. File-level
+pre-commit runs must skip the `mooncake-code-format` hook so it cannot rewrite
+C++ files outside the requested Rust/manifest/document scope. Every batch
+checks the worktree before and after its changes and fails its own handoff if
+any C or C++ source/header path differs from the batch baseline.
+
+If parity investigation exposes a C++ defect, ambiguity, or desirable C++
+change, record it as oracle context and continue only with authorized Rust-side
+work. Do not repair or normalize the C++ source.
+
 ## Current Baseline
 
 The reviewed manifest currently contains 1,399 C++ tests:
@@ -200,6 +218,7 @@ Correctness test parity is accepted only when:
 5. no row is missing, required-blocked, skipped, stale, or undiscoverable;
 6. every primary test passes its focused and owning module gate;
 7. the module, multi-node, and fault-recovery gates pass; and
-8. C++ Store remains source-only oracle evidence.
+8. C++ Store remains source-only oracle evidence; and
+9. no C or C++ source/header file was modified.
 
 Performance work remains gated until these criteria are satisfied.
