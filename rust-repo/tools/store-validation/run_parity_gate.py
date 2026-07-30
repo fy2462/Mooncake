@@ -24,7 +24,7 @@ class PlannedCommand:
     name: str
     argv: list[str]
     rust: dict[str, str]
-    cpp_references: list[dict[str, str]]
+    references: list[dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -102,21 +102,16 @@ def plan_parity_run(
                 continue
             name, argv = _command_for(rust)
             existing = by_test.get(key)
-            cpp_reference = dict(entry["cpp"])
+            reference = dict(entry["reference"])
             if existing is None:
                 by_test[key] = PlannedCommand(
                     name=name,
                     argv=argv,
                     rust=dict(rust),
-                    cpp_references=[cpp_reference],
+                    references=[reference],
                 )
-            elif cpp_reference not in existing.cpp_references:
-                first_owner = existing.cpp_references[0]
-                raise ValueError(
-                    f"Rust primary {rust['file']}:{rust['test']} is reused by "
-                    f"{first_owner['file']}:{first_owner['test']} and "
-                    f"{cpp_reference['file']}:{cpp_reference['test']}"
-                )
+            elif reference not in existing.references:
+                existing.references.append(reference)
 
     commands = sorted(
         by_test.values(), key=lambda item: (item.rust["file"], item.rust["test"])
@@ -175,7 +170,7 @@ def execute_plan(
                 "duration_seconds": round(time.monotonic() - command_started, 6),
                 "log": str(log),
                 "rust": command.rust,
-                "cpp_references": command.cpp_references,
+                "references": command.references,
                 "zero_tests_executed": zero_tests,
             }
         )
@@ -188,7 +183,7 @@ def execute_plan(
                 "exit_code": None,
                 "duration_seconds": 0.0,
                 "log": "",
-                "cpp_reference": entry.get("cpp", {}),
+                "reference": entry.get("reference", {}),
                 "prerequisite": entry.get("reason", "invalid parity disposition"),
             }
         )

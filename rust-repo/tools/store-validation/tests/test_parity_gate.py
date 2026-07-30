@@ -12,20 +12,40 @@ from run_parity_gate import (
 )
 
 
+STORE_SUITE = {
+    "id": "store-cpp",
+    "framework": "gtest",
+    "reference_root": "mooncake-store/tests",
+}
+
+
+def manifest(entries):
+    return {"schema_version": 2, "suite": dict(STORE_SUITE), "entries": entries}
+
+
 def entry(
     *,
     status="covered",
-    cpp_test="AllocatorTest.Allocate",
-    rust_file="mooncake-store-master/tests/test_allocator.rs",
-    rust_test="allocate_consumes_capacity",
+    reference_test="AllocatorTest.Allocate",
+    rust=None,
 ):
     return {
-        "cpp": {"file": "allocation_strategy_test.cpp", "test": cpp_test},
+        "reference": {
+            "file": "allocation_strategy_test.cpp",
+            "test": reference_test,
+        },
         "behavior": "A successful allocation consumes visible capacity.",
         "boundary": ["master", "allocator"],
         "status": status,
         "rust": (
-            [{"file": rust_file, "test": rust_test}] if status == "covered" else []
+            [
+                {
+                    "file": "mooncake-store-master/tests/test_allocator.rs",
+                    "test": "allocate_consumes_capacity",
+                }
+            ]
+            if rust is None and status == "covered"
+            else ([] if rust is None else rust)
         ),
         "reason": "Uncovered required behavior." if status != "covered" else "",
         "review": {"oracle": "allocation_strategy_test.cpp", "reviewed": True},
@@ -43,18 +63,16 @@ class ParityGateTest(unittest.TestCase):
         }
 
     def test_missing_row_blocks_execution_pass(self):
-        plan = plan_parity_run(
-            {"schema_version": 1, "entries": [entry(status="missing")]},
-            self.inventory,
-        )
+        plan = plan_parity_run(manifest([entry(status="missing")]), self.inventory)
         self.assertEqual(plan.status, "BLOCKED")
         self.assertEqual(plan.commands, [])
-        self.assertEqual(plan.blocked[0]["cpp"]["test"], "AllocatorTest.Allocate")
+        self.assertEqual(
+            plan.blocked[0]["reference"]["test"],
+            "AllocatorTest.Allocate",
+        )
 
     def test_groups_discoverable_integration_test_by_cargo_target(self):
-        plan = plan_parity_run(
-            {"schema_version": 1, "entries": [entry()]}, self.inventory
-        )
+        plan = plan_parity_run(manifest([entry()]), self.inventory)
         self.assertEqual(plan.status, "READY")
         self.assertEqual(
             [command.argv for command in plan.commands],
@@ -73,30 +91,63 @@ class ParityGateTest(unittest.TestCase):
             ],
         )
 
-    def test_duplicate_primary_is_rejected_even_when_planner_is_called_directly(self):
-        manifest = {
-            "schema_version": 1,
-            "entries": [entry(), entry(cpp_test="AllocatorTest.Reallocate")],
+    def test_shared_evidence_runs_once_and_retains_all_references(self):
+        plan = plan_parity_run(
+            manifest([entry(), entry(reference_test="AllocatorTest.Reallocate")]),
+            self.inventory,
+        )
+        self.assertEqual(len(plan.commands), 1)
+        self.assertEqual(
+            [reference["test"] for reference in plan.commands[0].references],
+            ["AllocatorTest.Allocate", "AllocatorTest.Reallocate"],
+        )
+
+    def test_aggregate_evidence_produces_one_command_per_rust_test(self):
+        second = {
+            "file": "transfer-engine-ffi/tests/test_engine.rs",
+            "test": "allocate_via_ffi",
         }
-        with self.assertRaisesRegex(ValueError, "reused by"):
-            plan_parity_run(manifest, self.inventory)
+        inventory = self.inventory | {TestRef("rust", second["file"], second["test"])}
+        first = {
+            "file": "mooncake-store-master/tests/test_allocator.rs",
+            "test": "allocate_consumes_capacity",
+        }
+        plan = plan_parity_run(manifest([entry(rust=[first, second])]), inventory)
+        self.assertEqual(len(plan.commands), 2)
+        self.assertEqual(
+            {command.references[0]["test"] for command in plan.commands},
+            {"AllocatorTest.Allocate"},
+        )
+
+    def test_transfer_engine_ffi_integration_test_uses_own_package(self):
+        rust = {
+            "file": "transfer-engine-ffi/tests/test_engine.rs",
+            "test": "test_submit",
+        }
+        inventory = {TestRef("rust", rust["file"], rust["test"])}
+        plan = plan_parity_run(manifest([entry(rust=[rust])]), inventory)
+        self.assertEqual(
+            plan.commands[0].argv,
+            [
+                "cargo",
+                "test",
+                "-p",
+                "transfer-engine-ffi",
+                "--test",
+                "test_engine",
+                "test_submit",
+                "--",
+                "--exact",
+            ],
+        )
 
     def test_unit_test_under_src_uses_lib_filter(self):
-        inventory = {
-            TestRef(
-                "rust", "mooncake-store-client/src/client/remove.rs", "remove_missing"
-            )
+        rust = {
+            "file": "mooncake-store-client/src/client/remove.rs",
+            "test": "remove_missing",
         }
-        manifest = {
-            "schema_version": 1,
-            "entries": [
-                entry(
-                    rust_file="mooncake-store-client/src/client/remove.rs",
-                    rust_test="remove_missing",
-                )
-            ],
-        }
-        plan = plan_parity_run(manifest, inventory)
+        inventory = {TestRef("rust", rust["file"], rust["test"])}
+        plan = plan_parity_run(manifest([entry(rust=[rust])]), inventory)
         self.assertEqual(
             plan.commands[0].argv,
             [
@@ -112,24 +163,17 @@ class ParityGateTest(unittest.TestCase):
         )
 
     def test_rejects_reference_outside_crates(self):
-        inventory = {TestRef("rust", "python/tests/test_client.py", "test_put")}
-        manifest = {
-            "schema_version": 1,
-            "entries": [
-                entry(rust_file="python/tests/test_client.py", rust_test="test_put")
-            ],
-        }
+        rust = {"file": "python/tests/test_client.py", "test": "test_put"}
+        inventory = {TestRef("rust", rust["file"], rust["test"])}
         with self.assertRaisesRegex(ValueError, "outside Rust crates"):
-            plan_parity_run(manifest, inventory)
+            plan_parity_run(manifest([entry(rust=[rust])]), inventory)
 
-    def test_execution_failure_retains_owning_cpp_behavior(self):
+    def test_execution_failure_retains_owning_reference_behavior(self):
         command = PlannedCommand(
             name="failing-parity-test",
             argv=[sys.executable, "-c", "raise SystemExit(7)"],
             rust={"file": "sample/tests/test_case.rs", "test": "case"},
-            cpp_references=[
-                {"file": "reference_test.cpp", "test": "ReferenceTest.Case"}
-            ],
+            references=[{"file": "reference_test.cpp", "test": "ReferenceTest.Case"}],
         )
         with tempfile.TemporaryDirectory() as directory:
             result = execute_plan(
@@ -140,7 +184,7 @@ class ParityGateTest(unittest.TestCase):
         self.assertEqual(result["status"], "FAIL")
         self.assertEqual(result["first_failure"]["name"], "failing-parity-test")
         self.assertEqual(
-            result["commands"][0]["cpp_references"][0]["test"],
+            result["commands"][0]["references"][0]["test"],
             "ReferenceTest.Case",
         )
 
@@ -149,7 +193,7 @@ class ParityGateTest(unittest.TestCase):
             name="stale-filter",
             argv=[sys.executable, "-c", "print('running 0 tests')"],
             rust={"file": "sample/src/lib.rs", "test": "missing"},
-            cpp_references=[{"file": "reference.cpp", "test": "Suite.Missing"}],
+            references=[{"file": "reference.cpp", "test": "Suite.Missing"}],
         )
         with tempfile.TemporaryDirectory() as directory:
             result = execute_plan(
