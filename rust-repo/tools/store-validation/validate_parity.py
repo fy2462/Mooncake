@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the C++ behavioral-reference to Rust-test parity manifest."""
+"""Validate reference-test to Rust-test parity manifests."""
 
 from __future__ import annotations
 
@@ -7,14 +7,23 @@ import argparse
 from collections import Counter
 from dataclasses import dataclass
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import sys
 from typing import Any
 
 from inventory import TestRef, discover_cpp_tests, discover_rust_tests
+from suites import SUITES
 
 
 ALLOWED_STATUSES = {"covered", "missing", "not-applicable", "blocked"}
+ALLOWED_RUST_PACKAGES = frozenset(
+    {
+        "mooncake-store-client",
+        "mooncake-store-core",
+        "mooncake-store-master",
+        "transfer-engine-ffi",
+    }
+)
 ALLOWED_NA_CATEGORIES = frozenset(
     {
         "language-unrepresentable",
@@ -39,12 +48,12 @@ def _finding(code: str, reference: str, message: str) -> Finding:
     return Finding(code=code, reference=reference, message=message)
 
 
-def _cpp_key(entry: dict[str, Any]) -> tuple[str, str] | None:
-    cpp = entry.get("cpp")
-    if not isinstance(cpp, dict):
+def _reference_key(entry: dict[str, Any]) -> tuple[str, str] | None:
+    reference = entry.get("reference")
+    if not isinstance(reference, dict):
         return None
-    file_name = cpp.get("file")
-    test_name = cpp.get("test")
+    file_name = reference.get("file")
+    test_name = reference.get("test")
     if not isinstance(file_name, str) or not isinstance(test_name, str):
         return None
     if not file_name.strip() or not test_name.strip():
@@ -64,28 +73,47 @@ def _rust_key(value: Any) -> tuple[str, str] | None:
     return file_name, test_name
 
 
+def _suite_is_trusted(manifest: dict[str, Any]) -> bool:
+    value = manifest.get("suite")
+    if not isinstance(value, dict):
+        return False
+    suite_id = value.get("id")
+    expected = SUITES.get(suite_id) if isinstance(suite_id, str) else None
+    return bool(
+        expected
+        and value.get("framework") == expected.framework
+        and value.get("reference_root") == expected.reference_root
+    )
+
+
 def summarize_manifest(manifest: dict[str, Any]) -> dict[str, int]:
     entries = [
         entry for entry in manifest.get("entries", []) if isinstance(entry, dict)
     ]
     statuses = Counter(entry.get("status") for entry in entries)
-    primary_owners: Counter[tuple[str, str]] = Counter()
+    rust_references: list[tuple[str, str]] = []
+    owners: Counter[tuple[str, str]] = Counter()
+    multi_test_rows = 0
     for entry in entries:
         if entry.get("status") not in {"covered", "blocked"}:
             continue
-        rust_keys = {
+        rust_keys = [
             rust_key
             for value in entry.get("rust", [])
             if (rust_key := _rust_key(value)) is not None
-        }
-        primary_owners.update(rust_keys)
+        ]
+        rust_references.extend(rust_keys)
+        owners.update(set(rust_keys))
+        multi_test_rows += len(set(rust_keys)) > 1
     return {
-        "cpp_total": len(entries),
+        "reference_total": len(entries),
         "applicable": sum(
             statuses.get(status, 0) for status in ("covered", "missing", "blocked")
         ),
-        "unique_primary": len(primary_owners),
-        "duplicate_primary": sum(count > 1 for count in primary_owners.values()),
+        "rust_references": len(rust_references),
+        "unique_rust_tests": len(owners),
+        "shared_rust_tests": sum(count > 1 for count in owners.values()),
+        "multi_test_rows": multi_test_rows,
         "covered": statuses.get("covered", 0),
         "missing": statuses.get("missing", 0),
         "blocked": statuses.get("blocked", 0),
@@ -95,13 +123,21 @@ def summarize_manifest(manifest: dict[str, Any]) -> dict[str, int]:
 
 def validate_manifest(
     manifest: dict[str, Any],
-    cpp_refs: set[TestRef],
+    reference_refs: set[TestRef],
     rust_refs: set[TestRef],
 ) -> list[Finding]:
     findings: list[Finding] = []
-    if manifest.get("schema_version") != 1:
+    if manifest.get("schema_version") != 2:
         findings.append(
-            _finding("invalid-schema-version", "manifest", "schema_version must be 1")
+            _finding("invalid-schema-version", "manifest", "schema_version must be 2")
+        )
+    if not _suite_is_trusted(manifest):
+        findings.append(
+            _finding(
+                "invalid-suite",
+                "manifest",
+                "suite must match one trusted reference-suite definition",
+            )
         )
 
     entries = manifest.get("entries")
@@ -110,20 +146,19 @@ def validate_manifest(
             _finding("invalid-entries", "manifest", "entries must be a JSON array")
         ]
 
-    cpp_inventory = {(ref.file, ref.name) for ref in cpp_refs}
+    reference_inventory = {(ref.file, ref.name) for ref in reference_refs}
     rust_inventory = {(ref.file, ref.name) for ref in rust_refs}
     entry_keys = [
-        _cpp_key(entry) if isinstance(entry, dict) else None for entry in entries
+        _reference_key(entry) if isinstance(entry, dict) else None for entry in entries
     ]
     counts = Counter(key for key in entry_keys if key is not None)
-    primary_owners: dict[tuple[str, str], list[str]] = {}
 
-    for key in sorted(cpp_inventory - set(counts)):
+    for key in sorted(reference_inventory - set(counts)):
         findings.append(
             _finding(
-                "unmapped-cpp-test",
+                "unmapped-reference-test",
                 f"{key[0]}:{key[1]}",
-                "discovered C++ behavioral reference has no manifest entry",
+                "discovered reference test has no manifest entry",
             )
         )
 
@@ -132,17 +167,17 @@ def validate_manifest(
         if count > 1:
             findings.append(
                 _finding(
-                    "duplicate-cpp-reference",
+                    "duplicate-reference",
                     reference,
-                    f"C++ reference appears {count} times",
+                    f"reference appears {count} times",
                 )
             )
-        if key not in cpp_inventory:
+        if key not in reference_inventory:
             findings.append(
                 _finding(
-                    "stale-cpp-reference",
+                    "stale-reference",
                     reference,
-                    "manifest entry does not match a discovered C++ test",
+                    "manifest entry does not match a discovered reference test",
                 )
             )
 
@@ -154,14 +189,14 @@ def validate_manifest(
                 )
             )
             continue
-        key = _cpp_key(raw_entry)
+        key = _reference_key(raw_entry)
         reference = f"{key[0]}:{key[1]}" if key is not None else f"entries[{index}]"
         if key is None:
             findings.append(
                 _finding(
-                    "invalid-cpp-reference",
+                    "invalid-reference",
                     reference,
-                    "cpp.file and cpp.test must be nonempty strings",
+                    "reference.file and reference.test must be nonempty strings",
                 )
             )
 
@@ -171,7 +206,7 @@ def validate_manifest(
                 _finding(
                     "missing-behavior",
                     reference,
-                    "entry must describe the observable C++ behavior",
+                    "entry must describe the observable reference behavior",
                 )
             )
 
@@ -218,6 +253,15 @@ def validate_manifest(
                 )
                 continue
             rust_keys.append(rust_key)
+            package = PurePosixPath(rust_key[0]).parts[0]
+            if package not in ALLOWED_RUST_PACKAGES:
+                findings.append(
+                    _finding(
+                        "rust-test-outside-approved-packages",
+                        f"{rust_key[0]}:{rust_key[1]}",
+                        "Rust evidence must belong to an approved Store-facing package",
+                    )
+                )
             if rust_key not in rust_inventory:
                 findings.append(
                     _finding(
@@ -227,48 +271,27 @@ def validate_manifest(
                     )
                 )
 
-        if status in {"covered", "blocked"}:
-            for rust_key in set(rust_keys):
-                primary_owners.setdefault(rust_key, []).append(reference)
-
         reason = raw_entry.get("reason")
         if not isinstance(reason, str):
             findings.append(
                 _finding("invalid-reason", reference, "reason must be a string")
             )
             reason = ""
-        if status == "covered":
-            if not rust_keys:
-                findings.append(
-                    _finding(
-                        "covered-without-rust-test",
-                        reference,
-                        "covered entries require exactly one Rust primary test",
-                    )
+        if status == "covered" and not rust_keys:
+            findings.append(
+                _finding(
+                    "covered-without-rust-test",
+                    reference,
+                    "covered entries require at least one Rust evidence test",
                 )
-            elif len(rust_keys) > 1:
-                findings.append(
-                    _finding(
-                        "multiple-primary-rust-tests",
-                        reference,
-                        "covered entries require exactly one Rust primary test",
-                    )
-                )
+            )
         elif status == "blocked":
             if not rust_keys:
                 findings.append(
                     _finding(
                         "blocked-without-rust-test",
                         reference,
-                        "blocked entries require exactly one existing Rust primary test",
-                    )
-                )
-            elif len(rust_keys) > 1:
-                findings.append(
-                    _finding(
-                        "multiple-primary-rust-tests",
-                        reference,
-                        "blocked entries require exactly one Rust primary test",
+                        "blocked entries require at least one existing Rust evidence test",
                     )
                 )
             prerequisite = raw_entry.get("prerequisite")
@@ -285,7 +308,7 @@ def validate_manifest(
                 _finding(
                     "noncovered-with-rust-test",
                     reference,
-                    f"{status} entries must not claim a Rust primary test",
+                    f"{status} entries must not claim complete Rust evidence",
                 )
             )
         if status != "blocked" and "prerequisite" in raw_entry:
@@ -310,76 +333,49 @@ def validate_manifest(
             findings.append(
                 _finding("invalid-review", reference, "review must be an object")
             )
-        else:
-            oracle = review.get("oracle")
-            if not isinstance(oracle, str) or not oracle.strip():
-                findings.append(
-                    _finding(
-                        "missing-review-oracle",
-                        reference,
-                        "review.oracle must identify the inspected C++ path",
-                    )
-                )
-            if review.get("reviewed") is not True:
-                findings.append(
-                    _finding(
-                        "unreviewed-entry",
-                        reference,
-                        "review.reviewed must be true",
-                    )
-                )
-            na_category = review.get("na_category")
-            if status == "not-applicable":
-                if not isinstance(na_category, str) or not na_category.strip():
-                    findings.append(
-                        _finding(
-                            "missing-na-category",
-                            reference,
-                            "not-applicable entries require review.na_category",
-                        )
-                    )
-                elif na_category not in ALLOWED_NA_CATEGORIES:
-                    findings.append(
-                        _finding(
-                            "invalid-na-category",
-                            reference,
-                            "review.na_category must be one of "
-                            f"{sorted(ALLOWED_NA_CATEGORIES)}",
-                        )
-                    )
-            elif "na_category" in review:
-                findings.append(
-                    _finding(
-                        "unexpected-na-category",
-                        reference,
-                        "only not-applicable entries may set review.na_category",
-                    )
-                )
-            if status in {"covered", "blocked"}:
-                if review.get("primary_reviewed") is not True:
-                    findings.append(
-                        _finding(
-                            "missing-primary-review",
-                            reference,
-                            f"{status} entries require review.primary_reviewed=true",
-                        )
-                    )
-            elif "primary_reviewed" in review:
-                findings.append(
-                    _finding(
-                        "unexpected-primary-review",
-                        reference,
-                        "only covered or blocked entries may set review.primary_reviewed",
-                    )
-                )
-
-    for rust_key, owners in sorted(primary_owners.items()):
-        if len(owners) > 1:
+            continue
+        oracle = review.get("oracle")
+        if not isinstance(oracle, str) or not oracle.strip():
             findings.append(
                 _finding(
-                    "duplicate-primary-rust-test",
-                    f"{rust_key[0]}:{rust_key[1]}",
-                    "Rust primary test is reused by " + ", ".join(sorted(owners)),
+                    "missing-review-oracle",
+                    reference,
+                    "review.oracle must identify the inspected reference path",
+                )
+            )
+        if review.get("reviewed") is not True:
+            findings.append(
+                _finding(
+                    "unreviewed-entry",
+                    reference,
+                    "review.reviewed must be true",
+                )
+            )
+        na_category = review.get("na_category")
+        if status == "not-applicable":
+            if not isinstance(na_category, str) or not na_category.strip():
+                findings.append(
+                    _finding(
+                        "missing-na-category",
+                        reference,
+                        "not-applicable entries require review.na_category",
+                    )
+                )
+            elif na_category not in ALLOWED_NA_CATEGORIES:
+                findings.append(
+                    _finding(
+                        "invalid-na-category",
+                        reference,
+                        "review.na_category must be one of "
+                        f"{sorted(ALLOWED_NA_CATEGORIES)}",
+                    )
+                )
+        elif "na_category" in review:
+            findings.append(
+                _finding(
+                    "unexpected-na-category",
+                    reference,
+                    "only not-applicable entries may set review.na_category",
                 )
             )
 
@@ -402,13 +398,13 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        cpp_refs = set(discover_cpp_tests(args.cpp_root))
+        reference_refs = set(discover_cpp_tests(args.cpp_root))
         rust_refs = set(discover_rust_tests(args.rust_root))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         print(f"parity validation error: {error}", file=sys.stderr)
         return 2
 
-    findings = validate_manifest(manifest, cpp_refs, rust_refs)
+    findings = validate_manifest(manifest, reference_refs, rust_refs)
     for finding in findings:
         print(f"ERROR {finding.code} {finding.reference}: {finding.message}")
 
@@ -416,31 +412,21 @@ def main(argv: list[str] | None = None) -> int:
     summary = summarize_manifest(manifest)
     print(
         "summary "
-        + " ".join(
-            f"{label}={summary[key]}"
-            for label, key in (
-                ("cpp-total", "cpp_total"),
-                ("applicable", "applicable"),
-                ("unique-primary", "unique_primary"),
-                ("duplicate-primary", "duplicate_primary"),
-                ("covered", "covered"),
-                ("missing", "missing"),
-                ("blocked", "blocked"),
-                ("not-applicable", "not_applicable"),
-            )
-        )
+        + " ".join(f"{key.replace('_', '-')}={value}" for key, value in summary.items())
     )
-    for status in args.list_status:
-        for entry in entries:
-            if isinstance(entry, dict) and entry.get("status") == status:
-                cpp = entry.get("cpp", {})
-                print(
-                    f"{status} {cpp.get('file', '?')}:{cpp.get('test', '?')}: "
-                    f"{entry.get('behavior', '')} -- {entry.get('reason', '')}"
-                )
+
+    requested_statuses = set(args.list_status)
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict) or entry.get("status") not in requested_statuses:
+            continue
+        reference = entry.get("reference", {})
+        print(
+            f"{entry.get('status')} {reference.get('file', '')}:"
+            f"{reference.get('test', '')}: {entry.get('reason', '')}"
+        )
 
     if findings:
-        return 1
+        return 2
     if args.require_complete and (summary["missing"] or summary["blocked"]):
         return 1
     return 0
