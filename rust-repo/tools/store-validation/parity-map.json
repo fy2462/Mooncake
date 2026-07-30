@@ -359,7 +359,7 @@
       "boundary": ["cpp-only", "thread-pool"],
       "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.BasicTaskExecution"},
       "reason": "Rust Store uses Tokio and component-owned workers rather than the C++ ThreadPool class; this internal class contract is outside the Rust product boundary.",
-      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -367,7 +367,7 @@
       "boundary": ["cpp-only", "thread-pool"],
       "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.ParallelExecution"},
       "reason": "Rust Store uses Tokio and component-owned workers rather than the C++ ThreadPool class; this internal scheduler implementation is outside the Rust product boundary.",
-      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -375,7 +375,7 @@
       "boundary": ["cpp-only", "thread-pool"],
       "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.ProperStop"},
       "reason": "Rust Store has component-specific shutdown contracts rather than the C++ ThreadPool class; its enqueue-after-stop exception is not a Rust Store API.",
-      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -383,7 +383,7 @@
       "boundary": ["cpp-only", "thread-pool"],
       "cpp": {"file": "thread_pool_test.cpp", "test": "ThreadPoolTest.StressTest"},
       "reason": "Rust Store does not use the C++ ThreadPool class; workload and fault tests cover its Tokio/component worker behavior at product boundaries.",
-      "review": {"oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/thread_pool_test.cpp and the C++ ThreadPool class", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -579,7 +579,7 @@
       "boundary": ["cpp-only", "uds", "acceptor-lifecycle"],
       "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.StopWakesAcceptLoop"},
       "reason": "Rust Dummy IPC exposes a caller-owned one-shot listener rather than the C++ background UdsAcceptor, so this internal accept-loop lifecycle is not a Rust API contract.",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor, and Rust DummyIpcChannel::listen_once", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor, and Rust DummyIpcChannel::listen_once", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -587,7 +587,7 @@
       "boundary": ["cpp-only", "uds", "acceptor-lifecycle"],
       "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.StopWakesActiveClientHandler"},
       "reason": "Rust Dummy IPC does not own a background acceptor or handler threads; connection and thread cancellation remain with its caller.",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::stop, and Rust DummyIpcChannel", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::stop, and Rust DummyIpcChannel", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -611,7 +611,7 @@
       "boundary": ["cpp-only", "uds", "connector-implementation"],
       "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectClearsSendTimeout"},
       "reason": "Rust UnixStream::connect does not install a temporary SO_SNDTIMEO, so clearing that C++ implementation detail is not applicable.",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsConnector, and Rust DummyIpcChannel::connect", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsConnector, and Rust DummyIpcChannel::connect", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -619,7 +619,7 @@
       "boundary": ["cpp-only", "uds", "acceptor-lifecycle"],
       "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.StartRequiresRegisteredHandler"},
       "reason": "Rust Dummy IPC exposes no handler-registration or background acceptor API; callers invoke the one-shot listener and process the returned channel directly.",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::start, and Rust DummyIpcChannel::listen_once", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::start, and Rust DummyIpcChannel::listen_once", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -645,7 +645,7 @@
       "boundary": ["cpp-only", "snapshot", "zstd", "raw-pointer"],
       "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_RawPointer"},
       "reason": "Rust Zstd APIs consume safe byte slices/readers rather than exposing the C++ raw-pointer overload; byte preservation is covered at the safe API boundary.",
-      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust zstd::stream APIs", "reviewed": true},
+      "review": {"na_category": "cpp-build-or-abi", "oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust zstd::stream APIs", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -653,7 +653,7 @@
       "boundary": ["cpp-only", "snapshot", "zstd", "overload"],
       "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Roundtrip_WithExplicitSize"},
       "reason": "Rust streaming decompression discovers the output length and has no caller-supplied exact-size overload; exact byte roundtrip is covered separately.",
-      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust zstd streaming decoder", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust zstd streaming decoder", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -688,7 +688,7 @@
       "boundary": ["cpp-only", "snapshot", "zstd", "raw-pointer"],
       "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.DecompressWithMaxSize_NullInput_Throws"},
       "reason": "Safe Rust decompression accepts a slice/reader, which cannot represent a null pointer with an independent length; this raw-pointer validation contract is not applicable.",
-      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust slice safety", "reviewed": true},
+      "review": {"na_category": "language-unrepresentable", "oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust slice safety", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1501,7 +1501,7 @@
       "boundary": ["cpp-only", "synchronization", "shared-mutex"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.CanLockExclusive"},
       "reason": "Rust uses parking_lot/std lock guards directly and has no SharedMutex compatibility wrapper whose lock/unlock surface needs parity testing.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp CanLockExclusive and Rust direct lock-guard usage", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp CanLockExclusive and Rust direct lock-guard usage", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1509,7 +1509,7 @@
       "boundary": ["cpp-only", "synchronization", "shared-mutex"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.CanLockShared"},
       "reason": "Rust uses parking_lot/std RwLock read guards directly rather than exposing the C++ lock_shared/unlock_shared wrapper API.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp CanLockShared and Rust direct RwLock guard usage", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp CanLockShared and Rust direct RwLock guard usage", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1517,7 +1517,7 @@
       "boundary": ["cpp-only", "synchronization", "shared-mutex", "exclusive"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.ExclusiveAccessIsMutuallyExclusive"},
       "reason": "This test checks std::shared_mutex primitive semantics delegated by the C++ wrapper; Rust delegates the same responsibility to maintained lock libraries without a corresponding Store abstraction.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp ExclusiveAccessIsMutuallyExclusive and mooncake-store/include/mutex.h", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp ExclusiveAccessIsMutuallyExclusive and mooncake-store/include/mutex.h", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1525,7 +1525,7 @@
       "boundary": ["cpp-only", "synchronization", "shared-mutex", "shared"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.SharedAccessIsConcurrent"},
       "reason": "This is a std::shared_mutex conformance check; Rust uses parking_lot/std RwLock guards directly and does not own an equivalent wrapper implementation.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp SharedAccessIsConcurrent and Rust RwLock usage", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp SharedAccessIsConcurrent and Rust RwLock usage", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1533,7 +1533,7 @@
       "boundary": ["cpp-only", "synchronization", "shared-mutex", "contention"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.WriterBlocksReaders"},
       "reason": "The assertion is delegated std::shared_mutex behavior and the Rust Store has no C++-compatible SharedMutex API boundary.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp WriterBlocksReaders and mooncake-store/include/mutex.h", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp WriterBlocksReaders and mooncake-store/include/mutex.h", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1541,7 +1541,7 @@
       "boundary": ["cpp-only", "synchronization", "raii", "exclusive"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.LocksOnConstructionExclusive"},
       "reason": "Rust lock guards encode acquisition and Drop-based release in the type system, so the C++ pointer-based RAII wrapper is intentionally absent.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp LocksOnConstructionExclusive and Rust lock guards", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp LocksOnConstructionExclusive and Rust lock guards", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1549,7 +1549,7 @@
       "boundary": ["cpp-only", "synchronization", "raii", "shared"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.LocksOnConstructionShared"},
       "reason": "Rust RwLock read guards provide native scoped ownership and Drop release without the C++ SharedMutexLocker compatibility type.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp LocksOnConstructionShared and Rust RwLock read guards", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp LocksOnConstructionShared and Rust RwLock read guards", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1557,7 +1557,7 @@
       "boundary": ["cpp-only", "synchronization", "raii", "manual-unlock"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.ManualLockUnlock"},
       "reason": "Rust lock guards cannot be constructed from null pointers; early release is expressed by dropping a guard, eliminating this wrapper-specific state machine.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp ManualLockUnlock and Rust guard ownership", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp ManualLockUnlock and Rust guard ownership", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1565,7 +1565,7 @@
       "boundary": ["cpp-only", "synchronization", "raii", "try-lock"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.TryLockSuccess"},
       "reason": "The mutable locked flag and re-lock refusal belong to the C++ SharedMutexLocker wrapper; Rust returns an owned optional guard from try_lock instead.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp TryLockSuccess and Rust try_lock guard semantics", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp TryLockSuccess and Rust try_lock guard semantics", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1573,7 +1573,7 @@
       "boundary": ["cpp-only", "synchronization", "raii", "shared", "try-lock"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.TryLockSharedSuccess"},
       "reason": "This tests the C++ wrapper's internal lock-state flag; Rust try_read returns a scoped guard and exposes no equivalent re-lockable locker object.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp TryLockSharedSuccess and Rust try_read guard semantics", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp TryLockSharedSuccess and Rust try_read guard semantics", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1581,7 +1581,7 @@
       "boundary": ["cpp-only", "synchronization", "raii", "null-pointer"],
       "cpp": {"file": "mutex_test.cpp", "test": "SharedMutexTest.HandlesNullptrSafely"},
       "reason": "Safe Rust lock guards have no null-pointer construction path, so this defensive C++ compatibility behavior is unrepresentable.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp HandlesNullptrSafely and Rust safe lock APIs", "reviewed": true},
+      "review": {"na_category": "language-unrepresentable", "oracle": "mooncake-store/tests/mutex_test.cpp HandlesNullptrSafely and Rust safe lock APIs", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1589,7 +1589,7 @@
       "boundary": ["cpp-only", "synchronization", "spin-lock"],
       "cpp": {"file": "mutex_test.cpp", "test": "SpinLockTest.LockUnlockTest"},
       "reason": "Rust Store does not port the C++ atomic_flag SpinLock or expose is_locked; it uses maintained mutex/RwLock implementations for its synchronization sites.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp LockUnlockTest and Rust synchronization usage", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp LockUnlockTest and Rust synchronization usage", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1597,7 +1597,7 @@
       "boundary": ["cpp-only", "synchronization", "spin-lock", "raii"],
       "cpp": {"file": "mutex_test.cpp", "test": "SpinLockTest.SpinLockerTest"},
       "reason": "Rust uses native scoped lock guards and has no SpinLocker compatibility wrapper to validate.",
-      "review": {"oracle": "mooncake-store/tests/mutex_test.cpp SpinLockerTest and Rust lock guards", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/mutex_test.cpp SpinLockerTest and Rust lock guards", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1669,7 +1669,7 @@
       "boundary": ["cpp-only", "serializer", "template-api", "round-trip"],
       "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassSerialization"},
       "reason": "Rust Store uses typed serde/prost/rmp-serde codecs and does not port the C++ serialize_to template or native-layout byte writer API.",
-      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerialization and Rust typed codec usage", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerialization and Rust typed codec usage", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1677,7 +1677,7 @@
       "boundary": ["cpp-only", "serializer", "shared-pointer"],
       "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassSerializationWithSharedPtr"},
       "reason": "Rust serializers operate on borrowed/owned typed values without a shared_ptr overload, so this C++ ownership convenience boundary is absent.",
-      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerializationWithSharedPtr and Rust ownership model", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerializationWithSharedPtr and Rust ownership model", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1685,7 +1685,7 @@
       "boundary": ["cpp-only", "serializer", "shared-pointer", "null-pointer"],
       "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassSerializationNullPointer"},
       "reason": "Rust has no nullable shared_ptr serializer overload; optional values use explicit Option encoding rather than this C++ invalid-pointer contract.",
-      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerializationNullPointer and Rust typed codecs", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassSerializationNullPointer and Rust typed codecs", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1693,7 +1693,7 @@
       "boundary": ["cpp-only", "serializer", "raw-byte-buffer", "corruption"],
       "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassDeserializationCorruptedBuffer"},
       "reason": "This exercises the removed C++ raw-memory reader and example class; Rust codec corruption behavior is tested at each actual persisted/wire format instead.",
-      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassDeserializationCorruptedBuffer and Rust format-specific decoders", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassDeserializationCorruptedBuffer and Rust format-specific decoders", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1701,7 +1701,7 @@
       "boundary": ["cpp-only", "serializer", "exception-adapter"],
       "cpp": {"file": "serializer_test.cpp", "test": "SerializerTest.ExampleClassDeserializationWithException"},
       "reason": "Safe Rust codecs return Result and do not have a C++ exception-to-null adapter boundary.",
-      "review": {"oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassDeserializationWithException and Rust Result-based codecs", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/serializer_test.cpp ExampleClassDeserializationWithException and Rust Result-based codecs", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1990,7 +1990,7 @@
       "boundary": ["cpp-only", "client", "transfer", "memcpy-operation"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.MemcpyOperationBasic"},
       "reason": "Rust does not expose a raw-pointer MemcpyOperation record; local copies use slice/owned-buffer methods that validate bounds at the call site.",
-      "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyOperationBasic and Rust transfer_local/memory_ffi copy architecture", "reviewed": true},
+      "review": {"na_category": "cpp-build-or-abi", "oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyOperationBasic and Rust transfer_local/memory_ffi copy architecture", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -1998,7 +1998,7 @@
       "boundary": ["cpp-only", "client", "transfer", "operation-state"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.MemcpyOperationState"},
       "reason": "Rust local-copy calls complete synchronously and return StoreResult directly, so there is no separately observable MemcpyOperationState or strategy-tagged future.",
-      "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyOperationState and Rust synchronous local_memcpy APIs", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyOperationState and Rust synchronous local_memcpy APIs", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -2006,7 +2006,7 @@
       "boundary": ["cpp-only", "client", "transfer", "memcpy-worker-pool"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.MemcpyWorkerPoolBasic"},
       "reason": "Rust intentionally performs local copies synchronously through owned memory capabilities and has no memcpy worker pool or shared completion-state API.",
-      "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyWorkerPoolBasic and Rust local_memcpy implementation", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyWorkerPoolBasic and Rust local_memcpy implementation", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -2014,7 +2014,7 @@
       "boundary": ["cpp-only", "client", "transfer", "memcpy-worker-pool", "batch"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.MemcpyWorkerPoolMultipleOperations"},
       "reason": "Rust has no batched MemcpyTask abstraction; its local read/write paths copy each bounded replica region synchronously and propagate failure immediately.",
-      "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyWorkerPoolMultipleOperations and Rust local transfer architecture", "reviewed": true},
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyWorkerPoolMultipleOperations and Rust local transfer architecture", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -2030,7 +2030,7 @@
       "boundary": ["cpp-only", "client", "transfer", "enum-abi", "formatting"],
       "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.TransferStrategyEnum"},
       "reason": "Rust dispatches through typed control flow and StoreResult without exposing the C++ TransferStrategy integer ABI or stream formatter.",
-      "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp TransferStrategyEnum and Rust transfer dispatch architecture", "reviewed": true},
+      "review": {"na_category": "cpp-build-or-abi", "oracle": "mooncake-store/tests/transfer_task_test.cpp TransferStrategyEnum and Rust transfer dispatch architecture", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
     {
@@ -2418,7 +2418,7 @@
       "behavior": "A ClientBufferAllocator created with SPDK DMA ownership releases its arena through spdk_free on destruction.", "boundary": ["cpp-only", "client", "spdk", "dma", "destructor"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SpdkDmaAllocatorDestroysWithSpdkFree"},
       "reason": "Rust ClientBufferAllocator owns a Vec arena and never accepts SPDK DMA ownership; native registered/accelerator allocations use the separate memory_ffi ownership types.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SpdkDmaAllocatorDestroysWithSpdkFree and Rust buffer_allocator/memory_ffi ownership split", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp SpdkDmaAllocatorDestroysWithSpdkFree and Rust buffer_allocator/memory_ffi ownership split", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "Multiple live client-buffer allocations occupy distinct regions and all capacity returns when their RAII handles drop.", "boundary": ["client", "buffer", "allocation", "raii"],
@@ -2448,25 +2448,25 @@
       "behavior": "Moving a C++ BufferHandle transfers ownership and nulls the source handle.", "boundary": ["language-specific", "client", "buffer", "move-semantics"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.BufferHandleMoveConstructor"},
       "reason": "Rust moves BufferHandle ownership by language semantics and makes the source binding statically unusable, so a runtime null-source assertion is unrepresentable.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp BufferHandleMoveConstructor and Rust affine move semantics", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "language-unrepresentable", "oracle": "mooncake-store/tests/client_buffer_test.cpp BufferHandleMoveConstructor and Rust affine move semantics", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ pointer helper splits a BufferHandle into contiguous nonempty slices capped at kMaxSliceSize.", "boundary": ["cpp-only", "client", "buffer", "pointer-slices"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SplitIntoSlices"},
       "reason": "Rust transfer APIs consume checked byte slices directly and do not expose the removed raw-pointer Slice helper.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlices and Rust slice-based transfer APIs", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlices and Rust slice-based transfer APIs", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ pointer helper emits one slice when a buffer is smaller than kMaxSliceSize.", "boundary": ["cpp-only", "client", "buffer", "pointer-slices"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SplitIntoSlicesSmallBuffer"},
       "reason": "Rust transfer APIs consume checked byte slices directly and do not expose the removed raw-pointer Slice helper.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlicesSmallBuffer and Rust slice-based transfer APIs", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlicesSmallBuffer and Rust slice-based transfer APIs", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ raw pointer and length overload produces bounded slices covering the complete range.", "boundary": ["cpp-only", "client", "buffer", "raw-pointer"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.SplitIntoSlicesPtrLength"},
       "reason": "Safe Rust represents pointer and length as one slice and does not need or expose this raw-pointer reconstruction helper.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlicesPtrLength and Rust safe slices", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "cpp-build-or-abi", "oracle": "mooncake-store/tests/client_buffer_test.cpp SplitIntoSlicesPtrLength and Rust safe slices", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "Eight page-sized allocations exactly exhaust an eight-page arena; a ninth fails and dropping handles makes capacity reusable.", "boundary": ["client", "buffer", "allocation", "exhaustion"],
@@ -2478,37 +2478,37 @@
       "behavior": "The C++ variant helper obtains total bytes from MemoryDescriptor.buffer_descriptor.", "boundary": ["cpp-only", "client", "replica-variant", "size"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.CalculateTotalSizeMemoryReplica"},
       "reason": "Rust normalizes every replica kind to ReplicaDescriptor.size, eliminating the C++ descriptor-variant size visitor.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeMemoryReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeMemoryReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ variant helper obtains total bytes from DiskDescriptor.object_size.", "boundary": ["cpp-only", "client", "replica-variant", "size"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.CalculateTotalSizeDiskReplica"},
       "reason": "Rust normalizes every replica kind to ReplicaDescriptor.size, eliminating the C++ descriptor-variant size visitor.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeDiskReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeDiskReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ Memory descriptor size helper preserves zero.", "boundary": ["cpp-only", "client", "replica-variant", "zero-size"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.CalculateTotalSizeZeroSizeMemoryReplica"},
       "reason": "Rust normalizes every replica kind to ReplicaDescriptor.size and has no descriptor-variant size visitor.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeZeroSizeMemoryReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp CalculateTotalSizeZeroSizeMemoryReplica and Rust unified ReplicaDescriptor", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ allocateSlices helper maps a Memory descriptor onto caller-owned raw memory.", "boundary": ["cpp-only", "client", "memory-replica", "raw-pointer"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesMemoryReplica"},
       "reason": "Rust transfer planning accepts caller-owned byte slices and ReplicaDescriptor.size directly; it has no raw-pointer allocateSlices adapter.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesMemoryReplica and Rust transfer planners", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesMemoryReplica and Rust transfer planners", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ allocateSlices helper partitions a Disk descriptor's object size over caller-owned raw memory.", "boundary": ["cpp-only", "client", "disk-replica", "raw-pointer"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesDiskReplica"},
       "reason": "Rust transfer planning accepts caller-owned byte slices and ReplicaDescriptor.size directly; it has no raw-pointer allocateSlices adapter.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesDiskReplica and Rust transfer planners", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesDiskReplica and Rust transfer planners", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "The C++ allocateSlices helper preserves a zero-size Memory slice at the supplied pointer.", "boundary": ["cpp-only", "client", "memory-replica", "zero-size"],
       "cpp": {"file": "client_buffer_test.cpp", "test": "ClientBufferTest.AllocateSlicesZeroSizeMemoryReplica"},
       "reason": "Rust rejects zero-length object transfers at API validation and has no raw-pointer allocateSlices adapter.",
-      "review": {"oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesZeroSizeMemoryReplica and Rust transfer validation", "reviewed": true}, "rust": [], "status": "not-applicable"
+      "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/client_buffer_test.cpp AllocateSlicesZeroSizeMemoryReplica and Rust transfer validation", "reviewed": true}, "rust": [], "status": "not-applicable"
     },
     {
       "behavior": "Two Store clients preserve exact bytes through put, query, Transfer Engine routing, and get.", "boundary": ["client", "master", "tcp", "end-to-end"],
@@ -2983,19 +2983,19 @@
     },
     {
       "behavior": "setup_dummy maps the C++ shared-memory hot cache so a warmed buffer is located in that mapping and its mapped bytes match the payload.",
-      "boundary": ["cpp-only", "dummy-client", "hot-cache", "shared-memory", "memfd", "zero-copy"],
+      "boundary": ["client", "dummy-client", "hot-cache", "shared-memory", "memfd", "zero-copy", "correctness"],
       "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.ShmMappingEstablished"},
-      "reason": "This is the deferred C++ cross-process SHM memfd mapping and zero-copy pointer contract. Rust intentionally rejects MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1; hot_cache.rs::shared_memory_mode_fails_closed verifies that fail-closed policy rather than replacing the mapping behavior.",
+      "reason": "Rust currently rejects MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1, but the C++ case has a client-visible correctness result. Add unique test cpp_parity_dummy_client_shm_mapping_establishes_zero_copy_hot_buffer in mooncake-store-client/tests/test_dummy_shm_hot_cache.rs: enable SHM, establish the real/dummy-client mapping, put and warm a 16 MiB 'S' payload, fetch it through DummyClient get_buffer, and assert the owner-bearing buffer is backed by the shared mapping with exact size and bytes. hot_cache.rs::shared_memory_mode_fails_closed proves only the current implementation gap.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp ShmMappingEstablished, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
       "rust": [],
-      "status": "not-applicable"
+      "status": "missing"
     },
     {
       "behavior": "Repeated single-key shared-memory hot-cache get_buffer acquisitions are faster than allocator-fallback acquisitions for the same payload size.",
       "boundary": ["cpp-only", "dummy-client", "hot-cache", "shared-memory", "zero-copy", "performance"],
       "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.Perf_HotCacheVsFallback"},
       "reason": "This compares the deferred C++ SHM zero-copy acquire path against allocator fallback latency. Rust fails closed when MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1, so no corresponding SHM performance requirement is supported.",
-      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_HotCacheVsFallback, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
+      "review": {"na_category": "excluded-performance-scope", "oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_HotCacheVsFallback, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
       "rust": [],
       "status": "not-applicable"
     },
@@ -3004,7 +3004,7 @@
       "boundary": ["cpp-only", "dummy-client", "hot-cache", "shared-memory", "zero-copy", "batch-get-buffer", "performance"],
       "cpp": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.Perf_BatchHotVsCold"},
       "reason": "This compares the deferred C++ SHM zero-copy batch-acquire path against fallback latency. Rust fails closed when MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1, so no corresponding SHM batch performance requirement is supported.",
-      "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_BatchHotVsCold, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
+      "review": {"na_category": "excluded-performance-scope", "oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp Perf_BatchHotVsCold, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs", "reviewed": true},
       "rust": [],
       "status": "not-applicable"
     },
