@@ -46,12 +46,44 @@ class ValidateParityTest(unittest.TestCase):
         self.assertIn("missing-rust-test", {item.code for item in findings})
 
     def test_not_applicable_requires_nonempty_reviewed_reason(self):
+        not_applicable = entry(status="not-applicable", rust=[], reason="")
+        not_applicable["review"]["na_category"] = "absent-rust-product-boundary"
         manifest = {
             "schema_version": 1,
-            "entries": [entry(status="not-applicable", rust=[], reason="")],
+            "entries": [not_applicable],
         }
         findings = validate_manifest(manifest, {CPP_REF}, set())
         self.assertIn("missing-disposition-reason", {item.code for item in findings})
+
+    def test_not_applicable_requires_allowed_na_category(self):
+        missing = entry(
+            status="not-applicable",
+            rust=[],
+            reason="The C++ helper has no Rust product boundary.",
+        )
+        findings = validate_manifest(
+            {"schema_version": 1, "entries": [missing]}, {CPP_REF}, set()
+        )
+        self.assertIn("missing-na-category", {item.code for item in findings})
+
+        invalid = entry(
+            status="not-applicable",
+            rust=[],
+            reason="The C++ helper has no Rust product boundary.",
+        )
+        invalid["review"]["na_category"] = "too-expensive"
+        findings = validate_manifest(
+            {"schema_version": 1, "entries": [invalid]}, {CPP_REF}, set()
+        )
+        self.assertIn("invalid-na-category", {item.code for item in findings})
+
+    def test_non_na_row_rejects_stale_na_category(self):
+        covered = entry()
+        covered["review"]["na_category"] = "absent-rust-product-boundary"
+        findings = validate_manifest(
+            {"schema_version": 1, "entries": [covered]}, {CPP_REF}, {RUST_REF}
+        )
+        self.assertIn("unexpected-na-category", {item.code for item in findings})
 
     def test_rejects_duplicate_and_stale_cpp_references(self):
         duplicate = entry()

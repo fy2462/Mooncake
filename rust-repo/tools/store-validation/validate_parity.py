@@ -15,6 +15,17 @@ from inventory import TestRef, discover_cpp_tests, discover_rust_tests
 
 
 ALLOWED_STATUSES = {"covered", "missing", "not-applicable", "blocked"}
+ALLOWED_NA_CATEGORIES = frozenset(
+    {
+        "language-unrepresentable",
+        "absent-rust-product-boundary",
+        "cpp-build-or-abi",
+        "noncanonical-duplicate-source",
+        "excluded-component-internal",
+        "no-executable-cpp-oracle",
+        "excluded-performance-scope",
+    }
+)
 
 
 @dataclass(frozen=True, order=True)
@@ -238,6 +249,33 @@ def validate_manifest(
                         "unreviewed-entry",
                         reference,
                         "review.reviewed must be true",
+                    )
+                )
+            na_category = review.get("na_category")
+            if status == "not-applicable":
+                if not isinstance(na_category, str) or not na_category.strip():
+                    findings.append(
+                        _finding(
+                            "missing-na-category",
+                            reference,
+                            "not-applicable entries require review.na_category",
+                        )
+                    )
+                elif na_category not in ALLOWED_NA_CATEGORIES:
+                    findings.append(
+                        _finding(
+                            "invalid-na-category",
+                            reference,
+                            "review.na_category must be one of "
+                            f"{sorted(ALLOWED_NA_CATEGORIES)}",
+                        )
+                    )
+            elif "na_category" in review:
+                findings.append(
+                    _finding(
+                        "unexpected-na-category",
+                        reference,
+                        "only not-applicable entries may set review.na_category",
                     )
                 )
 
