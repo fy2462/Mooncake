@@ -204,74 +204,14 @@
     },
     {"behavior":"An RPC bind host already expressed as a bare IPv4 address passes through unchanged and can start the RPC server.","boundary":["client","rpc","configuration"],"cpp":{"file":"host_port_fix_test.cpp","test":"HostPortFixTest.BareHostPassesThrough"},"reason":"Existing Rust evidence mooncake-store-client/src/client/endpoint.rs:explicit_and_bare_ipv4_derive_bindable_rpc_host is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_host_port_fix_test_cpp_hostportfixtest_barehostpassesthrough_2065631d in mooncake-store-client/src/client/endpoint.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/host_port_fix_test.cpp and getHostNameWithoutPort","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"A configured IPv4 host with a data-plane port is stripped to the bare host before RPC server binding, allowing the server to start.","boundary":["client","rpc","configuration"],"cpp":{"file":"host_port_fix_test.cpp","test":"HostPortFixTest.StripsPortForRpcServer"},"reason":"Existing Rust evidence mooncake-store-client/src/client/endpoint.rs:explicit_and_bare_ipv4_derive_bindable_rpc_host is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_host_port_fix_test_cpp_hostportfixtest_stripsportforrpcserver_86722d0a in mooncake-store-client/src/client/endpoint.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/host_port_fix_test.cpp, getHostNameWithoutPort, and coro_rpc_server startup","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Decimal and 0x/0X hexadecimal object keys parse as complete unsigned sequence hashes, while empty, malformed, and trailing-garbage keys are rejected.",
-      "boundary": ["master", "kv-event"],
-      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventKeyUtilTest.ParseSeqHashFromObjectKey"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and kv_event/key_util.h", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "test_parse_seq_hash_from_object_key_matches_cpp"}],
-      "status": "covered"
-    },
-    {
-      "behavior": "A disabled KV-event publisher is a no-op for stored and removed notifications and leaves published and dropped counters at zero.",
-      "boundary": ["master", "kv-event"],
-      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventPublisherTest.DisabledPublisherIsNoop"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher disabled path", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "disabled_publisher_is_noop_and_keeps_counters_zero"}],
-      "status": "covered"
-    },
-    {
-      "behavior": "When the KV-event queue reaches capacity, the publisher drops the oldest event, retains newer events, and increments its dropped-event accounting.",
-      "boundary": ["master", "kv-event", "backpressure"],
-      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventPublisherTest.DropsOldestWhenQueueFull"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher queue path", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "test_queue_capacity_drops_oldest_and_reserves_sequence_gap"}],
-      "status": "covered"
-    },
-    {
-      "behavior": "Publishing an SGLang object key over ZMQ emits a three-frame message with sequence, stored event type, backend, tenant, group, object key, empty sequence hashes, and successful publish statistics.",
-      "boundary": ["master", "kv-event", "zmq"],
-      "cpp": {"file": "kv_event_publisher_test.cpp", "test": "KvEventPublisherTest.PublishesSglangObjectKeyOverZmq"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher ZMQ encoding/publish paths", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/kv_event.rs", "test": "test_publish_sglang_object_key_over_zmq"}],
-      "status": "covered"
-    },
-    {
-      "behavior": "Pinned-memory registration rejects duplicate and overlapping ranges while accepting an adjacent range, and each accepted range unregisters exactly once when released.",
-      "boundary": ["transfer-engine-ffi", "memory-registration", "ownership"],
-      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.OverlapAndDuplicateAreRejected"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "overlap_is_rejected_but_adjacent_ranges_are_allowed"}], "status": "covered"
-    },
-    {
-      "behavior": "Pinned-memory quota rejects capacity beyond the configured limit, releasing a region refunds capacity, and a later full-size registration succeeds and unregisters once.",
-      "boundary": ["transfer-engine-ffi", "memory-registration", "quota"],
-      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.QuotaRejectsAndReleaseRefunds"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager quota accounting", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "quota_rejects_and_release_refunds"}], "status": "covered"
-    },
-    {
-      "behavior": "A failed native pin operation refunds its reservation so retrying the same range after native recovery succeeds and later unregisters exactly once.",
-      "boundary": ["transfer-engine-ffi", "memory-registration", "error-recovery"],
-      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.RegisterFailureRefundsReservation"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager registration rollback", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "registration_failure_refunds_reservation"}], "status": "covered"
-    },
-    {
-      "behavior": "A failed native unregister retains the address and quota reservation, preventing overlapping or capacity-consuming replacement registrations from reusing unsafe memory.",
-      "boundary": ["transfer-engine-ffi", "memory-registration", "failure-safety"],
-      "cpp": {"file": "registered_pinned_memory_test.cpp", "test": "RegisteredPinnedMemoryManagerTest.UnregisterFailureRetainsReservation"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager unregister failure path", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/pinned_memory.rs", "test": "runtime_unloading_releases_but_unregister_error_retains_reservation"}], "status": "covered"
-    },
+    {"behavior":"Decimal and 0x/0X hexadecimal object keys parse as complete unsigned sequence hashes, while empty, malformed, and trailing-garbage keys are rejected.","boundary":["master","kv-event"],"cpp":{"file":"kv_event_publisher_test.cpp","test":"KvEventKeyUtilTest.ParseSeqHashFromObjectKey"},"reason":"","review":{"oracle":"mooncake-store/tests/kv_event_publisher_test.cpp and kv_event/key_util.h","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-master/src/kv_event.rs","test":"test_parse_seq_hash_from_object_key_matches_cpp"}],"status":"covered"},
+    {"behavior":"A disabled KV-event publisher is a no-op for stored and removed notifications and leaves published and dropped counters at zero.","boundary":["master","kv-event"],"cpp":{"file":"kv_event_publisher_test.cpp","test":"KvEventPublisherTest.DisabledPublisherIsNoop"},"reason":"","review":{"oracle":"mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher disabled path","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-master/src/kv_event.rs","test":"disabled_publisher_is_noop_and_keeps_counters_zero"}],"status":"covered"},
+    {"behavior":"When the KV-event queue reaches capacity, the publisher drops the oldest event, retains newer events, and increments its dropped-event accounting.","boundary":["master","kv-event","backpressure"],"cpp":{"file":"kv_event_publisher_test.cpp","test":"KvEventPublisherTest.DropsOldestWhenQueueFull"},"reason":"","review":{"oracle":"mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher queue path","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-master/src/kv_event.rs","test":"test_queue_capacity_drops_oldest_and_reserves_sequence_gap"}],"status":"covered"},
+    {"behavior":"Publishing an SGLang object key over ZMQ emits a three-frame message with sequence, stored event type, backend, tenant, group, object key, empty sequence hashes, and successful publish statistics.","boundary":["master","kv-event","zmq"],"cpp":{"file":"kv_event_publisher_test.cpp","test":"KvEventPublisherTest.PublishesSglangObjectKeyOverZmq"},"reason":"Existing Rust primary mooncake-store-master/src/kv_event.rs:test_publish_sglang_object_key_over_zmq retries publish up to twenty times and asserts only at-least-one publish counters plus the first decoded event; it does not prove the C++ single publish produces exactly one event in the batch and exact published_events=1, published_batches=1, dropped_events=0 statistics. Add cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c in mooncake-store-master/src/kv_event.rs; synchronize one subscriber, issue exactly one publish, assert the three frames, one-event array and fields, then assert exact 1/1/0 statistics.","review":{"oracle":"mooncake-store/tests/kv_event_publisher_test.cpp and KvEventPublisher ZMQ encoding/publish paths","reviewed":true},"rust":[],"status":"missing"},
+    {"behavior":"Pinned-memory registration rejects duplicate and overlapping ranges while accepting an adjacent range, and each accepted range unregisters exactly once when released.","boundary":["transfer-engine-ffi","memory-registration","ownership"],"cpp":{"file":"registered_pinned_memory_test.cpp","test":"RegisteredPinnedMemoryManagerTest.OverlapAndDuplicateAreRejected"},"reason":"","review":{"oracle":"mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/pinned_memory.rs","test":"overlap_is_rejected_but_adjacent_ranges_are_allowed"}],"status":"covered"},
+    {"behavior":"Pinned-memory quota rejects capacity beyond the configured limit, releasing a region refunds capacity, and a later full-size registration succeeds and unregisters once.","boundary":["transfer-engine-ffi","memory-registration","quota"],"cpp":{"file":"registered_pinned_memory_test.cpp","test":"RegisteredPinnedMemoryManagerTest.QuotaRejectsAndReleaseRefunds"},"reason":"","review":{"oracle":"mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager quota accounting","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/pinned_memory.rs","test":"quota_rejects_and_release_refunds"}],"status":"covered"},
+    {"behavior":"A failed native pin operation refunds its reservation so retrying the same range after native recovery succeeds and later unregisters exactly once.","boundary":["transfer-engine-ffi","memory-registration","error-recovery"],"cpp":{"file":"registered_pinned_memory_test.cpp","test":"RegisteredPinnedMemoryManagerTest.RegisterFailureRefundsReservation"},"reason":"","review":{"oracle":"mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager registration rollback","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/pinned_memory.rs","test":"registration_failure_refunds_reservation"}],"status":"covered"},
+    {"behavior":"A failed native unregister retains the address and quota reservation, preventing overlapping or capacity-consuming replacement registrations from reusing unsafe memory.","boundary":["transfer-engine-ffi","memory-registration","failure-safety"],"cpp":{"file":"registered_pinned_memory_test.cpp","test":"RegisteredPinnedMemoryManagerTest.UnregisterFailureRetainsReservation"},"reason":"","review":{"oracle":"mooncake-store/tests/registered_pinned_memory_test.cpp and RegisteredPinnedMemoryManager unregister failure path","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/pinned_memory.rs","test":"runtime_unloading_releases_but_unregister_error_retains_reservation"}],"status":"covered"},
     {
       "behavior": "Copying host bytes to an accelerator pointer selects the matching device, switches to its device ordinal, performs a host-to-device copy, and preserves the bytes.",
       "boundary": ["transfer-engine", "accelerator", "copy"],
@@ -371,25 +311,10 @@
       "rust": [], "status": "not-applicable"
     },
     {"behavior":"An RPC deadline failure has a dedicated timeout error class, distinct from generic service failure, with a human-readable timeout message.","boundary":["client","rpc","error-contract"],"cpp":{"file":"rpc_timeout_test.cpp","test":"RpcTimeoutTest.ErrorCodeValueAndString"},"reason":"Existing Rust evidence mooncake-store-client/src/client/tests.rs:deadline_exceeded_maps_to_rpc_timeout, mooncake-store-core/src/error.rs:rpc_timeout_error_is_distinct_and_human_readable is split across 2 tests and therefore does not provide the required single independently discoverable primary. Add cpp_parity_rpc_timeout_test_cpp_rpctimeouttest_errorcodevalueandstring_671ed707 in mooncake-store-client/src/client/tests.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/rpc_timeout_test.cpp, ErrorCode::RPC_TIMEOUT, and toString","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "A configured short RPC timeout bounds an unanswered readiness call and reports timeout rather than generic RPC failure.",
-      "boundary": ["client", "rpc", "timeout", "fault-injection"],
-      "cpp": {"file": "rpc_timeout_test.cpp", "test": "RpcTimeoutTest.RpcTimesOutAgainstUnresponsiveMaster"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/rpc_timeout_test.cpp and BlackHoleServer", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/client/tests.rs", "test": "rpc_request_timeout_bounds_unresponsive_master"}], "status": "covered"
-    },
+    {"behavior":"A configured short RPC timeout bounds an unanswered readiness call and reports timeout rather than generic RPC failure.","boundary":["client","rpc","timeout","fault-injection"],"cpp":{"file":"rpc_timeout_test.cpp","test":"RpcTimeoutTest.RpcTimesOutAgainstUnresponsiveMaster"},"reason":"Existing Rust primary mooncake-store-client/src/client/tests.rs:rpc_request_timeout_bounds_unresponsive_master directly supplies a 50 ms tonic request timeout after connecting; it does not set and read MC_RPC_TIMEOUT_MS through the production client Connect path as the C++ oracle does. Add cpp_parity_rpc_timeout_test_cpp_rpctimeouttest_rpctimesoutagainstunresponsivemaster_4ef20575 in mooncake-store-client/src/client/tests.rs; configure the production timeout source before client construction, connect to an unresponsive Master endpoint, and assert RpcTimeout with elapsed time at least the configured budget and below one second rather than generic RPC failure.","review":{"oracle":"mooncake-store/tests/rpc_timeout_test.cpp and BlackHoleServer","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"Republishing byte-identical RPC metadata is idempotent and leaves the original metadata available.","boundary":["master","http-metadata","idempotency"],"cpp":{"file":"http_metadata_server_test.cpp","test":"HttpMetadataServerTest.AllowsIdempotentRpcMetaRepublish"},"reason":"Existing Rust evidence mooncake-store-master/tests/test_http_metadata.rs:test_transfer_engine_http_metadata_get_put_delete_protocol is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_http_metadata_server_test_cpp_httpmetadataservertest_allowsidempotentrpcmetarepublish_033d859c in mooncake-store-master/tests/test_http_metadata.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer PUT path","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"Republishing changed RPC metadata for an existing location is rejected and does not overwrite the original value.","boundary":["master","http-metadata","conflict-safety"],"cpp":{"file":"http_metadata_server_test.cpp","test":"HttpMetadataServerTest.RejectsChangedRpcMetaRepublish"},"reason":"Existing Rust evidence mooncake-store-master/tests/test_http_metadata.rs:test_transfer_engine_http_metadata_get_put_delete_protocol is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_http_metadata_server_test_cpp_httpmetadataservertest_rejectschangedrpcmetarepublish_cf9defb0 in mooncake-store-master/tests/test_http_metadata.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer PUT conflict path","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Starting the HTTP metadata listener on an occupied address reports bind failure.",
-      "boundary": ["master", "http-metadata", "startup-failure"],
-      "cpp": {"file": "http_metadata_server_test.cpp", "test": "HttpMetadataServerTest.StartReportsBindFailure"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer::Start", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/tests/test_http_metadata.rs", "test": "test_metadata_listener_reports_occupied_port"}],
-      "status": "covered"
-    },
+    {"behavior":"Starting the HTTP metadata listener on an occupied address reports bind failure.","boundary":["master","http-metadata","startup-failure"],"cpp":{"file":"http_metadata_server_test.cpp","test":"HttpMetadataServerTest.StartReportsBindFailure"},"reason":"Existing Rust primary mooncake-store-master/tests/test_http_metadata.rs:test_metadata_listener_reports_occupied_port calls bind_metadata_listener directly and asserts AddrInUse; it does not exercise the public metadata-server start lifecycle or prove the failed server remains not running as C++ does. Add cpp_parity_http_metadata_server_test_cpp_httpmetadataservertest_startreportsbindfailure_c2e61bed in mooncake-store-master/tests/test_http_metadata.rs; start one production metadata server, attempt a second on the same address, assert start failure and assert the second server is not running.","review":{"oracle":"mooncake-store/tests/http_metadata_server_test.cpp and HttpMetadataServer::Start","reviewed":true},"rust":[],"status":"missing"},
     {
       "behavior": "A CXL-backed client can put and get an object with exact byte preservation.",
       "boundary": ["client", "cxl", "data-path"],
@@ -443,37 +368,13 @@
     },
     {"behavior":"An empty tenant identifier normalizes to the canonical default tenant while named tenants retain their value and default classification.","boundary":["master","tenant","identity"],"cpp":{"file":"tenant_id_test.cpp","test":"TenantIdTest.NormalizesEmptyTenantToDefault"},"reason":"Existing Rust evidence mooncake-store-master/src/tenant_id.rs:normalizes_and_validates_canonical_values is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_tenant_id_test_cpp_tenantidtest_normalizesemptytenanttodefault_4e13af58 in mooncake-store-master/src/tenant_id.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId construction","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"Canonical tenant validation accepts default and ordinary names while rejecting the reserved underscore prefix and control bytes.","boundary":["master","tenant","validation"],"cpp":{"file":"tenant_id_test.cpp","test":"TenantIdTest.ValidatesCanonicalTenantName"},"reason":"Existing Rust evidence mooncake-store-master/src/tenant_id.rs:normalizes_and_validates_canonical_values is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_tenant_id_test_cpp_tenantidtest_validatescanonicaltenantname_41630bd3 in mooncake-store-master/src/tenant_id.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId::IsValid","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Tenant identifiers provide stable lexical ordering and hash-key equality.",
-      "boundary": ["master", "tenant", "collection-contract"],
-      "cpp": {"file": "tenant_id_test.cpp", "test": "TenantIdTest.SupportsOrderedAndHashedKeys"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/tenant_id_test.cpp and TenantId comparison/hash", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/tenant_id.rs", "test": "supports_ordering_and_hashing"}],
-      "status": "covered"
-    },
+    {"behavior":"Tenant identifiers provide stable lexical ordering and hash-key equality.","boundary":["master","tenant","collection-contract"],"cpp":{"file":"tenant_id_test.cpp","test":"TenantIdTest.SupportsOrderedAndHashedKeys"},"reason":"Existing Rust primary mooncake-store-master/src/tenant_id.rs:supports_ordering_and_hashing compares only default against one named tenant, so it can pass with a default-only ordering special case while named tenant lexical ordering is wrong; its hash assertion uses one named value. Add cpp_parity_tenant_id_test_cpp_tenantidtest_supportsorderedandhashedkeys_8e2784aa in mooncake-store-master/src/tenant_id.rs; assert tenant-a is less than tenant-b and insert then retrieve tenant-a through a hash map with the exact value 1.","review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId comparison/hash","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"A scoped key preserves colons and path characters and round-trips by splitting only at the tenant/local-key NUL delimiter.","boundary":["master","tenant","key-encoding"],"cpp":{"file":"tenant_id_test.cpp","test":"TenantIdTest.ScopedKeyPreservesExistingEncoding"},"reason":"Existing Rust evidence mooncake-store-master/src/tenant_id.rs:scoped_key_preserves_wire_format_and_local_nuls is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_tenant_id_test_cpp_tenantidtest_scopedkeypreservesexistingencoding_9875ac10 in mooncake-store-master/src/tenant_id.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId scoped-key encoding","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"Scoped-key parsing preserves embedded NUL bytes in the local key after the first tenant delimiter.","boundary":["master","tenant","binary-key"],"cpp":{"file":"tenant_id_test.cpp","test":"TenantIdTest.ScopedKeyRoundTripPreservesEmbeddedNullInLocalKey"},"reason":"Existing Rust evidence mooncake-store-master/src/tenant_id.rs:scoped_key_preserves_wire_format_and_local_nuls is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_tenant_id_test_cpp_tenantidtest_scopedkeyroundtrippreservesembeddednullinlocalkey_bf6f753d in mooncake-store-master/src/tenant_id.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId::ParseScopedKey","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"A legacy key without a tenant delimiter parses as belonging to the default tenant without changing the local key.","boundary":["master","tenant","backward-compatibility"],"cpp":{"file":"tenant_id_test.cpp","test":"TenantIdTest.ParsesLegacyUnscopedKeyAsDefaultTenant"},"reason":"Existing Rust evidence mooncake-store-master/src/tenant_id.rs:scoped_key_preserves_wire_format_and_local_nuls is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_tenant_id_test_cpp_tenantidtest_parseslegacyunscopedkeyasdefaulttenant_531948fb in mooncake-store-master/src/tenant_id.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and legacy unscoped-key parsing","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "A Unix-domain IPC connection transfers an exact raw request and response payload in both directions.",
-      "boundary": ["client", "uds", "ipc", "payload"],
-      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.SendsRawPayload"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnection raw I/O", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_channel_sends_raw_payload"}],
-      "status": "covered"
-    },
+    {"behavior":"A Unix-domain IPC connection transfers an exact raw request and response payload in both directions.","boundary":["client","uds","ipc","payload"],"cpp":{"file":"uds_transport_test.cpp","test":"UdsTransportTest.SendsRawPayload"},"reason":"","review":{"oracle":"mooncake-store/tests/uds_transport_test.cpp and UdsConnection raw I/O","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/dummy_tests.rs","test":"ipc_channel_sends_raw_payload"}],"status":"covered"},
     {"behavior":"Unix-domain IPC transfers an SCM_RIGHTS file descriptor from the initiating endpoint and the receiver can use the same underlying file.","boundary":["client","uds","ipc","fd-passing"],"cpp":{"file":"uds_transport_test.cpp","test":"UdsTransportTest.SendsFdFromClientToServer"},"reason":"Existing Rust evidence mooncake-store-client/src/dummy_tests.rs:ipc_channel_sends_and_receives_fd is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_uds_transport_test_cpp_udstransporttest_sendsfdfromclienttoserver_09701344 in mooncake-store-client/src/dummy_tests.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/uds_transport_test.cpp and UdsConnection::sendFd/recvFd","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Receiving an SCM_RIGHTS descriptor with a shorter-than-required payload fails and closes the received descriptor.",
-      "boundary": ["client", "uds", "ipc", "truncation-safety"],
-      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.RejectsFdWithPartialPayload"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnection::recvFd truncation handling", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_channel_rejects_fd_with_partial_payload"}],
-      "status": "covered"
-    },
+    {"behavior":"Receiving an SCM_RIGHTS descriptor with a shorter-than-required payload fails.","boundary":["client","uds","ipc","truncation-safety"],"cpp":{"file":"uds_transport_test.cpp","test":"UdsTransportTest.RejectsFdWithPartialPayload"},"reason":"","review":{"oracle":"mooncake-store/tests/uds_transport_test.cpp and UdsConnection::recvFd truncation handling","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/dummy_tests.rs","test":"ipc_channel_rejects_fd_with_partial_payload"}],"status":"covered"},
     {"behavior":"Unix-domain IPC transfers an SCM_RIGHTS file descriptor from the accepting endpoint and the initiator can use the same underlying file.","boundary":["client","uds","ipc","fd-passing"],"cpp":{"file":"uds_transport_test.cpp","test":"UdsTransportTest.SendsFdFromServerToClient"},"reason":"Existing Rust evidence mooncake-store-client/src/dummy_tests.rs:ipc_channel_sends_and_receives_fd is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_uds_transport_test_cpp_udstransporttest_sendsfdfromservertoclient_d2ccd818 in mooncake-store-client/src/dummy_tests.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/uds_transport_test.cpp and symmetric UdsConnection descriptor passing","reviewed":true},"rust":[],"status":"missing"},
     {
       "behavior": "Stopping the C++ background UDS acceptor wakes its accept loop and removes the listening endpoint.",
@@ -491,22 +392,8 @@
       "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/uds_transport_test.cpp, UdsAcceptor::stop, and Rust DummyIpcChannel", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
-    {
-      "behavior": "A Unix-domain connector rejects a non-positive connection timeout before attempting to connect.",
-      "boundary": ["client", "uds", "timeout", "validation"],
-      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectRejectsNonPositiveTimeout"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnector timeout validation", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_connect_rejects_zero_timeout_before_socket_access"}], "status": "covered"
-    },
-    {
-      "behavior": "Connecting to a missing Unix-domain endpoint with a short timeout fails promptly and identifies the endpoint.",
-      "boundary": ["client", "uds", "timeout", "failure-reporting"],
-      "cpp": {"file": "uds_transport_test.cpp", "test": "UdsTransportTest.ConnectFailureReturnsPromptlyWithShortTimeout"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/uds_transport_test.cpp and UdsConnector timed connect", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/dummy_tests.rs", "test": "ipc_connect_to_missing_endpoint_fails_promptly_with_path_context"}], "status": "covered"
-    },
+    {"behavior":"A Unix-domain connector rejects a non-positive connection timeout before attempting to connect.","boundary":["client","uds","timeout","validation"],"cpp":{"file":"uds_transport_test.cpp","test":"UdsTransportTest.ConnectRejectsNonPositiveTimeout"},"reason":"","review":{"oracle":"mooncake-store/tests/uds_transport_test.cpp and UdsConnector timeout validation","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/dummy_tests.rs","test":"ipc_connect_rejects_zero_timeout_before_socket_access"}],"status":"covered"},
+    {"behavior":"Connecting to a missing Unix-domain endpoint with a short timeout fails promptly and identifies the endpoint.","boundary":["client","uds","timeout","failure-reporting"],"cpp":{"file":"uds_transport_test.cpp","test":"UdsTransportTest.ConnectFailureReturnsPromptlyWithShortTimeout"},"reason":"","review":{"oracle":"mooncake-store/tests/uds_transport_test.cpp and UdsConnector timed connect","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/dummy_tests.rs","test":"ipc_connect_to_missing_endpoint_fails_promptly_with_path_context"}],"status":"covered"},
     {
       "behavior": "After a timed Unix-domain connect succeeds, the connector clears its temporary socket send timeout.",
       "boundary": ["cpp-only", "uds", "connector-implementation"],
@@ -542,24 +429,8 @@
       "rust": [], "status": "not-applicable"
     },
     {"behavior":"Bounded Zstd decompression succeeds when the decoded snapshot payload remains within its configured maximum.","boundary":["master","snapshot","zstd","size-limit"],"cpp":{"file":"zstd_util_test.cpp","test":"ZstdUtilTest.Roundtrip_WithMaxSize"},"reason":"Existing Rust evidence mooncake-store-master/src/ha/catalog_task.rs:bounded_zstd_roundtrip_preserves_text_and_binary_bytes is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_zstd_util_test_cpp_zstdutiltest_roundtrip_withmaxsize_14bd3502 in mooncake-store-master/src/ha/catalog_task.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/zstd_util_test.cpp and bounded decompression","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Invalid Zstd bytes fail closed rather than producing snapshot metadata.",
-      "boundary": ["master", "snapshot", "zstd", "corruption"],
-      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.Decompress_InvalidData_Throws"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and invalid-frame handling", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "invalid_zstd_payload_fails_closed"}],
-      "status": "covered"
-    },
-    {
-      "behavior": "Bounded Zstd decompression rejects a decoded payload that exceeds its configured maximum.",
-      "boundary": ["master", "snapshot", "zstd", "resource-limit"],
-      "cpp": {"file": "zstd_util_test.cpp", "test": "ZstdUtilTest.DecompressWithMaxSize_ExceedsLimit_Throws"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/zstd_util_test.cpp and Rust decode_task_manager bounded reader", "reviewed": true},
-      "rust": [{"file": "mooncake-store-master/src/ha/catalog_task.rs", "test": "bounded_zstd_rejects_decoded_size_above_limit"}],
-      "status": "covered"
-    },
+    {"behavior":"Invalid Zstd bytes fail closed rather than producing snapshot metadata.","boundary":["master","snapshot","zstd","corruption"],"cpp":{"file":"zstd_util_test.cpp","test":"ZstdUtilTest.Decompress_InvalidData_Throws"},"reason":"","review":{"oracle":"mooncake-store/tests/zstd_util_test.cpp and invalid-frame handling","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-master/src/ha/catalog_task.rs","test":"invalid_zstd_payload_fails_closed"}],"status":"covered"},
+    {"behavior":"Bounded Zstd decompression rejects a decoded payload that exceeds its configured maximum.","boundary":["master","snapshot","zstd","resource-limit"],"cpp":{"file":"zstd_util_test.cpp","test":"ZstdUtilTest.DecompressWithMaxSize_ExceedsLimit_Throws"},"reason":"","review":{"oracle":"mooncake-store/tests/zstd_util_test.cpp and Rust decode_task_manager bounded reader","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-master/src/ha/catalog_task.rs","test":"bounded_zstd_rejects_decoded_size_above_limit"}],"status":"covered"},
     {
       "behavior": "The C++ raw-pointer bounded decompressor rejects a null input pointer even for zero input length.",
       "boundary": ["cpp-only", "snapshot", "zstd", "raw-pointer"],
@@ -569,32 +440,10 @@
       "rust": [], "status": "not-applicable"
     },
     {"behavior":"Byte counts format with binary B/KB/MB/GB/TB units and two decimal places above bytes.","boundary":["configuration","diagnostics","byte-size"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.ByteSizeToString"},"reason":"Existing Rust evidence mooncake-store-client/src/utils.rs:byte_size_formatting_matches_cpp is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_utils_test_cpp_utilstest_bytesizetostring_b360b130 in mooncake-store-client/src/utils.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/utils_test.cpp and byte_size_to_string","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Byte-size parsing accepts binary unit strings and zero while rejecting negative and unknown-unit inputs.",
-      "boundary": ["configuration", "byte-size", "validation"],
-      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.StringToByteSize"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and try_string_to_byte_size", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/utils.rs", "test": "byte_size_parsing_matches_cpp"}], "status": "covered"
-    },
-    {
-      "behavior": "Boolean parsing is case-insensitive and whitespace-tolerant for 1/true/yes/on and 0/false/no/off, while invalid or empty input remains distinguishable.",
-      "boundary": ["configuration", "boolean", "validation"],
-      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.StringToBool"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/utils_test.cpp, string_to_bool, and Rust parse_bool_env helpers", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/utils.rs", "test": "tri_state_bool_parsing_matches_cpp"}], "status": "covered"
-    },
+    {"behavior":"Byte-size parsing accepts binary unit strings and zero while rejecting negative and unknown-unit inputs.","boundary":["configuration","byte-size","validation"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.StringToByteSize"},"reason":"","review":{"oracle":"mooncake-store/tests/utils_test.cpp and try_string_to_byte_size","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/utils.rs","test":"byte_size_parsing_matches_cpp"}],"status":"covered"},
+    {"behavior":"Boolean parsing is case-insensitive and whitespace-tolerant for 1/true/yes/on and 0/false/no/off, while invalid or empty input remains distinguishable.","boundary":["configuration","boolean","validation"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.StringToBool"},"reason":"","review":{"oracle":"mooncake-store/tests/utils_test.cpp, string_to_bool, and Rust parse_bool_env helpers","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/utils.rs","test":"tri_state_bool_parsing_matches_cpp"}],"status":"covered"},
     {"behavior":"An IPv4 TCP port is reservable when free, unavailable while bound, and available again after the reservation closes.","boundary":["client","network","port-reservation"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.IsPortAvailable"},"reason":"Existing Rust evidence mooncake-store-client/src/client/endpoint.rs:port_reservation_is_exclusive_and_releases_on_drop is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_utils_test_cpp_utilstest_isportavailable_50d40c13 in mooncake-store-client/src/client/endpoint.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/utils_test.cpp, isPortAvailable, and AutoPortBinder","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "Port availability detects an existing listening bind even when that listener enables address reuse.",
-      "boundary": ["client", "network", "port-conflict"],
-      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.IsPortAvailableWithBindingConflict"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and bind-conflict detection", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/client/endpoint.rs", "test": "port_reservation_detects_reuseaddr_listener_conflict"}],
-      "status": "covered"
-    },
+    {"behavior":"Port availability detects an existing listening bind even when that listener enables address reuse.","boundary":["client","network","port-conflict"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.IsPortAvailableWithBindingConflict"},"reason":"","review":{"oracle":"mooncake-store/tests/utils_test.cpp and bind-conflict detection","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/client/endpoint.rs","test":"port_reservation_detects_reuseaddr_listener_conflict"}],"status":"covered"},
     {"behavior":"Two simultaneous automatic port reservations select distinct ports in the configured range.","boundary":["client","network","port-reservation","concurrency"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.AutoPortBinderMultipleInstances"},"reason":"Existing Rust evidence mooncake-store-client/src/client/endpoint.rs:multiple_reservations_choose_distinct_ports_in_requested_range is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_utils_test_cpp_utilstest_autoportbindermultipleinstances_02680da0 in mooncake-store-client/src/client/endpoint.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/utils_test.cpp and AutoPortBinder simultaneous instances","reviewed":true},"rust":[],"status":"missing"},
     {
       "behavior": "The C++ splitString convenience wrapper splits on a delimiter and optionally trims each token.",
@@ -604,22 +453,8 @@
       "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/utils_test.cpp, splitString, and Rust standard string iterators", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
-    {
-      "behavior": "Network-interface lookup resolves the loopback interface to its IPv4 address.",
-      "boundary": ["network", "interface-discovery"],
-      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.GetInterfaceIPv4AddressLoopback"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and GetInterfaceIPv4Address", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/utils.rs", "test": "loopback_interface_resolves_to_ipv4"}], "status": "covered"
-    },
-    {
-      "behavior": "Network-interface lookup rejects a missing interface with explicit not-found context.",
-      "boundary": ["network", "interface-discovery", "failure-reporting"],
-      "cpp": {"file": "utils_test.cpp", "test": "UtilsTest.GetInterfaceIPv4AddressMissingInterface"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/utils_test.cpp and GetInterfaceIPv4Address failure path", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/utils.rs", "test": "missing_interface_reports_not_found_context"}], "status": "covered"
-    },
+    {"behavior":"Network-interface lookup resolves the loopback interface to its IPv4 address.","boundary":["network","interface-discovery"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.GetInterfaceIPv4AddressLoopback"},"reason":"","review":{"oracle":"mooncake-store/tests/utils_test.cpp and GetInterfaceIPv4Address","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/utils.rs","test":"loopback_interface_resolves_to_ipv4"}],"status":"covered"},
+    {"behavior":"Network-interface lookup rejects a missing interface with explicit not-found context.","boundary":["network","interface-discovery","failure-reporting"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.GetInterfaceIPv4AddressMissingInterface"},"reason":"","review":{"oracle":"mooncake-store/tests/utils_test.cpp and GetInterfaceIPv4Address failure path","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/utils.rs","test":"missing_interface_reports_not_found_context"}],"status":"covered"},
     {"behavior":"A client port reservation owns the bind for its lifetime and releases it when dropped.","boundary":["client","network","port-reservation","ownership"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.AutoPortBinderRAII"},"reason":"Existing Rust evidence mooncake-store-client/src/client/endpoint.rs:port_reservation_is_exclusive_and_releases_on_drop is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_utils_test_cpp_utilstest_autoportbinderraii_417100d0 in mooncake-store-client/src/client/endpoint.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/utils_test.cpp and AutoPortBinder RAII","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"Automatic client port reservation honors a caller-supplied inclusive port range.","boundary":["client","network","port-reservation","configuration"],"cpp":{"file":"utils_test.cpp","test":"UtilsTest.AutoPortBinderCustomRange"},"reason":"Existing Rust evidence mooncake-store-client/src/client/endpoint.rs:multiple_reservations_choose_distinct_ports_in_requested_range is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_utils_test_cpp_utilstest_autoportbindercustomrange_0d9cb744 in mooncake-store-client/src/client/endpoint.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/utils_test.cpp and AutoPortBinder custom range","reviewed":true},"rust":[],"status":"missing"},
     {
@@ -810,15 +645,7 @@
     {"behavior":"ObjectDataType uses the stable RFC numeric values UNKNOWN=0 through GENERAL=9.","boundary":["core","object-data-type","wire-compatibility"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.EnumValues"},"reason":"Existing Rust evidence mooncake-store-core/tests/test_types.rs:object_data_type_matches_cpp_numeric_and_text_contract is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_object_data_type_test_cpp_objectdatatypetest_enumvalues_24d85dbe in mooncake-store-core/tests/test_types.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp EnumValues and Rust ObjectDataType discriminants","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"Every valid ObjectDataType value round-trips through its integer representation.","boundary":["core","object-data-type","conversion"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.EnumRoundtrip"},"reason":"Existing Rust evidence mooncake-store-core/tests/test_types.rs:object_data_type_matches_cpp_numeric_and_text_contract is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_object_data_type_test_cpp_objectdatatypetest_enumroundtrip_558648e6 in mooncake-store-core/tests/test_types.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp EnumRoundtrip and Rust ObjectDataType::try_from","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"ObjectDataType formatting emits the canonical uppercase names and maps an out-of-range value to UNKNOWN.","boundary":["core","object-data-type","diagnostics"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.StreamOperator"},"reason":"Existing Rust evidence mooncake-store-core/tests/test_types.rs:object_data_type_matches_cpp_numeric_and_text_contract is shared by 3 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_object_data_type_test_cpp_objectdatatypetest_streamoperator_97b5ec3b in mooncake-store-core/tests/test_types.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp StreamOperator and Rust ObjectDataType Debug implementation","reviewed":true},"rust":[],"status":"missing"},
-    {
-      "behavior": "ReplicateConfig defaults data_type to UNKNOWN.",
-      "boundary": ["core", "replicate-config", "object-data-type", "default"],
-      "cpp": {"file": "object_data_type_test.cpp", "test": "ObjectDataTypeTest.ReplicateConfigDefaultDataType"},
-      "reason": "Rust explicitly tests the UNKNOWN ReplicateConfig default.",
-      "review": {"oracle": "mooncake-store/tests/object_data_type_test.cpp ReplicateConfigDefaultDataType and Rust ReplicateConfig::default", "reviewed": true},
-      "rust": [{"file": "mooncake-store-core/tests/test_types.rs", "test": "test_replicate_config_default"}],
-      "status": "covered"
-    },
+    {"behavior":"ReplicateConfig defaults data_type to UNKNOWN.","boundary":["core","replicate-config","object-data-type","default"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.ReplicateConfigDefaultDataType"},"reason":"Rust explicitly tests the UNKNOWN ReplicateConfig default.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp ReplicateConfigDefaultDataType and Rust ReplicateConfig::default","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-core/tests/test_types.rs","test":"test_replicate_config_default"}],"status":"covered"},
     {"behavior":"ReplicateConfig accepts and retains a non-default ObjectDataType value.","boundary":["core","replicate-config","object-data-type"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.ReplicateConfigSetDataType"},"reason":"Existing Rust evidence mooncake-store-core/tests/test_types.rs:replicate_config_retains_and_formats_non_default_data_type is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_object_data_type_test_cpp_objectdatatypetest_replicateconfigsetdatatype_cbe20749 in mooncake-store-core/tests/test_types.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp ReplicateConfigSetDataType and Rust ReplicateConfig","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"ReplicateConfig diagnostics include the canonical data_type name.","boundary":["core","replicate-config","object-data-type","diagnostics"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.ReplicateConfigStreamIncludesDataType"},"reason":"Existing Rust evidence mooncake-store-core/tests/test_types.rs:replicate_config_retains_and_formats_non_default_data_type is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_object_data_type_test_cpp_objectdatatypetest_replicateconfigstreamincludesdatatype_7ebb195f in mooncake-store-core/tests/test_types.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp ReplicateConfigStreamIncludesDataType and Rust ReplicateConfig Debug","reviewed":true},"rust":[],"status":"missing"},
     {"behavior":"PutStart accepts a non-default WEIGHT data type and completes the memory replica lifecycle.","boundary":["master","put","object-data-type","end-to-end"],"cpp":{"file":"object_data_type_test.cpp","test":"ObjectDataTypeTest.PutStartWithDataType"},"reason":"Existing Rust evidence mooncake-store-master/tests/test_master_object.rs:put_start_preserves_default_and_non_default_object_data_types is shared by 2 C++ rows and therefore is not a globally unique primary for this oracle. Add cpp_parity_object_data_type_test_cpp_objectdatatypetest_putstartwithdatatype_6a82fee7 in mooncake-store-master/tests/test_master_object.rs; it must independently drive and assert this row's complete C++ behavior.","review":{"oracle":"mooncake-store/tests/object_data_type_test.cpp PutStartWithDataType and Rust grpc_objects_put","reviewed":true},"rust":[],"status":"missing"},
@@ -1392,14 +1219,7 @@
       "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/transfer_task_test.cpp MemcpyWorkerPoolMultipleOperations and Rust local transfer architecture", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
-    {
-      "behavior": "Only identical non-empty endpoint identities are same-process; same-host endpoints with different ports remain remote.",
-      "boundary": ["client", "transfer", "endpoint-identity", "same-host", "safety"],
-      "cpp": {"file": "transfer_task_test.cpp", "test": "TransferTaskTest.IsSameProcessEndpoint"},
-      "reason": "",
-      "review": {"oracle": "mooncake-store/tests/transfer_task_test.cpp IsSameProcessEndpoint and Rust local_endpoints strategy selection", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/client/transfer_local.rs", "test": "same_process_endpoint_requires_identical_non_empty_identity"}], "status": "covered"
-    },
+    {"behavior":"Only identical non-empty endpoint identities are same-process; same-host endpoints with different ports remain remote.","boundary":["client","transfer","endpoint-identity","same-host","safety"],"cpp":{"file":"transfer_task_test.cpp","test":"TransferTaskTest.IsSameProcessEndpoint"},"reason":"","review":{"oracle":"mooncake-store/tests/transfer_task_test.cpp IsSameProcessEndpoint and Rust local_endpoints strategy selection","reviewed":true,"primary_reviewed":true},"rust":[{"file":"mooncake-store-client/src/client/transfer_local.rs","test":"same_process_endpoint_requires_identical_non_empty_identity"}],"status":"covered"},
     {
       "behavior": "The C++ TransferStrategy enum has fixed integer values and stream names for five native strategy variants.",
       "boundary": ["cpp-only", "client", "transfer", "enum-abi", "formatting"],
@@ -2405,15 +2225,7 @@
       "rust": [],
       "status": "missing"
     },
-    {
-      "behavior": "MOONCAKE_OFFLOAD_FILE_STORAGE_PATH sets the configured storage path.",
-      "boundary": ["client", "local-disk", "configuration"],
-      "cpp": {"file": "file_storage_test.cpp", "test": "FileStorageTest.ReadStringFromEnv"},
-      "reason": "",
-      "review": {"oracle": "file_storage_test.cpp ReadStringFromEnv and FileStorageConfig::FromEnvironment", "reviewed": true},
-      "rust": [{"file": "mooncake-store-client/src/local_storage_backend/config.rs", "test": "bucket_config_reads_cpp_environment_names"}],
-      "status": "covered"
-    },
+    {"behavior":"MOONCAKE_OFFLOAD_FILE_STORAGE_PATH sets the configured storage path.","boundary":["client","local-disk","configuration"],"cpp":{"file":"file_storage_test.cpp","test":"FileStorageTest.ReadStringFromEnv"},"reason":"Existing Rust primary mooncake-store-client/src/local_storage_backend/config.rs:bucket_config_reads_cpp_environment_names invokes the private injected from_lookup path with /var/lib/mooncake; it does not execute public from_environment or observe MOONCAKE_OFFLOAD_FILE_STORAGE_PATH=/tmp/storage as the C++ oracle does. Add cpp_parity_file_storage_test_cpp_filestoragetest_readstringfromenv_faab9add in mooncake-store-client/src/local_storage_backend/config.rs; under the test environment lock set the exact variable to /tmp/storage, call BucketStorageConfig::from_environment, assert root_dir=/tmp/storage, and restore the environment.","review":{"oracle":"file_storage_test.cpp ReadStringFromEnv and FileStorageConfig::FromEnvironment","reviewed":true},"rust":[],"status":"missing"},
     {
       "behavior": "Integer environment values set the local buffer to 2 GiB, bucket key limit to 1000, and global key limit to 5,000,000.",
       "boundary": ["client", "file-storage", "configuration"],
