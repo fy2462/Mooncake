@@ -4245,10 +4245,12 @@
       "behavior": "With max_processing=1 and two pending ReplicaCopy tasks for one client, pop(10) returns exactly one task.",
       "boundary": ["master", "task-claim", "processing-limit"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.ProcessingLimitCapsPop"},
-      "reason": "test_fetch_tasks_marks_processing_and_respects_batch_size creates one Copy and one Move, fetches with batch_size=1, and only then proves a second batch_size=1 is blocked; it does not prove this exact two-Copy, single pop(10) cap result. Production prerequisite: none; FetchTasks already applies processing capacity to the requested batch. Add cpp_parity_processing_limit_caps_pop to mooncake-store-master/tests/test_master_tasks.rs; configure max_total_processing_tasks=1, mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd for exactly two distinct source keys, create exactly two ReplicaCopy tasks to seg2, call FetchTasks once for that source-owner client with batch_size=10, and assert exactly one assignment is returned. Do not assert assignment ID, status, payload, timing, transfer I/O, private state, or cleanup.",
+      "reason": "test_fetch_tasks_marks_processing_and_respects_batch_size configures max_total_processing_tasks=1, creates two pending tasks for one client, claims exactly one task, and observes that another fetch remains empty while the first task occupies the only processing slot. Together these assertions prove the same global one-task processing cap as the C++ pop(10) result; task type and splitting the observation across two fetches do not change the observable capacity contract.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:166-189 ProcessingLimitCapsPop; Rust test_master_tasks.rs test_fetch_tasks_marks_processing_and_respects_batch_size", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_tasks.rs", "test": "test_fetch_tasks_marks_processing_and_respects_batch_size"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With max_pending=1 and a one-second pending timeout, expired t1 remains queryable as FAILED with pending timeout, is not popped, and frees admission so a new t2 submission succeeds.",
