@@ -6,6 +6,7 @@ use mooncake_store_master::oplog::{InMemoryOpLog, OpLogManager, OpLogStore};
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tonic::Request;
@@ -177,6 +178,188 @@ async fn test_ping_requires_remount_before_ok_status() {
     assert_eq!(resp.client_status, proto::ClientStatus::Ok as i32);
 }
 
+async fn mount_query_ip_segment(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+    base_addr: u64,
+    te_endpoint: &str,
+) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 1024 * 1024,
+            base_addr,
+            te_endpoint: te_endpoint.into(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn batch_query_ips(
+    service: &MasterServiceImpl,
+    client_ids: &[Uuid],
+) -> HashMap<String, proto::IpList> {
+    MasterService::batch_query_ip(
+        service,
+        Request::new(proto::BatchQueryIpRequest {
+            client_ids: client_ids.iter().copied().map(proto_uuid).collect(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .ips
+}
+
+#[tokio::test]
+async fn batch_query_ip_single_and_unknown_client_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_query_ip_segment(
+        &service,
+        client_id,
+        "query-single-segment",
+        0x300000000,
+        "127.0.0.1:12345",
+    )
+    .await;
+
+    let single = batch_query_ips(&service, &[client_id]).await;
+    assert_eq!(single[&client_id.to_string()].addresses, ["127.0.0.1"]);
+
+    let unknown = Uuid::new_v4();
+    let mixed = batch_query_ips(&service, &[client_id, unknown]).await;
+    assert_eq!(mixed[&client_id.to_string()].addresses, ["127.0.0.1"]);
+    assert!(!mixed.contains_key(&unknown.to_string()));
+}
+
+#[tokio::test]
+async fn batch_query_ip_deduplicates_multiple_segment_addresses_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    for (index, (name, endpoint)) in [
+        ("query-multi-a", "127.0.0.1:12345"),
+        ("query-multi-b", "127.0.0.1:12346"),
+        ("query-multi-c", "192.168.1.1:12345"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        mount_query_ip_segment(
+            &service,
+            client_id,
+            name,
+            0x300000000 + index as u64 * 0x200000,
+            endpoint,
+        )
+        .await;
+    }
+    let result = batch_query_ips(&service, &[client_id]).await;
+    let actual = result[&client_id.to_string()]
+        .addresses
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    assert_eq!(actual, HashSet::from(["127.0.0.1", "192.168.1.1"]));
+}
+
+#[tokio::test]
+async fn batch_query_ip_empty_request_parity() {
+    let service = MasterServiceImpl::default();
+    assert!(batch_query_ips(&service, &[]).await.is_empty());
+}
+
+#[tokio::test]
+async fn batch_query_ip_retains_client_with_only_empty_endpoints_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_query_ip_segment(&service, client_id, "query-empty-a", 0x300000000, "").await;
+    mount_query_ip_segment(&service, client_id, "query-empty-b", 0x302000000, "").await;
+
+    let result = batch_query_ips(&service, &[client_id]).await;
+    assert!(result.contains_key(&client_id.to_string()));
+    assert!(result[&client_id.to_string()].addresses.is_empty());
+}
+
+#[tokio::test]
+async fn batch_query_ip_parses_bracketed_ipv6_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_query_ip_segment(
+        &service,
+        client_id,
+        "query-bracketed-v6",
+        0x300000000,
+        "[::1]:17813",
+    )
+    .await;
+    let result = batch_query_ips(&service, &[client_id]).await;
+    assert_eq!(result[&client_id.to_string()].addresses, ["::1"]);
+}
+
+#[tokio::test]
+async fn batch_query_ip_preserves_ipv6_scope_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_query_ip_segment(
+        &service,
+        client_id,
+        "query-scoped-v6",
+        0x300000000,
+        "fe80::a236:bcff:fecb:a1be%eno2:15773",
+    )
+    .await;
+    let result = batch_query_ips(&service, &[client_id]).await;
+    assert_eq!(
+        result[&client_id.to_string()].addresses,
+        ["fe80::a236:bcff:fecb:a1be%eno2"]
+    );
+}
+
+#[tokio::test]
+async fn batch_query_ip_accepts_ipv6_without_port_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_query_ip_segment(&service, client_id, "query-raw-v6", 0x300000000, "::1").await;
+    let result = batch_query_ips(&service, &[client_id]).await;
+    assert_eq!(result[&client_id.to_string()].addresses, ["::1"]);
+}
+
+#[tokio::test]
+async fn batch_query_ip_mixed_ipv4_ipv6_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_query_ip_segment(
+        &service,
+        client_id,
+        "query-mixed-v4",
+        0x300000000,
+        "192.168.1.1:12345",
+    )
+    .await;
+    mount_query_ip_segment(
+        &service,
+        client_id,
+        "query-mixed-v6",
+        0x302000000,
+        "[::1]:17813",
+    )
+    .await;
+    let result = batch_query_ips(&service, &[client_id]).await;
+    let actual = result[&client_id.to_string()]
+        .addresses
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    assert_eq!(actual, HashSet::from(["192.168.1.1", "::1"]));
+}
+
 #[tokio::test]
 async fn test_query_ip_derives_address_from_mounted_segment() {
     let service = MasterServiceImpl::default();
@@ -189,10 +372,10 @@ async fn test_query_ip_derives_address_from_mounted_segment() {
                 high: client_id.as_u64_pair().0,
                 low: client_id.as_u64_pair().1,
             }),
-            segment_name: "10.0.0.1:1234".into(),
+            segment_name: "query-single-existing-fixture".into(),
             size: 1024,
             base_addr: 0x100000000,
-            te_endpoint: String::new(),
+            te_endpoint: "10.0.0.1:1234".into(),
             protocol: String::new(),
             host_id: String::new(),
         }),

@@ -263,8 +263,7 @@ impl MasterServiceImpl {
         let mut ips = std::collections::HashMap::new();
         for cid in &req.client_ids {
             let id = uuid_from_proto(cid);
-            let addresses = addresses_for_client(&self.state, id);
-            if !addresses.is_empty() {
+            if let Some(addresses) = query_ip_addresses_for_client(&self.state, id) {
                 ips.insert(id.to_string(), proto::IpList { addresses });
             }
         }

@@ -359,8 +359,8 @@ impl MasterServiceImpl {
     }
 
     // ---- QueryIp ----
-    // 查询指定客户端的 IP 地址列表，先查 clients 表，fallback 到 segment 名解析。
-    // Query IP addresses of a client; checks clients table first, falls back to segment name resolution.
+    // 查询指定客户端的传输端点 IP 地址列表。
+    // Query transfer-endpoint IP addresses for a client.
     pub(super) async fn query_ip_impl(
         &self,
         request: Request<proto::QueryIpRequest>,
@@ -371,12 +371,10 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        let addresses = addresses_for_client(&self.state, client_id);
-        if addresses.is_empty() {
-            Err(Status::not_found("client not found"))
-        } else {
-            Ok(Response::new(proto::QueryIpResponse { addresses }))
-        }
+        let Some(addresses) = query_ip_addresses_for_client(&self.state, client_id) else {
+            return Err(Status::not_found("client not found"));
+        };
+        Ok(Response::new(proto::QueryIpResponse { addresses }))
     }
 }
 

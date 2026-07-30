@@ -684,25 +684,53 @@ fn prune_delayed_replicas_on_segment(
     });
 }
 
-/// 获取客户端的地址列表：优先使用 clients 表的 addresses，fallback 到 segment host 名。
-/// Get client addresses: prefer clients table addresses, fallback to segment host names.
-pub(crate) fn addresses_for_client(state: &MasterState, client_id: Uuid) -> Vec<String> {
-    if let Some(entry) = state.clients.get(&client_id) {
-        if !entry.info.addresses.is_empty() {
-            return entry.info.addresses.clone();
+fn transfer_endpoint_host(endpoint: &str) -> String {
+    if let Some(rest) = endpoint.strip_prefix('[')
+        && let Some(closing) = rest.find(']')
+    {
+        return rest[..closing].to_string();
+    }
+    if endpoint.parse::<std::net::Ipv6Addr>().is_ok() {
+        return endpoint.to_string();
+    }
+    if let Some(scope) = endpoint.find('%')
+        && let Some(relative_colon) = endpoint[scope..].find(':')
+    {
+        let colon = scope + relative_colon;
+        let host = &endpoint[..colon];
+        let address = host.split('%').next().unwrap_or_default();
+        if address.parse::<std::net::Ipv6Addr>().is_ok() {
+            return host.to_string();
         }
     }
+    endpoint
+        .rsplit_once(':')
+        .map(|(host, _)| host.to_string())
+        .unwrap_or_else(|| endpoint.to_string())
+}
 
+/// Return C++-compatible QueryIp addresses, distinguishing no segments from
+/// mounted segments whose transfer endpoints are all empty.
+pub(super) fn query_ip_addresses_for_client(
+    state: &MasterState,
+    client_id: Uuid,
+) -> Option<Vec<String>> {
+    let mut found_segment = false;
     let mut addresses = Vec::new();
-    for segment in state.segments.iter() {
-        if segment.client_id == client_id {
-            let host = host_from_segment_name(&segment.segment.name);
-            if !host.is_empty() && !addresses.iter().any(|v| v == &host) {
-                addresses.push(host);
-            }
+    for entry in state.segments.iter() {
+        if entry.client_id != client_id {
+            continue;
+        }
+        found_segment = true;
+        if entry.segment.te_endpoint.is_empty() {
+            continue;
+        }
+        let host = transfer_endpoint_host(&entry.segment.te_endpoint);
+        if !addresses.iter().any(|address| address == &host) {
+            addresses.push(host);
         }
     }
-    addresses
+    found_segment.then_some(addresses)
 }
 
 /// 从 allocator 同步指定 Memory segment 的 used 字节数到 segments 表。
