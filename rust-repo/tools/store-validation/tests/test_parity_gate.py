@@ -73,14 +73,13 @@ class ParityGateTest(unittest.TestCase):
             ],
         )
 
-    def test_duplicate_rust_test_executes_once_and_keeps_both_oracles(self):
+    def test_duplicate_primary_is_rejected_even_when_planner_is_called_directly(self):
         manifest = {
             "schema_version": 1,
             "entries": [entry(), entry(cpp_test="AllocatorTest.Reallocate")],
         }
-        plan = plan_parity_run(manifest, self.inventory)
-        self.assertEqual(len(plan.commands), 1)
-        self.assertEqual(len(plan.commands[0].cpp_references), 2)
+        with self.assertRaisesRegex(ValueError, "reused by"):
+            plan_parity_run(manifest, self.inventory)
 
     def test_unit_test_under_src_uses_lib_filter(self):
         inventory = {
@@ -127,7 +126,7 @@ class ParityGateTest(unittest.TestCase):
         command = PlannedCommand(
             name="failing-parity-test",
             argv=[sys.executable, "-c", "raise SystemExit(7)"],
-            rust={"file": "crate/tests/test_case.rs", "test": "case"},
+            rust={"file": "sample/tests/test_case.rs", "test": "case"},
             cpp_references=[
                 {"file": "reference_test.cpp", "test": "ReferenceTest.Case"}
             ],
@@ -149,7 +148,7 @@ class ParityGateTest(unittest.TestCase):
         command = PlannedCommand(
             name="stale-filter",
             argv=[sys.executable, "-c", "print('running 0 tests')"],
-            rust={"file": "crate/src/lib.rs", "test": "missing"},
+            rust={"file": "sample/src/lib.rs", "test": "missing"},
             cpp_references=[{"file": "reference.cpp", "test": "Suite.Missing"}],
         )
         with tempfile.TemporaryDirectory() as directory:

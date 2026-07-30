@@ -111,7 +111,12 @@ def plan_parity_run(
                     cpp_references=[cpp_reference],
                 )
             elif cpp_reference not in existing.cpp_references:
-                existing.cpp_references.append(cpp_reference)
+                first_owner = existing.cpp_references[0]
+                raise ValueError(
+                    f"Rust primary {rust['file']}:{rust['test']} is reused by "
+                    f"{first_owner['file']}:{first_owner['test']} and "
+                    f"{cpp_reference['file']}:{cpp_reference['test']}"
+                )
 
     commands = sorted(
         by_test.values(), key=lambda item: (item.rust["file"], item.rust["test"])
