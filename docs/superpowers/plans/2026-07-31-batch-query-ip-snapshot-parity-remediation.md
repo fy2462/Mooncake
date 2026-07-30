@@ -19,6 +19,15 @@ execute successfully.
 LocalDisk MessagePack snapshots, Cargo, schema-v2 parity manifests, Python
 validation tooling, Git, and repository pre-commit hooks.
 
+**Execution status:** Deferred after the planned RED phase exposed a real HA
+state-model divergence. Seven populated fixtures consistently failed because
+Rust intentionally scrubs restored runtime coordinates pending remount. The
+test experiment was removed, the original 28-test storage target was restored,
+and the eight parity rows remain `missing`. See the design's “Investigation
+Outcome (Deferred)” section for the root-cause boundary and the required future
+architecture decision. The remaining unchecked implementation and evidence
+steps are intentionally not executed under this plan.
+
 ## Global Constraints
 
 - Work in `/home/fy2462/Mooncake/.worktrees/ha-chaos-live` on

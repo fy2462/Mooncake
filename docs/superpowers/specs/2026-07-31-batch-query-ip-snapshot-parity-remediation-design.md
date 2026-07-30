@@ -187,3 +187,32 @@ Only after all eight exact tests execute successfully:
 
 The Store LocalDisk io_uring optimization remains gated until the full
 correctness objective passes.
+
+## Investigation Outcome (Deferred)
+
+The first implementation attempt produced a repeatable semantic RED in seven
+of the eight fixtures. The empty request passed, while every fixture containing
+a mounted segment lost its saved `base`, `te_endpoint`, and non-CXL `protocol`
+after the first restore. The serializer and decoder preserve those fields; the
+loss occurs deliberately in `restore_loaded_snapshot_state`, which invalidates
+process-local routing coordinates and marks allocator segments runtime-unbound
+until the owning client executes `ReMountSegment`. The same safety rule is
+encoded in oplog replay and hot-standby tests.
+
+Further reference inspection also narrowed the C++ oracle: BatchQueryIp is
+called before restore, while inherited teardown compares the first and second
+serialized segment snapshots and broader service state. Requiring restored
+BatchQueryIp to expose the saved endpoint was therefore stronger than the C++
+test and unsafe for the Rust new-term remount model. However, Rust's second
+snapshot currently serializes the scrubbed coordinates, so C++-equivalent
+snapshot idempotence still represents a real parity gap.
+
+A safe correction requires separating durable snapshot coordinates from live
+routing availability, or otherwise preserving re-save metadata without making
+stale endpoints observable or allocatable. That change crosses snapshot
+restore, oplog replay, hot standby, remount collision checks, QueryIp, and
+segment-detail reporting, so it is not a low-risk correction local to these
+eight tests. The experiment was removed, the 28-test storage baseline was
+restored, and all eight manifest rows remain `missing`. This family is deferred
+for a separately approved HA-state design; it is not N/A and must not be
+upgraded using the ordinary BatchQueryIp tests.
