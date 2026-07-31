@@ -24,7 +24,7 @@ from validate_parity import validate_manifest
 class PlannedCommand:
     name: str
     argv: list[str]
-    rust: dict[str, str]
+    rust: dict[str, Any]
     references: list[dict[str, str]]
 
 
@@ -35,7 +35,7 @@ class ParityPlan:
     blocked: list[dict[str, Any]]
 
 
-def _command_for(rust: dict[str, str]) -> tuple[str, list[str]]:
+def _command_for(rust: dict[str, Any]) -> tuple[str, list[str]]:
     path = PurePosixPath(rust["file"])
     parts = path.parts
     if (
@@ -46,14 +46,19 @@ def _command_for(rust: dict[str, str]) -> tuple[str, list[str]]:
         raise ValueError(f"Rust reference is outside Rust crates: {rust['file']}")
     package = parts[0]
     test_name = rust["test"]
-    feature_args = (
-        ["--features", "link-native"]
+    features = (
+        ["link-native"]
         if package in {"mooncake-store-client", "mooncake-p2p-store"}
         else []
     )
+    features.extend(rust.get("features", []))
+    features = list(dict.fromkeys(features))
+    feature_args = ["--features", ",".join(features)] if features else []
     if parts[1] == "tests":
         target = PurePosixPath(parts[2]).stem
         module_names = [PurePosixPath(part).stem for part in parts[3:]]
+        if module_name := rust.get("module"):
+            module_names.append(module_name)
         test_filter = "::".join([*module_names, test_name])
         argv = [
             "cargo",

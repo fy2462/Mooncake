@@ -204,6 +204,34 @@ class ParityGateTest(unittest.TestCase):
             ],
         )
 
+    def test_rust_evidence_can_request_an_additional_cargo_feature(self):
+        rust = {
+            "file": "mooncake-store-client/tests/test_s3_source.rs",
+            "test": "test_miss_handler_batch_fetch_with_s3_hot_cache",
+            "features": ["s3"],
+            "module": "s3_tests",
+        }
+        inventory = {TestRef("rust", rust["file"], rust["test"])}
+
+        plan = plan_parity_run(manifest([entry(rust=[rust])]), inventory)
+
+        self.assertEqual(
+            plan.commands[0].argv,
+            [
+                "cargo",
+                "test",
+                "-p",
+                "mooncake-store-client",
+                "--features",
+                "link-native,s3",
+                "--test",
+                "test_s3_source",
+                "s3_tests::test_miss_handler_batch_fetch_with_s3_hot_cache",
+                "--",
+                "--exact",
+            ],
+        )
+
     def test_rejects_reference_outside_crates(self):
         rust = {"file": "python/tests/test_client.py", "test": "test_put"}
         inventory = {TestRef("rust", rust["file"], rust["test"])}
