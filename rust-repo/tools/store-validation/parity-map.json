@@ -764,31 +764,8 @@
       "review": {"na_category": "absent-rust-product-boundary", "oracle": "mooncake-store/tests/posix_file_test.cpp FileLifecycle and mooncake-store/src/posix_file.cpp", "reviewed": true},
       "rust": [], "status": "not-applicable"
     },
-    {
-      "behavior": "Writing the requested payload succeeds, returns exactly the requested length, and leaves the PosixFile error code at OK.",
-      "boundary": ["client", "local-storage", "posix", "write"],
-      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration.",
-      "reference": {"file": "posix_file_test.cpp", "test": "PosixFileTest.BasicWrite"},
-      "reason": "test_write_and_read_roundtrip observes a successful write whose complete five-byte payload is recovered exactly, and test_scan_meta_returns_keys_and_sizes observes successful writes with exact ten- and five-byte persisted logical lengths. Together they prove Rust's corresponding success and full-length write result, but the parity runner's mandatory link-native command is blocked before test execution because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
-      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp BasicWrite; Rust test_local_storage_backend.rs test_write_and_read_roundtrip and test_scan_meta_returns_keys_and_sizes", "reviewed": true},
-      "rust": [
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_write_and_read_roundtrip"},
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_scan_meta_returns_keys_and_sizes"}
-      ],
-      "status": "blocked"
-    },
-    {
-      "behavior": "After seeking to offset zero, reading the requested payload succeeds, returns exactly the requested length and bytes, and leaves the PosixFile error code at OK.",
-      "boundary": ["client", "local-storage", "posix", "read"],
-      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration.",
-      "reference": {"file": "posix_file_test.cpp", "test": "PosixFileTest.BasicRead"},
-      "reason": "test_write_and_read_roundtrip observes a successful read whose returned owned buffer exactly equals all five requested bytes, jointly proving the corresponding Rust success, returned length, and byte result. The parity runner's mandatory link-native command is blocked before test execution because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
-      "review": {"oracle": "mooncake-store/tests/posix_file_test.cpp BasicRead; Rust test_local_storage_backend.rs test_write_and_read_roundtrip", "reviewed": true},
-      "rust": [
-        {"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "test_write_and_read_roundtrip"}
-      ],
-      "status": "blocked"
-    },
+    {"behavior":"Writing the requested payload succeeds, returns exactly the requested length, and leaves the PosixFile error code at OK.","boundary":["client","local-storage","posix","write"],"reference":{"file":"posix_file_test.cpp","test":"PosixFileTest.BasicWrite"},"reason":"test_write_and_read_roundtrip observes a successful write whose complete five-byte payload is recovered exactly, and test_scan_meta_returns_keys_and_sizes observes successful writes with exact ten- and five-byte persisted logical lengths. Together they prove Rust's corresponding success and full-length write result, but. Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","review":{"oracle":"mooncake-store/tests/posix_file_test.cpp BasicWrite; Rust test_local_storage_backend.rs test_write_and_read_roundtrip and test_scan_meta_returns_keys_and_sizes","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_local_storage_backend.rs","test":"test_write_and_read_roundtrip"},{"file":"mooncake-store-client/tests/test_local_storage_backend.rs","test":"test_scan_meta_returns_keys_and_sizes"}],"status":"covered"},
+    {"behavior":"After seeking to offset zero, reading the requested payload succeeds, returns exactly the requested length and bytes, and leaves the PosixFile error code at OK.","boundary":["client","local-storage","posix","read"],"reference":{"file":"posix_file_test.cpp","test":"PosixFileTest.BasicRead"},"reason":"test_write_and_read_roundtrip observes a successful read whose returned owned buffer exactly equals all five requested bytes, jointly proving the corresponding Rust success, returned length, and byte result. Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","review":{"oracle":"mooncake-store/tests/posix_file_test.cpp BasicRead; Rust test_local_storage_backend.rs test_write_and_read_roundtrip","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_local_storage_backend.rs","test":"test_write_and_read_roundtrip"}],"status":"covered"},
     {
       "behavior": "One positioned pwritev at offset zero concatenates two iovecs, succeeds, returns their summed length, and leaves the PosixFile error code at OK.",
       "boundary": ["cpp-only", "file-wrapper", "posix", "vectored-io"],
