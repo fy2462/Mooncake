@@ -1757,12 +1757,11 @@
     {
       "behavior": "Batch allocation followed by FileStorage BatchLoad succeeds; the test's intended byte comparison is vacuous because it iterates an empty separate slice map.",
       "boundary": ["client", "file-storage", "batch-load"],
-      "prerequisite": "Parity runner support for nested Rust integration-test modules: resolve tests/test_storage/backends.rs to target test_storage and exact name backends::test_bucket_storage_backend_offload_load_scan_and_remove.",
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoad"},
-      "reason": "The C++ byte-comparison loop is vacuous, so its executable result is only successful batch loading after allocation. Rust test_bucket_storage_backend_offload_load_scan_and_remove is stronger: one production multi-key batch_load succeeds and returns both exact values after real batch publication. Its correct target/module-qualified command passes 1/1, but the parity runner derives nonexistent target `backends` and drops the `backends::` prefix, so the formal gate cannot yet reproduce the evidence.",
+      "reason": "The C++ byte-comparison loop is vacuous, so its executable result is only successful batch loading after allocation. Rust test_bucket_storage_backend_offload_load_scan_and_remove is stronger: one production multi-key batch_load succeeds and returns both exact values after real batch publication. Fresh formal native gate /tmp/mooncake-native-stale-blocked-gate.5UlPgr/parity.result.json records the mapped Rust test as PASS with zero FAIL and zero zero-test executions.",
       "review": {"oracle": "mooncake-store/tests/file_storage_test.cpp:213-234 and file_storage.cpp FileStorage::BatchLoad", "reviewed": true},
       "rust": [{"file":"mooncake-store-master/tests/test_storage/backends.rs","test":"test_bucket_storage_backend_offload_load_scan_and_remove"}],
-      "status": "blocked"
+      "status": "covered"
     },
     {
       "behavior": "Grouping 35 one-byte offload tasks with a ten-key bucket limit emits three full buckets, retains five tasks, then emits four buckets on the next call and clears residue.",
