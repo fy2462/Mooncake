@@ -239,8 +239,10 @@ Git, and repository pre-commit hooks.
   Run from `rust-repo`:
 
   ```bash
-  native_library_path=$(find ../build -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
+  native_library_path=$(find "$PWD/../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   test -n "$native_library_path"
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
   CARGO_TARGET_DIR=target/native-parity-classic \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -255,6 +257,8 @@ Git, and repository pre-commit hooks.
   Run:
 
   ```bash
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
   CARGO_TARGET_DIR=target/native-parity-classic \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -273,6 +277,8 @@ Git, and repository pre-commit hooks.
   native_library_path=$(find "$PWD/build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   test -n "$native_library_path"
   classic_artifact_root=$(mktemp -d /tmp/mooncake-native-classic-module.XXXXXX)
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
   MOONCAKE_TE_LIB_DIR="$PWD/build/mooncake-transfer-engine/src" \
   MOONCAKE_VALIDATION_CARGO_TARGET_DIR="$PWD/rust-repo/target/native-parity-classic" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -599,7 +605,7 @@ Git, and repository pre-commit hooks.
   Run from `rust-repo`:
 
   ```bash
-  native_library_path=$(find ../build -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
+  native_library_path=$(find "$PWD/../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   test -n "$native_library_path"
   CARGO_TARGET_DIR=target/native-parity-tent \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src -L native=../build/mooncake-transfer-engine/tent/src" \
@@ -816,7 +822,7 @@ Git, and repository pre-commit hooks.
   Run from `rust-repo` after recomputing the scoped path:
 
   ```bash
-  native_library_path=$(find ../build -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
+  native_library_path=$(find "$PWD/../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   CARGO_TARGET_DIR=target/native-parity-final-tent \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src -L native=../build/mooncake-transfer-engine/tent/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
