@@ -1399,10 +1399,17 @@
       "behavior": "A submitted background hot-cache fill eventually publishes the submitted bytes for retrieval.",
       "boundary": ["client", "hot-cache", "async-fill", "worker"],
       "reference": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.LocalHotCacheHandlerBasic"},
-      "reason": "Rust test_s3_source.rs:test_miss_handler_batch_fetch_with_s3_hot_cache awaits production batch prefetch, then proves a later exact read is a hot-cache hit, so it is a strong result-level candidate despite not reproducing the private C++ worker queue. It is not executable through the current parity runner: the test is compiled only with feature `s3`, while mooncake-store-client evidence commands enable only `link-native`; after the native library prerequisite is supplied, the current command would still select zero tests. Keep this row missing until the evidence runner can schedule the existing test with both required features and the test is executed successfully.",
+  "reason": "Rust test_s3_source.rs:test_miss_handler_batch_fetch_with_s3_hot_cache awaits production batch prefetch, then proves a later exact read is a hot-cache hit, which is a stronger result-level boundary than reproducing the private C++ worker queue. The exact `link-native,s3` command passes 1/1 with the qualified `s3_tests::` filter; evidence is retained at /tmp/mooncake-s3-hot-cache.Cv6cPd/test.log.",
       "review": {"oracle": "client_local_hot_cache_test.cpp LocalHotCacheHandlerBasic; Rust test_s3_source.rs test_miss_handler_batch_fetch_with_s3_hot_cache and its cfg(feature = s3)", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+  "rust": [
+    {
+      "file": "mooncake-store-client/tests/test_s3_source.rs",
+      "test": "test_miss_handler_batch_fetch_with_s3_hot_cache",
+      "features": ["s3"],
+      "module": "s3_tests"
+    }
+  ],
+  "status": "covered"
     },
     {
       "behavior": "The C++ LocalHotCacheHandler refuses a submission when constructed without a cache instance.",
