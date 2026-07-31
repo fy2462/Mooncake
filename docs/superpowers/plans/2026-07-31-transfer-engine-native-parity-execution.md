@@ -613,6 +613,8 @@ Git, and repository pre-commit hooks.
   ```bash
   native_library_path=$(find "$PWD/../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   test -n "$native_library_path"
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
   CARGO_TARGET_DIR=target/native-parity-tent \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src -L native=../build/mooncake-transfer-engine/tent/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -624,16 +626,18 @@ Git, and repository pre-commit hooks.
 
 - [ ] **Step 2: Build the Python binding with TENT native support**
 
-  Run only when `.venv/bin/maturin` is executable:
+  Run only when `/home/fy2462/Mooncake/.venv/bin/maturin` is executable:
 
   ```bash
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
   CARGO_TARGET_DIR=target/native-parity-tent \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src -L native=../build/mooncake-transfer-engine/tent/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    ../.venv/bin/maturin develop --manifest-path python/Cargo.toml \
+    /home/fy2462/Mooncake/.venv/bin/maturin develop --manifest-path python/Cargo.toml \
       --no-default-features --features link-tent-native
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    ../.venv/bin/python -m pytest python/tests -q
+    /home/fy2462/Mooncake/.venv/bin/python -m pytest python/tests -q
   ```
 
   Expected: binding build and selected Python tests pass. If maturin is absent,
