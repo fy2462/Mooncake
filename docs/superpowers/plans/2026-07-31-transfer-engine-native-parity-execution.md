@@ -667,10 +667,10 @@ Git, and repository pre-commit hooks.
   mkdir -p "$review_root"
   for manifest in parity-map.json transfer-engine-parity-map.json \
     tent-parity-map.json wheel-store-parity-map.json; do
-    for status in missing blocked not-applicable; do
+    for row_status in missing blocked not-applicable; do
       /home/fy2462/Mooncake/.venv/bin/python validate_parity.py \
-        --repo-root ../../.. --manifest "$manifest" --list-status "$status" \
-        >"$review_root/${manifest%.json}-$status.txt"
+        --repo-root ../../.. --manifest "$manifest" --list-status "$row_status" \
+        >"$review_root/${manifest%.json}-$row_status.txt"
     done
   done
   ```
