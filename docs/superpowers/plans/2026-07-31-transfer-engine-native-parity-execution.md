@@ -367,6 +367,9 @@ Git, and repository pre-commit hooks.
   candidate_gate_root=$(mktemp -d /tmp/mooncake-native-candidate-gate.XXXXXX)
   native_library_path=$(find "$PWD/../../../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   test -n "$native_library_path"
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_TARGET_DIR="$PWD/../../target/native-parity-classic" \
   RUSTFLAGS="-L native=$PWD/../../../build/mooncake-transfer-engine/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     /home/fy2462/Mooncake/.venv/bin/python run-parity-gate.py \
@@ -489,6 +492,9 @@ Git, and repository pre-commit hooks.
   classic_final_root=$(mktemp -d /tmp/mooncake-native-classic-final.XXXXXX)
   native_library_path=$(find "$PWD/../../../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   test -n "$native_library_path"
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_TARGET_DIR="$PWD/../../target/native-parity-classic" \
   RUSTFLAGS="-L native=$PWD/../../../build/mooncake-transfer-engine/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     /home/fy2462/Mooncake/.venv/bin/python run-parity-gate.py \
