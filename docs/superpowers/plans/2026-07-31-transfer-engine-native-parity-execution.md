@@ -805,14 +805,19 @@ Git, and repository pre-commit hooks.
   ```bash
   native_library_path=$(find "$PWD/build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
   final_module_root=$(mktemp -d /tmp/mooncake-native-final-module.XXXXXX)
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
   MOONCAKE_TE_LIB_DIR="$PWD/build/mooncake-transfer-engine/src" \
-  MOONCAKE_VALIDATION_CARGO_TARGET_DIR="$PWD/rust-repo/target/native-parity-final" \
+  MOONCAKE_VALIDATION_CARGO_TARGET_DIR="$PWD/rust-repo/target/native-parity-classic" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     rust-repo/tools/store-validation/run-module-gate.sh \
       --artifact-root "$final_module_root"
 
   cd rust-repo/tools/store-validation
   final_parity_root=$(mktemp -d /tmp/mooncake-native-final-parity.XXXXXX)
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_TARGET_DIR="$PWD/../../target/native-parity-classic" \
   RUSTFLAGS="-L native=$PWD/../../../build/mooncake-transfer-engine/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     /home/fy2462/Mooncake/.venv/bin/python run-parity-gate.py \
@@ -833,19 +838,23 @@ Git, and repository pre-commit hooks.
 
   ```bash
   native_library_path=$(find "$PWD/../build" -type f -name '*.so*' -printf '%h\n' | sort -u | paste -sd:)
-  CARGO_TARGET_DIR=target/native-parity-final-tent \
+  CARGO_INCREMENTAL=0 \
+  CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_TARGET_DIR=target/native-parity-tent \
   RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src -L native=../build/mooncake-transfer-engine/tent/src" \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     cargo test -p transfer-engine-ffi --no-default-features \
       --features link-tent-native --lib
-  if [[ -x ../.venv/bin/maturin ]]; then
-    CARGO_TARGET_DIR=target/native-parity-final-tent \
+  if [[ -x /home/fy2462/Mooncake/.venv/bin/maturin ]]; then
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_TEST_DEBUG=0 \
+    CARGO_TARGET_DIR=target/native-parity-tent \
     RUSTFLAGS="-L native=../build/mooncake-transfer-engine/src -L native=../build/mooncake-transfer-engine/tent/src" \
     LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-      ../.venv/bin/maturin develop --manifest-path python/Cargo.toml \
+      /home/fy2462/Mooncake/.venv/bin/maturin develop --manifest-path python/Cargo.toml \
         --no-default-features --features link-tent-native
     LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-      ../.venv/bin/python -m pytest python/tests -q
+      /home/fy2462/Mooncake/.venv/bin/python -m pytest python/tests -q
   fi
   ```
 
