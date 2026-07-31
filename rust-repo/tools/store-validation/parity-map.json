@@ -292,7 +292,7 @@
       "behavior": "A CXL-backed client supports batch put and get while preserving every object's bytes.",
       "boundary": ["client", "cxl", "batch", "data-path"],
       "reference": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.BatchPutGetOperations"},
-      "reason": "Rust has no end-to-end CXL batch put/get integrity test.",
+  "reason": "Rust tests CXL configuration, shared-capacity allocation, alias restoration, and mount validation, but no discoverable test mounts a CXL-backed client, successfully batch-puts ten distinct values, then batch-gets all ten and compares every returned size and byte sequence as this C++ body does.",
       "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL batch data path", "reviewed": true},
       "rust": [], "status": "missing"
     },
@@ -300,7 +300,7 @@
       "behavior": "Evicting a CXL-backed object removes it from the client-visible data path.",
       "boundary": ["client", "cxl", "eviction"],
       "reference": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.EvictOperation"},
-      "reason": "Rust has no end-to-end CXL eviction test.",
+  "reason": "Rust tests CXL capacity accounting and alias allocation, but no discoverable client data-path test writes 1,000 one-MiB CXL objects under pressure and proves through the public existence result that at least one inserted key was evicted, which is the complete C++ oracle.",
       "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL eviction path", "reviewed": true},
       "rust": [], "status": "missing"
     },
