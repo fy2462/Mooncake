@@ -281,6 +281,8 @@ Git, and repository pre-commit hooks.
   CARGO_PROFILE_TEST_DEBUG=0 \
   MOONCAKE_TE_LIB_DIR="$PWD/build/mooncake-transfer-engine/src" \
   MOONCAKE_VALIDATION_CARGO_TARGET_DIR="$PWD/rust-repo/target/native-parity-classic" \
+  MOONCAKE_VALIDATION_PYTHON=/home/fy2462/Mooncake/.venv/bin/python \
+  MOONCAKE_VALIDATION_MATURIN=/home/fy2462/Mooncake/.venv/bin/maturin \
   LD_LIBRARY_PATH="$native_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     rust-repo/tools/store-validation/run-module-gate.sh \
       --artifact-root "$classic_artifact_root"
