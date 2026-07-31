@@ -92,6 +92,30 @@ class ParityGateTest(unittest.TestCase):
             ],
         )
 
+    def test_nested_integration_module_uses_root_target_and_qualified_filter(self):
+        rust = {
+            "file": "mooncake-store-master/tests/test_allocator/cachelib.rs",
+            "test": "test_cachelib_like_allocator_reuses_freed_slot",
+        }
+        inventory = {TestRef("rust", rust["file"], rust["test"])}
+
+        plan = plan_parity_run(manifest([entry(rust=[rust])]), inventory)
+
+        self.assertEqual(
+            plan.commands[0].argv,
+            [
+                "cargo",
+                "test",
+                "-p",
+                "mooncake-store-master",
+                "--test",
+                "test_allocator",
+                "cachelib::test_cachelib_like_allocator_reuses_freed_slot",
+                "--",
+                "--exact",
+            ],
+        )
+
     def test_shared_evidence_runs_once_and_retains_all_references(self):
         plan = plan_parity_run(
             manifest([entry(), entry(reference_test="AllocatorTest.Reallocate")]),

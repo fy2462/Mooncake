@@ -52,7 +52,9 @@ def _command_for(rust: dict[str, str]) -> tuple[str, list[str]]:
         else []
     )
     if parts[1] == "tests":
-        target = path.stem
+        target = PurePosixPath(parts[2]).stem
+        module_names = [PurePosixPath(part).stem for part in parts[3:]]
+        test_filter = "::".join([*module_names, test_name])
         argv = [
             "cargo",
             "test",
@@ -61,7 +63,7 @@ def _command_for(rust: dict[str, str]) -> tuple[str, list[str]]:
             *feature_args,
             "--test",
             target,
-            test_name,
+            test_filter,
             "--",
             "--exact",
         ]
