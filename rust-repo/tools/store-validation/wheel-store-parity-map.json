@@ -54,54 +54,8 @@
       "rust": [],
       "status": "missing"
     },
-    {
-      "behavior": "Three one-replica keys exist, then after lease expiry batch clear returns all keys and removes their visibility. Rust `mooncake-store-client/tests/test_client_inproc_e2e.rs::batch_replica_clear_handles_single_multiple_empty_and_missing_keys` puts three keys, waits beyond a 20-ms lease, clears single and multi-key slices with exact returned keys, and asserts all three absent.",
-      "boundary": [
-        "wheel",
-        "store"
-      ],
-      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
-      "reference": {
-        "file": "test_batch_replica_clear.py",
-        "test": "TestBatchReplicaClearSingleStore.test_clear_after_lease_expiry"
-      },
-      "review": {
-        "oracle": "mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_after_lease_expiry test body and inspected Python/Store call path",
-        "reviewed": true
-      },
-      "rust": [
-        {
-          "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
-          "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
-        }
-      ],
-      "status": "blocked",
-      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
-    },
-    {
-      "behavior": "Empty input returns an empty list. The Rust client E2E invokes an empty slice and asserts an empty successful result.",
-      "boundary": [
-        "wheel",
-        "store"
-      ],
-      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
-      "reference": {
-        "file": "test_batch_replica_clear.py",
-        "test": "TestBatchReplicaClearSingleStore.test_clear_empty_keys"
-      },
-      "review": {
-        "oracle": "mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_empty_keys test body and inspected Python/Store call path",
-        "reviewed": true
-      },
-      "rust": [
-        {
-          "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
-          "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
-        }
-      ],
-      "status": "blocked",
-      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
-    },
+    {"behavior":"Three one-replica keys exist, then after lease expiry batch clear returns all keys and removes their visibility. Rust `mooncake-store-client/tests/test_client_inproc_e2e.rs::batch_replica_clear_handles_single_multiple_empty_and_missing_keys` puts three keys, waits beyond a 20-ms lease, clears single and multi-key slices with exact returned keys, and asserts all three absent.","boundary":["wheel","store"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"test_batch_replica_clear.py","test":"TestBatchReplicaClearSingleStore.test_clear_after_lease_expiry"},"review":{"oracle":"mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_after_lease_expiry test body and inspected Python/Store call path","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"batch_replica_clear_handles_single_multiple_empty_and_missing_keys"}],"status":"covered"},
+    {"behavior":"Empty input returns an empty list. The Rust client E2E invokes an empty slice and asserts an empty successful result.","boundary":["wheel","store"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"test_batch_replica_clear.py","test":"TestBatchReplicaClearSingleStore.test_clear_empty_keys"},"review":{"oracle":"mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_empty_keys test body and inspected Python/Store call path","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"batch_replica_clear_handles_single_multiple_empty_and_missing_keys"}],"status":"covered"},
     {
       "behavior": "One call clears all 50 expired keys and returns every key. Rust batch-clear evidence covers at most two keys per call, not this cardinality.",
       "boundary": [
@@ -138,54 +92,8 @@
       "rust": [],
       "status": "missing"
     },
-    {
-      "behavior": "Three absent keys return an empty list without error. The Rust client E2E submits absent keys and asserts an empty successful result.",
-      "boundary": [
-        "wheel",
-        "store"
-      ],
-      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
-      "reference": {
-        "file": "test_batch_replica_clear.py",
-        "test": "TestBatchReplicaClearSingleStore.test_clear_nonexistent_keys"
-      },
-      "review": {
-        "oracle": "mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_nonexistent_keys test body and inspected Python/Store call path",
-        "reviewed": true
-      },
-      "rust": [
-        {
-          "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
-          "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
-        }
-      ],
-      "status": "blocked",
-      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
-    },
-    {
-      "behavior": "After expiry one key returns as the sole cleared result and is no longer readable. The Rust client E2E clears one expired key, asserts the exact one-key result, and later asserts it absent.",
-      "boundary": [
-        "wheel",
-        "store"
-      ],
-      "reason": "The semantic Rust evidence remains complete, but the parity runner's mandatory mooncake-store-client --features link-native command stops before the test body because /usr/bin/aarch64-linux-gnu-ld.bfd cannot find -ltransfer_engine.",
-      "reference": {
-        "file": "test_batch_replica_clear.py",
-        "test": "TestBatchReplicaClearSingleStore.test_clear_single_key"
-      },
-      "review": {
-        "oracle": "mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_single_key test body and inspected Python/Store call path",
-        "reviewed": true
-      },
-      "rust": [
-        {
-          "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
-          "test": "batch_replica_clear_handles_single_multiple_empty_and_missing_keys"
-        }
-      ],
-      "status": "blocked",
-      "prerequisite": "Prebuilt native Transfer Engine library discoverable as -ltransfer_engine through the existing aarch64 linker configuration."
-    },
+    {"behavior":"Three absent keys return an empty list without error. The Rust client E2E submits absent keys and asserts an empty successful result.","boundary":["wheel","store"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"test_batch_replica_clear.py","test":"TestBatchReplicaClearSingleStore.test_clear_nonexistent_keys"},"review":{"oracle":"mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_nonexistent_keys test body and inspected Python/Store call path","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"batch_replica_clear_handles_single_multiple_empty_and_missing_keys"}],"status":"covered"},
+    {"behavior":"After expiry one key returns as the sole cleared result and is no longer readable. The Rust client E2E clears one expired key, asserts the exact one-key result, and later asserts it absent.","boundary":["wheel","store"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"test_batch_replica_clear.py","test":"TestBatchReplicaClearSingleStore.test_clear_single_key"},"review":{"oracle":"mooncake-wheel/tests/test_batch_replica_clear.py::TestBatchReplicaClearSingleStore.test_clear_single_key test body and inspected Python/Store call path","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"batch_replica_clear_handles_single_multiple_empty_and_missing_keys"}],"status":"covered"},
     {
       "behavior": "Three active-lease keys must be skipped with an empty return and remain readable with exact bytes. No approved Rust test issues batch replica clear before lease expiry and proves unchanged data.",
       "boundary": [
