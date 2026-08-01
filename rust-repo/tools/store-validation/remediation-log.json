@@ -1744,7 +1744,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.GetIntoAcceptsSubrangeOfLocalRegisteredBuffer",
     "rust": "python/tests/test_pybind_client_parity.py:test_get_into_accepts_interior_registered_buffer_range",
     "first_divergence": "The synchronous PyO3 get_into binding called Handle::current on a normal Python thread and panicked before reaching the registered-range lookup; it now blocks on the binding-owned Tokio runtime and accepts an interior BufferPool view.",
-    "repair_commit": "PENDING",
+    "repair_commit": "b9bab928",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_get_into_accepts_interior_registered_buffer_range",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-get-into-subrange-goal-019fbca4.typescript"
