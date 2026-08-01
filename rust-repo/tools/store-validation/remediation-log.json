@@ -1784,5 +1784,41 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_close_is_idempotent_with_real_binding_client",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-lifecycle-query-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrDuplicatePutSameKey",
+    "rust": "python/tests/test_pybind_client_parity.py:test_duplicate_put_preserves_first_value",
+    "first_divergence": "No real PyO3 single-key test proved a second successful put with different bytes leaves the first committed value visible.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_duplicate_put_preserves_first_value",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-basic-kv-edges-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.BatchIsExistMixed",
+    "rust": "python/tests/test_pybind_client_parity.py:test_batch_exists_preserves_mixed_input_order",
+    "first_divergence": "No real binding test proved mixed present and missing existence results preserve input cardinality and order through Python conversion.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_batch_exists_preserves_mixed_input_order",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-basic-kv-edges-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.RemoveByRegexBasic",
+    "rust": "python/tests/test_pybind_client_parity.py:test_remove_by_regex_removes_exact_matches",
+    "first_divergence": "No client-level PyO3 test proved regex removal returns the exact count while preserving a nonmatching key.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_remove_by_regex_removes_exact_matches",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-basic-kv-edges-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.RemoveByRegexNoMatch",
+    "rust": "python/tests/test_pybind_client_parity.py:test_remove_by_regex_no_match_is_zero_and_nonmutating",
+    "first_divergence": "No real binding test proved a no-match regex returns zero without removing the existing key.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_remove_by_regex_no_match_is_zero_and_nonmutating",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-basic-kv-edges-goal-019fbca4.typescript"
   }
 ]

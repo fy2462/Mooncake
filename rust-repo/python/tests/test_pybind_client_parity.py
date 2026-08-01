@@ -212,3 +212,53 @@ async def test_close_is_idempotent_with_real_binding_client(cachelib_master):
     client = await _client(cachelib_master)
     assert await client.close() == 0
     assert await client.close() == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_put_preserves_first_value(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    try:
+        assert await client.put("duplicate_put_key", b"first_value") == 0
+        assert await client.exists("duplicate_put_key") is True
+        assert await client.put("duplicate_put_key", b"second_value_longer") == 0
+        assert bytes(await client.get_buffer("duplicate_put_key")) == b"first_value"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_exists_preserves_mixed_input_order(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    try:
+        assert await client.put("exist_key_1", b"batch_exist_data") == 0
+        assert await client.put("exist_key_2", b"batch_exist_data") == 0
+        assert await client.batch_is_exist(
+            ["exist_key_1", "missing_key", "exist_key_2", "also_missing"]
+        ) == [True, False, True, False]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_by_regex_removes_exact_matches(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    try:
+        for key in ("prefix_alpha", "prefix_beta", "other_key"):
+            assert await client.put(key, b"regex_data") == 0
+        assert await client.remove_by_regex(r"^prefix_.*") == 2
+        assert await client.batch_is_exist(
+            ["prefix_alpha", "prefix_beta", "other_key"]
+        ) == [False, False, True]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_by_regex_no_match_is_zero_and_nonmutating(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    try:
+        assert await client.put("some_key", b"no_match_data") == 0
+        assert await client.remove_by_regex(r"^nonexistent_pattern_.*") == 0
+        assert await client.exists("some_key") is True
+    finally:
+        await client.close()
