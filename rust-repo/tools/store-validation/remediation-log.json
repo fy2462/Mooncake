@@ -1654,7 +1654,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.GracefulUnmountSegment_SetsCorrectStatus",
     "rust": "mooncake-store-master/tests/test_master_graceful_unmount_parity.rs:graceful_unmount_sets_correct_status_parity",
     "first_divergence": "Rust lacked the initial ACTIVE-by-name observation and the exact 1000-ms transition to GRACEFULLY_UNMOUNTING by name.",
-    "repair_commit": "PENDING",
+    "repair_commit": "decc60f9",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_sets_correct_status_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-unmount-goal-019fbca4.typescript"
@@ -1663,7 +1663,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.GracefulUnmountSegment_RejectWrongClient",
     "rust": "mooncake-store-master/tests/test_master_graceful_unmount_parity.rs:graceful_unmount_rejects_wrong_client_parity",
     "first_divergence": "Rust did not submit a graceful-unmount request from a non-owner and prove NOT_FOUND followed by owner success.",
-    "repair_commit": "PENDING",
+    "repair_commit": "decc60f9",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_rejects_wrong_client_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-unmount-goal-019fbca4.typescript"
@@ -1672,7 +1672,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.GracefulUnmountSegment_TimerExpiresAndUnmounts",
     "rust": "mooncake-store-master/tests/test_master_graceful_unmount_parity.rs:graceful_unmount_timer_expires_and_unmounts_parity",
     "first_divergence": "Rust lacked the exact 50-ms grace, immediate draining status, and 300-ms absent-or-UNDEFINED status API boundary.",
-    "repair_commit": "PENDING",
+    "repair_commit": "decc60f9",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_timer_expires_and_unmounts_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-unmount-goal-019fbca4.typescript"
@@ -1681,7 +1681,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.GracefulUnmountSegment_QueryStatusByIdWithReusedName",
     "rust": "mooncake-store-master/tests/test_master_graceful_unmount_parity.rs:graceful_unmount_status_by_id_with_reused_name_parity",
     "first_divergence": "Rust never observed independent old and replacement segment UUIDs sharing a name across the graceful-unmount deadline.",
-    "repair_commit": "PENDING",
+    "repair_commit": "decc60f9",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_status_by_id_with_reused_name_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-unmount-goal-019fbca4.typescript"
@@ -1690,7 +1690,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.GracefulUnmountSegment_EarlierTimerPreemptsWait",
     "rust": "mooncake-store-master/tests/test_master_graceful_unmount_parity.rs:graceful_unmount_earlier_timer_preempts_wait_parity",
     "first_divergence": "Rust did not prove that a later-enqueued 50-ms deadline wakes and preempts an existing 1000-ms scheduler wait.",
-    "repair_commit": "PENDING",
+    "repair_commit": "decc60f9",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_earlier_timer_preempts_wait_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-unmount-goal-019fbca4.typescript"
