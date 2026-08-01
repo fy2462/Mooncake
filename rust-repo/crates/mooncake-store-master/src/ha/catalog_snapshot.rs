@@ -1621,10 +1621,12 @@ fn snapshot_error(error: impl Into<String>) -> HaError {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_cpp_discarded_replicas, decode_local_disk_segments, decode_metadata,
-        decode_segments, decode_value, encode_compressed_value, encode_value,
+        LoadedSnapshot, decode_cpp_discarded_replicas, decode_local_disk_segments, decode_metadata,
+        decode_segments, decode_value, encode_compressed_value, encode_segments, encode_value,
     };
-    use mooncake_store_core::{ReplicaStatus, ReplicaType};
+    use crate::proto::SegmentStatus;
+    use crate::service::SegmentEntry;
+    use mooncake_store_core::{ReplicaStatus, ReplicaType, Segment};
     use rmpv::Value;
     use std::collections::HashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1661,6 +1663,47 @@ mod tests {
 
     fn disk_metadata(extra_fields: Vec<Value>) -> Value {
         disk_metadata_with_status(ReplicaStatus::Complete as i32 as i64, extra_fields)
+    }
+
+    #[test]
+    fn cpp_parity_serializer_test_cpp_serializertest_mountedsegmentserializationpreserveshostid_75440f87()
+     {
+        let segment_id = Uuid::new_v4();
+        let snapshot = LoadedSnapshot {
+            snapshot_id: "mounted-segment-round-trip".into(),
+            snapshot_sequence_id: 0,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: Segment {
+                    id: segment_id,
+                    name: "segment_host1".into(),
+                    base: 0x300000000,
+                    size: 1024 * 1024,
+                    te_endpoint: "segment_host1".into(),
+                    protocol: "tcp".into(),
+                    host_id: "host1".into(),
+                },
+                used: 0,
+                client_id: Uuid::nil(),
+                status: SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![],
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+
+        let encoded = encode_segments(&snapshot).unwrap();
+        let restored = decode_segments(&encoded).unwrap();
+        let restored = &restored[&segment_id].entry;
+
+        assert_eq!(restored.segment.id, segment_id);
+        assert_eq!(restored.segment.name, "segment_host1");
+        assert_eq!(restored.segment.host_id, "host1");
+        assert_eq!(restored.status, SegmentStatus::Active);
     }
 
     #[test]
