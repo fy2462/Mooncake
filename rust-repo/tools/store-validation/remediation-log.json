@@ -1195,7 +1195,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutStartInvalidParams",
     "rust": "mooncake-store-master/tests/test_master_object.rs:put_start_invalid_parameter_matrix_parity",
     "first_divergence": "Rust implemented all three validation branches, but its discoverable tests did not run the zero-total-replica, zero-slice, and same-node-plus-NoF inputs against one real mounted service and assert the exact InvalidArgument result for every request.",
-    "repair_commit": "PENDING",
+    "repair_commit": "b4ddc9a4",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object put_start_invalid_parameter_matrix_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-start-matrix-goal-019fbca4.typescript"
@@ -1204,7 +1204,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutStartOnePlusOneAllowsSingleAllocatedReplica",
     "rust": "mooncake-store-master/tests/test_master_object.rs:one_plus_one_allows_available_memory_only_parity",
     "first_divergence": "Rust treated NoF allocation failure as fatal after a successful Memory allocation, so a 1+1 request with only Memory capacity rolled back that valid descriptor instead of applying the C++ flexible-dual rule that accepts either available side.",
-    "repair_commit": "PENDING",
+    "repair_commit": "b4ddc9a4",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object one_plus_one_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-start-matrix-goal-019fbca4.typescript"
