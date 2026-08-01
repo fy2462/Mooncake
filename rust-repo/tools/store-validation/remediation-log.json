@@ -835,7 +835,7 @@
     "cpp": "replica_selection_test.cpp:ReplicaSelectionTest.EnvironmentOptInUsesBuiltinScorer",
     "rust": "mooncake-store-client/src/client/replica_selection.rs:cpp_parity_environment_opt_in_uses_builtin_selection",
     "first_divergence": "Existing Rust coverage omitted this exact environment, replica ordering, or Written/Failed status matrix even though the production selector already supported the required result.",
-    "repair_commit": "PENDING",
+    "repair_commit": "874fb68f",
     "focused_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib client::replica_selection::tests::cpp_parity_ -- --nocapture",
     "crate_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-replica-selection-goal-019fbaa7.typescript"
@@ -844,7 +844,7 @@
     "cpp": "replica_selection_test.cpp:ReplicaSelectionTest.ScorerSkipsIncompleteReplicas",
     "rust": "mooncake-store-client/src/client/replica_selection.rs:cpp_parity_scoring_skips_written_better_remote_memory",
     "first_divergence": "Existing Rust coverage omitted this exact environment, replica ordering, or Written/Failed status matrix even though the production selector already supported the required result.",
-    "repair_commit": "PENDING",
+    "repair_commit": "874fb68f",
     "focused_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib client::replica_selection::tests::cpp_parity_ -- --nocapture",
     "crate_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-replica-selection-goal-019fbaa7.typescript"
@@ -853,7 +853,7 @@
     "cpp": "replica_selection_test.cpp:ReplicaSelectionTest.LocalDiskPrecedesDisk",
     "rust": "mooncake-store-client/src/client/replica_selection.rs:cpp_parity_later_local_disk_overrides_earlier_disk",
     "first_divergence": "Existing Rust coverage omitted this exact environment, replica ordering, or Written/Failed status matrix even though the production selector already supported the required result.",
-    "repair_commit": "PENDING",
+    "repair_commit": "874fb68f",
     "focused_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib client::replica_selection::tests::cpp_parity_ -- --nocapture",
     "crate_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-replica-selection-goal-019fbaa7.typescript"
@@ -862,7 +862,7 @@
     "cpp": "replica_selection_test.cpp:ReplicaSelectionTest.DiskIsLastCompleteFallback",
     "rust": "mooncake-store-client/src/client/replica_selection.rs:cpp_parity_disk_is_last_complete_fallback_after_failed_memory",
     "first_divergence": "Existing Rust coverage omitted this exact environment, replica ordering, or Written/Failed status matrix even though the production selector already supported the required result.",
-    "repair_commit": "PENDING",
+    "repair_commit": "874fb68f",
     "focused_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib client::replica_selection::tests::cpp_parity_ -- --nocapture",
     "crate_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-replica-selection-goal-019fbaa7.typescript"
@@ -871,7 +871,7 @@
     "cpp": "replica_selection_test.cpp:ReplicaSelectionTest.NoCompleteReplicaReturnsNull",
     "rust": "mooncake-store-client/src/client/replica_selection.rs:cpp_parity_processing_memory_and_failed_nof_return_none",
     "first_divergence": "Existing Rust coverage omitted this exact environment, replica ordering, or Written/Failed status matrix even though the production selector already supported the required result.",
-    "repair_commit": "PENDING",
+    "repair_commit": "874fb68f",
     "focused_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib client::replica_selection::tests::cpp_parity_ -- --nocapture",
     "crate_command": "env CARGO_TARGET_DIR=<rust-repo>/target/native-parity-classic RUSTFLAGS='-L native=<worktree>/build/mooncake-transfer-engine/src' LD_LIBRARY_PATH=<native-library-dirs> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-replica-selection-goal-019fbaa7.typescript"
