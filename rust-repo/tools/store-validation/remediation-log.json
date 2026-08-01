@@ -2360,5 +2360,50 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segment_status_unknown_is_404",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.GetAllKeysReturnsKeys",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_get_all_keys_returns_stored_key",
+    "first_divergence": "The active object-inventory route omitted C++'s trailing newline and had no exact request-level proof that a completed object is visible.",
+    "repair_commit": "487be768",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_get_all_keys_returns_stored_key",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-key-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.GetAllKeysExcludesRemovedKey",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_get_all_keys_excludes_removed_key",
+    "first_divergence": "Cleanup visibility after a real remove operation lacked request-level HTTP proof.",
+    "repair_commit": "487be768",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_get_all_keys_excludes_removed_key",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-key-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryKeyReturnsDataForExistingKey",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_key_existing_response",
+    "first_divergence": "The Rust JSON serializer used normalized field names instead of the C++ Descriptor names with trailing underscores.",
+    "repair_commit": "487be768",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_key_existing_response",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-key-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryKeyReturns404ForNonexistentKey",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_key_missing_is_404",
+    "first_divergence": "The unknown-key to HTTP 404 mapping had no request-level proof.",
+    "repair_commit": "487be768",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_key_missing_is_404",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-key-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryKeyWithoutKeyParamReturns404",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_key_missing_parameter_is_404",
+    "first_divergence": "The missing key query-parameter to HTTP 404 mapping had no request-level proof.",
+    "repair_commit": "487be768",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_key_missing_parameter_is_404",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-key-routes-goal-019fbe77.typescript"
   }
 ]
