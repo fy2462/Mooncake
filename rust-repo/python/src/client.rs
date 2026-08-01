@@ -4285,14 +4285,26 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         let results = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
-            let result = client.batch_get_replica_list(&keys).await;
-            result.map_err(to_py_err)
+            let results = client
+                .batch_get_replica_list_results(&keys)
+                .await
+                .map_err(to_py_err)?;
+            results
+                .into_iter()
+                .map(|result| match result {
+                    Ok(replicas) => Ok(Some(replicas)),
+                    Err(mooncake_store_core::StoreError::KeyNotFound(_)) => Ok(None),
+                    Err(error) => Err(to_py_err(error)),
+                })
+                .collect::<PyResult<Vec<_>>>()
         })?;
 
         let py = unsafe { Python::assume_attached() };
         let dict = PyDict::new(py);
         for (key, replicas) in keys.into_iter().zip(results.into_iter()) {
-            dict.set_item(key, replicas_to_py(replicas))?;
+            if let Some(replicas) = replicas {
+                dict.set_item(key, replicas_to_py(replicas))?;
+            }
         }
         Ok(dict.into_any().unbind())
     }
@@ -4427,6 +4439,19 @@ impl PythonMooncakeClient {
                 }
             }
         };
+        let registration_base = memory_owner.base_address().as_ptr() as usize;
+        {
+            let slf_ref = slf.borrow();
+            let registrations = slf_ref.registered_py_buffers.lock();
+            if registrations.iter().any(|registration| {
+                registration.matches_python_object(python_object_identity)
+                    || registration.registration_id().base_address() == registration_base
+            }) {
+                return Err(to_py_err(
+                    "Python buffer object or address is already registered",
+                ));
+            }
+        }
         {
             let slf_ref = slf.borrow();
             let guard = try_client_slot(&slf_ref.inner)?;

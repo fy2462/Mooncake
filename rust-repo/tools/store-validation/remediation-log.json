@@ -1892,5 +1892,32 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_unmount_and_free_unowned_uuid_fails",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-batch-error-shapes-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.TestBatchAndNormalGetReplicaDesc",
+    "rust": "python/tests/test_pybind_client_parity.py:test_replica_descriptor_and_invalid_batch_mapping",
+    "first_divergence": "The binding propagated KeyNotFound for an invalid-only batch instead of omitting missing keys and returning the C++-compatible empty map.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_replica_descriptor_and_invalid_batch_mapping",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-replica-buffer-upsert-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrBufferRegistrationErrors",
+    "rust": "python/tests/test_pybind_client_parity.py:test_register_buffer_rejects_unknown_unregistration_and_duplicate",
+    "first_divergence": "No real binding test proved the exact unknown-unregister, initial-register, duplicate-register, final-unregister outcome sequence on Python-owned mutable memory.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_register_buffer_rejects_unknown_unregistration_and_duplicate",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-replica-buffer-upsert-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.UpsertBatch",
+    "rust": "python/tests/test_pybind_client_parity.py:test_upsert_batch_returns_aggregate_success_and_exact_ordered_bytes",
+    "first_divergence": "The aggregate upsert wrapper existed, but no real PyO3 test proved zero status together with exact ordered values for all three keys.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_upsert_batch_returns_aggregate_success_and_exact_ordered_bytes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-replica-buffer-upsert-goal-019fbca4.typescript"
   }
 ]

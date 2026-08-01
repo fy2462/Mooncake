@@ -377,3 +377,58 @@ async def test_missing_key_has_single_and_batch_python_error_shapes(cachelib_mas
         lease.release()
         pool.close()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_replica_descriptor_and_invalid_batch_mapping(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    key = "mooncake_key"
+    try:
+        assert (
+            await client.put(key, b"It's a test data for get_allocated_buffer_desc.")
+            == 0
+        )
+
+        replicas = client.get_replica_desc(key)
+        assert len(replicas) == 1
+        assert replicas[0]["replica_type"] == "Memory"
+
+        batch_replicas = client.batch_get_replica_desc([key])
+        assert list(batch_replicas) == [key]
+        assert len(batch_replicas[key]) == 1
+        assert batch_replicas[key][0]["replica_type"] == "Memory"
+        assert client.batch_get_replica_desc(["test_key_1"]) == {}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_register_buffer_rejects_unknown_unregistration_and_duplicate(
+    cachelib_master,
+):
+    client = await _client(cachelib_master)
+    unknown = bytearray(64)
+    registered = bytearray(1024)
+    try:
+        with pytest.raises(Exception):
+            client.unregister_buffer(unknown)
+        assert client.register_buffer(registered, len(registered)) == 0
+        with pytest.raises(Exception):
+            client.register_buffer(registered, len(registered))
+        assert client.unregister_buffer(registered) == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upsert_batch_returns_aggregate_success_and_exact_ordered_bytes(
+    cachelib_master,
+):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    keys = ["upsert_batch_0", "upsert_batch_1", "upsert_batch_2"]
+    values = [b"value_for_key_0!", b"value_for_key_1!", b"value_for_key_2!"]
+    try:
+        assert await client.upsert_batch(keys, values) == 0
+        assert [bytes(await client.get_buffer(key)) for key in keys] == values
+    finally:
+        await client.close()

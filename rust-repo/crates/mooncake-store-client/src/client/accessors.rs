@@ -84,10 +84,18 @@ impl MooncakeClient {
         &mut self,
         keys: &[String],
     ) -> StoreResult<Vec<Vec<ReplicaDescriptor>>> {
-        self.fetch_batch_replicas(keys)
+        self.batch_get_replica_list_results(keys)
             .await?
             .into_iter()
             .collect::<StoreResult<Vec<_>>>()
+    }
+
+    /// Query replica lists in one RPC while retaining each key's result.
+    pub async fn batch_get_replica_list_results(
+        &mut self,
+        keys: &[String],
+    ) -> StoreResult<Vec<StoreResult<Vec<ReplicaDescriptor>>>> {
+        self.fetch_batch_replicas(keys).await
     }
 
     /// Batch-query replica placement metadata and preserve lease TTL.
