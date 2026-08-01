@@ -54,6 +54,7 @@ pub mod dummy;
 #[cfg(test)]
 mod dummy_tests;
 pub mod engram;
+pub mod file_util;
 pub mod hot_cache;
 pub mod local_storage_backend;
 mod memory_ffi;

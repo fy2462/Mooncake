@@ -554,73 +554,73 @@
       "behavior": "Writing `hello mooncake` to the requested path succeeds and a raw binary read of that path returns exactly those text bytes.",
       "boundary": ["client", "local-disk", "filesystem", "text-write", "raw-content"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_Basic"},
-      "reason": "No discoverable Rust test writes selected plain text to a selected raw LocalDisk path and reads the same unencoded bytes back; add this portable contract before replacing LocalDisk file I/O with io_uring.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_Basic and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/WriteChunks/SaveStringToFile", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_basic"}],
+      "status": "covered"
     },
     {
       "behavior": "Writing exact text to a selected nested path with absent parents succeeds, creates every parent directory, and a raw read returns the same text.",
       "boundary": ["client", "local-disk", "filesystem", "text-write", "recursive-parents"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_CreatesSubdirectories"},
-      "reason": "Rust nested snapshot and persistence tests are indirect and do not assert selected text plus recursively absent parents plus a raw read; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_CreatesSubdirectories and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/EnsureDirExists/SaveStringToFile", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_createssubdirectories"}],
+      "status": "covered"
     },
     {
       "behavior": "Writing an empty string to the requested path succeeds and leaves a readable zero-length file there.",
       "boundary": ["client", "local-disk", "filesystem", "text-write", "empty-write", "size"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveStringToFile_EmptyContent"},
-      "reason": "No discoverable Rust test asserts that an empty write creates the selected regular file and that its raw content and length are zero; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveStringToFile_EmptyContent and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/WriteChunks/SaveStringToFile", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_emptycontent"}],
+      "status": "covered"
     },
     {
       "behavior": "Writing `[0, 1, 2, 128, 254, 255]` to the requested path succeeds and a raw file read returns byte-for-byte equality.",
       "boundary": ["client", "local-disk", "filesystem", "binary-write", "raw-content"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveBinaryToFile_Basic"},
-      "reason": "LocalStorageBackend round-trips an encoded per-key record rather than asserting raw selected-file bytes including zero and high-byte values; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_Basic and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/WriteChunks/SaveBinaryToFile", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_savebinarytofile_basic"}],
+      "status": "covered"
     },
     {
       "behavior": "Writing byte `[42]` to a selected nested path with absent parents succeeds, creates every parent directory, and a raw read returns exactly `[42]`.",
       "boundary": ["client", "local-disk", "filesystem", "binary-write", "recursive-parents", "raw-content"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.SaveBinaryToFile_CreatesSubdirectories"},
-      "reason": "Rust only has separate or indirect evidence for nested directory creation and binary persistence, not the selected nested raw-byte sequence; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp SaveBinaryToFile_CreatesSubdirectories and mooncake-store/src/utils/file_util.cpp PrepareOutputFile/EnsureDirExists/SaveBinaryToFile", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_savebinarytofile_createssubdirectories"}],
+      "status": "covered"
     },
     {
       "behavior": "Ensuring a selected absent path succeeds and makes that path a directory.",
       "boundary": ["client", "local-disk", "filesystem", "directory-creation", "path-type"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_CreateNew"},
-      "reason": "Rust LocalDisk initialization asserts an internally selected namespace directory but does not directly ensure an arbitrary absent path and assert its type; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_CreateNew and mooncake-store/src/utils/file_util.cpp EnsureDirExists", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_createnew"}],
+      "status": "covered"
     },
     {
       "behavior": "Ensuring an already existing directory succeeds without error.",
       "boundary": ["client", "local-disk", "filesystem", "directory-creation", "idempotence"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_AlreadyExists"},
-      "reason": "LocalStorageBackend init idempotence returns through an initialized-state fast path rather than directly revalidating an existing directory; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_AlreadyExists and mooncake-store/src/utils/file_util.cpp EnsureDirExists", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_alreadyexists"}],
+      "status": "covered"
     },
     {
       "behavior": "Ensuring a selected path already occupied by a regular file returns an error.",
       "boundary": ["client", "local-disk", "filesystem", "directory-creation", "type-conflict", "error"],
       "reference": {"file": "file_util_test.cpp", "test": "FileUtilTest.EnsureDirExists_PathIsFile_ReturnsError"},
-      "reason": "Rust LocalDisk source rejects a non-directory storage path, but no discoverable test exercises a regular file at the selected directory path and asserts the error; add this LocalDisk contract before io_uring file I/O.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/file_util_test.cpp EnsureDirExists_PathIsFile_ReturnsError and mooncake-store/src/utils/file_util.cpp EnsureDirExists", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/tests/test_file_util.rs","test":"cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_pathisfile_returnserror"}],
+      "status": "covered"
     },
     {"behavior":"Health check reports NOT_INITIALIZED before client setup.","boundary":["client","health","lifecycle","status-code"],"reason":"Rust exposes the stable 0/1/2 ClientHealthStatus contract and resolves an empty binding client slot to NOT_INITIALIZED. Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"health_check_test.cpp","test":"HealthCheckTest.ReturnsOneBeforeSetup"},"review":{"oracle":"mooncake-store/tests/health_check_test.cpp ReturnsOneBeforeSetup and Rust/Python health_check APIs","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"health_lifecycle_and_real_transfer_metrics_match_cpp_codes"}],"status":"covered"},
     {"behavior":"Health check reports HEALTHY after setup and a successful master ping.","boundary":["client","master","health","status-code"],"reason":"Rust performs a successful live Master ping and asserts the public HEALTHY status. Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"health_check_test.cpp","test":"HealthCheckTest.ReturnsZeroWhenHealthy"},"review":{"oracle":"mooncake-store/tests/health_check_test.cpp ReturnsZeroWhenHealthy and Rust health state/live E2E","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"health_lifecycle_and_real_transfer_metrics_match_cpp_codes"}],"status":"covered"},
