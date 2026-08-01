@@ -713,6 +713,10 @@ fn test_error_all_variants() {
         ),
         ("replica is not ready", StoreError::ReplicaNotReady),
         (
+            "lease expired before data transfer completed: slow-key",
+            StoreError::LeaseExpired("slow-key".into()),
+        ),
+        (
             "invalid parameters: bad",
             StoreError::InvalidParams("bad".into()),
         ),

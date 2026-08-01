@@ -62,6 +62,11 @@ pub enum StoreError {
     #[error("replica is not ready")]
     ReplicaNotReady,
 
+    /// The read lease expired before its data transfer completed.
+    /// 读取租约在数据传输完成前已过期。
+    #[error("lease expired before data transfer completed: {0}")]
+    LeaseExpired(String),
+
     /// Caller-supplied parameters are malformed or out of range.
     /// 调用方提供的参数格式错误或超出范围。
     #[error("invalid parameters: {0}")]

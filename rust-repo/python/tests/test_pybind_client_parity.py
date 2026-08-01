@@ -36,6 +36,13 @@ def cachelib_master(request):
     rpc_port = _free_port()
     metadata_port = _free_port()
     metrics_port = _free_port()
+    fixture_config = getattr(request, "param", None)
+    if isinstance(fixture_config, dict):
+        lease_ttl_ms = fixture_config.get("lease_ttl_ms")
+        memory_allocator = fixture_config.get("memory_allocator", "cachelib")
+    else:
+        lease_ttl_ms = fixture_config
+        memory_allocator = "cachelib"
     command = [
         str(_master_binary()),
         "--rpc-address",
@@ -49,9 +56,8 @@ def cachelib_master(request):
         "--metrics-port",
         str(metrics_port),
         "--memory-allocator",
-        "cachelib",
+        memory_allocator,
     ]
-    lease_ttl_ms = getattr(request, "param", None)
     if lease_ttl_ms is not None:
         command.extend(["--default-kv-lease-ttl-ms", str(lease_ttl_ms)])
     process = subprocess.Popen(
@@ -85,6 +91,7 @@ async def _client(
     cachelib_master,
     *,
     global_segment_size: int = 0,
+    local_buffer_size: int = 16 * 1024 * 1024,
     local_hostname: str = "localhost",
 ):
     rpc_port, metadata_port = cachelib_master
@@ -95,7 +102,7 @@ async def _client(
         protocol="tcp",
         device="",
         global_segment_size=global_segment_size,
-        local_buffer_size=16 * 1024 * 1024,
+        local_buffer_size=local_buffer_size,
     )
 
 
@@ -603,3 +610,61 @@ async def test_create_rejects_unreachable_master_invalid_protocol_and_empty_host
         await MooncakeClient.create(**{**base, "protocol": "invalid_protocol"})
     with pytest.raises(Exception):
         await MooncakeClient.create(**{**base, "local_hostname": ""})
+
+
+@pytest.mark.parametrize(
+    "cachelib_master",
+    [{"lease_ttl_ms": 1, "memory_allocator": "offset"}],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_lease_expiry_preserves_single_and_batch_failure_shapes(
+    cachelib_master,
+):
+    data_size = 256 * 1024 * 1024
+    segment_size = 512 * 1024 * 1024
+    source = bytearray(b"A" * data_size)
+    source_view = memoryview(source)
+    client = await _client(
+        cachelib_master,
+        global_segment_size=segment_size,
+        local_buffer_size=segment_size,
+    )
+    batch_views = []
+    try:
+        assert client.register_buffer(source, len(source)) == 0
+
+        key = "test_key_realclient"
+        assert await client.put(key, bytes(source)) == 0
+        with pytest.raises(Exception):
+            await client.get_buffer(key)
+        with pytest.raises(Exception):
+            client.get_into(key, source)
+        await asyncio.sleep(0.01)
+        assert await client.remove(key) == 0
+
+        keys = [f"batch_test_key_{index}" for index in range(128)]
+        slice_size = data_size // len(keys)
+        batch_views = [
+            source_view[offset : offset + slice_size]
+            for offset in range(0, data_size, slice_size)
+        ]
+        values = [bytes(view) for view in batch_views]
+        assert await client.put_batch(keys, values) == 0
+
+        handles = await client.batch_get_buffer(keys)
+        assert len(handles) == 128
+        assert any(handle is None for handle in handles)
+
+        bytes_read = client.batch_get_into(keys, batch_views, [slice_size] * len(keys))
+        assert len(bytes_read) == 128
+        assert any(result < 0 for result in bytes_read)
+
+        await asyncio.sleep(0.01)
+        assert await client.remove_all() == 128
+        assert client.unregister_buffer(source) == 0
+    finally:
+        for view in batch_views:
+            view.release()
+        source_view.release()
+        await client.close()

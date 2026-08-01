@@ -648,6 +648,14 @@ fn cached_query_result_tracks_lease_expiry() {
     assert!(!failure.success);
     assert_eq!(failure.error_status, -1);
     assert_eq!(failure.error_message, "missing");
+
+    let issued_before_rpc = std::time::Instant::now() - std::time::Duration::from_millis(2);
+    let expired_during_rpc = CachedQueryResultResponse::success_from(
+        issued_before_rpc,
+        Vec::<ReplicaDescriptor>::new(),
+        1,
+    );
+    assert!(expired_during_rpc.is_lease_expired());
 }
 
 #[test]

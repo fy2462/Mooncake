@@ -156,6 +156,7 @@ fn admission_column(key: &str, row: usize) -> usize {
 struct HotCacheEntry {
     value: Vec<u8>,
     last_access: u64,
+    lease_valid_until: Option<std::time::Instant>,
 }
 
 /// Captures the invalidation generation for one in-flight cache fill.
@@ -214,6 +215,16 @@ impl LocalHotCache {
     /// Return an owned copy and atomically refresh the key's LRU position.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
         let mut state = self.state.lock();
+        let lease_expired = state
+            .entries
+            .get(key)?
+            .lease_valid_until
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline);
+        if lease_expired {
+            let removed = state.entries.remove(key)?;
+            state.used_size -= removed.value.len();
+            return None;
+        }
         let sequence = state.take_access_sequence();
         let entry = state.entries.get_mut(key)?;
         entry.last_access = sequence;
@@ -224,7 +235,17 @@ impl LocalHotCache {
     /// original bytes, matching the C++ LocalHotCache contract.
     pub fn put(&self, key: &str, value: &[u8]) {
         let mut state = self.state.lock();
-        self.put_locked(&mut state, key, value);
+        self.put_locked(&mut state, key, value, None);
+    }
+
+    pub(crate) fn put_with_lease(
+        &self,
+        key: &str,
+        value: &[u8],
+        lease_valid_until: std::time::Instant,
+    ) {
+        let mut state = self.state.lock();
+        self.put_locked(&mut state, key, value, Some(lease_valid_until));
     }
 
     /// Capture the current invalidation generation before starting a fill.
@@ -264,10 +285,37 @@ impl LocalHotCache {
         if state.clear_generation != token.clear_generation || !is_current_generation {
             return false;
         }
-        self.put_locked(&mut state, &token.key, value)
+        self.put_locked(&mut state, &token.key, value, None)
     }
 
-    fn put_locked(&self, state: &mut HotCacheState, key: &str, value: &[u8]) -> bool {
+    pub(crate) fn put_with_token_and_lease(
+        &self,
+        token: HotCachePutToken,
+        value: &[u8],
+        lease_valid_until: std::time::Instant,
+    ) -> bool {
+        let mut state = self.state.lock();
+        let is_current_generation = state
+            .key_generations
+            .get(&token.key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|generation| {
+                Arc::ptr_eq(&generation, &token.key_generation)
+                    && generation.load(Ordering::Relaxed) == token.key_generation_value
+            });
+        if state.clear_generation != token.clear_generation || !is_current_generation {
+            return false;
+        }
+        self.put_locked(&mut state, &token.key, value, Some(lease_valid_until))
+    }
+
+    fn put_locked(
+        &self,
+        state: &mut HotCacheState,
+        key: &str,
+        value: &[u8],
+        lease_valid_until: Option<std::time::Instant>,
+    ) -> bool {
         if value.is_empty()
             || value.len() > self.max_value_size
             || value.len() > self.max_size
@@ -276,8 +324,19 @@ impl LocalHotCache {
             return false;
         }
 
+        let expired_duplicate = state.entries.get(key).is_some_and(|entry| {
+            entry
+                .lease_valid_until
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        });
+        if expired_duplicate && let Some(removed) = state.entries.remove(key) {
+            state.used_size -= removed.value.len();
+        }
+
         let sequence = state.take_access_sequence();
         if let Some(entry) = state.entries.get_mut(key) {
+            // Duplicate puts retain the original bytes, so they must retain
+            // the lease metadata that belongs to those bytes as well.
             entry.last_access = sequence;
             return true;
         }
@@ -304,6 +363,7 @@ impl LocalHotCache {
             HotCacheEntry {
                 value: value.to_vec(),
                 last_access: sequence,
+                lease_valid_until,
             },
         );
         true
@@ -424,6 +484,59 @@ mod tests {
 
         assert!(cache.get("too-large").is_none());
         assert_eq!(cache.get("fits").unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn store_lease_expiry_evicts_cached_value_while_remote_values_remain_unleased() {
+        let cache = LocalHotCache::new(1024, 4);
+        cache.put_with_lease(
+            "store-key",
+            b"stale",
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+        cache.put("remote-key", b"remote");
+
+        assert!(cache.get("store-key").is_none());
+        assert_eq!(
+            cache.get("remote-key").as_deref(),
+            Some(b"remote".as_slice())
+        );
+        assert_eq!(cache.state.lock().used_size, b"remote".len());
+    }
+
+    #[test]
+    fn duplicate_put_retains_the_lease_metadata_owned_by_retained_bytes() {
+        let cache = LocalHotCache::new(1024, 4);
+        let leased_deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        cache.put_with_lease("leased", b"store", leased_deadline);
+        cache.put("leased", b"remote");
+
+        cache.put("unleased", b"remote");
+        cache.put_with_lease("unleased", b"store", leased_deadline);
+
+        let state = cache.state.lock();
+        assert_eq!(state.entries["leased"].value, b"store");
+        assert_eq!(
+            state.entries["leased"].lease_valid_until,
+            Some(leased_deadline)
+        );
+        assert_eq!(state.entries["unleased"].value, b"remote");
+        assert_eq!(state.entries["unleased"].lease_valid_until, None);
+    }
+
+    #[test]
+    fn duplicate_put_replaces_an_already_expired_entry_atomically() {
+        let cache = LocalHotCache::new(1024, 4);
+        cache.put_with_lease(
+            "key",
+            b"stale",
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+
+        cache.put("key", b"fresh");
+
+        assert_eq!(cache.get("key").as_deref(), Some(b"fresh".as_slice()));
+        assert_eq!(cache.state.lock().used_size, b"fresh".len());
     }
 
     #[test]

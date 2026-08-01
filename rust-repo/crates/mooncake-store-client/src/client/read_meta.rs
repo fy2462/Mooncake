@@ -31,14 +31,19 @@ impl MooncakeClient {
         &mut self,
         keys: &[String],
     ) -> StoreResult<Vec<Option<BufferHandle>>> {
-        let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            match self.get_buffer(key).await {
-                Ok(bh) => results.push(Some(bh)),
-                Err(_) => results.push(None),
-            }
-        }
-        Ok(results)
+        Ok(self
+            .batch_get(keys)
+            .await?
+            .into_iter()
+            .zip(keys)
+            .map(|(data, key)| {
+                data.map(|data| BufferHandle {
+                    size: data.len(),
+                    key: key.clone(),
+                    data,
+                })
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------

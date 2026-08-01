@@ -35,6 +35,18 @@ impl MooncakeClient {
         key: &str,
         tenant_id: &str,
     ) -> StoreResult<Vec<ReplicaDescriptor>> {
+        Ok(self
+            .fetch_query_response_for_tenant(key, tenant_id)
+            .await?
+            .replicas)
+    }
+
+    pub(crate) async fn fetch_query_response_for_tenant(
+        &mut self,
+        key: &str,
+        tenant_id: &str,
+    ) -> StoreResult<super::CachedQueryResultResponse> {
+        let query_started_at = std::time::Instant::now();
         let request = proto::GetReplicaListRequest {
             key: key.to_string(),
             tenant_id: tenant_id.to_string(),
@@ -46,7 +58,11 @@ impl MooncakeClient {
             .map_err(Self::rpc_status_to_error)?
             .into_inner();
         let replicas = self.replicas_from_proto(&response.replicas);
-        Ok(replicas)
+        Ok(super::CachedQueryResultResponse::success_from(
+            query_started_at,
+            replicas,
+            response.lease_ttl_ms,
+        ))
     }
 
     /// Query the master for replica lists for multiple keys in one RPC.
@@ -81,6 +97,7 @@ impl MooncakeClient {
         &mut self,
         keys: &[String],
     ) -> StoreResult<Vec<super::CachedQueryResultResponse>> {
+        let query_started_at = std::time::Instant::now();
         let request = proto::BatchGetReplicaListRequest {
             keys: keys.to_vec(),
             tenant_id: self.tenant_id.clone(),
@@ -104,7 +121,8 @@ impl MooncakeClient {
             .into_iter()
             .map(|result| match result.status {
                 0 => match result.response {
-                    Some(response) => super::CachedQueryResultResponse::success(
+                    Some(response) => super::CachedQueryResultResponse::success_from(
+                        query_started_at,
                         self.replicas_from_proto(&response.replicas),
                         response.lease_ttl_ms,
                     ),

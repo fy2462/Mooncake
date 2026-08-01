@@ -30,6 +30,8 @@ impl MooncakeClient {
         tracing::info!(target: "te_debug", key_count = keys.len(), "batch_get: ENTER");
         let tenant_id = self.tenant_id.clone();
         let mut results = vec![None; keys.len()];
+        let mut lease_deadlines = vec![None; keys.len()];
+        let mut cache_replicas = vec![None; keys.len()];
         let mut pending = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
@@ -48,33 +50,40 @@ impl MooncakeClient {
             .iter()
             .map(|(_, key)| key.clone())
             .collect::<Vec<_>>();
-        let replica_results = if pending_keys.is_empty() {
+        let query_results = if pending_keys.is_empty() {
             Vec::new()
         } else {
-            match self.fetch_batch_replicas(&pending_keys).await {
+            match self.fetch_batch_query_responses(&pending_keys).await {
                 Ok(results) => results,
                 Err(err) => pending_keys
                     .iter()
-                    .map(|_| Err(StoreError::Internal(err.to_string())))
+                    .map(|_| super::CachedQueryResultResponse::failure(-2, err.to_string()))
                     .collect(),
             }
         };
 
-        for ((i, key), replica_result) in pending.into_iter().zip(replica_results.into_iter()) {
+        for ((i, key), query_result) in pending.into_iter().zip(query_results.into_iter()) {
             tracing::info!(target: "te_debug", index = i, total = keys.len(), %key, "batch_get: processing key");
-            let data_result = match replica_result {
-                Ok(replicas) => match self.select_best_replica(&replicas) {
+            let data_result = if query_result.success {
+                let lease_deadline = query_result.lease_valid_until;
+                match self.select_best_replica(&query_result.replicas) {
                     Some(replica) => {
-                        let result = self.read_from_replica(&key, replica).await;
-                        if let Ok(data) = &result {
-                            let cache_key = scoped_cache_key(&tenant_id, &key);
-                            self.cache_replica_value_if_admitted(cache_key.as_ref(), data, replica);
+                        let replica = replica.clone();
+                        let result = self.read_from_replica(&key, &replica).await;
+                        if result.is_ok() {
+                            lease_deadlines[i] = Some(lease_deadline);
+                            cache_replicas[i] = Some(replica);
                         }
                         result
                     }
                     None => Err(StoreError::KeyNotFound(key.clone())),
-                },
-                Err(err) => Err(err),
+                }
+            } else {
+                match query_result.error_status {
+                    -1 => Err(StoreError::KeyNotFound(key.clone())),
+                    -5 => Err(StoreError::ReplicaNotReady),
+                    _ => Err(StoreError::Internal(query_result.error_message)),
+                }
             };
 
             match data_result {
@@ -94,6 +103,28 @@ impl MooncakeClient {
                         }
                     }
                 }
+            }
+        }
+        // Match C++ BatchGet: all successful transfers are checked against
+        // their read leases at one shared time after the batch has finished.
+        let lease_check_time = std::time::Instant::now();
+        for (result, deadline) in results.iter_mut().zip(&lease_deadlines) {
+            if result.is_some() && deadline.is_some_and(|deadline| lease_check_time >= deadline) {
+                *result = None;
+            }
+        }
+        // Unlike C++, Rust's hot cache is checked before a new master query.
+        // Admit only transfers that survived the lease check so an expired
+        // transfer cannot become a later lease-bypassing cache hit.
+        for (((key, result), replica), deadline) in keys
+            .iter()
+            .zip(&results)
+            .zip(&cache_replicas)
+            .zip(&lease_deadlines)
+        {
+            if let (Some(data), Some(replica), Some(deadline)) = (result, replica, deadline) {
+                let cache_key = scoped_cache_key(&tenant_id, key);
+                self.cache_replica_value_if_admitted(cache_key.as_ref(), data, replica, *deadline);
             }
         }
         let ok_count = results.iter().filter(|r| r.is_some()).count();
@@ -173,11 +204,47 @@ impl MooncakeClient {
                     ))
                 })?;
         }
+        let query_results = match self.fetch_batch_query_responses(keys).await {
+            Ok(results) => results,
+            Err(error) => {
+                let message = error.to_string();
+                return Ok(keys
+                    .iter()
+                    .map(|_| Err(StoreError::Internal(message.clone())))
+                    .collect());
+            }
+        };
+        let tenant_id = self.tenant_id.clone();
         let mut results = Vec::with_capacity(keys.len());
-        for (i, key) in keys.iter().enumerate() {
-            match self.get_into_registered(key, buffers[i], sizes[i]).await {
-                Ok(n) => results.push(Ok(n)),
-                Err(error) => results.push(Err(error)),
+        let mut lease_deadlines = Vec::with_capacity(keys.len());
+        for (i, (key, query_result)) in keys.iter().zip(query_results).enumerate() {
+            if query_result.success {
+                lease_deadlines.push(Some(query_result.lease_valid_until));
+                results.push(
+                    self.get_into_from_replicas(
+                        key,
+                        buffers[i],
+                        sizes[i],
+                        &query_result.replicas,
+                        &tenant_id,
+                    )
+                    .await,
+                );
+            } else {
+                lease_deadlines.push(None);
+                results.push(Err(match query_result.error_status {
+                    -1 => StoreError::KeyNotFound(key.clone()),
+                    -5 => StoreError::ReplicaNotReady,
+                    _ => StoreError::Internal(query_result.error_message),
+                }));
+            }
+        }
+        // Match C++ BatchGet: use one post-transfer timestamp for the entire
+        // batch instead of refreshing or checking leases per key.
+        let lease_check_time = std::time::Instant::now();
+        for ((result, deadline), key) in results.iter_mut().zip(lease_deadlines).zip(keys) {
+            if result.is_ok() && deadline.is_some_and(|deadline| lease_check_time >= deadline) {
+                *result = Err(StoreError::LeaseExpired(key.clone()));
             }
         }
         Ok(results)

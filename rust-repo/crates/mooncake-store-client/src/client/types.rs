@@ -48,11 +48,18 @@ impl CachedQueryResultResponse {
         replicas: Vec<mooncake_store_core::ReplicaDescriptor>,
         lease_ttl_ms: u64,
     ) -> Self {
+        Self::success_from(std::time::Instant::now(), replicas, lease_ttl_ms)
+    }
+
+    pub(crate) fn success_from(
+        query_started_at: std::time::Instant,
+        replicas: Vec<mooncake_store_core::ReplicaDescriptor>,
+        lease_ttl_ms: u64,
+    ) -> Self {
         Self {
             success: true,
             replicas,
-            lease_valid_until: std::time::Instant::now()
-                + std::time::Duration::from_millis(lease_ttl_ms),
+            lease_valid_until: query_started_at + std::time::Duration::from_millis(lease_ttl_ms),
             error_status: 0,
             error_message: String::new(),
         }

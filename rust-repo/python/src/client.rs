@@ -3452,8 +3452,10 @@ impl PythonMooncakeClient {
             .map(get_writable_pointer)
             .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner).await?;
+        let mut client = slf.py().detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
+        })?;
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
             result.map_err(to_py_err)
         })

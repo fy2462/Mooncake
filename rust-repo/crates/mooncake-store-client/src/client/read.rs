@@ -54,6 +54,7 @@ impl MooncakeClient {
         cache_key: &str,
         data: &[u8],
         replica: &ReplicaDescriptor,
+        lease_valid_until: std::time::Instant,
     ) {
         if replica.replica_type != ReplicaType::Memory {
             return;
@@ -65,7 +66,7 @@ impl MooncakeClient {
             && !self.is_local_replica(replica)
             && let Some(cache) = &self.hot_cache
         {
-            cache.put(cache_key, data);
+            cache.put_with_lease(cache_key, data, lease_valid_until);
         }
     }
 
@@ -75,6 +76,7 @@ impl MooncakeClient {
         data: &[u8],
         replica: &ReplicaDescriptor,
         token: Option<HotCachePutToken>,
+        lease_valid_until: std::time::Instant,
     ) {
         if replica.replica_type != ReplicaType::Memory {
             return;
@@ -84,7 +86,7 @@ impl MooncakeClient {
             && !self.is_local_replica(replica)
             && let (Some(cache), Some(token)) = (&self.hot_cache, token)
         {
-            cache.put_with_token(token, data);
+            cache.put_with_token_and_lease(token, data, lease_valid_until);
         }
     }
 
@@ -185,14 +187,18 @@ impl MooncakeClient {
         // Level 1: fetch from memory store (gRPC → RDMA)
         // 第 1 级：从内存存储获取（gRPC → RDMA）
         tracing::info!(target: "te_debug", %key, "get: fetching replicas from master");
-        let replicas = match self.fetch_replicas_for_tenant(key, tenant_id).await {
-            Ok(replicas) => replicas,
+        let query = match self.fetch_query_response_for_tenant(key, tenant_id).await {
+            Ok(query) => Some(query),
             // A metadata miss is the signal to try the configured remote
             // source. Transport/service failures must still be returned
             // directly rather than being hidden behind a remote fetch.
-            Err(StoreError::KeyNotFound(_)) => Vec::new(),
+            Err(StoreError::KeyNotFound(_)) => None,
             Err(error) => return Err(error),
         };
+        let replicas = query
+            .as_ref()
+            .map(|query| query.replicas.as_slice())
+            .unwrap_or_default();
         tracing::info!(target: "te_debug", %key, replica_count = replicas.len(), "get: replicas received");
 
         let replica = self.select_best_replica(&replicas);
@@ -206,11 +212,18 @@ impl MooncakeClient {
                 );
                 let data = self.read_from_replica_for_tenant(key, tenant_id, r).await?;
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: read_from_replica success");
+                if query.as_ref().is_some_and(|query| query.is_lease_expired()) {
+                    return Err(StoreError::LeaseExpired(key.to_string()));
+                }
                 self.cache_replica_value_if_admitted_with_token(
                     cache_key.as_ref(),
                     &data,
                     r,
                     cache_fill_token,
+                    query
+                        .as_ref()
+                        .expect("a selected replica requires a successful query")
+                        .lease_valid_until,
                 );
                 Ok(data)
             }
@@ -292,9 +305,28 @@ impl MooncakeClient {
         size: usize,
     ) -> StoreResult<usize> {
         let tenant_id = self.tenant_id.clone();
-        let replicas = self.fetch_replicas(key).await?;
+        let query = self
+            .fetch_query_response_for_tenant(key, &tenant_id)
+            .await?;
+        let result = self
+            .get_into_from_replicas(key, buffer, size, &query.replicas, &tenant_id)
+            .await;
+        if result.is_ok() && query.is_lease_expired() {
+            return Err(StoreError::LeaseExpired(key.to_string()));
+        }
+        result
+    }
+
+    pub(crate) async fn get_into_from_replicas(
+        &mut self,
+        key: &str,
+        buffer: *mut c_void,
+        size: usize,
+        replicas: &[ReplicaDescriptor],
+        tenant_id: &str,
+    ) -> StoreResult<usize> {
         let replica = self
-            .select_best_replica(&replicas)
+            .select_best_replica(replicas)
             .ok_or(StoreError::KeyNotFound(key.to_string()))?;
         let object_size = replica.size as usize;
         if size < object_size {
@@ -308,7 +340,7 @@ impl MooncakeClient {
                 && !self.is_local_replica(replica))
         {
             let data = self
-                .read_from_replica_for_tenant(key, &tenant_id, replica)
+                .read_from_replica_for_tenant(key, tenant_id, replica)
                 .await?;
             self.accelerator
                 .copy_from_host(buffer.foreign_region(), &data)?;
