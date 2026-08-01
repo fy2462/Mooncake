@@ -262,3 +262,52 @@ async def test_remove_by_regex_no_match_is_zero_and_nonmutating(cachelib_master)
         assert await client.exists("some_key") is True
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_all_empty_store_returns_zero(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        assert await client.remove_all() == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_remove_preserves_status_order_and_unselected_key(
+    cachelib_master,
+):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    try:
+        for key in ("brm_1", "brm_2", "brm_3"):
+            assert await client.put(key, b"batch_rm_data") == 0
+        assert await client.batch_remove(["brm_1", "brm_3"]) == [0, 0]
+        assert await client.batch_is_exist(["brm_1", "brm_2", "brm_3"]) == [
+            False,
+            True,
+            False,
+        ]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_remove_missing_keys_preserves_cardinality(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        results = await client.batch_remove(["never_existed_1", "never_existed_2"])
+        assert len(results) == 2
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_put_parts_concatenates_exact_bytes(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    try:
+        assert await client.put_parts("put_parts_key", [b"Hello, ", b"Parts!"]) == 0
+        value = await client.get_buffer("put_parts_key")
+        assert len(value) == len(b"Hello, Parts!")
+        assert bytes(value) == b"Hello, Parts!"
+    finally:
+        await client.close()

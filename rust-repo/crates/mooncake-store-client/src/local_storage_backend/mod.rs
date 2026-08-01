@@ -2653,10 +2653,15 @@ fn validate_watermark_ratios(high: f64, low: f64) -> StoreResult<()> {
 
 impl Drop for LocalStorageBackend {
     fn drop(&mut self) {
-        if self.lifecycle == FilePerKeyLifecycle::Persistent
-            || !self.initialized.load(Ordering::SeqCst)
-            || self.storage_lock.get_mut().is_none()
-        {
+        if self.lifecycle == FilePerKeyLifecycle::Persistent {
+            if let Some(lock_file) = self.storage_lock.get_mut().take()
+                && let Err(error) = fs2::FileExt::unlock(&lock_file)
+            {
+                tracing::warn!(%error, "failed to unlock persistent FilePerKey storage on drop");
+            }
+            return;
+        }
+        if !self.initialized.load(Ordering::SeqCst) || self.storage_lock.get_mut().is_none() {
             return;
         }
         if let Err(err) = self.clean_storage_path_owned() {

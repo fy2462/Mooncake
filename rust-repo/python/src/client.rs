@@ -1742,7 +1742,7 @@ impl PythonMooncakeClient {
             let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.put_parts(&key, &slices, cfg).await;
-            result.map_err(to_py_err)
+            result.map(|()| 0).map_err(to_py_err)
         })
     }
 
