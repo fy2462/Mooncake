@@ -2612,5 +2612,23 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_cpp_parity_recovering_failure && cargo test -p mooncake-store-master --lib test_etcd_recovery_failure_transitions_actual_state_machine",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-standby-recovery-success-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestRecoveringDisconnected",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:test_cpp_parity_recovering_disconnected; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_disconnect_transitions_actual_state_machine",
+    "first_divergence": "Etcd recovery errors had no explicit transport-disconnection classification, so the production follower could not emit Disconnected from Recovering and commit Reconnecting.",
+    "repair_commit": "72baab84",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_cpp_parity_recovering_disconnected && cargo test -p mooncake-store-master --lib test_etcd_recovery_disconnect_transitions_actual_state_machine",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-recovery-terminal-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestRecoveringFatalError",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:test_cpp_parity_recovering_fatal_error; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_fatal_error_transitions_actual_state_machine",
+    "first_divergence": "Unrecoverable fallback read errors were retried as ordinary recovery failures, so the production follower could not emit FatalError from Recovering and remain Failed.",
+    "repair_commit": "72baab84",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_cpp_parity_recovering_fatal_error && cargo test -p mooncake-store-master --lib test_etcd_recovery_fatal_error_transitions_actual_state_machine",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-recovery-terminal-goal-019fbe77.typescript"
   }
 ]
