@@ -2072,5 +2072,59 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_client_operation_sentinels",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
     "evidence": "/tmp/mooncake-pybind-uninitialized-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrBatchIsExistBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_batch_exists_returns_two_failures",
+    "first_divergence": "The PyO3 batch existence path treated an absent client only as a closed exception and could not preserve one negative pre-setup sentinel per input key.",
+    "repair_commit": "4d7e8b3e",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_batch_exists_returns_two_failures",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrGetSizeBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_get_size_is_failure",
+    "first_divergence": "The binding exposed get_size only after async creation and raised on an absent core instead of returning the C++ negative pre-setup sentinel.",
+    "repair_commit": "4d7e8b3e",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_get_size_is_failure",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrRemoveByRegexBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_remove_by_regex_is_failure",
+    "first_divergence": "The binding raised a closed-client error before regex removal rather than returning the C++ negative pre-setup count.",
+    "repair_commit": "4d7e8b3e",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_remove_by_regex_is_failure",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrBatchRemoveBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_batch_remove_returns_two_failures",
+    "first_divergence": "The binding raised once for a missing core client and did not retain the C++ batch cardinality with one nonzero failure per key.",
+    "repair_commit": "4d7e8b3e",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_batch_remove_returns_two_failures",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrPutPartsBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_put_parts_is_failure",
+    "first_divergence": "The multipart binding had no pre-setup compatibility state and raised instead of returning a nonzero integer status.",
+    "repair_commit": "4d7e8b3e",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_put_parts_is_failure",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.HealthCheckBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_health_check_reports_not_initialized",
+    "first_divergence": "PyO3 health_check returned a boolean on success and raised for an absent client, discarding the C++ 0/1/2 status-code contract.",
+    "repair_commit": "4d7e8b3e",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_health_check_reports_not_initialized",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
   }
 ]
