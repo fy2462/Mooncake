@@ -30,7 +30,7 @@
     "cpp": "e2e/chaos_test.cpp:ChaosTest.LeaderKilledFailover",
     "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_leaderkilledfailover_ccc0b621",
     "first_divergence": "After the etcd-recorded leader was SIGKILLed and a new view stabilized, the same Rust client's first put_start returned ServiceUnavailable. Rust failover only ran from health_check, and candidate selection accepted a reachable standby without proving that Ping/remount succeeded.",
-    "repair_commit": "pending",
+    "repair_commit": "ffc47f49",
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=LeaderKilledFailover MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_leaderkilledfailover_ccc0b621 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-leader-kill-goal-019fbaa7/result.json"
