@@ -2018,5 +2018,50 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_copy_move_query_task_reports_id_type_and_success",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
     "evidence": "/tmp/mooncake-pybind-copy-move-task-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.SetupWithConfigDict",
+    "rust": "python/tests/test_pybind_client_parity.py:test_config_dict_setup_rejects_empty_and_roundtrips",
+    "first_divergence": "PyO3 exposed only typed create arguments and had no C++ ConfigDict-compatible string mapping, defaults, parser, or setup boundary.",
+    "repair_commit": "8a1eaece",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_config_dict_setup_rejects_empty_and_roundtrips",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-config-dict-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.SetupWithConfigDictHumanReadableSizes",
+    "rust": "python/tests/test_pybind_client_parity.py:test_config_dict_setup_accepts_human_readable_sizes",
+    "first_divergence": "The binding had no ConfigDict string-size parser for decimal values and optional K/KB/M/MB/G/GB/T/TB units.",
+    "repair_commit": "8a1eaece",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_config_dict_setup_accepts_human_readable_sizes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-config-dict-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.SetupWithConfigDictAllowsZeroSizes",
+    "rust": "python/tests/test_pybind_client_parity.py:test_config_dict_setup_accepts_zero_sizes",
+    "first_divergence": "Although validation accepted zero local capacity, lifecycle setup still tried to register a zero-length native staging buffer.",
+    "repair_commit": "8a1eaece",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_config_dict_setup_accepts_zero_sizes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-config-dict-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ConfigDictGlobalSegmentSizeAboveMaxPassesSizeValidation",
+    "rust": "python/tests/test_pybind_client_parity.py:test_config_dict_large_global_size_reaches_transport_failure",
+    "first_divergence": "No binding-level ConfigDict path proved that global segment size is total capacity and therefore has no one-segment maximum bound.",
+    "repair_commit": "8a1eaece",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_config_dict_large_global_size_reaches_transport_failure",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-config-dict-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrSetupWithInvalidConfigDictSize",
+    "rust": "python/tests/test_pybind_client_parity.py:test_config_dict_rejects_invalid_size_strings",
+    "first_divergence": "No binding parser rejected percentage, unknown-unit, negative, and over-limit local ConfigDict sizes without partial parsing or default fallback.",
+    "repair_commit": "8a1eaece",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_config_dict_rejects_invalid_size_strings",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-config-dict-goal-019fbca4.typescript"
   }
 ]
