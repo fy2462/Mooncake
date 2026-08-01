@@ -1,3 +1,4 @@
+import asyncio
 import os
 import socket
 import subprocess
@@ -31,26 +32,30 @@ def _master_binary() -> Path:
 
 
 @pytest.fixture
-def cachelib_master():
+def cachelib_master(request):
     rpc_port = _free_port()
     metadata_port = _free_port()
     metrics_port = _free_port()
+    command = [
+        str(_master_binary()),
+        "--rpc-address",
+        "127.0.0.1",
+        "--rpc-port",
+        str(rpc_port),
+        "--http-metadata-server-host",
+        "127.0.0.1",
+        "--http-metadata-server-port",
+        str(metadata_port),
+        "--metrics-port",
+        str(metrics_port),
+        "--memory-allocator",
+        "cachelib",
+    ]
+    lease_ttl_ms = getattr(request, "param", None)
+    if lease_ttl_ms is not None:
+        command.extend(["--default-kv-lease-ttl-ms", str(lease_ttl_ms)])
     process = subprocess.Popen(
-        [
-            str(_master_binary()),
-            "--rpc-address",
-            "127.0.0.1",
-            "--rpc-port",
-            str(rpc_port),
-            "--http-metadata-server-host",
-            "127.0.0.1",
-            "--http-metadata-server-port",
-            str(metadata_port),
-            "--metrics-port",
-            str(metrics_port),
-            "--memory-allocator",
-            "cachelib",
-        ],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -506,5 +511,68 @@ async def test_batch_upsert_from_preserves_status_order_and_bytes(cachelib_maste
         assert all(status < 0 for status in mismatch_statuses)
         for buffer in buffers:
             client.unregister_buffer(buffer)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_multi_buffer_batch_put_get_preserves_partition_order_and_bytes(
+    cachelib_master,
+):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    source = bytearray(b"1" * 1000)
+    destination = bytearray(b"0" * 1000)
+    source_view = memoryview(source)
+    destination_view = memoryview(destination)
+    source_parts = [source_view[offset : offset + 10] for offset in range(0, 1000, 10)]
+    destination_parts = [
+        destination_view[offset : offset + 10] for offset in range(0, 1000, 10)
+    ]
+    keys = [f"test_key_{index}" for index in range(10)]
+    all_sizes = [[10] * 10 for _ in keys]
+    try:
+        assert client.register_buffer(source, len(source)) == 0
+        assert client.register_buffer(destination, len(destination)) == 0
+        put_statuses = client.batch_put_from_multi_buffers(
+            keys,
+            [source_parts[index * 10 : (index + 1) * 10] for index in range(10)],
+            all_sizes,
+        )
+        assert put_statuses == [0] * 10
+        get_statuses = client.batch_get_into_multi_buffers(
+            keys,
+            [destination_parts[index * 10 : (index + 1) * 10] for index in range(10)],
+            all_sizes,
+            True,
+        )
+        assert get_statuses == [100] * 10
+        assert destination == source
+        assert client.unregister_buffer(source) == 0
+        assert client.unregister_buffer(destination) == 0
+    finally:
+        for part in source_parts + destination_parts:
+            part.release()
+        source_view.release()
+        destination_view.release()
+        await client.close()
+
+
+@pytest.mark.parametrize("cachelib_master", [1], indirect=True)
+@pytest.mark.asyncio
+async def test_remove_then_get_is_absent_and_repeat_remove_is_safe(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    key = "remove_then_get_key"
+    try:
+        assert await client.put(key, b"some_data_to_remove") == 0
+        assert await client.exists(key) is True
+        await asyncio.sleep(0.01)
+        assert await client.remove(key) == 0
+        assert await client.exists(key) is False
+        with pytest.raises(Exception):
+            await client.get_buffer(key)
+        try:
+            await client.remove(key)
+        except Exception:
+            pass
     finally:
         await client.close()

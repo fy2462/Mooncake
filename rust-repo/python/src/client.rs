@@ -1853,7 +1853,7 @@ impl PythonMooncakeClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let result = client.remove(&key, force).await;
-            result.map_err(to_py_err)
+            result.map(|()| 0).map_err(to_py_err)
         })
     }
 
@@ -3672,8 +3672,10 @@ impl PythonMooncakeClient {
             })
             .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner).await?;
+        let mut client = slf.py().detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
+        })?;
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let result = client
                 .batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)
                 .await;
@@ -4190,8 +4192,10 @@ impl PythonMooncakeClient {
             .collect::<PyResult<_>>()?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner).await?;
+        let mut client = slf.py().detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
+        })?;
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let result = client
                 .batch_put_from_multi_buffers(&keys, &ptrs, &all_sizes, cfg)
                 .await;

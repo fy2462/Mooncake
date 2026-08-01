@@ -1955,5 +1955,23 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_batch_upsert_from_preserves_status_order_and_bytes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-upsert-shapes-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.TestBatchPutAndGetMultiBuffers",
+    "rust": "python/tests/test_pybind_client_parity.py:test_multi_buffer_batch_put_get_preserves_partition_order_and_bytes",
+    "first_divergence": "Both synchronous multi-buffer binding methods used the caller thread's absent Tokio reactor and had no real test for the 10-by-10 slice ordering, statuses, or complete destination bytes.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_multi_buffer_batch_put_get_preserves_partition_order_and_bytes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-multibuffer-remove-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrGetAfterRemove",
+    "rust": "python/tests/test_pybind_client_parity.py:test_remove_then_get_is_absent_and_repeat_remove_is_safe",
+    "first_divergence": "PyO3 remove exposed Rust unit as an empty tuple on success and no real 1 ms lease test proved post-remove absence, failed read shape, and repeat-remove safety.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_remove_then_get_is_absent_and_repeat_remove_is_safe",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-multibuffer-remove-goal-019fbca4.typescript"
   }
 ]
