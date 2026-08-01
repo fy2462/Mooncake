@@ -1,6 +1,8 @@
 use mooncake_store_client::file_util::{
-    ensure_dir_exists, save_binary_to_file, save_string_to_file,
+    acquire_read_lock, acquire_write_lock, ensure_dir_exists, save_binary_to_file,
+    save_string_to_file,
 };
+use std::io::Read;
 
 #[test]
 fn cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_basic() {
@@ -73,4 +75,30 @@ fn cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_pathisfile_returns
     assert!(path.is_file());
     assert!(ensure_dir_exists(&path).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), b"data");
+}
+
+#[test]
+fn cpp_parity_posix_file_test_cpp_posixfiletest_filelocking() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("empty.dat");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+
+    {
+        let lock = acquire_write_lock(&file).unwrap();
+        assert!(lock.is_locked());
+        let mut exact = [0_u8; 10];
+        let error = (&file).read_exact(&mut exact).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    {
+        let lock = acquire_read_lock(&file).unwrap();
+        assert!(lock.is_locked());
+    }
 }
