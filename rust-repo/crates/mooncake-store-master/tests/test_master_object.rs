@@ -197,6 +197,29 @@ async fn get_memory_nof_parity_replicas(
     .replicas
 }
 
+async fn mount_preference_parity_segments(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    names: &[&str],
+) {
+    for (index, name) in names.iter().enumerate() {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: (*name).into(),
+                size: 16 * 1024 * 1024,
+                base_addr: 0x500000000 + index as u64 * 0x1000000,
+                te_endpoint: (*name).into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn put_start_invalid_parameter_matrix_parity() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
@@ -419,6 +442,199 @@ async fn memory_put_end_leaves_nof_revokeable_parity() {
     assert_eq!(final_replicas.len(), 1);
     assert_eq!(final_replicas[0].replica_type, Type::Memory as i32);
     assert_eq!(final_replicas[0].status, Status::Complete as i32);
+}
+
+#[tokio::test]
+async fn put_start_end_flow_parity() {
+    use proto::replica_descriptor::{ReplicaStatus as Status, ReplicaType as Type};
+
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let invalid_client_id = Uuid::new_v4();
+    mount_put_start_parity_segment(&service, client_id, "put-flow:3333").await;
+
+    let started = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "put-flow-key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(!started.replicas.is_empty());
+    assert_eq!(started.replicas[0].status, Status::Allocating as i32);
+
+    let get_error = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "put-flow-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .expect_err("processing object must not be readable");
+    assert_eq!(get_error.code(), tonic::Code::FailedPrecondition);
+    let remove_error = MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "put-flow-key".into(),
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .expect_err("processing object must not be removable");
+    assert_eq!(remove_error.code(), tonic::Code::FailedPrecondition);
+
+    for error in [
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(invalid_client_id)),
+                key: "put-flow-key".into(),
+                replica_type: Type::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .expect_err("foreign PutEnd must fail"),
+        MasterService::put_revoke(
+            &service,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(proto_uuid(invalid_client_id)),
+                key: "put-flow-key".into(),
+                replica_type: Type::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .expect_err("foreign PutRevoke must fail"),
+    ] {
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+    }
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "put-flow-key".into(),
+            replica_type: Type::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let replicas = get_memory_nof_parity_replicas(&service, "put-flow-key").await;
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].status, Status::Complete as i32);
+}
+
+#[tokio::test]
+async fn singular_preferred_segment_put_parity() {
+    use proto::replica_descriptor::{ReplicaStatus as Status, ReplicaType as Type};
+
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_preference_parity_segments(
+        &service,
+        client_id,
+        &["segment_0", "segment_1", "segment_2"],
+    )
+    .await;
+    let response = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "singular-preferred-key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "segment_1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.replicas.len(), 1);
+    assert_eq!(response.replicas[0].status, Status::Allocating as i32);
+    assert_eq!(response.replicas[0].transport_endpoint, "segment_1");
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "singular-preferred-key".into(),
+            replica_type: Type::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn multiple_preferred_segments_put_parity() {
+    use proto::replica_descriptor::{ReplicaStatus as Status, ReplicaType as Type};
+
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_preference_parity_segments(
+        &service,
+        client_id,
+        &["segment_0", "segment_1", "segment_2"],
+    )
+    .await;
+    let response = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "multiple-preferred-key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 2,
+                preferred_segments: vec!["segment_0".into(), "segment_1".into()],
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.replicas.len(), 2);
+    assert!(response
+        .replicas
+        .iter()
+        .all(|replica| replica.status == Status::Allocating as i32));
+    let endpoints: std::collections::HashSet<_> = response
+        .replicas
+        .iter()
+        .map(|replica| replica.transport_endpoint.as_str())
+        .collect();
+    assert_eq!(endpoints, std::collections::HashSet::from(["segment_0", "segment_1"]));
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "multiple-preferred-key".into(),
+            replica_type: Type::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
