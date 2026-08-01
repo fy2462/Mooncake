@@ -1312,7 +1312,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.LocalFirstPutPrefersWriterHost",
     "rust": "mooncake-store-master/tests/test_master_local_first.rs:local_first_put_prefers_writer_host_parity",
     "first_divergence": "Rust allocator coverage already preferred an explicit writer host, but no discoverable service-level test asserted the returned transport endpoint through PutStart.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c2d0085f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_local_first local_first_put_prefers_writer_host_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_local_first && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-local-first-goal-019fbca4.typescript"
@@ -1321,7 +1321,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.LocalFirstPutFallsBackToNextOrderedHost",
     "rust": "mooncake-store-master/tests/test_master_local_first.rs:local_first_falls_back_to_next_ordered_host_parity",
     "first_divergence": "Rust implemented ordered host fallback, but no discoverable service test requested an absent middle host and asserted the exact next endpoint.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c2d0085f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_local_first local_first_falls_back_to_next_ordered_host_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_local_first && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-local-first-goal-019fbca4.typescript"
@@ -1330,7 +1330,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.LocalFirstPutFallsBackWhenLocalSegmentIsFull",
     "rust": "mooncake-store-master/tests/test_master_local_first.rs:local_first_falls_back_when_local_segment_is_full_parity",
     "first_divergence": "Rust allocator coverage skipped a full local host, but no discoverable service test filled and completed the exact local segment before asserting the exact remote endpoint.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c2d0085f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_local_first local_first_falls_back_when_local_segment_is_full_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_local_first && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-local-first-goal-019fbca4.typescript"
@@ -1339,7 +1339,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.ExplicitPreferredSegmentOverridesLocalFirst",
     "rust": "mooncake-store-master/tests/test_master_local_first.rs:explicit_preferred_segment_overrides_local_first_parity",
     "first_divergence": "Rust separately covered preferred segments and LOCAL_FIRST host selection, but no discoverable service test asserted their precedence under a conflicting request.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c2d0085f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_local_first explicit_preferred_segment_overrides_local_first_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_local_first && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-local-first-goal-019fbca4.typescript"
@@ -1348,7 +1348,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.ExplicitPreferredSegmentFallsBackToLocalFirst",
     "rust": "mooncake-store-master/tests/test_master_local_first.rs:explicit_preferred_segment_falls_back_to_local_first_parity",
     "first_divergence": "Rust implemented fallback from an exhausted explicit preference into LOCAL_FIRST ordering, but no discoverable service test exercised the two-stage allocation and exact local endpoint.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c2d0085f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_local_first explicit_preferred_segment_falls_back_to_local_first_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_local_first && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-local-first-goal-019fbca4.typescript"
