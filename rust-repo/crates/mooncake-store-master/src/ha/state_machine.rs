@@ -863,6 +863,44 @@ mod tests {
     }
 
     #[test]
+    fn test_cpp_parity_recovering_disconnected() {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::MaxErrorsReached,
+            StandbyState::Watching,
+            StandbyState::Recovering,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Disconnected,
+            StandbyState::Recovering,
+            StandbyState::Reconnecting,
+        );
+    }
+
+    #[test]
+    fn test_cpp_parity_recovering_fatal_error() {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::MaxErrorsReached,
+            StandbyState::Watching,
+            StandbyState::Recovering,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::FatalError,
+            StandbyState::Recovering,
+            StandbyState::Failed,
+        );
+    }
+
+    #[test]
     fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectcount_e4579690()
      {
         let sm = StandbyStateMachine::new();

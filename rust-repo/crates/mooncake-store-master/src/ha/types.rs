@@ -31,6 +31,11 @@ pub enum HaError {
     #[error("invalid ha backend: {0}")]
     InvalidBackend(String),
 
+    /// A configured HA backend lost its transport connection.
+    /// 已配置的 HA 后端丢失传输连接。
+    #[error("ha backend disconnected: {0}")]
+    Disconnected(String),
+
     /// HA backend is unavailable in this build/mode.
     /// 当前构建/模式下 HA 后端不可用。
     #[error("ha backend unavailable in current mode: {0}")]

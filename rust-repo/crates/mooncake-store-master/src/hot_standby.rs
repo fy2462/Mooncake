@@ -273,6 +273,7 @@ mod tests {
         inner: InMemoryOpLog,
         notifier_healthy: Arc<AtomicBool>,
         recovery_error: Option<HaError>,
+        recovery_entries: Vec<OpLogRecord>,
     }
 
     struct EtcdRecoveryFixtureNotifier {
@@ -375,6 +376,9 @@ mod tests {
         ) -> Result<Vec<OpLogRecord>, HaError> {
             if let Some(error) = &self.recovery_error {
                 return Err(error.clone());
+            }
+            if !self.recovery_entries.is_empty() {
+                return Ok(self.recovery_entries.clone());
             }
             self.inner.read_since(since_seq, max_count)
         }
@@ -846,6 +850,7 @@ mod tests {
             inner: InMemoryOpLog::new(16),
             notifier_healthy,
             recovery_error: None,
+            recovery_entries: vec![],
         }));
 
         service.start().await.unwrap();
@@ -895,6 +900,7 @@ mod tests {
             recovery_error: Some(HaError::InvalidBackend(
                 "injected etcd recovery read failure".into(),
             )),
+            recovery_entries: vec![],
         }));
 
         service.start().await.unwrap();
@@ -925,6 +931,97 @@ mod tests {
             StandbyState::Reconnecting
         );
         assert_eq!(service.sync_status().state, StandbyState::Reconnecting);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_etcd_recovery_disconnect_transitions_actual_state_machine() {
+        let state = Arc::new(MasterState::empty());
+        let notifier_healthy = Arc::new(AtomicBool::new(false));
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 250,
+                cluster_id: "etcd-recovery-disconnect-state-machine".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(EtcdRecoveryFixtureOpLog {
+            inner: InMemoryOpLog::new(16),
+            notifier_healthy,
+            recovery_error: Some(HaError::Disconnected(
+                "injected etcd recovery disconnect".into(),
+            )),
+            recovery_entries: vec![],
+        }));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let history = service.state_machine.get_transition_history(16);
+                if history.iter().any(|record| {
+                    record.from_state == StandbyState::Recovering
+                        && record.to_state == StandbyState::Reconnecting
+                        && record.event == StandbyEvent::Disconnected
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("shared-oplog disconnect during recovery did not emit Disconnected");
+
+        assert_eq!(
+            service.state_machine.get_state(),
+            StandbyState::Reconnecting
+        );
+        assert_eq!(service.sync_status().state, StandbyState::Reconnecting);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_etcd_recovery_fatal_error_transitions_actual_state_machine() {
+        let state = Arc::new(MasterState::empty());
+        let notifier_healthy = Arc::new(AtomicBool::new(false));
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "etcd-recovery-fatal-state-machine".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(EtcdRecoveryFixtureOpLog {
+            inner: InMemoryOpLog::new(16),
+            notifier_healthy,
+            recovery_error: Some(HaError::UnavailableInCurrentMode(
+                "injected unrecoverable etcd recovery failure".into(),
+            )),
+            recovery_entries: vec![],
+        }));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let history = service.state_machine.get_transition_history(16);
+                if history.iter().any(|record| {
+                    record.from_state == StandbyState::Recovering
+                        && record.to_state == StandbyState::Failed
+                        && record.event == StandbyEvent::FatalError
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("unrecoverable shared-oplog gap did not emit FatalError");
+
+        assert_eq!(service.state_machine.get_state(), StandbyState::Failed);
+        assert_eq!(service.sync_status().state, StandbyState::Failed);
         service.stop();
     }
 
@@ -1987,9 +2084,27 @@ impl HotStandbyService {
                         }
                         Err(error) => {
                             if state_machine.is_in_state(StandbyState::Recovering) {
-                                state_machine.process_event(StandbyEvent::RecoveryFailed);
+                                let event = match &error {
+                                    HaError::Disconnected(_) => StandbyEvent::Disconnected,
+                                    _ if error.is_fatal() => StandbyEvent::FatalError,
+                                    _ => StandbyEvent::RecoveryFailed,
+                                };
+                                state_machine.process_event(event);
                             } else if state_machine.is_connected() {
                                 state_machine.process_event(StandbyEvent::WatchBroken);
+                            }
+                            if state_machine.is_in_state(StandbyState::Failed) {
+                                if let Some(status) = sync_status_ref.upgrade() {
+                                    let mut st = status.write();
+                                    st.state = StandbyState::Failed;
+                                    st.is_connected = false;
+                                    st.is_syncing = false;
+                                }
+                                tracing::error!(
+                                    %error,
+                                    "HotStandbyService: oplog recovery encountered a fatal error"
+                                );
+                                break;
                             }
                             state_machine.increment_reconnect_count();
                             consecutive_reconnect_failures =

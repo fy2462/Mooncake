@@ -4,6 +4,22 @@ use etcd_client::{Compare, CompareOp, Txn, TxnOp};
 use std::cell::RefCell;
 use std::future::Future;
 
+fn classify_etcd_read_error(error: etcd_client::Error) -> HaError {
+    let disconnected = match &error {
+        etcd_client::Error::IoError(_) | etcd_client::Error::TransportError(_) => true,
+        etcd_client::Error::GRpcStatus(status) => matches!(
+            status.code(),
+            tonic::Code::Cancelled | tonic::Code::DeadlineExceeded | tonic::Code::Unavailable
+        ),
+        _ => false,
+    };
+    if disconnected {
+        HaError::Disconnected(format!("etcd range query for oplog failed: {error}"))
+    } else {
+        HaError::InvalidBackend(format!("etcd range query for oplog failed: {error}"))
+    }
+}
+
 struct CurrentThreadRuntime {
     runtime: tokio::runtime::Runtime,
     #[cfg(test)]
@@ -346,12 +362,12 @@ fn validate_buffer_producer_view(
 #[cfg(test)]
 mod tests {
     use super::{
-        EtcdOpLogStore, block_on_runtime, current_thread_runtime_marker_for_test,
-        decode_etcd_range_entry, parse_latest_sequence_value, parse_snapshot_sequence_value,
-        run_notifier_thread, serialize_etcd_oplog_value, validate_buffer_producer_view,
-        validate_buffer_sequence,
+        EtcdOpLogStore, block_on_runtime, classify_etcd_read_error,
+        current_thread_runtime_marker_for_test, decode_etcd_range_entry,
+        parse_latest_sequence_value, parse_snapshot_sequence_value, run_notifier_thread,
+        serialize_etcd_oplog_value, validate_buffer_producer_view, validate_buffer_sequence,
     };
-    use crate::ha::OpLogRecord;
+    use crate::ha::{HaError, OpLogRecord};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -507,6 +523,26 @@ mod tests {
 
         assert!(result.is_err());
         assert!(!healthy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn etcd_read_error_classification_is_fail_closed() {
+        assert!(matches!(
+            classify_etcd_read_error(etcd_client::Error::GRpcStatus(tonic::Status::unavailable(
+                "offline"
+            ))),
+            HaError::Disconnected(_)
+        ));
+        assert!(matches!(
+            classify_etcd_read_error(etcd_client::Error::GRpcStatus(
+                tonic::Status::permission_denied("denied")
+            )),
+            HaError::InvalidBackend(_)
+        ));
+        assert!(matches!(
+            classify_etcd_read_error(etcd_client::Error::InvalidArgs("bad range".into())),
+            HaError::InvalidBackend(_)
+        ));
     }
 }
 
@@ -1001,9 +1037,7 @@ impl EtcdOpLogStore {
                 revision
             }
             Err(e) => {
-                return Err(HaError::InvalidBackend(format!(
-                    "etcd range query for oplog failed: {e}"
-                )));
+                return Err(classify_etcd_read_error(e));
             }
         };
 
