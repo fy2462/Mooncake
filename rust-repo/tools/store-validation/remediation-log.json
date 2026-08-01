@@ -1991,5 +1991,14 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_lease_expiry_preserves_single_and_batch_failure_shapes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-lease-expiry-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ConcurrentPutGetWithLeaseTimeOut",
+    "rust": "python/tests/test_pybind_client_parity.py:test_concurrent_expiring_reads_never_return_stale_bytes",
+    "first_divergence": "The synchronous single get_into binding held the Python GIL while waiting for the shared client slot, deadlocking four-thread mixed async/synchronous reads; no binding test exercised the exact two-phase concurrency matrix.",
+    "repair_commit": "1fb314e1",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_concurrent_expiring_reads_never_return_stale_bytes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-concurrent-lease-goal-019fbca4.typescript"
   }
 ]
