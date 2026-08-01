@@ -639,6 +639,69 @@ fn get_all_keys_lists_only_requested_tenant_parity() {
 }
 
 #[test]
+fn batch_exist_key_tenant_aware_preserves_order_parity() {
+    let service = strict_service(&["default", "tenant_batch_exist"], Duration::ZERO);
+    let client_id = Uuid::new_v4();
+    mount_seg(&service, "tenant-batch-exist:1", client_id, 16 * 1024);
+    put_object(
+        &service,
+        "batch_tenant_only",
+        "tenant_batch_exist",
+        client_id,
+        1024,
+    );
+    put_object(&service, "batch_default_only", "default", client_id, 1024);
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(client_proto(client_id)),
+                key: "batch_tenant_incomplete".into(),
+                slice_length: 1024,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+                tenant_id: "tenant_batch_exist".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let tenant_response = MasterService::batch_exist_key(
+            &service,
+            Request::new(proto::BatchExistKeyRequest {
+                keys: vec![
+                    "batch_tenant_only".into(),
+                    "batch_default_only".into(),
+                    "batch_tenant_missing".into(),
+                    "batch_tenant_incomplete".into(),
+                    "batch_tenant_only".into(),
+                ],
+                tenant_id: "tenant_batch_exist".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(tenant_response.results, [true, false, false, false, true]);
+
+        let default_response = MasterService::batch_exist_key(
+            &service,
+            Request::new(proto::BatchExistKeyRequest {
+                keys: vec!["batch_tenant_only".into(), "batch_default_only".into()],
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(default_response.results, [false, true]);
+    });
+}
+
+#[test]
 fn test_get_all_keys_filters_by_tenant() {
     let service = strict_service(&["tenant-Z", "default"], Duration::ZERO);
     let cid = Uuid::new_v4();
