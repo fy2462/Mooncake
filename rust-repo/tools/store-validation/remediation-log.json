@@ -1982,5 +1982,14 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_create_rejects_unreachable_master_invalid_protocol_and_empty_hostname",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-invalid-create-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.GetWithLeaseTimeOut",
+    "rust": "python/tests/test_pybind_client_parity.py:test_lease_expiry_preserves_single_and_batch_failure_shapes",
+    "first_divergence": "Rust discarded replica-query lease deadlines on single and batch reads, batch_get_buffer looped over independent single queries, and Store hot-cache entries could outlive their lease indefinitely.",
+    "repair_commit": "0d5b4a94",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_lease_expiry_preserves_single_and_batch_failure_shapes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-lease-expiry-goal-019fbca4.typescript"
   }
 ]
