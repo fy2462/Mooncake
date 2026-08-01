@@ -1051,7 +1051,7 @@
     "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.InitCreatesDirectoryStructure",
     "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_init_creates_durable_structure_without_eager_snapshots",
     "first_divergence": "Rust created the LocalFS oplog root but did not persist an initial latest marker, so fresh writer topology was not durable or directly observable.",
-    "repair_commit": "PENDING",
+    "repair_commit": "317db3ba",
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
@@ -1060,7 +1060,7 @@
     "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.InitWriterCreatesLatestFile",
     "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_fresh_store_persists_latest_zero",
     "first_divergence": "Rust kept the fresh sequence zero only in memory and left the literal latest file absent until the first durable advancement.",
-    "repair_commit": "PENDING",
+    "repair_commit": "317db3ba",
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
@@ -1069,7 +1069,7 @@
     "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.InitCleansTmpFiles",
     "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_init_removes_only_owned_stale_temp_files",
     "first_divergence": "Rust recovery ignored crash-left segment temporary files instead of removing recognized atomic-write artifacts during initialization.",
-    "repair_commit": "PENDING",
+    "repair_commit": "317db3ba",
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
