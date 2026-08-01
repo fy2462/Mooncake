@@ -1523,5 +1523,41 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity force_remove_all_leased_objects_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-force-remove-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertNewKey",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:upsert_new_key_two_phase_state_parity",
+    "first_divergence": "Rust covered generic two-phase success for a new upsert key, but did not identify the PROCESSING/ALLOCATING and COMPLETE states or the exact REPLICA_IS_NOT_READY failure.",
+    "repair_commit": "57cb9407",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity upsert_new_key_two_phase_state_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertSameSize",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:same_size_upsert_reuses_buffer_and_completes_parity",
+    "first_divergence": "Rust did not prove that a replacement client receives the original buffer address during a same-size PROCESSING upsert and returns it to COMPLETE.",
+    "repair_commit": "57cb9407",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity same_size_upsert_reuses_buffer_and_completes_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertSameSizeRefreshesMetadata",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:same_size_upsert_refreshes_client_metadata_parity",
+    "first_divergence": "Rust ended upserts with their initiating client and did not prove that a same-size replacement refreshes ownership so the former owner receives ILLEGAL_CLIENT.",
+    "repair_commit": "57cb9407",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity same_size_upsert_refreshes_client_metadata_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertDifferentSize",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:different_size_upsert_reallocates_and_completes_parity",
+    "first_divergence": "Rust lacked a successful completed-object resize proving 1 KiB-to-2 KiB buffer replacement, PROCESSING state, and terminal COMPLETE state.",
+    "repair_commit": "57cb9407",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity different_size_upsert_reallocates_and_completes_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-goal-019fbca4.typescript"
   }
 ]
