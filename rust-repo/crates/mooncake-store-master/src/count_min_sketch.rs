@@ -272,4 +272,46 @@ mod tests {
         // 300 次递增后，最小计数器应为 255（饱和）或接近饱和
         assert!(sketch.count("same_key") >= 200);
     }
+
+    #[test]
+    fn cpp_parity_client_local_hot_cache_test_cpp_localhotcachetest_countminsketchbasic_010a98d8() {
+        let mut sketch = CountMinSketch::with_dimensions(64, 4);
+
+        assert_eq!(sketch.increment("key_a"), 1);
+        assert_eq!(sketch.increment("key_a"), 2);
+        assert_eq!(sketch.increment("key_a"), 3);
+        assert_eq!(sketch.increment("key_b"), 1);
+        assert_eq!(sketch.count("key_a"), 3);
+        assert_eq!(sketch.count("key_b"), 1);
+        assert_eq!(sketch.count("key_c"), 0);
+
+        sketch.decay();
+        assert_eq!(sketch.count("key_a"), 1);
+        assert_eq!(sketch.count("key_b"), 0);
+    }
+
+    #[test]
+    fn cpp_parity_client_local_hot_cache_test_cpp_localhotcachetest_countminsketchautodecay_0164cdfb()
+     {
+        let mut sketch = CountMinSketch::with_dimensions(8, 2);
+
+        for expected in 1..=15 {
+            assert_eq!(sketch.increment("hot_key"), expected);
+        }
+        assert_eq!(sketch.count("hot_key"), 15);
+        assert_eq!(sketch.increment("hot_key"), 16);
+        assert_eq!(sketch.count("hot_key"), 8);
+    }
+
+    #[test]
+    fn cpp_parity_client_local_hot_cache_test_cpp_localhotcachetest_countminsketchzerodimensions_02ed20e0()
+     {
+        let mut sketch = CountMinSketch::with_dimensions(0, 0);
+
+        assert_eq!(sketch.width, CountMinSketch::DEFAULT_WIDTH);
+        assert_eq!(sketch.depth, CountMinSketch::DEFAULT_DEPTH);
+        assert_eq!(sketch.count("zero_key"), 0);
+        assert_eq!(sketch.increment("zero_key"), 1);
+        assert_eq!(sketch.count("zero_key"), 1);
+    }
 }

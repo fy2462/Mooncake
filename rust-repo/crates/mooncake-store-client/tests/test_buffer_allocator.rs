@@ -99,3 +99,47 @@ fn varying_size_allocations_survive_reverse_order_release() {
     assert_eq!(allocator.lock().allocated(), 0);
     assert!(ClientBufferAllocator::allocate(&allocator, 100 * 4096).is_some());
 }
+
+#[test]
+fn cpp_parity_client_buffer_test_cpp_clientbuffertest_multipleallocations_fe5945cf() {
+    const BUFFER_SIZE: usize = 1024 * 1024;
+    const ALLOCATION_SIZE: usize = 64 * 1024;
+    const ALLOCATION_COUNT: usize = 8;
+
+    let allocator = ClientBufferAllocator::new(BUFFER_SIZE);
+    let handles = (0..ALLOCATION_COUNT)
+        .map(|index| {
+            let handle = ClientBufferAllocator::allocate(&allocator, ALLOCATION_SIZE)
+                .unwrap_or_else(|| panic!("allocation {index} must succeed"));
+            assert_eq!(handle.size, ALLOCATION_SIZE);
+            handle.write(&vec![index as u8; ALLOCATION_SIZE]).unwrap();
+            handle
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(handles.len(), ALLOCATION_COUNT);
+    assert_eq!(
+        allocator.lock().allocated(),
+        ALLOCATION_COUNT * ALLOCATION_SIZE
+    );
+    for (index, handle) in handles.iter().enumerate() {
+        assert_eq!(handle.size, ALLOCATION_SIZE);
+        assert_eq!(handle.read().unwrap(), vec![index as u8; ALLOCATION_SIZE]);
+    }
+
+    drop(handles);
+    assert_eq!(allocator.lock().allocated(), 0);
+}
+
+#[test]
+fn cpp_parity_client_buffer_test_cpp_clientbuffertest_smallallocation_a47348f7() {
+    let allocator = ClientBufferAllocator::new(1024 * 1024);
+    let handle = ClientBufferAllocator::allocate(&allocator, 1).unwrap();
+
+    assert_eq!(handle.size, 1);
+    handle.write(&[0xff]).unwrap();
+    assert_eq!(handle.read().unwrap(), vec![0xff]);
+
+    drop(handle);
+    assert_eq!(allocator.lock().allocated(), 0);
+}
