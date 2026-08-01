@@ -1949,6 +1949,9 @@ impl PythonMooncakeClient {
         values: Vec<Bound<'py, PyBytes>>,
         config: Option<Bound<'py, ReplicateConfigPy>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i32) });
+        }
         let cfg = config.map(|c| c.borrow().to_core());
         let data: Vec<Vec<u8>> = values.iter().map(|v| v.as_bytes().to_vec()).collect();
         let inner = slf.borrow().inner.clone();
@@ -2748,6 +2751,11 @@ impl PythonMooncakeClient {
         keys: Vec<String>,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok(vec![-1_i32; keys.len()])
+            });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2764,6 +2772,11 @@ impl PythonMooncakeClient {
         py: Python<'py>,
         keys: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async move {
+                Ok(vec![-1_i32; keys.len()])
+            });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2813,6 +2826,9 @@ impl PythonMooncakeClient {
         pattern: String,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i64) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2874,15 +2890,21 @@ impl PythonMooncakeClient {
         }
     }
 
-    /// Check connectivity to the metadata server and master.
-    /// 检查与元数据服务器和 master 的连接状态。返回 bool。
+    /// Ping the Master and return the C++ health status code:
+    /// 0 healthy, 1 not initialized, or 2 master unreachable.
     fn health_check<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(1_i32) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
-            let result = client.health_check().await;
-            result.map(|()| true).map_err(to_py_err)
+            Ok(if client.health_check().await.is_ok() {
+                0_i32
+            } else {
+                2_i32
+            })
         })
     }
 

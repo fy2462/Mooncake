@@ -214,7 +214,7 @@ async def test_get_size_returns_exact_stored_length(cachelib_master):
 async def test_health_check_after_create_reports_healthy(cachelib_master):
     client = await _client(cachelib_master)
     try:
-        assert await client.health_check() is True
+        assert await client.health_check() == 0
     finally:
         await client.close()
 
@@ -1163,3 +1163,47 @@ async def test_live_tear_down_all_returns_integer_zero(cachelib_master):
         assert await client.tear_down_all() == 0
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_batch_exists_returns_two_failures():
+    client = MooncakeClient.uninitialized()
+    results = await client.batch_is_exist(["k1", "k2"])
+    assert len(results) == 2
+    assert all(status < 0 for status in results)
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_get_size_is_failure():
+    client = MooncakeClient.uninitialized()
+    assert await client.get_size("any_key") < 0
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_remove_by_regex_is_failure():
+    client = MooncakeClient.uninitialized()
+    assert await client.remove_by_regex(".*") < 0
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_batch_remove_returns_two_failures():
+    client = MooncakeClient.uninitialized()
+    results = await client.batch_remove(["k1", "k2"])
+    assert len(results) == 2
+    assert all(status != 0 for status in results)
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_put_parts_is_failure():
+    client = MooncakeClient.uninitialized()
+    config = ReplicateConfig(replica_num=1)
+    assert await client.put_parts("key", [b"data"], config) != 0
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_health_check_reports_not_initialized():
+    client = MooncakeClient.uninitialized()
+    assert await client.health_check() == 1
+    assert await client.close() == 0
+    with pytest.raises(StoreError, match="already closed"):
+        await client.health_check()
