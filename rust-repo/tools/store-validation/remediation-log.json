@@ -1735,7 +1735,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.BasicPutGetOperations",
     "rust": "python/tests/test_pybind_client_parity.py:test_put_get_buffer_and_exists_visible_results",
     "first_divergence": "The PyO3 put binding exposed Rust unit as an empty Python tuple on success instead of the C++ and Python adapter success code zero; no real binding test also proved get_buffer bytes and exists visibility together.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c89b6cca",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_put_get_buffer_and_exists_visible_results",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-basic-put-get-goal-019fbca4.typescript"
