@@ -2576,5 +2576,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segments_service_gate_toggle",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-service-gate-transitions-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.MultipleSegmentsAndKeys",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_multi_segment_and_key_inventory",
+    "first_divergence": "The combined two-segment/two-key inventory and query matrix had no request-level proof through one live router.",
+    "repair_commit": "b75e8089",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_multi_segment_and_key_inventory",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-multi-inventory-goal-019fbe77.typescript"
   }
 ]
