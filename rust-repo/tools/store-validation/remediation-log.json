@@ -84,7 +84,7 @@
     "cpp": "kv_event_publisher_test.cpp:KvEventPublisherTest.PublishesSglangObjectKeyOverZmq",
     "rust": "mooncake-store-master/src/kv_event.rs:cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c",
     "first_divergence": "The existing Rust ZMQ test retried publish up to twenty times to cross the PUB/SUB slow-joiner window and therefore asserted only at-least-one counters; it did not prove that one synchronized publish yields one event batch and exact 1/1/0 publish statistics.",
-    "repair_commit": "PENDING",
+    "repair_commit": "8f0e1bd0",
     "focused_command": "cargo test -p mooncake-store-master --lib kv_event::tests::cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-kv-event-goal-019fbaa7.typescript"
