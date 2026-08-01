@@ -2585,5 +2585,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_multi_segment_and_key_inventory",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-multi-inventory-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.BatchQueryKeysReturnsLocalDiskReplicaInfo",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_local_disk_response",
+    "first_divergence": "Only formatter-level coverage existed; there was no request-level proof backed by an authorized offload task and a real disk-only LocalDisk replica.",
+    "repair_commit": "a0b0255e",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_local_disk_response",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-local-disk-query-goal-019fbe77.typescript"
   }
 ]
