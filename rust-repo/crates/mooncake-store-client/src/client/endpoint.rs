@@ -18,11 +18,26 @@ pub(super) struct ResolvedClientEndpoint {
     pub(super) reservation: Option<PortReservation>,
 }
 
-pub(super) struct PortReservation {
+pub(crate) struct PortReservation {
     _socket: Socket,
 }
 
 impl ResolvedClientEndpoint {
+    pub(super) fn from_explicit(server_name: &str) -> StoreResult<Self> {
+        let parsed = ParsedClientEndpoint::parse(server_name)?;
+        let port = parsed.port.ok_or_else(|| {
+            StoreError::InvalidParams(
+                "external Transfer Engine local_host must include an explicit port".to_string(),
+            )
+        })?;
+        Ok(Self {
+            server_name: format_host_port(&parsed.host, port),
+            host: parsed.host,
+            port,
+            reservation: None,
+        })
+    }
+
     pub(super) fn from_environment(server_name: &str) -> StoreResult<Self> {
         let parsed = ParsedClientEndpoint::parse(server_name)?;
         if let Some(port) = parsed.port {
@@ -278,6 +293,18 @@ mod tests {
         assert!(ParsedClientEndpoint::parse("node:not-a-port").is_err());
         assert!(ParsedClientEndpoint::parse("[2001:db8::1").is_err());
         assert!(ParsedClientEndpoint::parse("[2001:db8::1]junk").is_err());
+    }
+
+    #[test]
+    fn external_engine_endpoint_requires_an_explicit_port() {
+        assert!(ResolvedClientEndpoint::from_explicit("node-a").is_err());
+        assert!(ResolvedClientEndpoint::from_explicit("2001:db8::1").is_err());
+        assert_eq!(
+            ResolvedClientEndpoint::from_explicit("node-a:12300")
+                .unwrap()
+                .server_name,
+            "node-a:12300"
+        );
     }
 
     #[test]

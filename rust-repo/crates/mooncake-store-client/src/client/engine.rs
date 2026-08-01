@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -8,12 +9,159 @@ use transfer_engine_ffi::{
     TransferEngineResult,
 };
 
+use super::endpoint::{PortReservation, ResolvedClientEndpoint};
 use super::reaper::{TransferCompletion, TransferReaper};
+
+/// Caller-owned proof that a classic Transfer Engine was initialized for one
+/// exact Store identity. Keeping the identity beside the native handle makes
+/// it impossible for client setup to publish a different endpoint/protocol.
+pub struct InitializedTransferEngine {
+    pub(crate) inner: Arc<TransferEngine>,
+    metadata_conn_string: String,
+    local_hostname: String,
+    protocol: String,
+    _port_reservation: Option<PortReservation>,
+    binding: Arc<ExclusiveEngineUse>,
+}
+
+#[derive(Default)]
+pub(crate) struct ExclusiveEngineUse {
+    state: AtomicU8,
+}
+
+const ENGINE_BINDING_AVAILABLE: u8 = 0;
+const ENGINE_BINDING_ACTIVE: u8 = 1;
+const ENGINE_BINDING_POISONED: u8 = 2;
+
+impl ExclusiveEngineUse {
+    pub(crate) fn acquire(
+        self: &Arc<Self>,
+    ) -> mooncake_store_core::error::StoreResult<ExclusiveEngineUseLease> {
+        self.state
+            .compare_exchange(
+                ENGINE_BINDING_AVAILABLE,
+                ENGINE_BINDING_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| {
+                mooncake_store_core::StoreError::InvalidParams(
+                    "external Transfer Engine is already bound to another Store client".to_string(),
+                )
+            })?;
+        Ok(ExclusiveEngineUseLease {
+            binding: Arc::clone(self),
+            reusable: false,
+        })
+    }
+}
+
+pub(crate) struct ExclusiveEngineUseLease {
+    binding: Arc<ExclusiveEngineUse>,
+    reusable: bool,
+}
+
+impl ExclusiveEngineUseLease {
+    pub(crate) fn mark_reusable(&mut self) {
+        self.reusable = true;
+    }
+}
+
+impl Drop for ExclusiveEngineUseLease {
+    fn drop(&mut self) {
+        self.binding.state.store(
+            if self.reusable {
+                ENGINE_BINDING_AVAILABLE
+            } else {
+                ENGINE_BINDING_POISONED
+            },
+            Ordering::Release,
+        );
+    }
+}
+
+pub(crate) struct InitializedTransferEngineLease {
+    pub(crate) owner: Arc<InitializedTransferEngine>,
+    binding: ExclusiveEngineUseLease,
+}
+
+impl InitializedTransferEngineLease {
+    pub(crate) fn mark_reusable(&mut self) {
+        self.binding.mark_reusable();
+    }
+}
+
+impl InitializedTransferEngine {
+    pub fn create(
+        metadata_conn_string: &str,
+        local_hostname: &str,
+        protocol: &str,
+        topology_matrix: Option<&str>,
+    ) -> mooncake_store_core::error::StoreResult<Self> {
+        let endpoint = ResolvedClientEndpoint::from_explicit(local_hostname)?;
+        let engine = TransferEngine::create(
+            metadata_conn_string,
+            &endpoint.server_name,
+            &endpoint.host,
+            u64::from(endpoint.port),
+            false,
+        )?;
+        engine.install_transport(protocol, topology_matrix)?;
+        Ok(Self {
+            inner: Arc::new(engine),
+            metadata_conn_string: metadata_conn_string.to_string(),
+            local_hostname: endpoint.server_name,
+            protocol: protocol.to_string(),
+            _port_reservation: endpoint.reservation,
+            binding: Arc::new(ExclusiveEngineUse::default()),
+        })
+    }
+
+    pub(crate) fn acquire(
+        self: &Arc<Self>,
+    ) -> mooncake_store_core::error::StoreResult<InitializedTransferEngineLease> {
+        let binding = self.binding.acquire()?;
+        Ok(InitializedTransferEngineLease {
+            owner: Arc::clone(self),
+            binding,
+        })
+    }
+
+    pub(crate) fn validate_identity(
+        &self,
+        metadata_conn_string: &str,
+        local_hostname: &str,
+        protocol: &str,
+    ) -> mooncake_store_core::error::StoreResult<()> {
+        use mooncake_store_core::StoreError;
+
+        if self.metadata_conn_string != metadata_conn_string {
+            return Err(StoreError::InvalidParams(
+                "external Transfer Engine metadata connection does not match client setup"
+                    .to_string(),
+            ));
+        }
+        if self.local_hostname != local_hostname {
+            return Err(StoreError::InvalidParams(format!(
+                "external Transfer Engine local endpoint {:?} does not match client endpoint {:?}",
+                self.local_hostname, local_hostname
+            )));
+        }
+        if self.protocol != protocol {
+            return Err(StoreError::InvalidParams(format!(
+                "external Transfer Engine protocol {:?} does not match client protocol {:?}",
+                self.protocol, protocol
+            )));
+        }
+        Ok(())
+    }
+}
 
 /// Optional data plane owned by a Store client. `rpc_only` clients keep this
 /// disabled so metadata/control-plane APIs do not initialize native TE state.
 pub(crate) struct ClientTransferEngine {
     inner: Option<Arc<TransferEngine>>,
+    _external_lease: Option<InitializedTransferEngineLease>,
     reaper: Option<Arc<TransferReaper>>,
 }
 
@@ -21,6 +169,15 @@ impl ClientTransferEngine {
     pub(crate) fn enabled(engine: Arc<TransferEngine>) -> Self {
         Self {
             inner: Some(engine),
+            _external_lease: None,
+            reaper: Some(Arc::new(TransferReaper::new())),
+        }
+    }
+
+    pub(crate) fn enabled_external(engine: InitializedTransferEngineLease) -> Self {
+        Self {
+            inner: Some(Arc::clone(&engine.owner.inner)),
+            _external_lease: Some(engine),
             reaper: Some(Arc::new(TransferReaper::new())),
         }
     }
@@ -28,12 +185,19 @@ impl ClientTransferEngine {
     pub(crate) fn disabled() -> Self {
         Self {
             inner: None,
+            _external_lease: None,
             reaper: None,
         }
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
         self.inner.is_some()
+    }
+
+    pub(crate) fn mark_external_engine_reusable(&mut self) {
+        if let Some(lease) = self._external_lease.as_mut() {
+            lease.mark_reusable();
+        }
     }
 
     fn require(&self) -> TransferEngineResult<&TransferEngine> {

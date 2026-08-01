@@ -399,6 +399,30 @@ fn effective_transport_protocol_honors_force_tcp_env() {
 }
 
 #[test]
+fn external_transfer_engine_rejects_cxl_until_mount_setup_is_cancellation_safe() {
+    assert!(MooncakeClient::supports_external_transfer_engine("tcp"));
+    assert!(MooncakeClient::supports_external_transfer_engine("rdma"));
+    assert!(!MooncakeClient::supports_external_transfer_engine("cxl"));
+    assert!(!MooncakeClient::supports_external_transfer_engine(
+        "rpc_only"
+    ));
+}
+
+#[test]
+fn external_transfer_engine_binding_is_exclusive_and_reusable() {
+    let binding = std::sync::Arc::new(super::engine::ExclusiveEngineUse::default());
+    let mut first = binding.acquire().unwrap();
+    assert!(binding.acquire().is_err());
+    first.mark_reusable();
+    drop(first);
+    assert!(binding.acquire().is_ok());
+
+    let poisoned = std::sync::Arc::new(super::engine::ExclusiveEngineUse::default());
+    drop(poisoned.acquire().unwrap());
+    assert!(poisoned.acquire().is_err());
+}
+
+#[test]
 fn rpc_only_skips_transfer_engine_initialization() {
     assert!(!MooncakeClient::uses_transfer_engine("rpc_only"));
     for protocol in ["", "tcp", "rdma", "efa", "cxi"] {

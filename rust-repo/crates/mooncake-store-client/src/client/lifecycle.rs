@@ -3,7 +3,7 @@ use super::config::ClientConfig;
 use super::endpoint::ResolvedClientEndpoint;
 use super::http::{ClientHttpConfig, ClientHttpServerState, ClientHttpSnapshot};
 use super::metrics::{ClientMetrics, MetricsChannel};
-use super::{MooncakeClient, OwnedStoreSegment};
+use super::{InitializedTransferEngine, MooncakeClient, OwnedStoreSegment};
 use crate::hot_cache::{HotCacheAdmission, LocalHotCacheSettings};
 use crate::proto;
 use mooncake_store_core::StoreError;
@@ -69,6 +69,206 @@ pub(super) fn unmount_confirms_segment_absent<T>(result: Result<T, tonic::Status
     }
 }
 
+struct PendingStoreSegment {
+    cleanup_ids: Vec<Uuid>,
+    buffer: crate::memory_ffi::OwnedSegmentBuffer,
+}
+
+struct RollbackStoreSegment {
+    cleanup_ids: Vec<Uuid>,
+    buffer: Option<crate::memory_ffi::OwnedSegmentBuffer>,
+}
+
+impl RollbackStoreSegment {
+    fn release(mut self, engine: &TransferEngine) {
+        if let Some(buffer) = self.buffer.take() {
+            release_failed_store_segment(engine, buffer);
+        }
+    }
+}
+
+impl Drop for RollbackStoreSegment {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            tracing::error!("leaking Store segment because startup mount absence was not proven");
+            std::mem::forget(buffer);
+        }
+    }
+}
+
+struct StoreSegmentSetupGuard {
+    engine: Arc<TransferEngine>,
+    master: proto::master_service_client::MasterServiceClient<MetricsChannel>,
+    runtime: tokio::runtime::Handle,
+    client_id: Uuid,
+    segment_name: String,
+    rpc_request_timeout: Option<Duration>,
+    prepared: Vec<crate::memory_ffi::OwnedSegmentBuffer>,
+    pending: Option<PendingStoreSegment>,
+    mounted: Vec<OwnedStoreSegment>,
+    armed: bool,
+}
+
+impl StoreSegmentSetupGuard {
+    fn new(
+        engine: Arc<TransferEngine>,
+        master: proto::master_service_client::MasterServiceClient<MetricsChannel>,
+        client_id: Uuid,
+        segment_name: String,
+        rpc_request_timeout: Option<Duration>,
+        prepared: Vec<crate::memory_ffi::OwnedSegmentBuffer>,
+    ) -> Self {
+        Self {
+            engine,
+            master,
+            runtime: tokio::runtime::Handle::current(),
+            client_id,
+            segment_name,
+            rpc_request_timeout,
+            prepared,
+            pending: None,
+            mounted: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn begin_mount(
+        &mut self,
+        expected_segment_id: Uuid,
+        buffer: crate::memory_ffi::OwnedSegmentBuffer,
+    ) {
+        debug_assert!(self.pending.is_none());
+        self.pending = Some(PendingStoreSegment {
+            cleanup_ids: vec![expected_segment_id],
+            buffer,
+        });
+    }
+
+    fn add_returned_mount_id(&mut self, segment_id: Uuid) {
+        if let Some(pending) = self.pending.as_mut()
+            && !pending.cleanup_ids.contains(&segment_id)
+        {
+            pending.cleanup_ids.push(segment_id);
+        }
+    }
+
+    fn accept_mount(&mut self, segment_id: Uuid, segment_name: String, size: u64) {
+        let pending = self.pending.take().expect("mount must be pending");
+        self.mounted.push(OwnedStoreSegment {
+            segment_id,
+            segment_name,
+            size,
+            buffer: pending.buffer,
+        });
+    }
+
+    fn take_rollback_targets(&mut self) -> Vec<RollbackStoreSegment> {
+        let mut targets =
+            Vec::with_capacity(self.mounted.len() + usize::from(self.pending.is_some()));
+        if let Some(pending) = self.pending.take() {
+            targets.push(RollbackStoreSegment {
+                cleanup_ids: pending.cleanup_ids,
+                buffer: Some(pending.buffer),
+            });
+        }
+        targets.extend(self.mounted.drain(..).map(|mounted| RollbackStoreSegment {
+            cleanup_ids: vec![mounted.segment_id],
+            buffer: Some(mounted.buffer),
+        }));
+        targets
+    }
+
+    async fn rollback(mut self) {
+        self.armed = false;
+        let prepared = std::mem::take(&mut self.prepared);
+        for buffer in prepared {
+            release_failed_store_segment(&self.engine, buffer);
+        }
+        let targets = self.take_rollback_targets();
+        rollback_mounted_store_segments(
+            self.master.clone(),
+            Arc::clone(&self.engine),
+            self.client_id,
+            self.segment_name.clone(),
+            self.rpc_request_timeout,
+            targets,
+        )
+        .await;
+    }
+
+    fn finish(mut self) -> Vec<OwnedStoreSegment> {
+        debug_assert!(self.prepared.is_empty());
+        debug_assert!(self.pending.is_none());
+        self.armed = false;
+        std::mem::take(&mut self.mounted)
+    }
+}
+
+impl Drop for StoreSegmentSetupGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let prepared = std::mem::take(&mut self.prepared);
+        for buffer in prepared {
+            release_failed_store_segment(&self.engine, buffer);
+        }
+        let targets = self.take_rollback_targets();
+        if targets.is_empty() {
+            let _ = self.engine.remove_local_segment(&self.segment_name);
+            return;
+        }
+        let cleanup = rollback_mounted_store_segments(
+            self.master.clone(),
+            Arc::clone(&self.engine),
+            self.client_id,
+            self.segment_name.clone(),
+            self.rpc_request_timeout,
+            targets,
+        );
+        self.runtime.spawn(cleanup);
+    }
+}
+
+async fn rollback_mounted_store_segments(
+    mut master: proto::master_service_client::MasterServiceClient<MetricsChannel>,
+    engine: Arc<TransferEngine>,
+    client_id: Uuid,
+    segment_name: String,
+    rpc_request_timeout: Option<Duration>,
+    targets: Vec<RollbackStoreSegment>,
+) {
+    let mut endpoint_safe_to_remove = true;
+    let mut outcomes = Vec::with_capacity(targets.len());
+    for target in targets {
+        let mut absent = true;
+        for segment_id in &target.cleanup_ids {
+            absent &= unmount_confirms_segment_absent(
+                master
+                    .unmount_segment(MooncakeClient::rpc_request_with_timeout(
+                        proto::UnmountSegmentRequest {
+                            segment_id: Some(MooncakeClient::uuid_to_proto_uuid(*segment_id)),
+                            client_id: Some(MooncakeClient::uuid_to_proto_uuid(client_id)),
+                        },
+                        rpc_request_timeout,
+                    ))
+                    .await,
+            );
+        }
+        endpoint_safe_to_remove &= absent;
+        outcomes.push((target, absent));
+    }
+    if endpoint_safe_to_remove {
+        let _ = engine.remove_local_segment(&segment_name);
+    }
+    for (target, absent) in outcomes {
+        if absent {
+            target.release(&engine);
+        }
+    }
+}
+
 impl MooncakeClient {
     /// Create a new Mooncake client, bootstrapping the TransferEngine,
     /// registering memory, and mounting a segment if needed.
@@ -131,6 +331,37 @@ impl MooncakeClient {
             global_segment_size,
             local_buffer_size,
             ClientHttpConfig::default(),
+        )
+        .await
+    }
+
+    /// Create a Store client around a caller-owned, already initialized
+    /// classic Transfer Engine. The client retains shared ownership for the
+    /// full lifetime of every registration and in-flight transfer.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_transfer_engine(
+        master_addr: &str,
+        metadata_conn_string: &str,
+        local_host: &str,
+        protocol: &str,
+        device: &str,
+        global_segment_size: u64,
+        local_buffer_size: u64,
+        engine: Arc<InitializedTransferEngine>,
+    ) -> StoreResult<Self> {
+        Self::create_with_config_and_engine(
+            ClientConfig {
+                master_addrs: &[master_addr.to_string()],
+                metadata_conn_string,
+                local_host,
+                protocol,
+                device,
+                global_segment_size,
+                local_buffer_size,
+                tenant_id: "",
+                http: ClientHttpConfig::default(),
+            },
+            Some(engine),
         )
         .await
     }
@@ -269,6 +500,13 @@ impl MooncakeClient {
     }
 
     async fn create_with_config(config: ClientConfig<'_>) -> StoreResult<Self> {
+        Self::create_with_config_and_engine(config, None).await
+    }
+
+    async fn create_with_config_and_engine(
+        config: ClientConfig<'_>,
+        external_engine: Option<Arc<InitializedTransferEngine>>,
+    ) -> StoreResult<Self> {
         if config.master_addrs.is_empty() {
             return Err(StoreError::InvalidParams(
                 "at least one master address is required".to_string(),
@@ -285,7 +523,12 @@ impl MooncakeClient {
             match Self::connect_master_addr(addr, metrics.clone()).await {
                 Ok(master) => {
                     return Self::create_with_connected_master(
-                        addr, master, &config, metrics, endpoint,
+                        addr,
+                        master,
+                        &config,
+                        metrics,
+                        endpoint,
+                        external_engine.clone(),
                     )
                     .await;
                 }
@@ -306,6 +549,7 @@ impl MooncakeClient {
         config: &ClientConfig<'_>,
         metrics: Option<Arc<ClientMetrics>>,
         endpoint: ResolvedClientEndpoint,
+        external_engine: Option<Arc<InitializedTransferEngine>>,
     ) -> StoreResult<Self> {
         let ClientConfig {
             master_addrs,
@@ -352,11 +596,46 @@ impl MooncakeClient {
                 storage_config.enable_tenant_scope,
             )?))
         };
+        // Resolve every fallible environment-backed client option before any
+        // native memory registration or Master mount is created.
+        let hot_cache_settings =
+            LocalHotCacheSettings::from_environment().map_err(StoreError::InvalidParams)?;
+        let (hot_cache, hot_cache_admission) = match hot_cache_settings {
+            Some(settings) => {
+                tracing::info!(
+                    total_size = settings.total_size,
+                    block_size = settings.block_size,
+                    max_entries = settings.max_entries,
+                    admission_threshold = settings.admission_threshold,
+                    "local hot cache enabled"
+                );
+                (
+                    Some(Arc::new(crate::LocalHotCache::new_with_block_size(
+                        settings.total_size,
+                        settings.block_size,
+                        settings.max_entries,
+                    ))),
+                    Some(HotCacheAdmission::new(settings.admission_threshold)),
+                )
+            }
+            None => (None, None),
+        };
         let uses_transfer_engine = Self::uses_transfer_engine(effective_protocol);
         if !uses_transfer_engine && global_segment_size > 0 {
             return Err(StoreError::InvalidParams(
                 "rpc_only clients cannot mount a data-plane segment".to_string(),
             ));
+        }
+        if !uses_transfer_engine && external_engine.is_some() {
+            return Err(StoreError::InvalidParams(
+                "an external Transfer Engine requires a data-plane protocol".to_string(),
+            ));
+        }
+        if external_engine.is_some() && !Self::supports_external_transfer_engine(effective_protocol)
+        {
+            return Err(StoreError::InvalidParams(format!(
+                "external Transfer Engine setup does not support protocol {effective_protocol:?}"
+            )));
         }
         if uses_transfer_engine
             && Self::tent_mode_requested(
@@ -372,32 +651,42 @@ impl MooncakeClient {
 
         // Steps 3-5: rpc_only is a metadata/control-plane client and must not
         // create, configure, or discover a native Transfer Engine.
+        let external_engine_lease = if let Some(engine) = external_engine.as_ref() {
+            engine.validate_identity(metadata_conn_string, local_host, effective_protocol)?;
+            Some(engine.acquire()?)
+        } else {
+            None
+        };
         let engine = if uses_transfer_engine {
-            let auto_discover = Self::resolve_auto_discover(
-                effective_protocol,
-                device,
-                std::env::var("MC_MS_AUTO_DISC").ok().as_deref(),
-            );
-            let engine = TransferEngine::create(
-                metadata_conn_string,
-                local_host,
-                ip,
-                u64::from(port),
-                auto_discover,
-            )?;
-
-            if effective_protocol != "tcp" {
-                let topology_matrix = Self::transport_topology_matrix_from_env(
+            if let Some(engine) = external_engine_lease.as_ref() {
+                Some(Arc::clone(&engine.owner.inner))
+            } else {
+                let auto_discover = Self::resolve_auto_discover(
                     effective_protocol,
                     device,
-                    std::env::var("MC_MS_FILTERS").ok().as_deref(),
+                    std::env::var("MC_MS_AUTO_DISC").ok().as_deref(),
                 );
-                engine.install_transport(effective_protocol, topology_matrix.as_deref())?;
-            } else {
-                engine.install_transport("tcp", None)?;
+                let engine = TransferEngine::create(
+                    metadata_conn_string,
+                    local_host,
+                    ip,
+                    u64::from(port),
+                    auto_discover,
+                )?;
+
+                if effective_protocol != "tcp" {
+                    let topology_matrix = Self::transport_topology_matrix_from_env(
+                        effective_protocol,
+                        device,
+                        std::env::var("MC_MS_FILTERS").ok().as_deref(),
+                    );
+                    engine.install_transport(effective_protocol, topology_matrix.as_deref())?;
+                } else {
+                    engine.install_transport("tcp", None)?;
+                }
+                engine.discover_topology()?;
+                Some(Arc::new(engine))
             }
-            engine.discover_topology()?;
-            Some(Arc::new(engine))
         } else {
             None
         };
@@ -584,34 +873,40 @@ impl MooncakeClient {
             cxl_segment_registration = Some(registration);
         } else if global_segment_size > 0 {
             let engine = engine
-                .as_deref()
+                .as_ref()
                 .expect("data-plane segment validation requires Transfer Engine");
             let max_mr_size = Self::resolve_max_mr_size(
                 effective_protocol,
                 global_segment_size,
                 std::env::var("MC_MAX_MR_SIZE").ok().as_deref(),
             )?;
-            let mut prepared = Vec::new();
-            for chunk_size in Self::split_segment_capacity_aligned(
+            let chunk_sizes = Self::split_segment_capacity_aligned(
                 global_segment_size,
                 max_mr_size,
                 memory_segment_alignment as u64,
-            )? {
+            )?;
+            let mut allocated = Vec::with_capacity(chunk_sizes.len());
+            for chunk_size in chunk_sizes {
                 let chunk_size = usize::try_from(chunk_size).map_err(|_| {
                     StoreError::InvalidParams(
                         "Store segment chunk exceeds addressable memory".to_string(),
                     )
                 })?;
-                let seg_buf = crate::memory_ffi::allocate_store_segment(
-                    chunk_size,
-                    effective_protocol,
-                    memory_segment_alignment,
-                )
-                .map_err(|error| {
-                    StoreError::Internal(format!(
-                        "failed to populate segment buffer before registration: {error}"
-                    ))
-                })?;
+                allocated.push(
+                    crate::memory_ffi::allocate_store_segment(
+                        chunk_size,
+                        effective_protocol,
+                        memory_segment_alignment,
+                    )
+                    .map_err(|error| {
+                        StoreError::Internal(format!(
+                            "failed to populate segment buffer before registration: {error}"
+                        ))
+                    })?,
+                );
+            }
+            let mut prepared = Vec::with_capacity(allocated.len());
+            for seg_buf in allocated {
                 if let Err(error) =
                     crate::memory_ffi::register_local_memory(engine, &seg_buf, "cpu:0", true)
                 {
@@ -620,182 +915,65 @@ impl MooncakeClient {
                 }
                 prepared.push(seg_buf);
             }
-            let mut prepared = prepared.into_iter();
-            while let Some(seg_buf) = prepared.next() {
+            let mut setup = StoreSegmentSetupGuard::new(
+                Arc::clone(engine),
+                master.clone(),
+                client_id,
+                local_host.to_string(),
+                rpc_request_timeout,
+                prepared,
+            );
+            while let Some(seg_buf) = setup.prepared.pop() {
                 let size = seg_buf.len() as u64;
+                let base_addr = seg_buf.as_ptr() as u64;
                 let expected_segment_id = mooncake_store_core::stable_memory_segment_id(
                     client_id,
                     local_host,
-                    seg_buf.as_ptr() as u64,
+                    base_addr,
                     size,
                     &local_transport_endpoint,
                     effective_protocol,
                     &host_id,
                 );
                 let request = proto::MountSegmentRequest {
-                    client_id: Some(proto::Uuid {
-                        high: client_id.as_u64_pair().0,
-                        low: client_id.as_u64_pair().1,
-                    }),
+                    client_id: Some(Self::uuid_to_proto_uuid(client_id)),
                     segment_name: local_host.to_string(),
                     size,
-                    base_addr: seg_buf.as_ptr() as u64,
+                    base_addr,
                     te_endpoint: local_transport_endpoint.clone(),
                     protocol: effective_protocol.to_string(),
                     host_id: host_id.clone(),
                 };
+                setup.begin_mount(expected_segment_id, seg_buf);
                 let mount_response = match master
                     .mount_segment(Self::rpc_request_with_timeout(request, rpc_request_timeout))
                     .await
                 {
                     Ok(response) => response.into_inner(),
                     Err(status) => {
-                        let current_unmounted = unmount_confirms_segment_absent(
-                            master
-                                .unmount_segment(Self::rpc_request_with_timeout(
-                                    proto::UnmountSegmentRequest {
-                                        segment_id: Some(Self::uuid_to_proto_uuid(
-                                            expected_segment_id,
-                                        )),
-                                        client_id: Some(Self::uuid_to_proto_uuid(client_id)),
-                                    },
-                                    rpc_request_timeout,
-                                ))
-                                .await,
-                        );
-                        let mut endpoint_safe_to_remove = current_unmounted;
-                        for mounted in owned_store_segments.drain(..) {
-                            let unmounted = unmount_confirms_segment_absent(
-                                master
-                                    .unmount_segment(Self::rpc_request_with_timeout(
-                                        proto::UnmountSegmentRequest {
-                                            segment_id: Some(Self::uuid_to_proto_uuid(
-                                                mounted.segment_id,
-                                            )),
-                                            client_id: Some(proto::Uuid {
-                                                high: client_id.as_u64_pair().0,
-                                                low: client_id.as_u64_pair().1,
-                                            }),
-                                        },
-                                        rpc_request_timeout,
-                                    ))
-                                    .await,
-                            );
-                            if unmounted {
-                                release_failed_store_segment(engine, mounted.buffer);
-                            } else {
-                                endpoint_safe_to_remove = false;
-                                tracing::error!(
-                                    segment_id = %mounted.segment_id,
-                                    "leaking Store segment because startup rollback unmount failed"
-                                );
-                                std::mem::forget(mounted);
-                            }
-                        }
-                        let mut buffers = Vec::new();
-                        if current_unmounted {
-                            buffers.push(seg_buf);
-                        } else {
-                            tracing::error!(
-                                segment_id = %expected_segment_id,
-                                "leaking Store segment because ambiguous startup mount could not be unmounted"
-                            );
-                            std::mem::forget(seg_buf);
-                        }
-                        buffers.extend(prepared);
-                        if endpoint_safe_to_remove {
-                            release_failed_store_segments(engine, local_host, buffers);
-                        } else {
-                            for buffer in buffers {
-                                release_failed_store_segment(engine, buffer);
-                            }
-                        }
-                        return Err(Self::rpc_status_to_error(status));
+                        let error = Self::rpc_status_to_error(status);
+                        setup.rollback().await;
+                        return Err(error);
                     }
                 };
                 let Some(id) = mount_response.segment_id else {
-                    let current_unmounted = unmount_confirms_segment_absent(
-                        master
-                            .unmount_segment(Self::rpc_request_with_timeout(
-                                proto::UnmountSegmentRequest {
-                                    segment_id: Some(Self::uuid_to_proto_uuid(expected_segment_id)),
-                                    client_id: Some(Self::uuid_to_proto_uuid(client_id)),
-                                },
-                                rpc_request_timeout,
-                            ))
-                            .await,
-                    );
-                    if current_unmounted {
-                        release_failed_store_segment(engine, seg_buf);
-                    } else {
-                        tracing::error!(
-                            segment_id = %expected_segment_id,
-                            "leaking Store segment because UUID-less mount could not be unmounted"
-                        );
-                        std::mem::forget(seg_buf);
-                    }
-                    for buffer in prepared {
-                        release_failed_store_segment(engine, buffer);
-                    }
-                    for mounted in owned_store_segments {
-                        std::mem::forget(mounted);
-                    }
+                    setup.rollback().await;
                     return Err(StoreError::Internal(
                         "MountSegment response missing segment_id".to_string(),
                     ));
                 };
                 let segment_id = Uuid::from_u64_pair(id.high, id.low);
                 if segment_id != expected_segment_id {
-                    let returned_unmounted = unmount_confirms_segment_absent(
-                        master
-                            .unmount_segment(Self::rpc_request_with_timeout(
-                                proto::UnmountSegmentRequest {
-                                    segment_id: Some(Self::uuid_to_proto_uuid(segment_id)),
-                                    client_id: Some(Self::uuid_to_proto_uuid(client_id)),
-                                },
-                                rpc_request_timeout,
-                            ))
-                            .await,
-                    );
-                    let expected_unmounted = unmount_confirms_segment_absent(
-                        master
-                            .unmount_segment(Self::rpc_request_with_timeout(
-                                proto::UnmountSegmentRequest {
-                                    segment_id: Some(Self::uuid_to_proto_uuid(expected_segment_id)),
-                                    client_id: Some(Self::uuid_to_proto_uuid(client_id)),
-                                },
-                                rpc_request_timeout,
-                            ))
-                            .await,
-                    );
-                    if returned_unmounted && expected_unmounted {
-                        release_failed_store_segment(engine, seg_buf);
-                    } else {
-                        tracing::error!(
-                            returned_segment_id = %segment_id,
-                            expected_segment_id = %expected_segment_id,
-                            "leaking Store segment after Master returned a non-canonical UUID"
-                        );
-                        std::mem::forget(seg_buf);
-                    }
-                    for buffer in prepared {
-                        release_failed_store_segment(engine, buffer);
-                    }
-                    for mounted in owned_store_segments {
-                        std::mem::forget(mounted);
-                    }
+                    setup.add_returned_mount_id(segment_id);
+                    setup.rollback().await;
                     return Err(StoreError::Internal(
                         "MountSegment returned a non-canonical segment UUID".to_string(),
                     ));
                 }
                 mounted_segment_ids.insert(segment_id, local_host.to_string());
-                owned_store_segments.push(OwnedStoreSegment {
-                    segment_id,
-                    segment_name: local_host.to_string(),
-                    size,
-                    buffer: seg_buf,
-                });
+                setup.accept_mount(segment_id, local_host.to_string(), size);
             }
+            owned_store_segments = setup.finish();
         }
 
         // Step 8: Register the current node's hostname as a local endpoint.
@@ -807,35 +985,15 @@ impl MooncakeClient {
         let mut endpoints = HashSet::new();
         endpoints.insert(local_transport_endpoint.clone());
 
-        let hot_cache_settings =
-            LocalHotCacheSettings::from_environment().map_err(StoreError::InvalidParams)?;
-        let (hot_cache, hot_cache_admission) = match hot_cache_settings {
-            Some(settings) => {
-                tracing::info!(
-                    total_size = settings.total_size,
-                    block_size = settings.block_size,
-                    max_entries = settings.max_entries,
-                    admission_threshold = settings.admission_threshold,
-                    "local hot cache enabled"
-                );
-                (
-                    Some(Arc::new(crate::LocalHotCache::new_with_block_size(
-                        settings.total_size,
-                        settings.block_size,
-                        settings.max_entries,
-                    ))),
-                    Some(HotCacheAdmission::new(settings.admission_threshold)),
-                )
-            }
-            None => (None, None),
-        };
-
         let client = Self {
             master,
-            engine: engine.map_or_else(
-                super::engine::ClientTransferEngine::disabled,
-                super::engine::ClientTransferEngine::enabled,
-            ),
+            engine: match external_engine_lease {
+                Some(engine) => super::engine::ClientTransferEngine::enabled_external(engine),
+                None => engine.map_or_else(
+                    super::engine::ClientTransferEngine::disabled,
+                    super::engine::ClientTransferEngine::enabled,
+                ),
+            },
             _auto_port_reservation: reservation,
             accelerator: Arc::new(crate::data_plane_ffi::NativeAcceleratorBackend),
             client_id,
@@ -1130,6 +1288,10 @@ impl MooncakeClient {
 
     pub(super) fn uses_transfer_engine(protocol: &str) -> bool {
         protocol != "rpc_only"
+    }
+
+    pub(super) fn supports_external_transfer_engine(protocol: &str) -> bool {
+        Self::uses_transfer_engine(protocol) && protocol != "cxl"
     }
 
     pub(super) const fn tent_mode_requested(

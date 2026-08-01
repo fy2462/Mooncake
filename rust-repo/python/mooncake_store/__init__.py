@@ -12,6 +12,7 @@ _RUST_EXPORTS = {
     "EngramStoreConfig",
     "P2pStore",
     "BufferPool",
+    "ClassicTransferEngine",
     "BufferLease",
     "RegisteredBufferPool",
     "RegisteredBufferLease",

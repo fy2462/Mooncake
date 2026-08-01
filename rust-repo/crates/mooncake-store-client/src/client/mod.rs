@@ -45,6 +45,7 @@ pub(crate) mod write_parts;
 
 pub use background::{ClientBackgroundConfig, ClientBackgroundHandle};
 pub use batch_types::{BatchPutStartResult, BatchUpsertEntry};
+pub use engine::InitializedTransferEngine;
 pub use http::ClientHttpConfig;
 pub use replica_selection::{ReplicaScorer, ReplicaSelectionPolicy, builtin_remote_replica_score};
 pub use storage::{OffloadTaskItem, PromotionTaskItem, SegmentDetail};

@@ -12,6 +12,7 @@
 // CPython 胶水代码。
 
 mod buffer_pool;
+mod classic_transfer_engine;
 mod client;
 mod client_ext;
 mod dlpack;
@@ -146,6 +147,7 @@ fn enable_te_debug_tracing() {
 #[pymodule]
 fn _mooncake_store(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<client::PythonMooncakeClient>()?;
+    m.add_class::<classic_transfer_engine::PyClassicTransferEngine>()?;
     m.add_class::<buffer_pool::BufferPoolPy>()?;
     m.add_class::<buffer_pool::BufferLeasePy>()?;
     m.add("RegisteredBufferPool", m.getattr("BufferPool")?)?;

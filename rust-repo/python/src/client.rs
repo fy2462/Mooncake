@@ -86,6 +86,7 @@
 //    - 不在 async 块内部使用 Python::assume_attached()
 // =============================================================================
 
+use crate::classic_transfer_engine::PyClassicTransferEngine;
 use crate::dlpack::DLPackMemoryOwner;
 use crate::remote_config::PyRemoteSourceConfig;
 use crate::replicate_config::ReplicateConfigPy;
@@ -1488,6 +1489,69 @@ impl PythonMooncakeClient {
             // MooncakeClient object via IntoPy.
             // 返回 Rust 结构体 —— future_into_py 通过 IntoPy 将其转换为
             // Python MooncakeClient 对象。
+            let inner = Arc::new(AsyncMutex::new(Some(client)));
+            let background_handle = MooncakeClient::start_background_workers(
+                Arc::clone(&inner),
+                ClientBackgroundConfig::default(),
+            );
+            Ok(PythonMooncakeClient {
+                inner,
+                background: Arc::new(AsyncMutex::new(Some(background_handle))),
+                registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+            })
+        })
+    }
+
+    /// Create a Store client that shares a caller-initialized classic
+    /// Transfer Engine instead of constructing another native engine.
+    #[staticmethod]
+    #[pyo3(signature = (
+        transfer_engine,
+        local_hostname,
+        metadata_server,
+        master_server_addr,
+        protocol = String::from("tcp"),
+        device = String::new(),
+        global_segment_size = -1,
+        local_buffer_size = -1,
+    ))]
+    fn create_with_transfer_engine<'py>(
+        py: Python<'py>,
+        transfer_engine: PyRef<'py, PyClassicTransferEngine>,
+        local_hostname: String,
+        metadata_server: String,
+        master_server_addr: String,
+        protocol: String,
+        device: String,
+        global_segment_size: i64,
+        local_buffer_size: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let normalized = normalize_create_args(
+            local_hostname,
+            metadata_server,
+            master_server_addr,
+            protocol,
+        )?;
+        let global_segment_size = u64::try_from(global_segment_size.max(0)).map_err(to_py_err)?;
+        let local_buffer_size = if local_buffer_size < 0 {
+            268_435_456
+        } else {
+            u64::try_from(local_buffer_size).map_err(to_py_err)?
+        };
+        let engine = Arc::clone(&transfer_engine.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let client = MooncakeClient::create_with_transfer_engine(
+                &normalized.master_server_addr,
+                &normalized.metadata_server,
+                &normalized.local_hostname,
+                &normalized.protocol,
+                &device,
+                global_segment_size,
+                local_buffer_size,
+                engine,
+            )
+            .await
+            .map_err(to_py_err)?;
             let inner = Arc::new(AsyncMutex::new(Some(client)));
             let background_handle = MooncakeClient::start_background_workers(
                 Arc::clone(&inner),

@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from mooncake_store import BufferPool, MooncakeClient, StoreError
+from mooncake_store import BufferPool, ClassicTransferEngine, MooncakeClient, StoreError
 
 SLAB_SIZE = 1 << 24
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -803,3 +803,130 @@ async def test_concurrent_expiring_reads_never_return_stale_bytes(cachelib_maste
             await asyncio.sleep(0)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_accepts_initialized_external_transfer_engine(cachelib_master):
+    rpc_port, _ = cachelib_master
+    metadata_server = "P2PHANDSHAKE"
+    local_hostname = "localhost:17813"
+    engine = ClassicTransferEngine(
+        metadata_server=metadata_server,
+        local_hostname=local_hostname,
+        protocol="tcp",
+    )
+    client = await MooncakeClient.create_with_transfer_engine(
+        transfer_engine=engine,
+        local_hostname=local_hostname,
+        metadata_server=metadata_server,
+        master_server_addr=f"127.0.0.1:{rpc_port}",
+        protocol="tcp",
+        global_segment_size=SLAB_SIZE,
+        local_buffer_size=SLAB_SIZE,
+    )
+    try:
+        assert await client.put("test_key_external_te", b"Hello, RealClient!") == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_external_transfer_engine_rejects_mismatched_identity(cachelib_master):
+    rpc_port, metadata_port = cachelib_master
+    metadata_server = f"http://127.0.0.1:{metadata_port}/metadata"
+    engine = ClassicTransferEngine(
+        metadata_server=metadata_server,
+        local_hostname="localhost:17814",
+        protocol="tcp",
+    )
+
+    common = dict(
+        transfer_engine=engine,
+        local_hostname="localhost:17814",
+        metadata_server=metadata_server,
+        master_server_addr=f"127.0.0.1:{rpc_port}",
+        protocol="tcp",
+        global_segment_size=SLAB_SIZE,
+        local_buffer_size=SLAB_SIZE,
+    )
+
+    with pytest.raises(StoreError, match="external Transfer Engine local endpoint"):
+        await MooncakeClient.create_with_transfer_engine(
+            local_hostname="localhost:17815",
+            **{key: value for key, value in common.items() if key != "local_hostname"},
+        )
+    with pytest.raises(StoreError, match="metadata connection"):
+        await MooncakeClient.create_with_transfer_engine(
+            metadata_server=f"{metadata_server}-other",
+            **{key: value for key, value in common.items() if key != "metadata_server"},
+        )
+    with pytest.raises(StoreError, match="external Transfer Engine protocol"):
+        await MooncakeClient.create_with_transfer_engine(
+            protocol="rdma",
+            **{key: value for key, value in common.items() if key != "protocol"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_external_transfer_engine_survives_pre_mount_setup_failure(
+    cachelib_master, monkeypatch
+):
+    rpc_port, metadata_port = cachelib_master
+    metadata_server = f"http://127.0.0.1:{metadata_port}/metadata"
+    local_hostname = "localhost:17816"
+    engine = ClassicTransferEngine(
+        metadata_server=metadata_server,
+        local_hostname=local_hostname,
+        protocol="tcp",
+    )
+    create_args = dict(
+        transfer_engine=engine,
+        local_hostname=local_hostname,
+        metadata_server=metadata_server,
+        master_server_addr=f"127.0.0.1:{rpc_port}",
+        protocol="tcp",
+        global_segment_size=SLAB_SIZE,
+        local_buffer_size=SLAB_SIZE,
+    )
+
+    monkeypatch.setenv("MC_STORE_LOCAL_HOT_CACHE_SIZE", str(SLAB_SIZE))
+    monkeypatch.setenv("MC_STORE_LOCAL_HOT_CACHE_USE_SHM", "1")
+    with pytest.raises(StoreError, match="LOCAL_HOT_CACHE_USE_SHM"):
+        await MooncakeClient.create_with_transfer_engine(**create_args)
+
+    monkeypatch.delenv("MC_STORE_LOCAL_HOT_CACHE_USE_SHM")
+    client = await MooncakeClient.create_with_transfer_engine(**create_args)
+    try:
+        assert await client.put("test_key_external_te_retry", b"retry") == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_external_transfer_engine_allows_only_one_live_client(cachelib_master):
+    rpc_port, _ = cachelib_master
+    local_hostname = "localhost:17817"
+    engine = ClassicTransferEngine(
+        metadata_server="P2PHANDSHAKE",
+        local_hostname=local_hostname,
+        protocol="tcp",
+    )
+    create_args = dict(
+        transfer_engine=engine,
+        local_hostname=local_hostname,
+        metadata_server="P2PHANDSHAKE",
+        master_server_addr=f"127.0.0.1:{rpc_port}",
+        protocol="tcp",
+        global_segment_size=0,
+        local_buffer_size=SLAB_SIZE,
+    )
+
+    first = await MooncakeClient.create_with_transfer_engine(**create_args)
+    try:
+        with pytest.raises(StoreError, match="already bound"):
+            await MooncakeClient.create_with_transfer_engine(**create_args)
+    finally:
+        await first.close()
+
+    replacement = await MooncakeClient.create_with_transfer_engine(**create_args)
+    await replacement.close()

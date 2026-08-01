@@ -230,6 +230,7 @@ impl MooncakeClient {
     /// C++ 等价：`Client::TearDownAll()`。
     pub async fn tear_down_all(&mut self) -> StoreResult<()> {
         self.shutdown_state.close();
+        let mut external_engine_clean = true;
 
         // Stop offload RPC server if running.
         self.offload_server_state.stop();
@@ -254,6 +255,7 @@ impl MooncakeClient {
                 }))
                 .await;
             if let Err(error) = result {
+                external_engine_clean = false;
                 failed_segment_ids.insert(*segment_id);
                 failed_segment_names.insert(segment_name.clone());
                 tracing::warn!(
@@ -275,20 +277,33 @@ impl MooncakeClient {
 
         if let Some(registration) = self.cxl_segment_registration.take() {
             if failed_segment_names.contains(&self.local_hostname) {
+                external_engine_clean = false;
                 tracing::error!(
                     "leaking native CXL registration because Master unmount was not proven"
                 );
                 std::mem::forget(registration);
-            } else if let Ok(engine) = self.engine.required_arc()
-                && let Err(error) =
-                    crate::memory_ffi::unregister_cxl_segment(&engine, &registration)
-            {
-                tracing::error!(%error, "failed to unregister native CXL segment");
+            } else {
+                match self.engine.required_arc() {
+                    Ok(engine) => {
+                        if let Err(error) =
+                            crate::memory_ffi::unregister_cxl_segment(&engine, &registration)
+                        {
+                            external_engine_clean = false;
+                            tracing::error!(%error, "failed to unregister native CXL segment");
+                        }
+                    }
+                    Err(error) => {
+                        external_engine_clean = false;
+                        tracing::error!(%error, "CXL teardown is missing its Transfer Engine");
+                        std::mem::forget(registration);
+                    }
+                }
             }
         }
 
         for mut segment in std::mem::take(&mut self.owned_store_segments) {
             if failed_segment_ids.contains(&segment.segment_id) {
+                external_engine_clean = false;
                 tracing::error!(
                     segment_id = %segment.segment_id,
                     "leaking Store segment because Master unmount was not proven"
@@ -301,6 +316,7 @@ impl MooncakeClient {
                 Err(error) => Err(StoreError::from(error)),
             };
             if let Err(error) = te_unregistered {
+                external_engine_clean = false;
                 retained_segment_names.insert(segment.segment_name.clone());
                 tracing::error!(
                     %error,
@@ -309,6 +325,7 @@ impl MooncakeClient {
                 );
                 std::mem::forget(segment);
             } else if !segment.buffer.release() {
+                external_engine_clean = false;
                 tracing::error!("leaking Store segment because CUDA host unregister failed");
             }
         }
@@ -317,6 +334,7 @@ impl MooncakeClient {
         self.local_buffer.wait_until_available().await;
         if let Some(mut registration) = self.local_buffer.take_registration() {
             if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                external_engine_clean = false;
                 retained_segment_names.insert(self.local_hostname.clone());
                 tracing::error!(
                     %error,
@@ -329,6 +347,7 @@ impl MooncakeClient {
         let registrations = std::mem::take(&mut *self.registered_buffers.write());
         for mut registration in registrations.into_values() {
             if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                external_engine_clean = false;
                 retained_segment_names.insert(self.local_hostname.clone());
                 tracing::error!(
                     %error,
@@ -351,12 +370,16 @@ impl MooncakeClient {
                 continue;
             }
             if let Err(error) = self.engine.remove_local_segment(&segment_name) {
+                external_engine_clean = false;
                 tracing::warn!(
                     %error,
                     %segment_name,
                     "failed to remove local Transfer Engine segment"
                 );
             }
+        }
+        if external_engine_clean {
+            self.engine.mark_external_engine_reusable();
         }
         Ok(())
     }
