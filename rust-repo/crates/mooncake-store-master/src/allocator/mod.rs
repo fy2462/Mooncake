@@ -1070,6 +1070,15 @@ impl SegmentAllocator {
         })
     }
 
+    /// Resolve the transport endpoint associated with an allocated replica.
+    /// Returns `None` for stale or identity-mismatched descriptors.
+    pub fn transport_endpoint_for(&self, replica: &ReplicaDescriptor) -> Option<&str> {
+        self.segments
+            .get(&replica.segment_id)
+            .filter(|state| state.segment.name == replica.segment_name)
+            .map(|state| state.segment.te_endpoint.as_str())
+    }
+
     /// Get total memory usage across all segments: (total_capacity, total_used).
     /// 获取所有 segment 的内存使用总计：(总容量, 总已用)。
     pub fn usage_totals(&self) -> (u64, u64) {

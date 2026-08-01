@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex, RwLock};
 
 mod common;
 use common::{make_seg, make_seg_with_usage};
@@ -667,6 +668,79 @@ fn offset_and_cachelib_allocators_support_parallel_allocate_release() {
             worker.join().unwrap();
         }
         assert_eq!(allocator.lock().unwrap().usage_totals().1, 0);
+    }
+}
+
+#[test]
+fn cpp_parity_buffer_allocator_test_cpp_bufferallocatortest_parallelallocation_c8e3e399() {
+    const ALLOCATION_SIZE: u64 = 477;
+    const WORKERS: usize = 4;
+
+    for kind in [
+        MemoryAllocatorKind::Offset,
+        MemoryAllocatorKind::CachelibLike,
+    ] {
+        let mut segment = make_seg("test", 32 * 1024 * 1024);
+        segment.base = 0x1_2000_0000;
+        segment.te_endpoint = "test".to_string();
+        let segment_id = segment.id;
+
+        let mut allocator = SegmentAllocator::new().with_memory_allocator(kind);
+        allocator.add_segment(segment, 0, Uuid::new_v4());
+        let allocator = Arc::new(RwLock::new(allocator));
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let saw_invalid_descriptor = Arc::new(AtomicBool::new(false));
+
+        let workers = (0..WORKERS)
+            .map(|worker| {
+                let allocator = Arc::clone(&allocator);
+                let barrier = Arc::clone(&barrier);
+                let success_count = Arc::clone(&success_count);
+                let saw_invalid_descriptor = Arc::clone(&saw_invalid_descriptor);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for iteration in 0..1_000 {
+                        let replicas = allocator.write().unwrap().allocate(
+                            &format!("parallel-{worker}-{iteration}"),
+                            ALLOCATION_SIZE,
+                            1,
+                            &ReplicateConfig::default(),
+                        );
+                        let Some(replica) = replicas.first() else {
+                            std::thread::yield_now();
+                            continue;
+                        };
+                        let endpoint = allocator
+                            .read()
+                            .unwrap()
+                            .transport_endpoint_for(replica)
+                            .map(str::to_owned);
+                        if replica.segment_id != segment_id
+                            || replica.segment_name != "test"
+                            || endpoint.as_deref() != Some("test")
+                            || replica.size != ALLOCATION_SIZE
+                            || matches!(
+                                replica.base_addr.checked_add(replica.offset),
+                                None | Some(0)
+                            )
+                        {
+                            saw_invalid_descriptor.store(true, Ordering::Relaxed);
+                        }
+                        success_count.fetch_add(1, Ordering::Relaxed);
+                        std::thread::yield_now();
+                        allocator.write().unwrap().release(&replicas).unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(!saw_invalid_descriptor.load(Ordering::Relaxed));
+        assert!(success_count.load(Ordering::Relaxed) > 0);
+        assert_eq!(allocator.read().unwrap().usage_totals().1, 0);
     }
 }
 
