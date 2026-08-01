@@ -719,6 +719,43 @@ mod tests {
         assert_eq!(absent_body["present"], false);
     }
 
+    #[tokio::test]
+    async fn test_admin_http_leader_warmup_role_and_health() {
+        let state = runtime_state(MasterRuntimeState::LeaderWarmup);
+        let router = admin_router(state);
+
+        let (role_status, role_body) = get_router(&router, "/role").await;
+        let (health_status, health_body) = get_router(&router, "/health").await;
+        let health_body: Value = serde_json::from_str(&health_body).unwrap();
+
+        assert_eq!(role_status, StatusCode::OK);
+        assert_eq!(role_body, "leader");
+        assert_eq!(health_status, StatusCode::OK);
+        assert_eq!(health_body["role"], "leader");
+        assert_eq!(health_body["ha_state"], "leader_warmup");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_role_all_state_matrix() {
+        let state = runtime_state(MasterRuntimeState::Starting);
+        let router = admin_router(state.clone());
+
+        for (runtime_state, expected_role) in [
+            (MasterRuntimeState::Starting, "standby"),
+            (MasterRuntimeState::Standby, "standby"),
+            (MasterRuntimeState::Candidate, "standby"),
+            (MasterRuntimeState::Recovering, "standby"),
+            (MasterRuntimeState::CatchingUp, "standby"),
+            (MasterRuntimeState::LeaderWarmup, "leader"),
+            (MasterRuntimeState::Serving, "leader"),
+        ] {
+            state.set_runtime_state(runtime_state);
+            let (status, body) = get_router(&router, "/role").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, expected_role, "state={}", runtime_state.as_str());
+        }
+    }
+
     #[test]
     fn test_batch_query_keys_formats_local_disk_values() {
         let key = "disk-key".to_string();

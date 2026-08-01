@@ -638,9 +638,22 @@ async fn metrics_handler() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ha::MasterRuntimeState;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    use serde_json::Value;
     use tower::ServiceExt;
+
+    async fn get(router: &Router, path: &str) -> (StatusCode, String) {
+        let response = router
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
 
     #[tokio::test]
     async fn test_admin_http_metrics_returns_master_text() {
@@ -659,5 +672,32 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("master_"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_starting_always_available_matrix() {
+        let state = AdminRuntimeState::new(MasterRuntimeState::Starting, None, false);
+        let router = metrics_admin_router(state);
+        let mut bodies = std::collections::HashMap::new();
+
+        for path in [
+            "/metrics",
+            "/metrics/summary",
+            "/health",
+            "/role",
+            "/ha_status",
+            "/leader",
+        ] {
+            let (status, body) = get(&router, path).await;
+            assert_eq!(status, StatusCode::OK, "path={path}");
+            bodies.insert(path, body);
+        }
+
+        let health: Value = serde_json::from_str(bodies["/health"].as_str()).unwrap();
+        let leader: Value = serde_json::from_str(bodies["/leader"].as_str()).unwrap();
+        assert_eq!(health["ha_state"], "starting");
+        assert_eq!(bodies["/role"], "standby");
+        assert_eq!(bodies["/ha_status"], "starting");
+        assert_eq!(leader["present"], false);
     }
 }
