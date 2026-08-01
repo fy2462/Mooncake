@@ -2639,5 +2639,77 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_allocator cpp_parity_buffer_allocator_test_cpp_bufferallocatortest_parallelallocation_c8e3e399 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master",
     "evidence": "/tmp/mooncake-buffer-allocator-parallel-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.SaveStringToFile_Basic",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_basic",
+    "first_divergence": "Rust had no portable selected-path helper or raw-byte proof for an unencoded plain-text write.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.SaveStringToFile_CreatesSubdirectories",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_createssubdirectories",
+    "first_divergence": "Rust lacked direct evidence that a selected nested text path recursively creates every absent parent before writing raw bytes.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.SaveStringToFile_EmptyContent",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_savestringtofile_emptycontent",
+    "first_divergence": "Rust had no direct contract that an empty content write still creates a readable zero-length regular file.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.SaveBinaryToFile_Basic",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_savebinarytofile_basic",
+    "first_divergence": "Existing LocalDisk tests exercised encoded records rather than a selected raw file containing zero and high-byte values unchanged.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.SaveBinaryToFile_CreatesSubdirectories",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_savebinarytofile_createssubdirectories",
+    "first_divergence": "Rust lacked one direct contract combining recursive parent creation with exact raw binary persistence at the selected nested path.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.EnsureDirExists_CreateNew",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_createnew",
+    "first_divergence": "Rust only created internally selected storage namespaces and did not directly ensure an arbitrary absent directory path.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.EnsureDirExists_AlreadyExists",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_alreadyexists",
+    "first_divergence": "Rust had no direct selected-directory proof that ensure-directory is idempotent after the path already exists.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "file_util_test.cpp:FileUtilTest.EnsureDirExists_PathIsFile_ReturnsError",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_file_util_test_cpp_fileutiltest_ensuredirexists_pathisfile_returnserror",
+    "first_divergence": "Rust lacked a direct selected-path test proving that an existing regular file is rejected and remains unmodified.",
+    "repair_commit": "0810bd41",
+    "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
   }
 ]
