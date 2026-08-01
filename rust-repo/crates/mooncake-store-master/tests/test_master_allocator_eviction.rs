@@ -7,6 +7,7 @@ use mooncake_store_master::eviction::EvictionManager;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 use tonic::Request;
 use uuid::Uuid;
@@ -39,6 +40,29 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
             size,
             base_addr: 0x100000000,
             te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn mount_memory_segment_at(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    name: &str,
+    base_addr: u64,
+    size: u64,
+) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: name.to_string(),
+            size,
+            base_addr,
+            te_endpoint: name.to_string(),
             protocol: String::new(),
             host_id: String::new(),
         }),
@@ -558,5 +582,136 @@ async fn test_nof_eviction_respects_hard_pin() {
     assert_eq!(
         response.replicas[0].replica_type,
         proto::replica_descriptor::ReplicaType::NofSsd as i32
+    );
+}
+
+#[tokio::test]
+async fn ten_service_replicas_use_unique_segments_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    const SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+    const SLICE_SIZE: u64 = 1024 * 1024 - 16;
+    for index in 0..20 {
+        let name = format!("segment_{index}");
+        mount_memory_segment_at(
+            &service,
+            client_id,
+            &name,
+            0x300000000 + index * SEGMENT_SIZE,
+            SEGMENT_SIZE,
+        )
+        .await;
+    }
+
+    let replicas = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "replica_uniqueness_test_key".to_string(),
+            slice_length: SLICE_SIZE,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 10,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+
+    assert_eq!(replicas.len(), 10);
+    assert!(replicas.iter().all(|replica| {
+        replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32
+            && replica.size == SLICE_SIZE
+    }));
+    assert_eq!(
+        replicas
+            .iter()
+            .map(|replica| replica.transport_endpoint.as_str())
+            .collect::<HashSet<_>>()
+            .len(),
+        10
+    );
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "replica_uniqueness_test_key".to_string(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn replication_two_single_segment_best_effort_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_memory_segment_at(
+        &service,
+        client_id,
+        "single_segment",
+        0x300000000,
+        16 * 1024 * 1024,
+    )
+    .await;
+
+    let replicas = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "replication_factor_two_single_segment".to_string(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 2,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(
+        replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::Memory as i32
+    );
+    assert_eq!(replicas[0].transport_endpoint, "single_segment");
+    assert_eq!(replicas[0].size, 1024);
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "replication_factor_two_single_segment".to_string(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let completed = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "replication_factor_two_single_segment".to_string(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        completed[0].status,
+        proto::replica_descriptor::ReplicaStatus::Complete as i32
     );
 }

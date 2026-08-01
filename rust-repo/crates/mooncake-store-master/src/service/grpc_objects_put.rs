@@ -179,7 +179,8 @@ impl MasterServiceImpl {
         } else {
             Vec::new()
         };
-        if replicas.len() != replica_count {
+        let memory_only_best_effort = config.nof_replica_num == 0 && !replicas.is_empty();
+        if replicas.len() != replica_count && !memory_only_best_effort {
             release_replicas(&self.state, &replicas)?;
             replicas.clear();
             self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
@@ -190,6 +191,15 @@ impl MasterServiceImpl {
                     PUT_NO_SPACE_HELPER_STR,
                 )));
             }
+        }
+        if memory_only_best_effort && replicas.len() != replica_count {
+            let actual_quota_charge =
+                checked_requested_memory_quota_charge(req.slice_length, replicas.len()).map_err(
+                    |_| Status::invalid_argument("Memory replica quota charge overflows uint64"),
+                )?;
+            let excess_reservation = reserved_quota_charge - actual_quota_charge;
+            self.abort_tenant_quota(&tenant_id, excess_reservation)?;
+            reserved_quota_charge = actual_quota_charge;
         }
         // NoF 副本分配：使用显式 preferred_nof_segments；same-node NoF 组合按 C++ 拒绝。
         // NoF replica allocation: use explicit preferred_nof_segments; same-node NoF is rejected like C++.
