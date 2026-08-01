@@ -2459,5 +2459,104 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_mixed_results",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.CreateDrainJobSucceedsWithValidRequest",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_create_drain_job",
+    "first_divergence": "The active create-drain route lacked request-level success JSON proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_create_drain_job",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.CreateDrainJobFailsWithInvalidJson",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_create_drain_job_invalid_json",
+    "first_divergence": "Malformed create-drain JSON had no request-level 400/error-shape proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_create_drain_job_invalid_json",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.CreateDrainJobFailsWithEmptyBody",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_create_drain_job_empty_segments_is_400",
+    "first_divergence": "The empty-segments create boundary had no request-level 400 proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_create_drain_job_empty_segments_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryDrainJobReturnsCreatedJob",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_created_drain_job",
+    "first_divergence": "Created-job identity was not proven across create and query HTTP requests.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_created_drain_job",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryDrainJobFailsWithInvalidJobId",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_drain_job_invalid_id_is_400",
+    "first_divergence": "Invalid query job UUID parsing had no HTTP 400 proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_drain_job_invalid_id_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryDrainJobFailsWithMissingJobId",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_drain_job_missing_id_is_400",
+    "first_divergence": "Missing query job_id parsing had no HTTP 400 proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_drain_job_missing_id_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QueryDrainJobFailsForNonexistentJob",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_drain_job_unknown_id_is_404",
+    "first_divergence": "Unknown valid query job UUID mapping had no HTTP 404 proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_drain_job_unknown_id_is_404",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.CancelDrainJobSucceeds",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_cancel_drain_job",
+    "first_divergence": "Successful cancel identity and CANCELED JSON were not exercised through HTTP.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_cancel_drain_job",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.CancelDrainJobFailsWithInvalidJobId",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_cancel_drain_job_invalid_id_is_400",
+    "first_divergence": "Invalid cancel job UUID parsing had no HTTP 400 proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_cancel_drain_job_invalid_id_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.CancelDrainJobFailsWithMissingJobId",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_cancel_drain_job_missing_id_is_400",
+    "first_divergence": "Missing cancel job_id parsing had no HTTP 400 proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_cancel_drain_job_missing_id_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.DrainJobFullLifecycle",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_drain_job_full_lifecycle",
+    "first_divergence": "The complete create-query-cancel-query HTTP transition had no request-level state and identity proof.",
+    "repair_commit": "f42c8084",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_drain_job_full_lifecycle",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
   }
 ]
