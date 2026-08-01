@@ -156,7 +156,7 @@
     "cpp": "cxl_client_integration_test.cpp:ClientIntegrationTestCxl.BasicPutGetOperations",
     "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_basicputgetoperations_88ca6678",
     "first_divergence": "Rust had CXL configuration and mount pieces but no client data-path test; the first real run additionally showed lifecycle incorrectly tried to register an ordinary host staging allocation with a transport that accepts registrations only inside its CXL mapping.",
-    "repair_commit": "PENDING",
+    "repair_commit": "30f8e652",
     "focused_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_ -- --nocapture",
     "crate_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e",
     "evidence": "/tmp/mooncake-cxl-client-goal-019fbaa7.typescript"
@@ -165,7 +165,7 @@
     "cpp": "cxl_client_integration_test.cpp:ClientIntegrationTestCxl.BatchPutGetOperations",
     "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_batchputgetoperations_0423569f",
     "first_divergence": "Rust generic TCP batch tests and CXL allocator tests never crossed the mounted CXL client boundary together, so no test proved all ten batch statuses, scalar reads, batch reads, and exact bytes on the shared mapping.",
-    "repair_commit": "PENDING",
+    "repair_commit": "30f8e652",
     "focused_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_ -- --nocapture",
     "crate_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e",
     "evidence": "/tmp/mooncake-cxl-client-goal-019fbaa7.typescript"
@@ -174,7 +174,7 @@
     "cpp": "cxl_client_integration_test.cpp:ClientIntegrationTestCxl.EvictOperation",
     "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_evictoperation_a8cef4ce",
     "first_divergence": "Rust had explicit CXL allocator release coverage but no successful public-client fill loop followed by successful exists RPCs and an observed absence from the automatic CXL high-watermark worker.",
-    "repair_commit": "PENDING",
+    "repair_commit": "30f8e652",
     "focused_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_ -- --nocapture",
     "crate_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e",
     "evidence": "/tmp/mooncake-cxl-client-goal-019fbaa7.typescript"
