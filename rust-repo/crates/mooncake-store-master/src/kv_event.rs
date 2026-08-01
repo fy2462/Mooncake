@@ -628,8 +628,20 @@ mod tests {
         let subscriber = context.socket(zmq::SUB).unwrap();
         subscriber.set_subscribe(b"").unwrap();
         subscriber.set_rcvtimeo(2_000).unwrap();
+        subscriber
+            .monitor(
+                "inproc://kv-event-parity-subscriber-monitor",
+                zmq::SocketEvent::ALL as i32,
+            )
+            .unwrap();
+        let monitor = context.socket(zmq::PAIR).unwrap();
+        monitor.set_rcvtimeo(5_000).unwrap();
+        monitor
+            .connect("inproc://kv-event-parity-subscriber-monitor")
+            .unwrap();
         subscriber.connect(&endpoint).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        wait_for_zmq_event(&monitor, zmq::SocketEvent::HANDSHAKE_SUCCEEDED);
+        std::thread::sleep(Duration::from_millis(50));
 
         let tenant_id = TenantId::new("tenant-a".to_string()).unwrap();
         publisher.publish_stored(object_key, "cpu", &tenant_id, group_id);
@@ -717,6 +729,21 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         format!("tcp://{addr}")
+    }
+
+    fn wait_for_zmq_event(monitor: &zmq::Socket, expected: zmq::SocketEvent) {
+        for _ in 0..16 {
+            let event_frame = monitor.recv_msg(0).unwrap();
+            assert!(event_frame.len() >= 2);
+            let event =
+                zmq::SocketEvent::from_raw(u16::from_ne_bytes([event_frame[0], event_frame[1]]));
+            assert!(monitor.get_rcvmore().unwrap());
+            let _endpoint_frame = monitor.recv_msg(0).unwrap();
+            if event == expected {
+                return;
+            }
+        }
+        panic!("did not observe expected ZMQ event {expected:?}");
     }
 
     fn wait_for_stats(

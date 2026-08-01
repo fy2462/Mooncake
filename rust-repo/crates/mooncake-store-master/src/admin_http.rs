@@ -20,7 +20,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AdminRuntimeState {
     runtime: Arc<RwLock<AdminRuntimeSnapshot>>,
-    service: Option<Arc<MasterServiceImpl>>,
+    service: Arc<RwLock<Option<Arc<MasterServiceImpl>>>>,
 }
 
 #[derive(Clone)]
@@ -42,7 +42,7 @@ impl AdminRuntimeState {
                 leader_view,
                 service_ready,
             })),
-            service: None,
+            service: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -54,10 +54,9 @@ impl AdminRuntimeState {
         leader_view: Option<MasterView>,
         service: Arc<MasterServiceImpl>,
     ) -> Self {
-        Self {
-            service: Some(service),
-            ..Self::serving(leader_view)
-        }
+        let state = Self::serving(leader_view);
+        state.set_service_delegate(Some(service));
+        state
     }
 
     pub fn set_runtime_state(&self, state: MasterRuntimeState) {
@@ -66,6 +65,17 @@ impl AdminRuntimeState {
 
     pub fn set_leader_view(&self, leader_view: Option<MasterView>) {
         self.runtime.write().leader_view = leader_view;
+    }
+
+    pub fn set_service_delegate(&self, service: Option<Arc<MasterServiceImpl>>) {
+        if service.is_none() {
+            self.runtime.write().service_ready = false;
+        }
+        *self.service.write() = service;
+    }
+
+    pub fn set_service_ready(&self, service_ready: bool) {
+        self.runtime.write().service_ready = service_ready;
     }
 
     fn snapshot(&self) -> AdminRuntimeSnapshot {
@@ -397,7 +407,17 @@ struct TenantQuotaPolicyRequest {
 fn service_or_unavailable(
     state: &AdminRuntimeState,
 ) -> Result<Arc<MasterServiceImpl>, (StatusCode, Json<Value>)> {
-    let service = state.service.clone().ok_or_else(|| {
+    if !state.snapshot().service_ready {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "error_code": Code::Unavailable as i32,
+                "error_message": "service plane is not active"
+            })),
+        ));
+    }
+    let service = state.service.read().clone().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
@@ -560,6 +580,7 @@ fn effective_service_ready(state: &AdminRuntimeState, configured_ready: bool) ->
     configured_ready
         && state
             .service
+            .read()
             .as_ref()
             .map_or(true, |service| service.is_service_available())
 }
@@ -1105,6 +1126,49 @@ mod tests {
             let (status, _) = request_router(&router, method, &path, body).await;
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "path={path}");
         }
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_segments_delegate_clear_transition() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let state = AdminRuntimeState::serving_with_service(None, service.clone());
+        let router = admin_router(state.clone());
+
+        let (ready_status, _) = get_router(&router, "/get_all_segments").await;
+        state.set_service_delegate(None);
+        let (cleared_status, cleared_body) = get_router(&router, "/get_all_segments").await;
+        let (_, health_body) = get_router(&router, "/health").await;
+        let health_body: Value = serde_json::from_str(&health_body).unwrap();
+        let (_, summary_body) = get_router(&router, "/metrics/summary").await;
+        state.set_service_delegate(Some(service));
+        let (reattached_status, _) = get_router(&router, "/get_all_segments").await;
+        state.set_service_ready(true);
+        let (reopened_status, _) = get_router(&router, "/get_all_segments").await;
+
+        assert_eq!(ready_status, StatusCode::OK);
+        assert_eq!(cleared_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(cleared_body.contains("service plane is not active"));
+        assert_eq!(health_body["service_ready"], false);
+        assert!(summary_body.contains("service_ready=false"));
+        assert_eq!(reattached_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reopened_status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_segments_service_gate_toggle() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let state = AdminRuntimeState::serving_with_service(None, service.clone());
+        let router = admin_router(state);
+
+        let (ready_status, _) = get_router(&router, "/get_all_segments").await;
+        service.set_service_available(false);
+        let (unavailable_status, _) = get_router(&router, "/get_all_segments").await;
+        service.set_service_available(true);
+        let (restored_status, _) = get_router(&router, "/get_all_segments").await;
+
+        assert_eq!(ready_status, StatusCode::OK);
+        assert_eq!(unavailable_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(restored_status, StatusCode::OK);
     }
 
     #[tokio::test]
