@@ -269,6 +269,17 @@ mod tests {
         read_attempts: Arc<AtomicUsize>,
     }
 
+    struct EtcdRecoveryFixtureOpLog {
+        inner: InMemoryOpLog,
+        notifier_healthy: Arc<AtomicBool>,
+        recovery_error: Option<HaError>,
+    }
+
+    struct EtcdRecoveryFixtureNotifier {
+        healthy: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
     impl FlakyReadOpLog {
         fn new(remaining_failures: usize, read_attempts: Arc<AtomicUsize>) -> Self {
             Self::with_failure_counter(
@@ -349,6 +360,100 @@ mod tests {
 
         fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
             self.inner.poll_from(since_seq, max_count)
+        }
+    }
+
+    impl OpLogStore for EtcdRecoveryFixtureOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            if let Some(error) = &self.recovery_error {
+                return Err(error.clone());
+            }
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
+
+        fn create_change_notifier(&self) -> Option<Box<dyn OpLogChangeNotifier>> {
+            Some(Box::new(EtcdRecoveryFixtureNotifier {
+                healthy: self.notifier_healthy.clone(),
+                thread: None,
+            }))
+        }
+    }
+
+    impl OpLogChangeNotifier for EtcdRecoveryFixtureNotifier {
+        fn start(
+            &mut self,
+            _start_seq_id: u64,
+            _on_entry: OpLogEntryCallback,
+            mut on_error: OpLogErrorCallback,
+        ) -> Result<(), HaError> {
+            self.healthy.store(true, Ordering::Release);
+            let healthy = self.healthy.clone();
+            self.thread = Some(std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                for _ in 0..10 {
+                    on_error(HaError::InvalidBackend(
+                        "injected etcd watch recovery error".into(),
+                    ));
+                }
+                healthy.store(false, Ordering::Release);
+            }));
+            Ok(())
+        }
+
+        fn stop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+            self.healthy.store(false, Ordering::Release);
+        }
+
+        fn is_healthy(&self) -> bool {
+            self.healthy.load(Ordering::Acquire)
         }
     }
 
@@ -721,6 +826,105 @@ mod tests {
         .await
         .expect("standby did not reconnect within its bounded retry budget");
         assert!(service.is_running());
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_etcd_recovery_success_transitions_actual_state_machine() {
+        let state = Arc::new(MasterState::empty());
+        let notifier_healthy = Arc::new(AtomicBool::new(false));
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "etcd-recovery-state-machine".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(EtcdRecoveryFixtureOpLog {
+            inner: InMemoryOpLog::new(16),
+            notifier_healthy,
+            recovery_error: None,
+        }));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let history = service.state_machine.get_transition_history(16);
+                if history.iter().any(|record| {
+                    record.from_state == StandbyState::Recovering
+                        && record.to_state == StandbyState::Watching
+                        && record.event == StandbyEvent::RecoverySuccess
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("successful shared-oplog recovery did not emit RecoverySuccess");
+
+        let history = service.state_machine.get_transition_history(16);
+        assert!(history.iter().any(|record| {
+            record.from_state == StandbyState::Watching
+                && record.to_state == StandbyState::Recovering
+                && record.event == StandbyEvent::MaxErrorsReached
+        }));
+        assert_eq!(service.state_machine.get_state(), StandbyState::Watching);
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn test_etcd_recovery_failure_transitions_actual_state_machine() {
+        let state = Arc::new(MasterState::empty());
+        let notifier_healthy = Arc::new(AtomicBool::new(false));
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 250,
+                cluster_id: "etcd-recovery-failure-state-machine".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(EtcdRecoveryFixtureOpLog {
+            inner: InMemoryOpLog::new(16),
+            notifier_healthy,
+            recovery_error: Some(HaError::InvalidBackend(
+                "injected etcd recovery read failure".into(),
+            )),
+        }));
+
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let history = service.state_machine.get_transition_history(16);
+                if history.iter().any(|record| {
+                    record.from_state == StandbyState::Recovering
+                        && record.to_state == StandbyState::Reconnecting
+                        && record.event == StandbyEvent::RecoveryFailed
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("failed shared-oplog recovery did not emit RecoveryFailed");
+
+        let history = service.state_machine.get_transition_history(16);
+        assert!(history.iter().any(|record| {
+            record.from_state == StandbyState::Watching
+                && record.to_state == StandbyState::Recovering
+                && record.event == StandbyEvent::MaxErrorsReached
+        }));
+        assert_eq!(
+            service.state_machine.get_state(),
+            StandbyState::Reconnecting
+        );
+        assert_eq!(service.sync_status().state, StandbyState::Reconnecting);
         service.stop();
     }
 
@@ -1639,13 +1843,17 @@ impl HotStandbyService {
                             start_seq_id,
                             on_entry,
                             Box::new(move |_err| {
-                                if !error_state_machine.is_in_state(StandbyState::Failed) {
+                                if error_state_machine.is_in_state(StandbyState::Watching) {
+                                    error_state_machine.increment_errors();
+                                } else if !error_state_machine.is_in_state(StandbyState::Recovering)
+                                    && !error_state_machine.is_in_state(StandbyState::Failed)
+                                {
                                     error_state_machine.process_event(StandbyEvent::WatchBroken);
                                 }
                                 if let Some(status) = error_status.upgrade() {
                                     let mut st = status.write();
                                     st.state = error_state_machine.get_state();
-                                    st.is_connected = false;
+                                    st.is_connected = error_state_machine.is_connected();
                                     if st.state == StandbyState::Failed {
                                         st.is_syncing = false;
                                     }
@@ -1662,13 +1870,28 @@ impl HotStandbyService {
                                         notifier.stop();
                                         return;
                                     }
-                                    if !notifier.is_healthy() || !state_machine.is_connected() {
-                                        if state_machine.is_connected() {
-                                            state_machine.process_event(StandbyEvent::WatchBroken);
+                                    if !notifier.is_healthy() {
+                                        if state_machine.is_in_state(StandbyState::Watching) {
+                                            state_machine.increment_errors();
+                                            if state_machine.is_in_state(StandbyState::Watching) {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_millis(10),
+                                                );
+                                                continue;
+                                            }
                                         }
                                         notifier.stop();
                                         break;
                                     }
+                                    if state_machine.is_in_state(StandbyState::Recovering) {
+                                        notifier.stop();
+                                        break;
+                                    }
+                                    if !state_machine.is_connected() {
+                                        notifier.stop();
+                                        break;
+                                    }
+                                    state_machine.reset_errors();
                                     let expected = applier_clone.get_expected_sequence_id();
                                     let applied = expected.saturating_sub(1);
                                     let primary =
@@ -1752,15 +1975,20 @@ impl HotStandbyService {
                                     break;
                                 }
                             }
-                            if !state_machine.is_connected() {
+                            if state_machine.is_in_state(StandbyState::Recovering) {
+                                state_machine.process_event(StandbyEvent::RecoverySuccess);
+                            } else if !state_machine.is_connected() {
                                 state_machine.process_event(StandbyEvent::Connected);
                                 state_machine.process_event(StandbyEvent::SyncComplete);
                             }
+                            state_machine.reset_errors();
                             state_machine.reset_reconnect_count();
                             consecutive_reconnect_failures = 0;
                         }
                         Err(error) => {
-                            if state_machine.is_connected() {
+                            if state_machine.is_in_state(StandbyState::Recovering) {
+                                state_machine.process_event(StandbyEvent::RecoveryFailed);
+                            } else if state_machine.is_connected() {
                                 state_machine.process_event(StandbyEvent::WatchBroken);
                             }
                             state_machine.increment_reconnect_count();
