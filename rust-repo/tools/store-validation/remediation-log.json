@@ -2000,5 +2000,14 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_concurrent_expiring_reads_never_return_stale_bytes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-concurrent-lease-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.TestSetupExistTransferEngine",
+    "rust": "python/tests/test_pybind_client_parity.py:test_create_accepts_initialized_external_transfer_engine",
+    "first_divergence": "The Store bootstrap always constructed and configured a new classic Transfer Engine, and PyO3 exposed no classic caller-owned handle distinct from its optional TENT engine.",
+    "repair_commit": "b9b59719",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_create_accepts_initialized_external_transfer_engine",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-external-engine-goal-019fbca4.typescript"
   }
 ]
