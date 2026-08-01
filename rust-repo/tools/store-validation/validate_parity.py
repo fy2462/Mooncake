@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 import sys
 from typing import Any
 
-from inventory import TestRef, discover_rust_tests
+from inventory import TestRef, discover_python_tests, discover_rust_tests
 from suites import SUITES, discover_suite_tests
 
 
@@ -24,6 +24,7 @@ ALLOWED_RUST_PACKAGES = frozenset(
         "transfer-engine-ffi",
     }
 )
+ALLOWED_PYTHON_TEST_ROOT = ("python", "tests")
 ALLOWED_NA_CATEGORIES = frozenset(
     {
         "language-unrepresentable",
@@ -71,6 +72,17 @@ def _rust_key(value: Any) -> tuple[str, str] | None:
     if not file_name.strip() or not test_name.strip():
         return None
     return file_name, test_name
+
+
+def _is_approved_test_path(file_name: str) -> bool:
+    parts = PurePosixPath(file_name).parts
+    return bool(
+        parts
+        and (
+            parts[0] in ALLOWED_RUST_PACKAGES
+            or parts[: len(ALLOWED_PYTHON_TEST_ROOT)] == ALLOWED_PYTHON_TEST_ROOT
+        )
+    )
 
 
 def _suite_is_trusted(manifest: dict[str, Any]) -> bool:
@@ -266,13 +278,12 @@ def validate_manifest(
                 )
                 continue
             rust_keys.append(rust_key)
-            package = PurePosixPath(rust_key[0]).parts[0]
-            if package not in ALLOWED_RUST_PACKAGES:
+            if not _is_approved_test_path(rust_key[0]):
                 findings.append(
                     _finding(
                         "rust-test-outside-approved-packages",
                         f"{rust_key[0]}:{rust_key[1]}",
-                        "Rust evidence must belong to an approved Store-facing package",
+                        "Test evidence must belong to an approved Store-facing package",
                     )
                 )
             if rust_key not in rust_inventory:
@@ -414,6 +425,12 @@ def main(argv: list[str] | None = None) -> int:
         ]
         repo_root = args.repo_root.resolve()
         rust_refs = set(discover_rust_tests(repo_root / "rust-repo/crates"))
+        python_root = repo_root / "rust-repo/python"
+        if python_root.is_dir():
+            rust_refs.update(
+                TestRef(ref.framework, f"python/{ref.file}", ref.name)
+                for ref in discover_python_tests(python_root)
+            )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         print(f"parity validation error: {error}", file=sys.stderr)
         return 2

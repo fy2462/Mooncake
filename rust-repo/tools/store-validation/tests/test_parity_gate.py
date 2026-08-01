@@ -232,11 +232,26 @@ class ParityGateTest(unittest.TestCase):
             ],
         )
 
-    def test_rejects_reference_outside_crates(self):
-        rust = {"file": "python/tests/test_client.py", "test": "test_put"}
-        inventory = {TestRef("rust", rust["file"], rust["test"])}
-        with self.assertRaisesRegex(ValueError, "outside Rust crates"):
-            plan_parity_run(manifest([entry(rust=[rust])]), inventory)
+    def test_python_binding_evidence_uses_exact_pytest_node(self):
+        rust = {
+            "file": "python/tests/test_pybind_client_parity.py",
+            "test": "test_allocate_and_mount_segments_rounds_and_frees",
+        }
+        inventory = {TestRef("python", rust["file"], rust["test"])}
+
+        plan = plan_parity_run(manifest([entry(rust=[rust])]), inventory)
+
+        self.assertEqual(plan.status, "READY")
+        self.assertEqual(
+            plan.commands[0].argv,
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "python/tests/test_pybind_client_parity.py::test_allocate_and_mount_segments_rounds_and_frees",
+            ],
+        )
 
     def test_execution_failure_retains_owning_reference_behavior(self):
         command = PlannedCommand(

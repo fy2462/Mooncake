@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path, PurePosixPath
 import platform
 import re
@@ -14,7 +15,7 @@ import sys
 import time
 from typing import Any, Sequence
 
-from inventory import TestRef, discover_rust_tests
+from inventory import TestRef, discover_python_tests, discover_rust_tests
 from result import build_gate_result, utc_now, write_json_atomic
 from suites import SUITES, discover_suite_tests
 from validate_parity import validate_manifest
@@ -38,14 +39,22 @@ class ParityPlan:
 def _command_for(rust: dict[str, Any]) -> tuple[str, list[str]]:
     path = PurePosixPath(rust["file"])
     parts = path.parts
-    if (
-        len(parts) < 3
-        or parts[0] in {"python", "tools"}
-        or parts[1] not in {"src", "tests"}
-    ):
+    test_name = rust["test"]
+    if len(parts) >= 3 and parts[:2] == ("python", "tests"):
+        if path.suffix != ".py":
+            raise ValueError(f"Python reference is not a test module: {rust['file']}")
+        pytest_node = "::".join(test_name.split("."))
+        safe_name = f"python-{path.stem}-{test_name}".replace("_", "-")
+        return safe_name, [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            f"{path}::{pytest_node}",
+        ]
+    if len(parts) < 3 or parts[0] == "tools" or parts[1] not in {"src", "tests"}:
         raise ValueError(f"Rust reference is outside Rust crates: {rust['file']}")
     package = parts[0]
-    test_name = rust["test"]
     features = (
         ["link-native"]
         if package in {"mooncake-store-client", "mooncake-p2p-store"}
@@ -173,6 +182,14 @@ def execute_plan(
     started_at = utc_now()
     started = time.monotonic()
     records: list[dict[str, Any]] = []
+    command_env = os.environ.copy()
+    python_root = str(rust_root / "python")
+    inherited_python_path = command_env.get("PYTHONPATH")
+    command_env["PYTHONPATH"] = (
+        f"{python_root}{os.pathsep}{inherited_python_path}"
+        if inherited_python_path
+        else python_root
+    )
     for index, command in enumerate(plan.commands):
         log = logs_dir / f"{index:04d}-{command.name}.log"
         command_started = time.monotonic()
@@ -180,6 +197,7 @@ def execute_plan(
             completed = subprocess.run(
                 command.argv,
                 cwd=rust_root,
+                env=command_env,
                 check=False,
                 text=True,
                 stdout=stream,
@@ -251,6 +269,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.loads(path.read_text(encoding="utf-8")) for path in args.manifest
         ]
         rust_inventory = set(discover_rust_tests(rust_root / "crates"))
+        python_root = rust_root / "python"
+        if python_root.is_dir():
+            rust_inventory.update(
+                TestRef(item.framework, f"python/{item.file}", item.name)
+                for item in discover_python_tests(python_root)
+            )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         print(f"parity gate error: {error}", file=sys.stderr)
         return 2

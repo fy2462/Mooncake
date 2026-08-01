@@ -19,6 +19,9 @@ RUST_REF = TestRef(
 RUST_REF_2 = TestRef(
     "rust", "transfer-engine-ffi/tests/test_engine.rs", "reuse_adjacent_range"
 )
+PYTHON_REF = TestRef(
+    "python", "python/tests/test_pybind_client_parity.py", "test_round_trip"
+)
 STORE_SUITE = {
     "id": "store-cpp",
     "framework": "gtest",
@@ -150,6 +153,17 @@ class ValidateParityTest(unittest.TestCase):
         unrelated = entry(rust=[rust_value(unrelated_ref)])
         codes = finding_codes(unrelated, {unrelated_ref})
         self.assertIn("rust-test-outside-approved-packages", codes)
+
+    def test_python_binding_test_is_accepted_as_store_facing_evidence(self):
+        python_evidence = entry(rust=[rust_value(PYTHON_REF)])
+        self.assertEqual(
+            validate_manifest(
+                manifest([python_evidence]),
+                {REFERENCE_REF},
+                {PYTHON_REF},
+            ),
+            [],
+        )
 
     def test_not_applicable_requires_nonempty_reviewed_reason(self):
         candidate = entry(status="not-applicable", rust=[], reason="")

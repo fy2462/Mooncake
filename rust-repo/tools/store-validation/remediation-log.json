@@ -1703,5 +1703,32 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_prevents_new_allocation_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-prevent-allocation-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.AllocateAndMountSegmentAlignsAndUnmounts",
+    "rust": "python/tests/test_pybind_client_parity.py:test_allocate_and_mount_segments_rounds_and_frees",
+    "first_divergence": "Rust exposed the API but lacked a real PyO3/TCP test proving Cachelib slab rounding for 1 byte and slab-plus-one together with successful UUID-list cleanup.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_allocate_and_mount_segments_rounds_and_frees",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-segment-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.AllocateAndMountSegmentRejectsOverflowSize",
+    "rust": "python/tests/test_pybind_client_parity.py:test_allocate_and_mount_segments_rejects_overflow_without_outputs",
+    "first_divergence": "No discoverable Python binding test passed u64::MAX through PyO3 and proved alignment overflow leaves caller-side output sentinels unchanged.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_allocate_and_mount_segments_rejects_overflow_without_outputs",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-segment-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.AllocateAndMountSegmentFreesOnTearDown",
+    "rust": "python/tests/test_pybind_client_parity.py:test_close_then_unmount_and_free_previous_ids_fails",
+    "first_divergence": "Rust had no binding-level teardown test; exercising it revealed TE segment metadata was removed before owned buffers were unregistered, causing a native use-after-removal crash instead of successful close.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_close_then_unmount_and_free_previous_ids_fails",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-segment-lifecycle-goal-019fbca4.typescript"
   }
 ]

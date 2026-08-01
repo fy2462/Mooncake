@@ -261,22 +261,7 @@ impl MooncakeClient {
             .iter()
             .map(|segment| segment.segment_name.clone())
             .collect::<std::collections::HashSet<_>>();
-        for segment_name in segment_names {
-            if failed_segment_names.contains(&segment_name) {
-                tracing::error!(
-                    %segment_name,
-                    "retaining local Transfer Engine segment because Master unmount was not proven"
-                );
-                continue;
-            }
-            if let Err(error) = self.engine.remove_local_segment(&segment_name) {
-                tracing::warn!(
-                    %error,
-                    %segment_name,
-                    "failed to remove local Transfer Engine segment"
-                );
-            }
-        }
+        let mut retained_segment_names = failed_segment_names.clone();
         self.mounted_segment_ids.write().clear();
         self.mounted_external_segments.write().clear();
 
@@ -308,6 +293,7 @@ impl MooncakeClient {
                 Err(error) => Err(StoreError::from(error)),
             };
             if let Err(error) = te_unregistered {
+                retained_segment_names.insert(segment.segment_name.clone());
                 tracing::error!(
                     %error,
                     segment_id = %segment.segment_id,
@@ -323,6 +309,7 @@ impl MooncakeClient {
         self.local_buffer.wait_until_available().await;
         if let Some(mut registration) = self.local_buffer.take_registration() {
             if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                retained_segment_names.insert(self.local_hostname.clone());
                 tracing::error!(
                     %error,
                     "typed staging-buffer teardown failed; RAII will retain or leak its owner safely"
@@ -334,10 +321,32 @@ impl MooncakeClient {
         let registrations = std::mem::take(&mut *self.registered_buffers.write());
         for mut registration in registrations.into_values() {
             if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                retained_segment_names.insert(self.local_hostname.clone());
                 tracing::error!(
                     %error,
                     registration = ?registration,
                     "typed registered-memory teardown failed; RAII will retain or leak its owner safely"
+                );
+            }
+        }
+
+        // Native Transfer Engine memory registrations retain metadata owned by
+        // their local segment. Remove the segment only after every backing
+        // registration has been unregistered; reversing this order can leave
+        // unregisterLocalMemory dereferencing already-removed metadata.
+        for segment_name in segment_names {
+            if retained_segment_names.contains(&segment_name) {
+                tracing::error!(
+                    %segment_name,
+                    "retaining local Transfer Engine segment because teardown was not proven"
+                );
+                continue;
+            }
+            if let Err(error) = self.engine.remove_local_segment(&segment_name) {
+                tracing::warn!(
+                    %error,
+                    %segment_name,
+                    "failed to remove local Transfer Engine segment"
                 );
             }
         }
