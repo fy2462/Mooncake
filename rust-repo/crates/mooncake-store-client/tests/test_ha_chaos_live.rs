@@ -175,6 +175,19 @@ fn cpp_chaos_test_live_config_selects_one_exact_oracle() {
         CppChaosTestCase::BackupMasterKilled
     );
 
+    let mut one_backup = env.clone();
+    one_backup.insert(
+        "MOONCAKE_RUN_CPP_CHAOS_TEST".into(),
+        "AllMastersOtherThanOneBackedUpKilledFailover".into(),
+    );
+    assert_eq!(
+        CppChaosTestConfig::from_map(&one_backup)
+            .unwrap()
+            .unwrap()
+            .case,
+        CppChaosTestCase::AllMastersOtherThanOneBackedUpKilledFailover
+    );
+
     let mut unknown = env;
     unknown.insert("MOONCAKE_RUN_CPP_CHAOS_TEST".into(), "UnknownCase".into());
     assert!(CppChaosTestConfig::from_map(&unknown).is_err());
@@ -1459,6 +1472,7 @@ impl CppChaosRandConfig {
 enum CppChaosTestCase {
     LeaderKilledFailover,
     BackupMasterKilled,
+    AllMastersOtherThanOneBackedUpKilledFailover,
 }
 
 #[derive(Debug, Clone)]
@@ -1480,6 +1494,9 @@ impl CppChaosTestConfig {
         let case = match case.as_str() {
             "LeaderKilledFailover" => CppChaosTestCase::LeaderKilledFailover,
             "BackupMasterKilled" => CppChaosTestCase::BackupMasterKilled,
+            "AllMastersOtherThanOneBackedUpKilledFailover" => {
+                CppChaosTestCase::AllMastersOtherThanOneBackedUpKilledFailover
+            }
             other => return Err(format!("unknown MOONCAKE_RUN_CPP_CHAOS_TEST case: {other}")),
         };
         let result_path = PathBuf::from(required_live_env(
@@ -1499,6 +1516,9 @@ impl CppChaosTestConfig {
             match case {
                 CppChaosTestCase::LeaderKilledFailover => "cpp-chaos-test-leader-killed-failover",
                 CppChaosTestCase::BackupMasterKilled => "cpp-chaos-test-backup-master-killed",
+                CppChaosTestCase::AllMastersOtherThanOneBackedUpKilledFailover => {
+                    "cpp-chaos-test-one-backup-survivor"
+                }
             },
             "MOONCAKE_RUN_CPP_CHAOS_TEST",
         )?;
@@ -4636,6 +4656,148 @@ async fn run_remount_checkpoint(
     })
 }
 
+async fn run_cpp_one_backup_survivor_failover_live(
+    config: CppChaosTestConfig,
+) -> Result<(), String> {
+    let mut cluster = MasterCluster::start(&config.gate)
+        .await
+        .map_err(|error| format!("start one-backup-survivor Masters: {error}"))?;
+    let initial_view = wait_for_stable_leader_without_clients(&config.gate, &cluster).await?;
+    let leader_index = cluster
+        .index_for_address(&initial_view.leader_address)
+        .ok_or_else(|| format!("etcd leader {} is not owned", initial_view.leader_address))?;
+    let followers = (0..3)
+        .filter(|index| *index != leader_index)
+        .collect::<Vec<_>>();
+    let survivor_index = followers[0];
+    let survivor_address = cluster.slots[survivor_index].address.clone();
+    let victims = (0..3)
+        .filter(|index| *index != survivor_index)
+        .collect::<Vec<_>>();
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+    let mut clients = create_clients(&config.gate, &masters, 1, CLIENT_SEGMENT_SIZE).await?;
+
+    let operation: Result<serde_json::Value, FailureRecord> = async {
+        for &index in &victims {
+            cluster.hard_kill(index).await.map_err(|error| {
+                scenario_failure(
+                    "master-sigkill",
+                    format!("SIGKILL Master {index}: {error}"),
+                )
+            })?;
+        }
+        if cluster.running_indices() != BTreeSet::from([survivor_index]) {
+            return Err(scenario_failure(
+                "master-sigkill",
+                format!(
+                    "expected only pre-failure backup {survivor_index} alive, got {:?}",
+                    cluster.running_indices()
+                ),
+            ));
+        }
+        let promoted_view = wait_for_stable_leader_without_clients(&config.gate, &cluster)
+            .await
+            .map_err(|error| scenario_failure("follower-promotion", error))?;
+        if promoted_view.leader_address != survivor_address
+            || promoted_view.leader_address == initial_view.leader_address
+            || promoted_view.view_version == initial_view.view_version
+        {
+            return Err(scenario_failure(
+                "follower-promotion",
+                format!(
+                    "sole backup was not promoted: survivor={survivor_address}, {initial_view:?} -> {promoted_view:?}"
+                ),
+            ));
+        }
+        tokio::time::timeout(Duration::from_secs(30), clients[0].put("key", b"value"))
+            .await
+            .map_err(|_| scenario_failure("post-promotion-put", "same client put timed out"))?
+            .map_err(|error| {
+                scenario_failure(
+                    "post-promotion-put",
+                    format!("same client put failed after promotion: {error}"),
+                )
+            })?;
+        let actual = tokio::time::timeout(Duration::from_secs(30), clients[0].get("key"))
+            .await
+            .map_err(|_| scenario_failure("post-promotion-get", "same client get timed out"))?
+            .map_err(|error| {
+                scenario_failure(
+                    "post-promotion-get",
+                    format!("same client get failed after promotion: {error}"),
+                )
+            })?;
+        if actual != b"value" {
+            return Err(scenario_failure(
+                "post-promotion-get",
+                format!("same client returned wrong bytes: {actual:?}"),
+            ));
+        }
+        Ok(serde_json::json!({
+            "initial_leader": initial_view.leader_address,
+            "initial_leader_index": leader_index,
+            "initial_view_version": initial_view.view_version,
+            "pre_failure_backup_indices": followers,
+            "sole_survivor_index": survivor_index,
+            "sole_survivor_address": survivor_address,
+            "killed_indices": victims,
+            "crash_mode": "SIGKILL",
+            "promoted_leader": promoted_view.leader_address,
+            "promoted_view_version": promoted_view.view_version,
+            "same_client_post_promotion_puts": 1,
+            "same_client_exact_reads": 1,
+            "byte_comparisons": 5,
+        }))
+    }
+    .await;
+
+    for &index in &victims {
+        if !cluster.running_indices().contains(&index) {
+            let _ = cluster.restart(index).await;
+        }
+    }
+    let cleanup = tear_down_scenario_clients(&mut clients).await;
+    let (status, evidence, failure) = match operation {
+        Ok(evidence) if cleanup.is_ok() => ("PASS", evidence, None),
+        Ok(evidence) => (
+            "FAIL",
+            evidence,
+            Some(scenario_failure("cleanup", cleanup.unwrap_err())),
+        ),
+        Err(mut failure) => {
+            if let Err(error) = cleanup {
+                failure.message = format!("{}; cleanup: {error}", failure.message);
+            }
+            ("FAIL", serde_json::json!({}), Some(failure))
+        }
+    };
+    write_json_artifact(
+        &config.gate.result_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": status,
+            "case": "AllMastersOtherThanOneBackedUpKilledFailover",
+            "seed": format!("0x{:016x}", config.gate.seed),
+            "master_count": 3,
+            "client_count": 1,
+            "segment_size": CLIENT_SEGMENT_SIZE,
+            "shared_oplog": "etcd",
+            "evidence": evidence,
+            "first_failure": failure,
+        }),
+    )?;
+    if let Some(failure) = failure {
+        return Err(format!("{}: {}", failure.stage, failure.message));
+    }
+    Ok(())
+}
+
 async fn run_cpp_backup_master_killed_live(config: CppChaosTestConfig) -> Result<(), String> {
     let mut cluster = MasterCluster::start(&config.gate)
         .await
@@ -5420,6 +5582,25 @@ async fn cpp_parity_e2e_chaos_test_cpp_chaostest_backupmasterkilled_c9ce1b74() {
     run_cpp_backup_master_killed_live(config)
         .await
         .expect("C++ BackupMasterKilled parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_test_cpp_chaostest_allmastersotherthanonebackedupkilledfailover_5d56ddf2()
+ {
+    let Some(config) = CppChaosTestConfig::from_env().expect("valid C++ chaos-test environment")
+    else {
+        eprintln!(
+            "SKIP C++ one-backup-survivor parity: MOONCAKE_RUN_CPP_CHAOS_TEST is not enabled"
+        );
+        return;
+    };
+    if config.case != CppChaosTestCase::AllMastersOtherThanOneBackedUpKilledFailover {
+        eprintln!("SKIP C++ one-backup-survivor parity: a different chaos case is selected");
+        return;
+    }
+    run_cpp_one_backup_survivor_failover_live(config)
+        .await
+        .expect("C++ one-backup-survivor parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

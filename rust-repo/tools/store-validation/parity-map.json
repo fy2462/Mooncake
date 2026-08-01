@@ -128,13 +128,18 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.AllMastersOtherThanOneBackedUpKilledFailover"
       },
-      "reason": "Rust's etcd-gated chaos test can leave one Master running after an index-selected two-slot stop, but no discoverable live test establishes that the sole survivor was a known backup while the old leader was killed, then asserts survivor promotion and post-promotion put/get.",
+  "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_allmastersotherthanonebackedupkilledfailover_5d56ddf2 starts three external etcd-elected Rust Masters and one real TCP client with a 16-MiB segment, records the old leader and both pre-failure backups, chooses one backup as the sole survivor, immediately SIGKILLs the old leader and other backup, proves that exact survivor is promoted to a newer view, then uses the existing client to put and exactly get the object. Native evidence at /tmp/mooncake-one-backup-goal-019fbaa7/result.json passed with old leader index 1 and backup index 2 killed, backup index 0 promoted from view 2 to 5, one same-client put, one exact read, and five compared bytes.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, LeaderCoordinator, MasterProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs ChaosSchedule paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+  "rust": [
+    {
+      "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+      "test": "cpp_parity_e2e_chaos_test_cpp_chaostest_allmastersotherthanonebackedupkilledfailover_5d56ddf2"
+    }
+  ],
+  "status": "covered"
     },
     {
       "behavior": "With etcd serving both leader election and the shared oplog, a mounted client survives SIGKILL of all three Masters, restart of all three, a new election, and then successfully puts and exactly gets an object.",
