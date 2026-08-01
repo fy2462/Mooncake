@@ -1100,5 +1100,59 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_rejects_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-corruption-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadOpLogSingleEntry",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_single_record_range_read_returns_exact_entry",
+    "first_divergence": "Rust exposed an inclusive range API instead of ReadOpLog, but lacked a one-record limit oracle for exact sequence, producer view, and encoded object-key identity.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-read-snapshot-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadOpLogSinceBasic",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_range_from_zero_returns_one_through_ten_in_order",
+    "first_divergence": "Existing Rust LocalFS tests started reads at sequence one and did not prove the zero boundary returns the complete ordered one-through-ten range.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-read-snapshot-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.GetLatestSequenceIdFirstBoot",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_fresh_store_persists_latest_zero",
+    "first_divergence": "The fresh latest-sequence zero oracle was added with the LocalFS initialization persistence repair and directly covers first boot.",
+    "repair_commit": "317db3ba",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_fresh_store_persists_latest_zero -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.SnapshotNotFound",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_unknown_snapshot_id_returns_error",
+    "first_divergence": "Rust propagated the missing snapshot-file error but had no direct stable-named unknown-id assertion.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-read-snapshot-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.SnapshotIdValidation",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_snapshot_ids_reject_traversal_slash_and_nul",
+    "first_divergence": "Rust validated snapshot IDs but the existing combined test covered traversal only, not plain slash and embedded NUL with the validation error boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-read-snapshot-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.CleanupEmptyDir",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_cleanup_empty_store_succeeds",
+    "first_divergence": "Rust cleanup handled an empty segment set but lacked a direct no-op success oracle preserving the fresh latest marker and empty read result.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-read-snapshot-goal-019fbca4.typescript"
   }
 ]

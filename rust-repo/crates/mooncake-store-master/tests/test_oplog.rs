@@ -353,6 +353,96 @@ fn localfs_unremovable_stale_temp_does_not_block_recovery() {
 }
 
 #[test]
+fn cpp_parity_localfs_single_record_range_read_returns_exact_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    let sequence = store
+        .append(&OpLogRecord {
+            seq: 0,
+            producer_view_version: 7,
+            payload: json!({
+                "op": "remove",
+                "schema_version": 1,
+                "key": "test_key",
+            })
+            .to_string(),
+        })
+        .unwrap();
+
+    let entries = store.read_since(sequence, 1).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, sequence);
+    assert_eq!(entries[0].producer_view_version, 7);
+    let payload = decode_record_payload_value_for_test(&entries[0].payload).unwrap();
+    assert_eq!(payload["op"], "remove");
+    assert_eq!(payload["key"], "test_key");
+}
+
+#[test]
+fn cpp_parity_localfs_range_from_zero_returns_one_through_ten_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();
+    for _ in 0..10 {
+        store.append(&make_entry(0)).unwrap();
+    }
+
+    let entries = store.read_since(0, 100).unwrap();
+
+    assert_eq!(entries.len(), 10);
+    assert_eq!(entries.first().unwrap().seq, 1);
+    assert_eq!(entries.last().unwrap().seq, 10);
+    assert_eq!(
+        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        (1..=10).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn cpp_parity_localfs_unknown_snapshot_id_returns_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();
+
+    let error = store
+        .get_snapshot_sequence_id("nonexistent")
+        .expect_err("an unknown snapshot id must fail");
+
+    assert!(error.to_string().contains("oplog read snapshot seq"));
+}
+
+#[test]
+fn cpp_parity_localfs_snapshot_ids_reject_traversal_slash_and_nul() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();
+
+    for snapshot_id in ["../escape", "path/slash", "null\0byte"] {
+        let error = store
+            .record_snapshot_sequence_id(snapshot_id, 1)
+            .expect_err("unsafe snapshot id must fail validation");
+        assert!(
+            error.to_string().contains("invalid snapshot id"),
+            "snapshot_id={snapshot_id:?}: {error}"
+        );
+    }
+    assert!(!dir.path().join("snapshots").exists());
+}
+
+#[test]
+fn cpp_parity_localfs_cleanup_empty_store_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();
+
+    store.cleanup_before(100).unwrap();
+
+    assert_eq!(store.latest_sequence(), 0);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("latest")).unwrap(),
+        "0"
+    );
+    assert!(store.read_since(0, 1).unwrap().is_empty());
+}
+
+#[test]
 fn test_local_fs_append_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
