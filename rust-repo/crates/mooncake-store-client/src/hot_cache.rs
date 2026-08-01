@@ -86,9 +86,7 @@ impl LocalHotCacheSettings {
         let block_size = parse_positive_usize(block_size).unwrap_or(DEFAULT_HOT_CACHE_BLOCK_SIZE);
         let max_entries = total_size / block_size;
         if max_entries == 0 {
-            return Err(format!(
-                "local hot cache size {total_size} is smaller than block size {block_size}"
-            ));
+            return Ok(None);
         }
         let admission_threshold = admission_threshold
             .and_then(|value| value.parse::<u8>().ok())
@@ -151,127 +149,109 @@ fn admission_column(key: &str, row: usize) -> usize {
     hasher.finish() as usize % ADMISSION_SKETCH_WIDTH
 }
 
-/// 本地热缓存，减少远程存储访问的延迟。
-/// (Local hot cache to reduce latency of remote storage accesses.)
-///
-/// ## 字段 (Fields)
-/// - `data`: 环形缓冲区，存储实际的缓存数据 (ring buffer storing cached data)
-/// - `tail`: 环形缓冲区的下一个写入位置 (next write position in the ring buffer)
-/// - `entries`: key -> (offset, len) 映射，定位缓存数据 (key-to-location index)
-/// - `max_size`: 缓冲区最大字节数 (maximum buffer size in bytes)
-/// - `max_entries`: 最大缓存条目数 (maximum number of cached entries)
+struct HotCacheEntry {
+    value: Vec<u8>,
+    last_access: u64,
+}
+
+#[derive(Default)]
+struct HotCacheState {
+    entries: HashMap<String, HotCacheEntry>,
+    used_size: usize,
+    next_access: u64,
+}
+
+impl HotCacheState {
+    fn take_access_sequence(&mut self) -> u64 {
+        let sequence = self.next_access;
+        self.next_access = self.next_access.saturating_add(1);
+        sequence
+    }
+}
+
+/// A bounded, thread-safe local LRU cache that returns owned values.
 pub struct LocalHotCache {
-    /// 环形存储：数据按 offset 顺序写入，到达末尾时绕回 (ring buffer storage)
-    data: Mutex<Vec<u8>>,
-    /// 写入指针：下一个 value 将从 data[tail] 开始写入 (write cursor)
-    tail: Mutex<usize>,
-    /// key → (offset, len) 索引，用于 O(1) 查找 (key-to-location index)
-    entries: Mutex<HashMap<String, (usize, usize)>>,
+    state: Mutex<HotCacheState>,
     max_size: usize,
     max_value_size: usize,
     max_entries: usize,
 }
 
 impl LocalHotCache {
-    /// 创建一个新的热缓存。
-    /// (Create a new hot cache with given max_size and max_entries.)
-    ///
-    /// `max_size` 至少为 4096 字节（单页大小）。
     pub fn new(max_size: usize, max_entries: usize) -> Self {
-        let size = max_size.max(4096);
-        Self::new_with_block_size(size, size, max_entries)
+        Self::new_with_block_size(max_size, max_size.max(1), max_entries)
     }
 
     /// Create a cache whose individual values may not exceed `block_size`.
-    ///
-    /// The C++ cache allocates fixed-size physical blocks and therefore cannot
-    /// admit an object larger than one block.
     pub fn new_with_block_size(max_size: usize, block_size: usize, max_entries: usize) -> Self {
-        let size = max_size.max(4096);
         Self {
-            data: Mutex::new(vec![0u8; size]),
-            tail: Mutex::new(0),
-            entries: Mutex::new(HashMap::new()),
-            max_size: size,
-            max_value_size: block_size.max(1).min(size),
+            state: Mutex::new(HotCacheState::default()),
+            max_size,
+            max_value_size: block_size.max(1),
             max_entries,
         }
     }
 
-    /// 从缓存中获取 key 对应的数据。
-    /// (Get cached data for a key. Returns `None` on cache miss.)
-    ///
-    /// 查找流程：先查 entries 索引 → 找到 offset/len → 从 data 中拷贝对应字节。
-    /// 返回的是数据的拷贝（`Vec<u8>`），避免借用冲突。
+    /// Return an owned copy and atomically refresh the key's LRU position.
     pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        let entries = self.entries.lock();
-        if let Some(&(offset, len)) = entries.get(key) {
-            let data = self.data.lock();
-            Some(data[offset..offset + len].to_vec())
-        } else {
-            None
-        }
+        let mut state = self.state.lock();
+        let sequence = state.take_access_sequence();
+        let entry = state.entries.get_mut(key)?;
+        entry.last_access = sequence;
+        Some(entry.value.clone())
     }
 
-    /// 将 key/value 写入缓存。
-    /// (Put a key/value pair into the cache.)
-    ///
-    /// ## 行为 (Behavior)
-    /// 1. 若 value 超过 `max_size`，直接丢弃
-    /// 2. 循环驱逐：当空间不足或条目数超过 `max_entries` 时，驱逐 offset 最小的条目
-    /// 3. 若写入位置 + value 超出缓冲区末尾，绕回到开头并清空所有条目
-    /// 4. 将 value 拷贝到环形缓冲区，更新 entries 索引和 tail 指针
+    /// Insert a new value. Duplicate keys are LRU touches and retain their
+    /// original bytes, matching the C++ LocalHotCache contract.
     pub fn put(&self, key: &str, value: &[u8]) {
-        if value.len() > self.max_value_size {
+        if value.is_empty()
+            || value.len() > self.max_value_size
+            || value.len() > self.max_size
+            || self.max_entries == 0
+        {
             return;
         }
 
-        let mut entries = self.entries.lock();
-        let mut tail = self.tail.lock();
-        let mut data = self.data.lock();
+        let mut state = self.state.lock();
+        let sequence = state.take_access_sequence();
+        if let Some(entry) = state.entries.get_mut(key) {
+            entry.last_access = sequence;
+            return;
+        }
 
-        // evict if needed
-        // 驱逐：空间不足 或 条目数超限
-        while *tail + value.len() > self.max_size || entries.len() >= self.max_entries {
-            if entries.is_empty() {
-                *tail = 0;
-                break;
-            }
-            // 驱逐 offset 最小的条目（最早写入的）
-            // Evict the entry with the smallest offset (oldest write)
-            let oldest_key = entries
+        while state.used_size + value.len() > self.max_size
+            || state.entries.len() >= self.max_entries
+        {
+            let oldest_key = state
+                .entries
                 .iter()
-                .min_by_key(|&(_, &(off, _))| off)
-                .map(|(k, _)| k.clone());
-            if let Some(k) = oldest_key {
-                entries.remove(&k);
+                .min_by_key(|(_, entry)| entry.last_access)
+                .map(|(key, _)| key.clone());
+            let Some(oldest_key) = oldest_key else {
+                return;
+            };
+            if let Some(removed) = state.entries.remove(&oldest_key) {
+                state.used_size -= removed.value.len();
             }
         }
 
-        let offset = *tail;
-        // 缓冲区末尾空间不足 → 绕回 (wrap around)
-        if offset + value.len() > data.len() {
-            *tail = 0;
-            entries.clear();
-        }
-
-        let offset = *tail;
-        data[offset..offset + value.len()].copy_from_slice(value);
-        entries.insert(key.to_string(), (offset, value.len()));
-        *tail = offset + value.len();
+        state.used_size += value.len();
+        state.entries.insert(
+            key.to_string(),
+            HotCacheEntry {
+                value: value.to_vec(),
+                last_access: sequence,
+            },
+        );
     }
 
-    /// 从缓存中移除指定 key。
-    /// (Remove a key from the cache. No-op if the key is not present.)
     pub fn remove(&self, key: &str) {
-        self.entries.lock().remove(key);
+        let mut state = self.state.lock();
+        if let Some(entry) = state.entries.remove(key) {
+            state.used_size -= entry.value.len();
+        }
     }
 
-    /// Remove cached entries whose user key matches `pattern`.
-    ///
-    /// When `tenant_id` is non-empty, cache keys use the same scoped format as
-    /// the client (`tenant_id + '\0' + key`) and the regex is applied only to
-    /// the user-key suffix.
     pub fn remove_by_regex_for_tenant(
         &self,
         tenant_id: &str,
@@ -279,33 +259,42 @@ impl LocalHotCache {
     ) -> Result<usize, regex::Error> {
         let re = Regex::new(pattern)?;
         let prefix = (!tenant_id.is_empty()).then(|| format!("{tenant_id}\0"));
-        let mut removed = 0usize;
-        self.entries.lock().retain(|key, _| {
-            let user_key = match prefix.as_deref() {
-                Some(prefix) => match key.strip_prefix(prefix) {
-                    Some(user_key) => user_key,
-                    None => return true,
-                },
-                None => key.as_str(),
-            };
-            let keep = !re.is_match(user_key);
-            if !keep {
-                removed += 1;
+        let mut state = self.state.lock();
+        let matching_keys = state
+            .entries
+            .keys()
+            .filter(|key| {
+                let user_key = match prefix.as_deref() {
+                    Some(prefix) => match key.strip_prefix(prefix) {
+                        Some(user_key) => user_key,
+                        None => return false,
+                    },
+                    None => key.as_str(),
+                };
+                re.is_match(user_key)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in &matching_keys {
+            if let Some(entry) = state.entries.remove(key) {
+                state.used_size -= entry.value.len();
             }
-            keep
-        });
-        Ok(removed)
+        }
+        Ok(matching_keys.len())
     }
 
-    /// 清空所有缓存条目，重置 tail 指针。
-    /// (Clear all cached entries and reset the tail pointer.)
     pub fn clear(&self) {
-        self.entries.lock().clear();
-        *self.tail.lock() = 0;
+        let mut state = self.state.lock();
+        state.entries.clear();
+        state.used_size = 0;
     }
 
     pub fn block_count(&self) -> usize {
         self.max_size / self.max_value_size
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.max_value_size
     }
 }
 
@@ -374,5 +363,30 @@ mod tests {
         assert!(admission.should_admit("key"));
         assert_eq!(admission.count("key"), 2);
         assert!(admission.should_admit("key"));
+    }
+
+    #[test]
+    fn cpp_parity_zero_hot_cache_size_disables_cache() {
+        assert_eq!(
+            LocalHotCacheSettings::from_values(Some("0"), None, None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn cpp_parity_sub_default_block_disables_cache_without_failing_client() {
+        assert_eq!(
+            LocalHotCacheSettings::from_values(Some("8388608"), None, None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn cpp_parity_sub_custom_block_disables_cache_without_failing_client() {
+        assert_eq!(
+            LocalHotCacheSettings::from_values(Some("2097152"), Some("4194304"), None, None,)
+                .unwrap(),
+            None
+        );
     }
 }
