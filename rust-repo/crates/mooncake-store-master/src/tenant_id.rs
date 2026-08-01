@@ -94,7 +94,18 @@ impl<'de> Deserialize<'de> for TenantId {
 #[cfg(test)]
 mod tests {
     use super::{TenantId, TenantIdError};
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
+
+    #[test]
+    fn cpp_parity_tenant_id_test_cpp_tenantidtest_supportsorderedandhashedkeys_8e2784aa() {
+        let tenant_a = TenantId::new("tenant-a".into()).unwrap();
+        let tenant_b = TenantId::new("tenant-b".into()).unwrap();
+
+        assert!(tenant_a < tenant_b);
+        let mut tenants = HashMap::new();
+        tenants.insert(tenant_a.clone(), 1);
+        assert_eq!(tenants[&tenant_a], 1);
+    }
 
     #[test]
     fn normalizes_and_validates_canonical_values() {

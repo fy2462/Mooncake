@@ -500,6 +500,118 @@ fn test_large_object_no_segment() {
 }
 
 #[test]
+fn cpp_parity_allocation_strategy_test_cpp_allocationstrategyparameterizedtest_preferredsegmentinsufficientspace_26230ac5()
+ {
+    const MIB: u64 = 1024 * 1024;
+    for strategy in [
+        AllocationStrategy::Random,
+        AllocationStrategy::FreeRatioFirst,
+    ] {
+        for allocator_kind in [
+            MemoryAllocatorKind::Offset,
+            MemoryAllocatorKind::CachelibLike,
+        ] {
+            let mut allocator = SegmentAllocator::new()
+                .with_strategy(strategy)
+                .with_memory_allocator(allocator_kind);
+            allocator.add_segment(make_seg("segment1", 64 * MIB), 0, Uuid::new_v4());
+            allocator.add_segment(make_seg("preferred", 64 * MIB), 0, Uuid::new_v4());
+            let preferred = ReplicateConfig {
+                preferred_segment: "preferred".into(),
+                ..Default::default()
+            };
+
+            for index in 0..4 {
+                let replicas = allocator
+                    .allocate_checked(&format!("preferred-{index}"), 15 * MIB, 1, &preferred)
+                    .unwrap();
+                assert_eq!(replicas.len(), 1);
+                assert_eq!(replicas[0].segment_name, "preferred");
+                assert_eq!(replicas[0].size, 15 * MIB);
+                assert_eq!(replicas[0].replica_type, ReplicaType::Memory);
+            }
+
+            let fallback = allocator
+                .allocate_checked("fallback", 5 * MIB, 1, &preferred)
+                .unwrap();
+            assert_eq!(fallback.len(), 1);
+            assert_eq!(fallback[0].segment_name, "segment1");
+            assert_eq!(fallback[0].size, 5 * MIB);
+            assert_eq!(fallback[0].replica_type, ReplicaType::Memory);
+        }
+    }
+}
+
+#[test]
+fn cpp_parity_allocation_strategy_test_cpp_allocationstrategyparameterizedtest_allallocatorsfull_963d7115()
+ {
+    const MIB: u64 = 1024 * 1024;
+    for strategy in [
+        AllocationStrategy::Random,
+        AllocationStrategy::FreeRatioFirst,
+    ] {
+        for allocator_kind in [
+            MemoryAllocatorKind::Offset,
+            MemoryAllocatorKind::CachelibLike,
+        ] {
+            let mut allocator = SegmentAllocator::new()
+                .with_strategy(strategy)
+                .with_memory_allocator(allocator_kind);
+            allocator.add_segment(make_seg("segment1", 64 * MIB), 0, Uuid::new_v4());
+            allocator.add_segment(make_seg("segment2", 64 * MIB), 0, Uuid::new_v4());
+
+            for index in 0..8 {
+                let replicas = allocator
+                    .allocate_checked(
+                        &format!("fill-{index}"),
+                        15 * MIB,
+                        1,
+                        &ReplicateConfig::default(),
+                    )
+                    .unwrap();
+                assert_eq!(replicas.len(), 1);
+                assert_eq!(replicas[0].size, 15 * MIB);
+                assert_eq!(replicas[0].replica_type, ReplicaType::Memory);
+            }
+
+            assert_eq!(
+                allocator
+                    .allocate_checked("impossible", 5 * MIB, 1, &ReplicateConfig::default())
+                    .unwrap_err(),
+                SegmentAllocationError::NoAvailableHandle
+            );
+        }
+    }
+}
+
+#[test]
+fn cpp_parity_allocation_strategy_test_cpp_allocationstrategyparameterizedtest_verylargesizeallocation_8ebc4bfe()
+ {
+    const MIB: u64 = 1024 * 1024;
+    for strategy in [
+        AllocationStrategy::Random,
+        AllocationStrategy::FreeRatioFirst,
+    ] {
+        for allocator_kind in [
+            MemoryAllocatorKind::Offset,
+            MemoryAllocatorKind::CachelibLike,
+        ] {
+            let mut allocator = SegmentAllocator::new()
+                .with_strategy(strategy)
+                .with_memory_allocator(allocator_kind);
+            allocator.add_segment(make_seg("segment1", 64 * MIB), 0, Uuid::new_v4());
+
+            assert_eq!(
+                allocator
+                    .allocate_checked("huge", 100 * MIB, 1, &ReplicateConfig::default())
+                    .unwrap_err(),
+                SegmentAllocationError::NoAvailableHandle
+            );
+        }
+    }
+}
+
+#[test]
 fn offset_and_cachelib_allocators_reject_requests_larger_than_capacity() {
     for kind in [
         MemoryAllocatorKind::Offset,
