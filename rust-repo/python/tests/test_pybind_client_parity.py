@@ -76,7 +76,7 @@ def cachelib_master():
             process.wait(timeout=5)
 
 
-async def _client(cachelib_master):
+async def _client(cachelib_master, *, global_segment_size: int = 0):
     rpc_port, metadata_port = cachelib_master
     return await MooncakeClient.create(
         local_hostname="localhost",
@@ -84,7 +84,7 @@ async def _client(cachelib_master):
         master_server_addr=f"127.0.0.1:{rpc_port}",
         protocol="tcp",
         device="",
-        global_segment_size=0,
+        global_segment_size=global_segment_size,
         local_buffer_size=16 * 1024 * 1024,
     )
 
@@ -136,3 +136,18 @@ async def test_close_then_unmount_and_free_previous_ids_fails(cachelib_master):
     await client.close()
     with pytest.raises(Exception, match="client already closed"):
         await client.unmount_and_free_segments(segment_ids)
+
+
+@pytest.mark.asyncio
+async def test_put_get_buffer_and_exists_visible_results(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    key = "test_key_realclient"
+    value = b"Hello, RealClient!"
+    try:
+        assert await client.put(key, value) == 0
+        retrieved = await client.get_buffer(key)
+        assert len(retrieved) == len(value)
+        assert bytes(retrieved) == value
+        assert await client.exists(key) is True
+    finally:
+        await client.close()

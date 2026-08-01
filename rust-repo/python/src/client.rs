@@ -1524,7 +1524,7 @@ impl PythonMooncakeClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let result = client.put(&key, &data, cfg).await;
-            result.map_err(to_py_err)
+            result.map(|()| 0).map_err(to_py_err)
         })
     }
 
