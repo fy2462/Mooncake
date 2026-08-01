@@ -12,7 +12,7 @@
     "cpp": "e2e/chaos_rand_test.cpp:ChaosRandTest.RandomMasterCrashWithSmallValue",
     "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithsmallvalue_1ecb1b92",
     "first_divergence": "The prior Rust live gate used three clients, guaranteed at least one Master remained alive, and attempted graceful SIGTERM before escalation; the C++ oracle uses five clients, independent 50% kill/start choices, permits all Masters down, and immediately hard-kills selected Masters.",
-    "repair_commit": "pending",
+    "repair_commit": "77b84333",
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_RAND_SMALL=1 MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_RAND_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS=1 MC_RPC_TIMEOUT_MS=1000 MC_RPC_CONNECT_TIMEOUT_MS=1000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithsmallvalue_1ecb1b92 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-chaos-rand-small-goal-019fbaa7/result.json"
@@ -21,7 +21,7 @@
     "cpp": "e2e/chaos_rand_test.cpp:ChaosRandTest.RandomMasterCrashWithLargeValue",
     "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithlargevalue_00768aca",
     "first_divergence": "The prior Rust live gate used three 32-MiB clients with 42 three-MiB values, guaranteed at least one Master remained alive, and attempted graceful SIGTERM before escalation; the C++ oracle uses five 16-MiB clients, 100 one-MiB values, independent 50% kill/start choices, permits all Masters down, and immediately hard-kills selected Masters.",
-    "repair_commit": "pending",
+    "repair_commit": "77b84333",
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_RAND_LARGE=1 MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_RAND_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS=1 MC_RPC_TIMEOUT_MS=1000 MC_RPC_CONNECT_TIMEOUT_MS=1000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithlargevalue_00768aca -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-chaos-rand-large-goal-019fbaa7/result.json"
