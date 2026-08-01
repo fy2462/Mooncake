@@ -1443,6 +1443,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_admin_http_batch_query_local_disk_response() {
+        let service = Arc::new(MasterServiceImpl::with_runtime_config(
+            crate::MasterRuntimeConfig {
+                enable_offload: true,
+                lease_ttl: std::time::Duration::ZERO,
+                ..Default::default()
+            },
+        ));
+        let client_id = Uuid::from_u128(0x300);
+        let storage_id = Uuid::from_u128(0x301);
+        let recovery_session_id = Uuid::from_u128(0x302);
+        let (client_high, client_low) = client_id.as_u64_pair();
+        let (storage_high, storage_low) = storage_id.as_u64_pair();
+        let (session_high, session_low) = recovery_session_id.as_u64_pair();
+
+        service
+            .mount_segment(TonicRequest::new(proto::MountSegmentRequest {
+                client_id: Some(proto::Uuid {
+                    high: client_high,
+                    low: client_low,
+                }),
+                segment_name: "ld_segment".to_string(),
+                size: 8 * 1024 * 1024,
+                base_addr: 0x6000_0000_0,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }))
+            .await
+            .unwrap();
+        for (enable_offloading, recovery_complete) in [(false, false), (true, true)] {
+            service
+                .mount_local_disk_segment(TonicRequest::new(proto::MountLocalDiskSegmentRequest {
+                    client_id: Some(proto::Uuid {
+                        high: client_high,
+                        low: client_low,
+                    }),
+                    enable_offloading,
+                    storage_id: Some(proto::Uuid {
+                        high: storage_high,
+                        low: storage_low,
+                    }),
+                    recovery_complete,
+                    recovery_session_id: Some(proto::Uuid {
+                        high: session_high,
+                        low: session_low,
+                    }),
+                }))
+                .await
+                .unwrap();
+        }
+        put_complete_memory_key_in_segment(&service, client_id, "ld_only_key", "ld_segment", 2048)
+            .await;
+
+        let tasks = service
+            .offload_object_heartbeat(TonicRequest::new(proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(proto::Uuid {
+                    high: client_high,
+                    low: client_low,
+                }),
+                enable_offloading: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .tasks;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].key, "ld_only_key");
+        service
+            .notify_offload_success(TonicRequest::new(proto::NotifyOffloadSuccessRequest {
+                client_id: Some(proto::Uuid {
+                    high: client_high,
+                    low: client_low,
+                }),
+                keys: vec!["ld_only_key".to_string()],
+                metadatas: vec![proto::StorageObjectMetadata {
+                    bucket_id: 0,
+                    offset: 0,
+                    key_size: "ld_only_key".len() as i64,
+                    data_size: 2048,
+                    transport_endpoint: "127.0.0.1:9999".to_string(),
+                }],
+                tasks,
+                recovery_session_id: None,
+            }))
+            .await
+            .unwrap();
+        let cleared = service
+            .batch_replica_clear(TonicRequest::new(proto::BatchReplicaClearRequest {
+                object_keys: vec!["ld_only_key".to_string()],
+                client_id: Some(proto::Uuid {
+                    high: client_high,
+                    low: client_low,
+                }),
+                segment_name: "ld_segment".to_string(),
+                tenant_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(cleared.cleared_keys, vec!["ld_only_key"]);
+
+        let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
+        let (status, body) = get_router(&router, "/batch_query_keys?keys=ld_only_key").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["ld_only_key"]["ok"], true);
+        assert_eq!(body["data"]["ld_only_key"]["values"], json!([]));
+        assert_eq!(
+            body["data"]["ld_only_key"]["local_disk_values"][0]["transport_endpoint"],
+            "127.0.0.1:9999"
+        );
+    }
+
+    #[tokio::test]
     async fn test_admin_http_batch_query_keys_missing_key_is_embedded_error() {
         let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
         let (status, body) = get_router(&router, "/batch_query_keys?keys=nonexistent_key").await;
