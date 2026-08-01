@@ -75,7 +75,7 @@
     "cpp": "e2e/chaos_test.cpp:ChaosTest.ClientKilledFailover",
     "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_clientkilledfailover_992dc564",
     "first_divergence": "Rust had in-process liveness and stale-client cleanup coverage, but no discoverable test placed the sole mounted segment in an independently killable Rust client process, proved that its heartbeat was registered, delivered parent-driven SIGKILL, and asserted the C++ post-TTL cross-client error sequence.",
-    "repair_commit": "PENDING",
+    "repair_commit": "e52ebdbc",
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=ClientKilledFailover MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_clientkilledfailover_992dc564 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-client-killed-goal-019fbaa7/result.json"
