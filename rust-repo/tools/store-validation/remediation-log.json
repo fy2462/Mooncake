@@ -1496,5 +1496,32 @@
     "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --lib client::tasks::tests::legacy_task_payload_defaults_to_default_tenant -- --exact --nocapture",
     "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-master-tenant-task-payload-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.ForceRemoveLeasedObject",
+    "rust": "mooncake-store-master/tests/test_master_force_remove_parity.rs:force_remove_leased_object_parity",
+    "first_divergence": "Rust separately covered lease-blocked batch removal and forced removal of an unleased object, but did not prove the exact single-object live-lease rejection, forced success, and final OBJECT_NOT_FOUND sequence.",
+    "repair_commit": "ca1cb2cc",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity force_remove_leased_object_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-force-remove-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.ForceRemoveByRegexLeasedObjects",
+    "rust": "mooncake-store-master/tests/test_master_force_remove_parity.rs:force_remove_by_regex_leased_objects_parity",
+    "first_divergence": "Rust had forced regex deletion of one unleased key, but no five-key live-lease matrix contrasting non-force count zero and preservation with force count five and absence.",
+    "repair_commit": "ca1cb2cc",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity force_remove_by_regex_leased_objects_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-force-remove-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.ForceRemoveAllLeasedObjects",
+    "rust": "mooncake-store-master/tests/test_master_force_remove_parity.rs:force_remove_all_leased_objects_parity",
+    "first_divergence": "Rust forced remove-all for unleased objects, but did not prove the ten-key live-lease count-and-existence matrix across both non-force and force phases.",
+    "repair_commit": "ca1cb2cc",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity force_remove_all_leased_objects_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_force_remove_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-force-remove-goal-019fbca4.typescript"
   }
 ]
