@@ -2774,12 +2774,11 @@ impl PythonMooncakeClient {
     // upsert / upsert_parts — 插入或更新
     // ===================================================================
 
-    /// Insert-or-update a key-value pair. Returns replica locations.
+    /// Insert-or-update a key-value pair. Returns zero on success.
     ///
-    /// 插入或更新键值对。返回副本位置列表 List[(segment_name, offset, segment_id)]。
-    /// Unlike put(), upsert() can overwrite existing keys and returns
-    /// the replica descriptors showing where the data was allocated.
-    /// 与 put() 不同，upsert() 可以覆盖已有 key 并返回副本分配信息。
+    /// 插入或更新键值对。成功时返回零。
+    /// Unlike put(), upsert() can overwrite existing keys.
+    /// 与 put() 不同，upsert() 可以覆盖已有 key。
     #[pyo3(signature = (key, value, config = None))]
     fn upsert<'py>(
         slf: &Bound<'py, Self>,
@@ -2792,17 +2791,10 @@ impl PythonMooncakeClient {
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
 
-        // Return Rust tuple list — future_into_py handles IntoPy conversion
-        // 返回 Rust 元组列表 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let result = client.upsert(&key, &data, cfg).await;
-            let replicas = result.map_err(to_py_err)?;
-            let out: Vec<(String, u64, String)> = replicas
-                .iter()
-                .map(|r| (r.segment_name.clone(), r.offset, r.segment_id.to_string()))
-                .collect();
-            Ok(out)
+            result.map(|_| 0).map_err(to_py_err)
         })
     }
 
@@ -3121,18 +3113,11 @@ impl PythonMooncakeClient {
         let data: Vec<Vec<u8>> = values.iter().map(|v| v.as_bytes().to_vec()).collect();
         let inner = slf.borrow().inner.clone();
 
-        // Return Rust tuple list — future_into_py handles IntoPy conversion
-        // 返回 Rust 元组列表 —— future_into_py 处理 IntoPy 转换
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let slices: Vec<&[u8]> = data.iter().map(|v| v.as_slice()).collect();
             let result = client.upsert_parts(&key, &slices, cfg).await;
-            let replicas = result.map_err(to_py_err)?;
-            let out: Vec<(String, u64, String)> = replicas
-                .iter()
-                .map(|r| (r.segment_name.clone(), r.offset, r.segment_id.to_string()))
-                .collect();
-            Ok(out)
+            result.map(|_| 0).map_err(to_py_err)
         })
     }
 
@@ -4340,14 +4325,14 @@ impl PythonMooncakeClient {
     // 于零拷贝传输。Python buffer 对象保存在 registered_py_buffers 中，防止
     // GC 释放或移动底层内存。
     //
-    // Both register_buffer and unregister_buffer are SYNCHRONOUS: they hold
-    // the client mutex via as_ref() (not take()) so the client remains
-    // available for concurrent async operations.  This is safe because the
-    // underlying register/unregister calls are immediate (no await points).
+    // Both register_buffer and unregister_buffer are SYNCHRONOUS: they wait
+    // for the shared client slot rather than surfacing transient background
+    // contention. The underlying register/unregister calls are immediate once
+    // the slot is acquired.
     //
-    // register_buffer 和 unregister_buffer 都是同步的：通过 as_ref() 持有
-    // client mutex（而非 take()），因此可与并发异步操作共存。这是安全的，
-    // 因为底层的 register/unregister 调用是即时的（没有 await 点）。
+    // register_buffer 和 unregister_buffer 都是同步的：它们等待共享客户端
+    // 槽位，避免把短暂的后台竞争暴露给调用方；取得槽位后底层注册/注销调用
+    // 会立即完成。
     // ===================================================================
 
     /// Register a Python buffer for RDMA zero-copy access.
@@ -4453,18 +4438,18 @@ impl PythonMooncakeClient {
             }
         }
         {
-            let slf_ref = slf.borrow();
-            let guard = try_client_slot(&slf_ref.inner)?;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| to_py_err("client already closed"))?;
+            let inner = slf.borrow().inner.clone();
+            let guard = slf.py().detach(move || {
+                pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
+            })?;
+            let client = &*guard;
             let registration_id = client
                 .register_owned_buffer(memory_owner, &effective_location)
                 .map_err(to_py_err)?;
             // Publish the Python lookup identity before releasing the client
             // lock. The actual allocation owner already moved into the FFI
             // registration capability.
-            slf_ref
+            slf.borrow()
                 .registered_py_buffers
                 .lock()
                 .push(PythonBufferRegistration {
@@ -4494,12 +4479,13 @@ impl PythonMooncakeClient {
             raw_address
         };
         {
-            let slf_ref = slf.borrow();
-            let guard = try_client_slot(&slf_ref.inner)?;
-            let client = guard
-                .as_ref()
-                .ok_or_else(|| to_py_err("client already closed"))?;
-            let mut registered_py_buffers = slf_ref.registered_py_buffers.lock();
+            let inner = slf.borrow().inner.clone();
+            let guard = slf.py().detach(move || {
+                pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
+            })?;
+            let client = &*guard;
+            let registrations = slf.borrow().registered_py_buffers.clone();
+            let mut registered_py_buffers = registrations.lock();
             let registration_id = registered_py_buffers
                 .iter()
                 .find(|registration| {
@@ -4523,9 +4509,9 @@ impl PythonMooncakeClient {
     // Zero-copy upsert — 零拷贝插入或更新
     //
     // Same block_on pattern as put_from/get_into: the future captures raw
-    // pointers, making it !Send.  Returns replica descriptors as Python dicts.
+    // pointers, making it !Send. Returns C++-compatible integer statuses.
     // 与 put_from/get_into 相同的 block_on 模式：future 捕获裸指针使其不是
-    // Send。返回副本描述信息作为 Python 字典。
+    // Send。返回与 C++ 兼容的整数状态。
     // ===================================================================
 
     /// Insert-or-update from a Python buffer (zero-copy via RDMA).
@@ -4537,16 +4523,17 @@ impl PythonMooncakeClient {
         buffer: Bound<'_, PyAny>,
         size: usize,
         config: Option<Bound<'_, ReplicateConfigPy>>,
-    ) -> PyResult<Py<PyAny>> {
+    ) -> PyResult<i32> {
         let ptr = get_pointer(&buffer)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        let replicas = tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner).await?;
-            let result = client.upsert_from(&key, ptr, size, cfg).await;
-            result.map_err(to_py_err)
+        let mut client = slf.py().detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
         })?;
-        Ok(replicas_to_py(replicas))
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let result = client.upsert_from(&key, ptr, size, cfg).await;
+            result.map(|_| 0).map_err(to_py_err)
+        })
     }
 
     /// Zero-copy TensorMetadata upsert from an owner-bearing registered
@@ -4671,23 +4658,22 @@ impl PythonMooncakeClient {
         buffers: Vec<Bound<'_, PyAny>>,
         sizes: Vec<usize>,
         config: Option<Bound<'_, ReplicateConfigPy>>,
-    ) -> PyResult<Py<PyAny>> {
+    ) -> PyResult<Vec<i32>> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            return Ok(vec![-1; keys.len()]);
+        }
         let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        let results = tokio::runtime::Handle::current().block_on(async {
-            let mut client = take_client(&inner).await?;
-            let result = client.batch_upsert_from(&keys, &ptrs, &sizes, cfg).await;
-            result.map_err(to_py_err)
+        let mut client = slf.py().detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
         })?;
-        // GIL is held throughout block_on, so assume_attached() is safe here
-        // GIL 在整个 block_on 期间持有，因此 assume_attached() 在此安全
-        let py = unsafe { Python::assume_attached() };
-        let out: Vec<Py<PyAny>> = results
-            .iter()
-            .map(|replicas| replicas_to_py(replicas.clone()))
-            .collect();
-        Ok(out.into_pyobject(py)?.unbind())
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let result = client
+                .batch_upsert_from_statuses(&keys, &ptrs, &sizes, cfg)
+                .await;
+            result.map_err(to_py_err)
+        })
     }
 
     /// Batch zero-copy TensorMetadata upsert with one C++-compatible status

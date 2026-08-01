@@ -432,3 +432,79 @@ async def test_upsert_batch_returns_aggregate_success_and_exact_ordered_bytes(
         assert [bytes(await client.get_buffer(key)) for key in keys] == values
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upsert_create_and_same_size_replace_returns_visible_result_and_bytes(
+    cachelib_master,
+):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    key = "upsert_basic_key"
+    try:
+        assert await client.upsert(key, b"upsert_basic_v1!") == 0
+        assert bytes(await client.get_buffer(key)) == b"upsert_basic_v1!"
+        assert await client.upsert(key, b"upsert_basic_v2!") == 0
+        assert bytes(await client.get_buffer(key)) == b"upsert_basic_v2!"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upsert_from_replaces_registered_buffer(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    key = "upsert_from_key"
+    first = bytearray(b"A" * 64)
+    second = bytearray(b"B" * 64)
+    try:
+        assert client.register_buffer(first, len(first)) == 0
+        assert client.upsert_from(key, first, len(first)) == 0
+        assert bytes(await client.get_buffer(key)) == bytes(first)
+
+        assert client.register_buffer(second, len(second)) == 0
+        assert client.upsert_from(key, second, len(second)) == 0
+        assert bytes(await client.get_buffer(key)) == bytes(second)
+        client.unregister_buffer(first)
+        client.unregister_buffer(second)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_upsert_parts_concatenates_and_replaces_same_size(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    key = "upsert_parts_key"
+    try:
+        assert await client.upsert_parts(key, [b"Hello, ", b"World!"]) == 0
+        assert bytes(await client.get_buffer(key)) == b"Hello, World!"
+        assert await client.upsert_parts(key, [b"Goodbye", b"Moon!!"]) == 0
+        assert bytes(await client.get_buffer(key)) == b"GoodbyeMoon!!"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_batch_upsert_from_preserves_status_order_and_bytes(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    keys = ["batch_upsert_0", "batch_upsert_1", "batch_upsert_2"]
+    buffers = [bytearray(b"X" * 32), bytearray(b"Y" * 32), bytearray(b"Z" * 32)]
+    try:
+        for buffer in buffers:
+            assert client.register_buffer(buffer, len(buffer)) == 0
+        assert client.batch_upsert_from(keys, buffers, [32, 32, 32]) == [0, 0, 0]
+        assert [bytes(await client.get_buffer(key)) for key in keys] == [
+            bytes(buffer) for buffer in buffers
+        ]
+        partial_statuses = client.batch_upsert_from(
+            ["batch_upsert_valid_retry", ""],
+            buffers[:2],
+            [32, 32],
+        )
+        assert partial_statuses[0] == 0
+        assert partial_statuses[1] < 0
+        mismatch_statuses = client.batch_upsert_from(["one", "two"], buffers[:1], [32])
+        assert len(mismatch_statuses) == 2
+        assert all(status < 0 for status in mismatch_statuses)
+        for buffer in buffers:
+            client.unregister_buffer(buffer)
+    finally:
+        await client.close()
