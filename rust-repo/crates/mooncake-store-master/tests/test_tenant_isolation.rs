@@ -523,6 +523,122 @@ fn batch_remove_and_remove_all_are_tenant_scoped_parity() {
 }
 
 #[test]
+fn batch_get_replica_list_keeps_tenant_isolation_parity() {
+    let service = strict_service(
+        &["default", "batch_get_tenant_a", "batch_get_tenant_b"],
+        Duration::ZERO,
+    );
+    let client_id = Uuid::new_v4();
+    let key = "batch_get_tenant_shared_key";
+    mount_seg(&service, "tenant-batch-get:1", client_id, 16 * 1024);
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let put_for_tenant =
+            |tenant_id: &str, size: u64, group_ids: Vec<String>| proto::PutStartRequest {
+                client_id: Some(client_proto(client_id)),
+                key: key.into(),
+                slice_length: size,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    group_ids,
+                    ..Default::default()
+                }),
+                tenant_id: tenant_id.into(),
+            };
+        for (tenant_id, request) in [
+            (
+                "batch_get_tenant_a",
+                put_for_tenant("batch_get_tenant_a", 1024, vec!["batch_get_group_a".into()]),
+            ),
+            (
+                "batch_get_tenant_b",
+                put_for_tenant("batch_get_tenant_b", 2048, vec![]),
+            ),
+        ] {
+            MasterService::put_start(&service, Request::new(request))
+                .await
+                .unwrap();
+            MasterService::put_end(
+                &service,
+                Request::new(proto::PutEndRequest {
+                    client_id: Some(client_proto(client_id)),
+                    key: key.into(),
+                    replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                    tenant_id: tenant_id.into(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        for (tenant_id, expected_status) in [
+            ("batch_get_tenant_a", 0),
+            ("batch_get_tenant_b", 0),
+            ("default", -1),
+        ] {
+            let response = MasterService::batch_get_replica_list(
+                &service,
+                Request::new(proto::BatchGetReplicaListRequest {
+                    keys: vec![key.into()],
+                    tenant_id: tenant_id.into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(response.results.len(), 1);
+            assert_eq!(response.results[0].status, expected_status, "{tenant_id}");
+            assert_eq!(response.results[0].response.is_some(), expected_status == 0);
+        }
+    });
+}
+
+#[test]
+fn get_all_keys_lists_only_requested_tenant_parity() {
+    let service = strict_service(&["default", "tenant_get_all_keys_a"], Duration::ZERO);
+    let client_id = Uuid::new_v4();
+    mount_seg(&service, "tenant-listing:1", client_id, 16 * 1024);
+    for (key, tenant_id) in [
+        ("shared_listing_key", "default"),
+        ("default_listing_key", "default"),
+        ("shared_listing_key", "tenant_get_all_keys_a"),
+        ("tenant_listing_key", "tenant_get_all_keys_a"),
+    ] {
+        put_object(&service, key, tenant_id, client_id, 1024);
+    }
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let default_keys = MasterService::get_all_keys(
+            &service,
+            Request::new(proto::GetAllKeysRequest {
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .keys;
+        assert!(default_keys.contains(&"shared_listing_key".to_string()));
+        assert!(default_keys.contains(&"default_listing_key".to_string()));
+        assert!(!default_keys.contains(&"tenant_listing_key".to_string()));
+
+        let tenant_keys = MasterService::get_all_keys(
+            &service,
+            Request::new(proto::GetAllKeysRequest {
+                tenant_id: "tenant_get_all_keys_a".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .keys;
+        assert!(tenant_keys.contains(&"shared_listing_key".to_string()));
+        assert!(tenant_keys.contains(&"tenant_listing_key".to_string()));
+        assert!(!tenant_keys.contains(&"default_listing_key".to_string()));
+    });
+}
+
+#[test]
 fn test_get_all_keys_filters_by_tenant() {
     let service = strict_service(&["tenant-Z", "default"], Duration::ZERO);
     let cid = Uuid::new_v4();

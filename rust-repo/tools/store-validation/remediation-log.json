@@ -1271,5 +1271,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation batch_remove_and_remove_all_are_tenant_scoped_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-tenant-removal-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.BatchGetReplicaListKeepsTenantIsolation",
+    "rust": "mooncake-store-master/tests/test_tenant_isolation.rs:batch_get_replica_list_keeps_tenant_isolation_parity",
+    "first_divergence": "Rust already scoped batch replica lookup by tenant, but no discoverable direct test combined one grouped tenant-A object, one ungrouped tenant-B object, and the exact successful/successful/not-found three-query matrix.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation batch_get_replica_list_keeps_tenant_isolation_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-tenant-query-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.GetAllKeysListsOnlyRequestedTenant",
+    "rust": "mooncake-store-master/tests/test_tenant_isolation.rs:get_all_keys_lists_only_requested_tenant_parity",
+    "first_divergence": "Rust already filtered GetAllKeys by tenant, but existing coverage did not assert reciprocal default/tenant membership and exclusion for a shared key plus one exclusive key in each scope.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation get_all_keys_lists_only_requested_tenant_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-tenant-query-goal-019fbca4.typescript"
   }
 ]
