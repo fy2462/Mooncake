@@ -2126,5 +2126,23 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_health_check_reports_not_initialized",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
     "evidence": "/tmp/mooncake-pybind-pre-setup-cluster-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrMountNonExistentFile",
+    "rust": "python/tests/test_pybind_client_parity.py:test_file_mount_missing_path_fails_without_ids",
+    "first_divergence": "PyO3 exposed only a raw name/size/address mount and had no owner-bearing file mapping API or C++ `(status, segment_ids)` carrier.",
+    "repair_commit": "8077e694",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_file_mount_missing_path_fails_without_ids",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-file-mount-errors-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrUnmountInvalidSegmentIds",
+    "rust": "python/tests/test_pybind_client_parity.py:test_plain_unmount_rejects_zero_uuid",
+    "first_divergence": "The binding offered only name-based unmount, not the C++ UUID-list plain-unmount tied to file-mounted ownership records.",
+    "repair_commit": "8077e694",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_plain_unmount_rejects_zero_uuid",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-file-mount-errors-goal-019fbca4.typescript"
   }
 ]
