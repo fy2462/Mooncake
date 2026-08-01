@@ -598,7 +598,7 @@
     "cpp": "tenant_id_test.cpp:TenantIdTest.SupportsOrderedAndHashedKeys",
     "rust": "mooncake-store-master/src/tenant_id.rs:cpp_parity_tenant_id_test_cpp_tenantidtest_supportsorderedandhashedkeys_8e2784aa",
     "first_divergence": "Existing Rust coverage for TenantIdTest.SupportsOrderedAndHashedKeys omitted one or more exact C++ dimensions: named-key ordering/hash retrieval, the successful fill sequence, both strategy and allocator variants, complete fallback descriptors, or checked capacity errors.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d3ae370b",
     "focused_command": "cargo test -p mooncake-store-master --lib tenant_id::tests::cpp_parity_tenant_id_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_allocator",
     "evidence": "/tmp/mooncake-tenant-allocation-goal-019fbaa7.typescript"
@@ -608,7 +608,7 @@
     "cpp": "allocation_strategy_test.cpp:AllocationStrategyParameterizedTest.PreferredSegmentInsufficientSpace",
     "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_allocation_strategy_test_cpp_allocationstrategyparameterizedtest_preferredsegmentinsufficientspace_26230ac5",
     "first_divergence": "Existing Rust coverage for AllocationStrategyParameterizedTest.PreferredSegmentInsufficientSpace omitted one or more exact C++ dimensions: named-key ordering/hash retrieval, the successful fill sequence, both strategy and allocator variants, complete fallback descriptors, or checked capacity errors.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d3ae370b",
     "focused_command": "cargo test -p mooncake-store-master --lib tenant_id::tests::cpp_parity_tenant_id_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_allocator",
     "evidence": "/tmp/mooncake-tenant-allocation-goal-019fbaa7.typescript"
@@ -618,7 +618,7 @@
     "cpp": "allocation_strategy_test.cpp:AllocationStrategyParameterizedTest.AllAllocatorsFull",
     "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_allocation_strategy_test_cpp_allocationstrategyparameterizedtest_allallocatorsfull_963d7115",
     "first_divergence": "Existing Rust coverage for AllocationStrategyParameterizedTest.AllAllocatorsFull omitted one or more exact C++ dimensions: named-key ordering/hash retrieval, the successful fill sequence, both strategy and allocator variants, complete fallback descriptors, or checked capacity errors.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d3ae370b",
     "focused_command": "cargo test -p mooncake-store-master --lib tenant_id::tests::cpp_parity_tenant_id_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_allocator",
     "evidence": "/tmp/mooncake-tenant-allocation-goal-019fbaa7.typescript"
@@ -628,7 +628,7 @@
     "cpp": "allocation_strategy_test.cpp:AllocationStrategyParameterizedTest.VeryLargeSizeAllocation",
     "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_allocation_strategy_test_cpp_allocationstrategyparameterizedtest_verylargesizeallocation_8ebc4bfe",
     "first_divergence": "Existing Rust coverage for AllocationStrategyParameterizedTest.VeryLargeSizeAllocation omitted one or more exact C++ dimensions: named-key ordering/hash retrieval, the successful fill sequence, both strategy and allocator variants, complete fallback descriptors, or checked capacity errors.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d3ae370b",
     "focused_command": "cargo test -p mooncake-store-master --lib tenant_id::tests::cpp_parity_tenant_id_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_allocator",
     "evidence": "/tmp/mooncake-tenant-allocation-goal-019fbaa7.typescript"
