@@ -370,7 +370,20 @@ impl LocalFsOpLogStore {
         if data.starts_with(LOCAL_OPLOG_V2_MAGIC) {
             return Self::parse_v2_entries(&data[LOCAL_OPLOG_V2_MAGIC.len()..]);
         }
-        Self::parse_v1_entries(data)
+        match Self::parse_v1_entries(data) {
+            Ok(entries) => Ok(entries),
+            Err(_) if data.starts_with(b"MCOPLG") => Err(HaError::InvalidBackend(
+                "unsupported local oplog format version".into(),
+            )),
+            Err(_)
+                if data.get(4..LOCAL_OPLOG_V2_MAGIC.len()) == Some(&LOCAL_OPLOG_V2_MAGIC[4..]) =>
+            {
+                Err(HaError::InvalidBackend(
+                    "local oplog segment has corrupted v2 magic".into(),
+                ))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn parse_v2_entries(data: &[u8]) -> Result<Vec<OpLogRecord>, HaError> {

@@ -476,6 +476,21 @@ fn test_local_fs_reads_legacy_v1_segment() {
 }
 
 #[test]
+fn legacy_v1_magic_prefix_collision_remains_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let sequence = u32::from_le_bytes(*b"MCOP");
+    let payload = "x".repeat(u16::from_le_bytes(*b"LG") as usize);
+    write_legacy_segment(dir.path(), sequence as u64, &[(sequence, payload.as_str())]);
+
+    let store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();
+    let entries = store.read_since(sequence as u64, 1).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, sequence as u64);
+    assert_eq!(entries[0].payload, payload);
+}
+
+#[test]
 fn test_local_fs_rejects_truncated_legacy_frame() {
     let dir = tempfile::tempdir().unwrap();
     let mut frame = Vec::new();
@@ -520,6 +535,58 @@ fn test_local_fs_rejects_v2_checksum_corruption() {
         .err()
         .expect("checksum corruption must fail recovery");
     assert!(error.to_string().contains("checksum mismatch"));
+}
+
+#[test]
+fn cpp_parity_localfs_rejects_corrupted_current_format_magic() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.append(&make_entry(0)).unwrap();
+    let path = dir.path().join("oplog_00000000000000000001.bin");
+    let mut data = std::fs::read(&path).unwrap();
+    data[..4].copy_from_slice(b"XXXX");
+    std::fs::write(path, data).unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("corrupted current-format magic must fail recovery");
+    assert!(error.to_string().contains("corrupted v2 magic"), "{error}");
+}
+
+#[test]
+fn cpp_parity_localfs_rejects_unknown_current_format_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.append(&make_entry(0)).unwrap();
+    let path = dir.path().join("oplog_00000000000000000001.bin");
+    let mut data = std::fs::read(&path).unwrap();
+    data[7] = b'3';
+    std::fs::write(path, data).unwrap();
+
+    let error = LocalFsOpLogStore::new(dir.path(), 10)
+        .err()
+        .expect("unknown current-format version must fail recovery");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported local oplog format version"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cpp_parity_localfs_rejects_truncated_current_format_segment() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = LocalFsOpLogStore::new(dir.path(), 1).unwrap();
+    store.append(&make_entry(0)).unwrap();
+    let path = dir.path().join("oplog_00000000000000000001.bin");
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_len(16).unwrap();
+
+    let error = store
+        .read_since(1, 1)
+        .expect_err("truncated current-format segment must fail a live read");
+    assert!(error.to_string().contains("truncated"), "{error}");
 }
 
 #[test]
