@@ -1078,7 +1078,7 @@
     "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadCorruptedSegmentBadMagic",
     "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_rejects_corrupted_current_format_magic",
     "first_divergence": "A damaged Rust v2 magic header fell through to legacy-v1 parsing instead of being classified and rejected as current-format corruption.",
-    "repair_commit": "PENDING",
+    "repair_commit": "cb3bc63f",
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_rejects_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-corruption-goal-019fbca4.typescript"
@@ -1087,7 +1087,7 @@
     "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadCorruptedSegmentWrongVersion",
     "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_rejects_unknown_current_format_version",
     "first_divergence": "Rust encoded its version in MCOPLG02 but treated an unknown MCOPLG version suffix as a legacy-v1 frame instead of an unsupported native format.",
-    "repair_commit": "PENDING",
+    "repair_commit": "cb3bc63f",
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_rejects_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-corruption-goal-019fbca4.typescript"
@@ -1096,7 +1096,7 @@
     "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadCorruptedSegmentTruncated",
     "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_rejects_truncated_current_format_segment",
     "first_divergence": "Rust rejected handcrafted legacy truncation but lacked a live-read oracle for a persisted current-v2 segment truncated below one complete frame header.",
-    "repair_commit": "PENDING",
+    "repair_commit": "cb3bc63f",
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_rejects_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-corruption-goal-019fbca4.typescript"
