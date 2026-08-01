@@ -1,0 +1,11 @@
+[
+  {
+    "cpp": "e2e/e2e_rand_test.cpp:E2ERandTest.RandomSequentialDeletePutGet",
+    "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_e2e_rand_test_cpp_e2erandtest_randomsequentialdeleteputget_d43f8d57",
+    "first_divergence": "The prior Rust evidence used an in-process non-HA Master with 32-MiB segments, 3-MiB values, 42 keys, and four rounds instead of an external etcd-elected Master with two 256-MiB segments, 15-MiB values, a capacity-derived 68-key range, and configured sustained duration.",
+    "repair_commit": "pending",
+    "focused_command": "MOONCAKE_RUN_E2E_RAND=1 MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_E2E_RAND_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MOONCAKE_E2E_RAND_RUN_SECONDS=1 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_e2e_rand_test_cpp_e2erandtest_randomsequentialdeleteputget_d43f8d57 -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
+    "evidence": "/tmp/mooncake-e2e-rand-goal-019fbaa7/result.json"
+  }
+]

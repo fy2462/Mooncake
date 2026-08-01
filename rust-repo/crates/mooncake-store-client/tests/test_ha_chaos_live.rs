@@ -48,6 +48,75 @@ fn large_profile_exceeds_capacity_and_values_are_key_distinct() {
 }
 
 #[test]
+fn cpp_e2e_rand_profile_preserves_capacity_derived_workload_shape() {
+    let profile = E2ERandProfile::cpp_default();
+
+    assert_eq!(profile.client_count, 2);
+    assert_eq!(profile.segment_size, 256 * 1024 * 1024);
+    assert_eq!(profile.value_size, 15 * 1024 * 1024);
+    assert_eq!(profile.key_count, 68);
+    assert_eq!(profile.run_duration, Duration::from_secs(3_600));
+    assert_eq!(
+        cpp_e2e_rand_value(12, 16),
+        b"value_12_12_12_1",
+        "value bytes must match the C++ value_ + repeated <key>_ pattern"
+    );
+}
+
+#[test]
+fn cpp_e2e_rand_live_config_is_opt_in_and_requires_a_positive_duration() {
+    let none = BTreeMap::new();
+    assert!(E2ERandConfig::from_map(&none).unwrap().is_none());
+
+    let mut env = BTreeMap::from([
+        ("MOONCAKE_RUN_E2E_RAND".into(), "1".into()),
+        (
+            "MOONCAKE_HA_ETCD_ENDPOINT".into(),
+            "http://127.0.0.1:42379".into(),
+        ),
+        (
+            "MOONCAKE_HA_MASTER_BIN".into(),
+            "/tmp/mooncake-master".into(),
+        ),
+        (
+            "MOONCAKE_E2E_RAND_RESULT".into(),
+            "/tmp/e2e-rand/result.json".into(),
+        ),
+        ("MOONCAKE_HA_ARTIFACT_ROOT".into(), "/tmp/e2e-rand".into()),
+        ("MOONCAKE_HA_SEED".into(), "0x4d4f4f4e48414348".into()),
+    ]);
+
+    let canonical = E2ERandConfig::from_map(&env)
+        .unwrap()
+        .expect("enabled canonical E2E rand config");
+    assert_eq!(canonical.profile.run_duration, Duration::from_secs(3_600));
+
+    env.insert("MOONCAKE_E2E_RAND_RUN_SECONDS".into(), "7".into());
+    let shortened = E2ERandConfig::from_map(&env)
+        .unwrap()
+        .expect("enabled shortened E2E rand config");
+    assert_eq!(shortened.profile.run_duration, Duration::from_secs(7));
+
+    for invalid in ["0", "-1", "not-a-number"] {
+        env.insert("MOONCAKE_E2E_RAND_RUN_SECONDS".into(), invalid.into());
+        assert!(
+            E2ERandConfig::from_map(&env)
+                .unwrap_err()
+                .contains("MOONCAKE_E2E_RAND_RUN_SECONDS"),
+            "duration {invalid} must fail closed"
+        );
+    }
+
+    env.insert("MOONCAKE_E2E_RAND_RUN_SECONDS".into(), "7".into());
+    env.insert("MOONCAKE_RUN_HA_CHAOS".into(), "1".into());
+    assert!(
+        E2ERandConfig::from_map(&env)
+            .unwrap_err()
+            .contains("mutually exclusive")
+    );
+}
+
+#[test]
 fn large_pressure_evidence_requires_an_observable_outcome() {
     assert!(require_large_pressure_evidence(&ScenarioEvidence::default()).is_err());
 
@@ -823,6 +892,10 @@ const LARGE_CLIENT_COUNT: usize = 3;
 const LARGE_CLIENT_SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
 const LARGE_KEY_COUNT: usize = 42;
 const LARGE_VALUE_LEN: usize = 3 * 1024 * 1024;
+const CPP_E2E_RAND_CLIENT_COUNT: usize = 2;
+const CPP_E2E_RAND_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
+const CPP_E2E_RAND_VALUE_SIZE: usize = 15 * 1024 * 1024;
+const CPP_E2E_RAND_RUN_SECONDS: u64 = 3_600;
 const MASTER_CLIENT_TTL: Duration = Duration::from_secs(2);
 const MASTER_CLIENT_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 const SCENARIO_CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
@@ -857,13 +930,162 @@ struct GateConfig {
     rounds: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct E2ERandProfile {
+    client_count: usize,
+    segment_size: u64,
+    value_size: usize,
+    key_count: usize,
+    run_duration: Duration,
+}
+
+impl E2ERandProfile {
+    fn cpp_default() -> Self {
+        Self {
+            client_count: CPP_E2E_RAND_CLIENT_COUNT,
+            segment_size: CPP_E2E_RAND_SEGMENT_SIZE,
+            value_size: CPP_E2E_RAND_VALUE_SIZE,
+            key_count: CPP_E2E_RAND_SEGMENT_SIZE as usize * CPP_E2E_RAND_CLIENT_COUNT
+                / CPP_E2E_RAND_VALUE_SIZE
+                * 2,
+            run_duration: Duration::from_secs(CPP_E2E_RAND_RUN_SECONDS),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct E2ERandConfig {
+    gate: GateConfig,
+    profile: E2ERandProfile,
+}
+
+impl E2ERandConfig {
+    fn from_env() -> Result<Option<Self>, String> {
+        Self::from_map(&std::env::vars().collect())
+    }
+
+    fn from_map(env: &BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        reject_conflicting_live_opt_ins(env)?;
+        if env.get("MOONCAKE_RUN_E2E_RAND").map(String::as_str) != Some("1") {
+            return Ok(None);
+        }
+
+        let result_path = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_E2E_RAND_RESULT",
+            "MOONCAKE_RUN_E2E_RAND",
+        )?);
+        let artifact_root = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_HA_ARTIFACT_ROOT",
+            "MOONCAKE_RUN_E2E_RAND",
+        )?);
+        let gate = GateConfig::enabled_from_map(
+            env,
+            result_path,
+            artifact_root,
+            "e2e-rand",
+            "MOONCAKE_RUN_E2E_RAND",
+        )?;
+        let mut profile = E2ERandProfile::cpp_default();
+        if let Some(value) = env.get("MOONCAKE_E2E_RAND_RUN_SECONDS") {
+            let seconds = value.parse::<u64>().map_err(|_| {
+                format!("MOONCAKE_E2E_RAND_RUN_SECONDS must be a positive integer: {value}")
+            })?;
+            if seconds == 0 {
+                return Err(format!(
+                    "MOONCAKE_E2E_RAND_RUN_SECONDS must be a positive integer: {value}"
+                ));
+            }
+            profile.run_duration = Duration::from_secs(seconds);
+        }
+
+        Ok(Some(Self { gate, profile }))
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct E2ERandEvidence {
+    iterations: u64,
+    selected_operations: u64,
+    successful_reads: u64,
+    byte_comparisons: u64,
+    elapsed_milliseconds: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct E2ERandResult {
+    schema_version: u32,
+    status: ResultStatus,
+    seed: String,
+    masters: Vec<String>,
+    client_count: usize,
+    segment_size: u64,
+    value_size: usize,
+    key_count: usize,
+    configured_run_seconds: u64,
+    evidence: E2ERandEvidence,
+    first_failure: Option<FailureRecord>,
+}
+
+impl E2ERandResult {
+    fn new(
+        config: &E2ERandConfig,
+        status: ResultStatus,
+        masters: Vec<String>,
+        evidence: E2ERandEvidence,
+        first_failure: Option<FailureRecord>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            status,
+            seed: format!("0x{:016x}", config.gate.seed),
+            masters,
+            client_count: config.profile.client_count,
+            segment_size: config.profile.segment_size,
+            value_size: config.profile.value_size,
+            key_count: config.profile.key_count,
+            configured_run_seconds: config.profile.run_duration.as_secs(),
+            evidence,
+            first_failure,
+        }
+    }
+
+    fn write_atomic(&self, result_path: &Path) -> Result<(), String> {
+        let parent = result_path
+            .parent()
+            .ok_or_else(|| format!("result path {} has no parent", result_path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create result directory {}: {error}", parent.display()))?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| format!("create E2E rand result in {}: {error}", parent.display()))?;
+        serde_json::to_writer_pretty(&mut temporary, self)
+            .map_err(|error| format!("serialize E2E rand result: {error}"))?;
+        temporary
+            .write_all(b"\n")
+            .map_err(|error| format!("terminate E2E rand result: {error}"))?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|error| format!("sync E2E rand result: {error}"))?;
+        temporary.persist(result_path).map_err(|error| {
+            format!(
+                "publish E2E rand result to {}: {}",
+                result_path.display(),
+                error.error
+            )
+        })?;
+        Ok(())
+    }
+}
+
 impl GateConfig {
     fn from_env() -> Result<Option<Self>, String> {
         Self::from_map(&std::env::vars().collect())
     }
 
     fn from_map(env: &BTreeMap<String, String>) -> Result<Option<Self>, String> {
-        reject_dual_live_opt_ins(env)?;
+        reject_conflicting_live_opt_ins(env)?;
         if env.get("MOONCAKE_RUN_HA_CHAOS").map(String::as_str) != Some("1") {
             return Ok(None);
         }
@@ -933,17 +1155,20 @@ struct LivenessPreflightConfig {
     result_path: PathBuf,
 }
 
-fn reject_dual_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(), String> {
-    if env.get("MOONCAKE_RUN_HA_CHAOS").map(String::as_str) == Some("1")
-        && env
-            .get("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT")
-            .map(String::as_str)
-            == Some("1")
-    {
-        return Err(
-            "MOONCAKE_RUN_HA_CHAOS and MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT are mutually exclusive"
-                .into(),
-        );
+fn reject_conflicting_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(), String> {
+    let enabled = [
+        "MOONCAKE_RUN_HA_CHAOS",
+        "MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT",
+        "MOONCAKE_RUN_E2E_RAND",
+    ]
+    .into_iter()
+    .filter(|name| env.get(*name).map(String::as_str) == Some("1"))
+    .collect::<Vec<_>>();
+    if enabled.len() > 1 {
+        return Err(format!(
+            "live test opt-ins are mutually exclusive: {}",
+            enabled.join(", ")
+        ));
     }
     Ok(())
 }
@@ -951,7 +1176,7 @@ fn reject_dual_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(), String
 fn liveness_preflight_config_from_map(
     env: &BTreeMap<String, String>,
 ) -> Result<Option<LivenessPreflightConfig>, String> {
-    reject_dual_live_opt_ins(env)?;
+    reject_conflicting_live_opt_ins(env)?;
     if env
         .get("MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT")
         .map(String::as_str)
@@ -1473,7 +1698,14 @@ impl Drop for MasterSlot {
 
 impl MasterCluster {
     async fn start(config: &GateConfig) -> Result<Self, String> {
-        let reservations = (0..3)
+        Self::start_with_count(config, 3).await
+    }
+
+    async fn start_with_count(config: &GateConfig, count: usize) -> Result<Self, String> {
+        if count == 0 {
+            return Err("Master cluster must contain at least one process".into());
+        }
+        let reservations = (0..count)
             .map(|_| {
                 TcpListener::bind(("127.0.0.1", 0))
                     .map_err(|error| format!("reserve Master loopback port: {error}"))
@@ -1496,7 +1728,7 @@ impl MasterCluster {
                 master_root.display()
             )
         })?;
-        let mut slots = Vec::with_capacity(3);
+        let mut slots = Vec::with_capacity(count);
         for (index, (reservation, address)) in reservations
             .into_iter()
             .zip(addresses.into_iter())
@@ -2432,6 +2664,15 @@ impl ScenarioClient {
             .as_mut()
             .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
             .get(key)
+            .await
+    }
+
+    async fn remove(&self, key: &str) -> Result<(), StoreError> {
+        let mut client = self.client.lock().await;
+        client
+            .as_mut()
+            .ok_or_else(|| StoreError::Internal("scenario client was shut down".into()))?
+            .remove(key, false)
             .await
     }
 
@@ -3846,6 +4087,159 @@ async fn run_remount_checkpoint(
     })
 }
 
+fn cpp_e2e_rand_value(key_index: usize, value_size: usize) -> Vec<u8> {
+    let mut value = b"value_".to_vec();
+    let pattern = format!("{key_index}_").into_bytes();
+    while value.len() < value_size {
+        let remaining = value_size - value.len();
+        value.extend_from_slice(&pattern[..remaining.min(pattern.len())]);
+    }
+    value
+}
+
+async fn execute_cpp_e2e_rand_workload(
+    config: &E2ERandConfig,
+    clients: &[ScenarioClient],
+) -> Result<E2ERandEvidence, FailureRecord> {
+    let started = Instant::now();
+    let deadline = started + config.profile.run_duration;
+    let mut rng = config.gate.seed;
+    let mut evidence = E2ERandEvidence::default();
+
+    while Instant::now() < deadline {
+        evidence.iterations += 1;
+        for key_index in 0..config.profile.key_count {
+            if advance_seeded_index(&mut rng, 100) < 50 {
+                continue;
+            }
+            evidence.selected_operations += 1;
+            let key = format!("key_{key_index}");
+            let value = cpp_e2e_rand_value(key_index, config.profile.value_size);
+
+            let delete_client = advance_seeded_index(&mut rng, clients.len());
+            let _ = await_mutating_operation(clients[delete_client].remove(&key)).await;
+            let put_client = advance_seeded_index(&mut rng, clients.len());
+            let _ = await_mutating_operation(clients[put_client].put(&key, &value)).await;
+            let get_client = advance_seeded_index(&mut rng, clients.len());
+            if let Ok(actual) = clients[get_client].get(&key).await {
+                evidence.successful_reads += 1;
+                evidence.byte_comparisons += value.len() as u64;
+                if actual != value {
+                    let mismatch = actual
+                        .iter()
+                        .zip(&value)
+                        .position(|(actual, expected)| actual != expected)
+                        .unwrap_or_else(|| actual.len().min(value.len()));
+                    return Err(scenario_failure(
+                        "exact-read",
+                        format!(
+                            "client {get_client} returned stale or corrupt bytes for {key}: actual_len={}, expected_len={}, first_mismatch={mismatch}",
+                            actual.len(),
+                            value.len()
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    evidence.elapsed_milliseconds = started.elapsed().as_millis();
+    if evidence.selected_operations == 0 || evidence.successful_reads == 0 {
+        return Err(scenario_failure(
+            "evidence",
+            format!(
+                "E2E rand workload produced insufficient evidence: selected={}, successful_reads={}",
+                evidence.selected_operations, evidence.successful_reads
+            ),
+        ));
+    }
+    Ok(evidence)
+}
+
+async fn run_cpp_e2e_rand_live(config: E2ERandConfig) -> Result<(), String> {
+    let mut master_addresses = Vec::new();
+    let mut evidence = E2ERandEvidence::default();
+    let operation: Result<(), FailureRecord> = async {
+        let cluster = MasterCluster::start_with_count(&config.gate, 1)
+            .await
+            .map_err(|error| scenario_failure("master-start", error))?;
+        master_addresses = cluster.addresses().into_iter().collect();
+        let coordinator = tokio::time::timeout(
+            Duration::from_secs(10),
+            LeaderCoordinator::new_etcd(
+                vec![config.gate.etcd_endpoint.clone()],
+                &cluster.cluster_namespace,
+            ),
+        )
+        .await
+        .map_err(|_| scenario_failure("leader", "timed out creating E2E rand coordinator"))?
+        .map_err(|error| scenario_failure("leader", format!("create coordinator: {error}")))?;
+        let stable_view = wait_for_stable_leader(
+            &coordinator,
+            &cluster,
+            &mut [],
+            Instant::now() + Duration::from_secs(45),
+        )
+        .await
+        .map_err(|error| scenario_failure("leader", error))?;
+        if !master_addresses.contains(&stable_view.leader_address) {
+            return Err(scenario_failure(
+                "leader",
+                format!(
+                    "etcd elected {}, outside owned Masters {:?}",
+                    stable_view.leader_address, master_addresses
+                ),
+            ));
+        }
+
+        let mut clients = create_clients(
+            &config.gate,
+            &master_addresses,
+            config.profile.client_count,
+            config.profile.segment_size,
+        )
+        .await
+        .map_err(|error| scenario_failure("client-start", error))?;
+        let workload = execute_cpp_e2e_rand_workload(&config, &clients).await;
+        let cleanup = tear_down_scenario_clients(&mut clients).await;
+        match (workload, cleanup) {
+            (Ok(result), Ok(())) => {
+                evidence = result;
+                Ok(())
+            }
+            (Err(failure), Ok(())) => Err(failure),
+            (Ok(result), Err(error)) => {
+                evidence = result;
+                Err(scenario_failure("client-cleanup", error))
+            }
+            (Err(mut failure), Err(error)) => {
+                failure.message = format!("{}; client cleanup: {error}", failure.message);
+                Err(failure)
+            }
+        }
+    }
+    .await;
+
+    let result = match &operation {
+        Ok(()) => E2ERandResult::new(
+            &config,
+            ResultStatus::Pass,
+            master_addresses,
+            evidence,
+            None,
+        ),
+        Err(failure) => E2ERandResult::new(
+            &config,
+            ResultStatus::Fail,
+            master_addresses,
+            evidence,
+            Some(failure.clone()),
+        ),
+    };
+    result.write_atomic(&config.gate.result_path)?;
+    operation.map_err(|failure| format!("{}: {}", failure.stage, failure.message))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn three_master_small_client_liveness_preflight_preserves_sentinel_bytes() {
     let Some(liveness_config) =
@@ -3897,6 +4291,18 @@ async fn three_master_small_client_liveness_preflight_preserves_sentinel_bytes()
         panic!("small-client liveness preflight failed: {error}; cleanup: {cleanup:?}");
     }
     cleanup.expect("tear down liveness preflight clients");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_e2e_rand_test_cpp_e2erandtest_randomsequentialdeleteputget_d43f8d57() {
+    let Some(config) = E2ERandConfig::from_env().expect("valid E2E rand environment") else {
+        eprintln!("SKIP E2E rand parity: MOONCAKE_RUN_E2E_RAND is not enabled");
+        return;
+    };
+
+    run_cpp_e2e_rand_live(config)
+        .await
+        .expect("C++ E2E rand parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
