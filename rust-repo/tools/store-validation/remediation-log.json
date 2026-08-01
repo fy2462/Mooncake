@@ -1973,5 +1973,14 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_remove_then_get_is_absent_and_repeat_remove_is_safe",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-multibuffer-remove-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrSetupWithInvalidArgument",
+    "rust": "python/tests/test_pybind_client_parity.py:test_create_rejects_unreachable_master_invalid_protocol_and_empty_hostname",
+    "first_divergence": "Argument normalization covered only empty fields; no real binding test drove unreachable-master and unknown-protocol setup failures together with empty-hostname rejection.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_create_rejects_unreachable_master_invalid_protocol_and_empty_hostname",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-invalid-create-goal-019fbca4.typescript"
   }
 ]

@@ -576,3 +576,30 @@ async def test_remove_then_get_is_absent_and_repeat_remove_is_safe(cachelib_mast
             pass
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_unreachable_master_invalid_protocol_and_empty_hostname(
+    cachelib_master,
+):
+    rpc_port, metadata_port = cachelib_master
+    base = {
+        "local_hostname": "localhost",
+        "metadata_server": f"http://127.0.0.1:{metadata_port}/metadata",
+        "master_server_addr": f"127.0.0.1:{rpc_port}",
+        "protocol": "tcp",
+        "device": "",
+        "global_segment_size": SLAB_SIZE,
+        "local_buffer_size": SLAB_SIZE,
+    }
+
+    with pytest.raises(Exception) as unreachable_error:
+        await asyncio.wait_for(
+            MooncakeClient.create(**{**base, "master_server_addr": "192.0.2.1:1"}),
+            timeout=10,
+        )
+    assert not isinstance(unreachable_error.value, asyncio.TimeoutError)
+    with pytest.raises(Exception):
+        await MooncakeClient.create(**{**base, "protocol": "invalid_protocol"})
+    with pytest.raises(Exception):
+        await MooncakeClient.create(**{**base, "local_hostname": ""})
