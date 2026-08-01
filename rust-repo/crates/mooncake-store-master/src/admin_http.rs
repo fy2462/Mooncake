@@ -841,15 +841,26 @@ mod tests {
     }
 
     async fn put_complete_memory_key(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
+        put_complete_memory_key_in_segment(service, client_id, key, "admin_test_segment", 1024)
+            .await;
+    }
+
+    async fn put_complete_memory_key_in_segment(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        segment_name: &str,
+        slice_length: u64,
+    ) {
         let (high, low) = client_id.as_u64_pair();
         service
             .put_start(TonicRequest::new(proto::PutStartRequest {
                 client_id: Some(proto::Uuid { high, low }),
                 key: key.to_owned(),
-                slice_length: 1024,
+                slice_length,
                 config: Some(proto::ReplicateConfig {
                     replica_num: 1,
-                    preferred_segment: "admin_test_segment".to_string(),
+                    preferred_segment: segment_name.to_owned(),
                     ..Default::default()
                 }),
                 tenant_id: String::new(),
@@ -1169,6 +1180,72 @@ mod tests {
         assert_eq!(ready_status, StatusCode::OK);
         assert_eq!(unavailable_status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(restored_status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_multi_segment_and_key_inventory() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let client_id = Uuid::from_u128(0x300);
+        let (high, low) = client_id.as_u64_pair();
+        for (segment_name, base_addr, size) in [
+            ("seg_alpha", 0x4000_0000_0, 8 * 1024 * 1024),
+            ("seg_beta", 0x5000_0000_0, 4 * 1024 * 1024),
+        ] {
+            service
+                .mount_segment(TonicRequest::new(proto::MountSegmentRequest {
+                    client_id: Some(proto::Uuid { high, low }),
+                    segment_name: segment_name.to_string(),
+                    size,
+                    base_addr,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                    host_id: String::new(),
+                }))
+                .await
+                .unwrap();
+        }
+        put_complete_memory_key_in_segment(&service, client_id, "key_one", "seg_alpha", 1024).await;
+        put_complete_memory_key_in_segment(&service, client_id, "key_two", "seg_beta", 2048).await;
+        let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
+
+        let (segments_status, segments_body) = get_router(&router, "/get_all_segments").await;
+        assert_eq!(segments_status, StatusCode::OK);
+        assert!(segments_body.contains("seg_alpha"));
+        assert!(segments_body.contains("seg_beta"));
+
+        let (keys_status, keys_body) = get_router(&router, "/get_all_keys").await;
+        assert_eq!(keys_status, StatusCode::OK);
+        assert!(keys_body.contains("key_one"));
+        assert!(keys_body.contains("key_two"));
+
+        for segment_name in ["seg_alpha", "seg_beta"] {
+            let (query_status, query_body) =
+                get_router(&router, &format!("/query_segment?segment={segment_name}")).await;
+            assert_eq!(query_status, StatusCode::OK);
+            assert!(query_body.contains(segment_name));
+
+            let (status_status, status_body) = get_router(
+                &router,
+                &format!("/api/v1/segments/status?segment={segment_name}"),
+            )
+            .await;
+            let status_body: Value = serde_json::from_str(&status_body).unwrap();
+            assert_eq!(status_status, StatusCode::OK);
+            assert_eq!(status_body["success"], true);
+            assert_eq!(status_body["segment"], segment_name);
+        }
+
+        let (detail_status, detail_body) = get_router(&router, "/get_segments_detail").await;
+        let detail_body: Value = serde_json::from_str(&detail_body).unwrap();
+        assert_eq!(detail_status, StatusCode::OK);
+        assert_eq!(detail_body["total_segments"], 2);
+
+        let (batch_status, batch_body) =
+            get_router(&router, "/batch_query_keys?keys=key_one,key_two").await;
+        let batch_body: Value = serde_json::from_str(&batch_body).unwrap();
+        assert_eq!(batch_status, StatusCode::OK);
+        assert_eq!(batch_body["data"]["key_one"]["ok"], true);
+        assert_eq!(batch_body["data"]["key_two"]["ok"], true);
     }
 
     #[tokio::test]
