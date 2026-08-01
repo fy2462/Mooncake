@@ -474,6 +474,19 @@ fn uuid_json_string(uuid: Option<&proto::Uuid>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn get(state: AdminRuntimeState, path: &str) -> (StatusCode, String) {
+        let response = admin_router(state)
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
 
     fn leader_state() -> AdminRuntimeState {
         AdminRuntimeState::serving(Some(MasterView {
@@ -523,6 +536,40 @@ mod tests {
 
         assert_eq!(health["service_ready"], false);
         assert!(summary.contains("service_ready=false"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_metrics_summary_serving_response() {
+        let (status, body) = get(AdminRuntimeState::serving(None), "/metrics/summary").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("role=leader"));
+        assert!(body.contains("state=serving"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_health_standby_returns_ok_role() {
+        let state = AdminRuntimeState {
+            state: MasterRuntimeState::Standby,
+            leader_view: None,
+            service_ready: false,
+            service: None,
+        };
+        let (status, body) = get(state, "/health").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["role"], "standby");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_health_serving_returns_leader() {
+        let (status, body) = get(AdminRuntimeState::serving(None), "/health").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["role"], "leader");
     }
 
     #[test]

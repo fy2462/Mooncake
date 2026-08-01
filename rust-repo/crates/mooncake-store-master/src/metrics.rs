@@ -608,14 +608,18 @@ pub async fn serve_metrics_http(addr: SocketAddr) {
 }
 
 pub async fn serve_metrics_http_with_admin(addr: SocketAddr, admin_state: AdminRuntimeState) {
-    register_metrics();
-
-    let app = Router::new()
-        .route("/metrics", get(metrics_handler))
-        .merge(admin_router(admin_state));
+    let app = metrics_admin_router(admin_state);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Build the production metrics and administrative HTTP surface.
+pub fn metrics_admin_router(admin_state: AdminRuntimeState) -> Router {
+    register_metrics();
+    Router::new()
+        .route("/metrics", get(metrics_handler))
+        .merge(admin_router(admin_state))
 }
 
 /// HTTP handler for GET /metrics.
@@ -629,4 +633,31 @@ async fn metrics_handler() -> String {
     let mut buffer = vec![];
     encoder.encode(&metric_families, &mut buffer).unwrap();
     String::from_utf8(buffer).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_admin_http_metrics_returns_master_text() {
+        let response = metrics_admin_router(AdminRuntimeState::serving(None))
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("master_"));
+    }
 }
