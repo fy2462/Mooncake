@@ -363,12 +363,22 @@ mod tests {
 
     #[test]
     fn legacy_task_payload_defaults_to_default_tenant() {
-        let copy: ReplicaCopyPayload =
-            serde_json::from_str(r#"{"key":"k","source":"s","targets":["t"]}"#).unwrap();
-        let move_payload: ReplicaMovePayload =
-            serde_json::from_str(r#"{"key":"k","source":"s","target":"t"}"#).unwrap();
+        let copy: ReplicaCopyPayload = serde_json::from_str(
+            r#"{"key":"legacy_copy_key","source":"segment_0","targets":["segment_1"]}"#,
+        )
+        .unwrap();
+        let move_payload: ReplicaMovePayload = serde_json::from_str(
+            r#"{"key":"legacy_move_key","source":"segment_0","target":"segment_1"}"#,
+        )
+        .unwrap();
 
         assert_eq!(copy.tenant_id, "default");
+        assert_eq!(copy.key, "legacy_copy_key");
+        assert_eq!(copy.source, "segment_0");
+        assert_eq!(copy.targets, ["segment_1"]);
         assert_eq!(move_payload.tenant_id, "default");
+        assert_eq!(move_payload.key, "legacy_move_key");
+        assert_eq!(move_payload.source, "segment_0");
+        assert_eq!(move_payload.target, "segment_1");
     }
 }

@@ -1014,3 +1014,105 @@ async fn create_copy_task_rejects_unregistered_tenant_before_object_lookup() {
 
     assert_eq!(error.code(), Code::ResourceExhausted);
 }
+
+#[tokio::test]
+async fn tenant_tasks_carry_tenant_in_payload() {
+    let service = strict_service(false);
+    let source_owner = Uuid::new_v4();
+    let target_owner = Uuid::new_v4();
+    let writer = Uuid::new_v4();
+    let tenant_id = "tenant_for_async_task";
+    let key = "tenant_task_key";
+
+    service
+        .upsert_tenant_quota_policy(tenant_id, 16 * 1024)
+        .unwrap();
+    mount_memory(&service, source_owner, "segment_0").await;
+    mount_memory(&service, target_owner, "segment_1").await;
+
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(writer)),
+            key: key.into(),
+            slice_length: 1024,
+            config: Some(replica_config("segment_0")),
+            tenant_id: tenant_id.into(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(writer)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: tenant_id.into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let copy_task_id = MasterService::create_copy_task(
+        &service,
+        Request::new(proto::CreateCopyTaskRequest {
+            key: key.into(),
+            targets: vec!["segment_1".into()],
+            tenant_id: tenant_id.into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .task_id
+    .unwrap();
+    let move_task_id = MasterService::create_move_task(
+        &service,
+        Request::new(proto::CreateMoveTaskRequest {
+            key: key.into(),
+            source: "segment_0".into(),
+            target: "segment_1".into(),
+            tenant_id: tenant_id.into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .task_id
+    .unwrap();
+
+    let assignments = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto_uuid(source_owner)),
+            batch_size: 16,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks;
+    assert_eq!(assignments.len(), 2);
+
+    let copy_task_id = Uuid::from_u64_pair(copy_task_id.high, copy_task_id.low);
+    let move_task_id = Uuid::from_u64_pair(move_task_id.high, move_task_id.low);
+    let mut saw_copy = false;
+    let mut saw_move = false;
+    for assignment in assignments {
+        let assignment_id = assignment.id.as_ref().unwrap();
+        let assignment_id = Uuid::from_u64_pair(assignment_id.high, assignment_id.low);
+        let payload: serde_json::Value = serde_json::from_str(&assignment.payload).unwrap();
+        if assignment_id == copy_task_id {
+            assert_eq!(payload["tenant_id"], tenant_id);
+            assert_eq!(payload["key"], key);
+            saw_copy = true;
+        } else if assignment_id == move_task_id {
+            assert_eq!(payload["tenant_id"], tenant_id);
+            assert_eq!(payload["key"], key);
+            saw_move = true;
+        }
+    }
+    assert!(saw_copy);
+    assert!(saw_move);
+}
