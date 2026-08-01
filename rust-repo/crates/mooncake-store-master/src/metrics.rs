@@ -31,7 +31,9 @@
 use crate::admin_http::{AdminRuntimeState, admin_router};
 use axum::{Router, routing::get};
 use lazy_static::lazy_static;
-use prometheus::{Encoder, Histogram, IntCounter, IntGauge, TextEncoder, register_histogram};
+use prometheus::{
+    Encoder, Histogram, IntCounter, IntGauge, TextEncoder, core::Collector, register_histogram,
+};
 use std::net::SocketAddr;
 
 mod batch;
@@ -283,6 +285,16 @@ lazy_static! {
         "total OpLog checksum failures"
     )
     .unwrap();
+    pub static ref OPLOG_GAP_RESOLVE_ATTEMPTS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_gap_resolve_attempts_total",
+        "total OpLog gap resolution attempts"
+    )
+    .unwrap();
+    pub static ref OPLOG_GAP_RESOLVE_SUCCESS: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_gap_resolve_success_total",
+        "total successful OpLog gap resolutions"
+    )
+    .unwrap();
     pub static ref OPLOG_ETCD_WRITE_FAILURES: IntCounter = IntCounter::new(
         "mooncake_store_oplog_etcd_write_failures_total",
         "total failed etcd OpLog write operations"
@@ -296,6 +308,11 @@ lazy_static! {
     pub static ref OPLOG_WATCH_DISCONNECTIONS: IntCounter = IntCounter::new(
         "mooncake_store_oplog_watch_disconnections_total",
         "total OpLog watch disconnections"
+    )
+    .unwrap();
+    pub static ref OPLOG_APPLIED_ENTRIES: IntCounter = IntCounter::new(
+        "mooncake_store_oplog_applied_entries_total",
+        "total OpLog entries successfully applied on standby"
     )
     .unwrap();
     pub static ref OPLOG_BATCH_COMMITS: IntCounter = IntCounter::new(
@@ -314,6 +331,15 @@ lazy_static! {
         vec![
             100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0, 500_000.0,
             1_000_000.0, 5_000_000.0
+        ]
+    )
+    .unwrap();
+    pub static ref OPLOG_APPLY_LATENCY_US: Histogram = register_histogram!(
+        "mooncake_store_oplog_apply_latency_us",
+        "latency of applying OpLog entries in microseconds",
+        vec![
+            50.0, 100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 50_000.0, 100_000.0,
+            500_000.0, 1_000_000.0
         ]
     )
     .unwrap();
@@ -505,9 +531,12 @@ pub fn register_metrics() {
     register_gauge(&PENDING_MUTATION_QUEUE_SIZE);
     register_counter(&OPLOG_SKIPPED_ENTRIES);
     register_counter(&OPLOG_CHECKSUM_FAILURES);
+    register_counter(&OPLOG_GAP_RESOLVE_ATTEMPTS);
+    register_counter(&OPLOG_GAP_RESOLVE_SUCCESS);
     register_counter(&OPLOG_ETCD_WRITE_FAILURES);
     register_counter(&OPLOG_ETCD_WRITE_RETRIES);
     register_counter(&OPLOG_WATCH_DISCONNECTIONS);
+    register_counter(&OPLOG_APPLIED_ENTRIES);
     register_counter(&OPLOG_BATCH_COMMITS);
     register_counter(&OPLOG_SYNC_BATCH_COMMITS);
     register_counter(&OPLOG_WRITER_SUBMITTED);
@@ -518,6 +547,53 @@ pub fn register_metrics() {
     register_histogram_metric(&OPLOG_WRITER_DURABLE_WAIT_US);
     register_counter(&OPLOG_WRITER_POISON_EVENTS);
     register_counter(&OPLOG_WRITER_POST_POISON_FAILURES);
+    register_histogram_metric(&OPLOG_APPLY_LATENCY_US);
+}
+
+/// Encode C++-compatible aliases from the live Rust HA gauge state.
+///
+/// These aliases are derived on demand and do not maintain a second metric
+/// state or rename the ordinary Rust Prometheus families.
+pub fn encode_ha_compat_metrics() -> Result<String, String> {
+    let aliases = [
+        (
+            "ha_oplog_last_sequence_id",
+            "latest OpLog sequence ID on primary",
+            OPLOG_LAST_SEQ_ID.get(),
+        ),
+        (
+            "ha_oplog_applied_sequence_id",
+            "standby applied OpLog sequence ID",
+            OPLOG_APPLIED_SEQ_ID.get(),
+        ),
+        (
+            "ha_oplog_standby_lag",
+            "standby replication lag in entries",
+            OPLOG_STANDBY_LAG.get(),
+        ),
+    ];
+    let mut metric_families = Vec::with_capacity(aliases.len());
+    for (name, help, value) in aliases {
+        let gauge = IntGauge::new(name, help).map_err(|error| error.to_string())?;
+        gauge.set(value);
+        metric_families.extend(gauge.collect());
+    }
+
+    let mut buffer = Vec::new();
+    TextEncoder::new()
+        .encode(&metric_families, &mut buffer)
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(buffer).map_err(|error| error.to_string())
+}
+
+/// Return a compact snapshot of the current HA sequence gauges.
+pub fn ha_summary() -> String {
+    format!(
+        "last_seq={} applied_seq={} standby_lag={}",
+        OPLOG_LAST_SEQ_ID.get(),
+        OPLOG_APPLIED_SEQ_ID.get(),
+        OPLOG_STANDBY_LAG.get()
+    )
 }
 
 /// Start the Prometheus metrics HTTP server.

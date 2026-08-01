@@ -686,5 +686,149 @@
     "focused_command": "cargo test -p mooncake-store-client --test test_buffer_allocator cpp_parity_client_buffer_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --lib count_min_sketch::tests::cpp_parity_client_local_hot_cache_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_buffer_allocator && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-client-buffer-count-sketch-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSetOpLogLastSequenceId",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_sets_last_sequence_id",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSetOpLogAppliedSequenceId",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_sets_applied_sequence_id",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSetOpLogStandbyLag",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_sets_standby_lag",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSetOpLogPendingEntries",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_sets_pending_oplog_entries",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSetPendingMutationQueueSize",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_sets_pending_mutation_queue_size",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestIncOpLogSkippedEntries",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_increments_skipped_entries_once",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestIncOpLogChecksumFailures",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_increments_checksum_failures_by_two",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestIncGapResolveCounters",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_increments_gap_resolve_counters",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestIncOpLogEtcdWriteFailuresAndRetries",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_increments_etcd_failures_and_retries",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestIncWatchDisconnectionsAndAppliedEntries",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_increments_watch_disconnects_and_applied_entries",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestRecordOpLogEtcdWriteLatency",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_observes_etcd_write_latencies_without_panic",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestRecordOpLogApplyLatency",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_observes_apply_latencies_without_panic",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSerializeMetrics",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_serialization_exposes_cpp_names",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestGetSummaryString",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_summary_contains_sequence_labels",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestSingletonInstance",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_global_accesses_share_state",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/ha_metric_manager_test.cpp:HAMetricManagerTest.TestConcurrentAccess",
+    "rust": "mooncake-store-master/tests/test_ha_metrics.rs:cpp_parity_ha_metric_concurrent_applied_entry_increments_are_exact",
+    "first_divergence": "Rust lacked a discoverable direct assertion for this exact HA metric result and, where required, the production counter, histogram, compatibility serialization, or summary boundary.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_ha_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_ha_metrics && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-ha-metrics-goal-019fbaa7.typescript"
   }
 ]
