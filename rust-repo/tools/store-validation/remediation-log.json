@@ -1352,5 +1352,32 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_local_first explicit_preferred_segment_falls_back_to_local_first_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_local_first && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-local-first-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.GetReplicaList",
+    "rust": "mooncake-store-master/tests/test_master_basic_lifecycle.rs:get_replica_list_missing_and_completed_parity",
+    "first_divergence": "Rust already returned NotFound for a missing key and routed completed replicas, but no discoverable direct test combined the exact missing lookup with a successful one-replica lifecycle and nonempty final response.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_basic_lifecycle get_replica_list_missing_and_completed_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_basic_lifecycle && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-basic-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.RemoveObject",
+    "rust": "mooncake-store-master/tests/test_master_basic_lifecycle.rs:remove_completed_and_missing_object_parity",
+    "first_divergence": "Rust already supported normal completed-object removal and NotFound errors, but no discoverable test reproduced the exact successful lifecycle followed by removed lookup and separate missing remove outcomes.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_basic_lifecycle remove_completed_and_missing_object_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_basic_lifecycle && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-basic-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.SingleSliceMultiReplicaFlow",
+    "rust": "mooncake-store-master/tests/test_master_basic_lifecycle.rs:single_slice_three_replica_descriptor_lifecycle_parity",
+    "first_divergence": "Rust allocator tests covered distinct segments, but no discoverable service test asserted all three descriptor counts, statuses, and 5 MiB sizes before and after PutEnd plus processing lookup failure.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_basic_lifecycle single_slice_three_replica_descriptor_lifecycle_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_basic_lifecycle && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-basic-lifecycle-goal-019fbca4.typescript"
   }
 ]
