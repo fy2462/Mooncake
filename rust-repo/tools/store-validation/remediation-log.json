@@ -646,7 +646,7 @@
     "cpp": "client_buffer_test.cpp:ClientBufferTest.MultipleAllocations",
     "rust": "mooncake-store-client/tests/test_buffer_allocator.rs:cpp_parity_client_buffer_test_cpp_clientbuffertest_multipleallocations_fe5945cf",
     "first_divergence": "Rust tested only two small allocation offsets and aggregate accounting, without eight simultaneous 64-KiB writable handles or exact bytes retained across the full live set.",
-    "repair_commit": "PENDING",
+    "repair_commit": "e394f8a7",
     "focused_command": "cargo test -p mooncake-store-client --test test_buffer_allocator cpp_parity_client_buffer_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --lib count_min_sketch::tests::cpp_parity_client_local_hot_cache_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_buffer_allocator && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-client-buffer-count-sketch-goal-019fbaa7.typescript"
@@ -655,7 +655,7 @@
     "cpp": "client_buffer_test.cpp:ClientBufferTest.SmallAllocation",
     "rust": "mooncake-store-client/tests/test_buffer_allocator.rs:cpp_parity_client_buffer_test_cpp_clientbuffertest_smallallocation_a47348f7",
     "first_divergence": "Rust's alignment test requested 100 bytes and did not prove the exact one-byte logical size plus writable 0xFF readback contract.",
-    "repair_commit": "PENDING",
+    "repair_commit": "e394f8a7",
     "focused_command": "cargo test -p mooncake-store-client --test test_buffer_allocator cpp_parity_client_buffer_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --lib count_min_sketch::tests::cpp_parity_client_local_hot_cache_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_buffer_allocator && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-client-buffer-count-sketch-goal-019fbaa7.typescript"
@@ -664,7 +664,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.CountMinSketchBasic",
     "rust": "mooncake-store-master/src/count_min_sketch.rs:cpp_parity_client_local_hot_cache_test_cpp_localhotcachetest_countminsketchbasic_010a98d8",
     "first_divergence": "Existing Rust sketch tests used approximate inequalities and did not jointly assert exact increment returns, unseen zero, and both odd-value decay results.",
-    "repair_commit": "PENDING",
+    "repair_commit": "e394f8a7",
     "focused_command": "cargo test -p mooncake-store-client --test test_buffer_allocator cpp_parity_client_buffer_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --lib count_min_sketch::tests::cpp_parity_client_local_hot_cache_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_buffer_allocator && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-client-buffer-count-sketch-goal-019fbaa7.typescript"
@@ -673,7 +673,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.CountMinSketchAutoDecay",
     "rust": "mooncake-store-master/src/count_min_sketch.rs:cpp_parity_client_local_hot_cache_test_cpp_localhotcachetest_countminsketchautodecay_0164cdfb",
     "first_divergence": "Existing Rust auto-decay coverage only asserted a loose upper bound after a larger threshold and omitted the exact pre-decay return 16 and stored count 8.",
-    "repair_commit": "PENDING",
+    "repair_commit": "e394f8a7",
     "focused_command": "cargo test -p mooncake-store-client --test test_buffer_allocator cpp_parity_client_buffer_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --lib count_min_sketch::tests::cpp_parity_client_local_hot_cache_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_buffer_allocator && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-client-buffer-count-sketch-goal-019fbaa7.typescript"
@@ -682,7 +682,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.CountMinSketchZeroDimensions",
     "rust": "mooncake-store-master/src/count_min_sketch.rs:cpp_parity_client_local_hot_cache_test_cpp_localhotcachetest_countminsketchzerodimensions_02ed20e0",
     "first_divergence": "Rust implemented zero-dimension defaulting but no discoverable test invoked both zero dimensions, inspected both defaults, and proved the normalized sketch remained usable.",
-    "repair_commit": "PENDING",
+    "repair_commit": "e394f8a7",
     "focused_command": "cargo test -p mooncake-store-client --test test_buffer_allocator cpp_parity_client_buffer_test_cpp_ -- --nocapture && cargo test -p mooncake-store-master --lib count_min_sketch::tests::cpp_parity_client_local_hot_cache_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_buffer_allocator && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-client-buffer-count-sketch-goal-019fbaa7.typescript"
