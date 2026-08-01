@@ -1627,7 +1627,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.HardPinObjectNotEvicted",
     "rust": "mooncake-store-master/tests/test_master_hard_pin_parity.rs:hard_pin_object_not_evicted_parity",
     "first_divergence": "Rust used a test-only explicit eviction cycle and did not reproduce the 16-MiB segment, twenty 1-MiB allocation attempts, 200-ms lease expiry, 700-ms automatic-eviction wait, forced cleanup, and final absence oracle.",
-    "repair_commit": "PENDING",
+    "repair_commit": "86c19883",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_hard_pin_parity hard_pin_object_not_evicted_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_hard_pin_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-hard-pin-goal-019fbca4.typescript"
@@ -1636,7 +1636,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.HardPinWithSoftPinEvictionOrder",
     "rust": "mooncake-store-master/tests/test_master_hard_pin_parity.rs:hard_pin_with_soft_pin_eviction_order_parity",
     "first_divergence": "Rust did not combine a live 10-second soft pin, enabled soft-pin eviction, 0.5 eviction ratio, twenty allocation attempts, and the timed automatic-eviction observation that only requires the hard-pinned key to survive.",
-    "repair_commit": "PENDING",
+    "repair_commit": "86c19883",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_hard_pin_parity hard_pin_with_soft_pin_eviction_order_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_hard_pin_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-hard-pin-goal-019fbca4.typescript"
@@ -1645,7 +1645,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.HardPinDefaultIsFalse",
     "rust": "mooncake-store-master/tests/test_master_hard_pin_parity.rs:hard_pin_default_is_false_parity",
     "first_divergence": "Rust compared normal and hard-pinned keys only after explicit eviction, so it lacked the C++ oracle's narrower immediate successful start, completion, and lookup path for both default and requested hard-pin configurations.",
-    "repair_commit": "PENDING",
+    "repair_commit": "86c19883",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_hard_pin_parity hard_pin_default_is_false_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_hard_pin_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-hard-pin-goal-019fbca4.typescript"
