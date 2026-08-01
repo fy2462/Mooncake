@@ -2297,5 +2297,68 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_service_unavailable_route_matrix",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-service-unavailable-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QuerySegmentReturnsDataForExistingSegment",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_segment_existing_response",
+    "first_divergence": "The active query-segment HTTP route had no request-level proof for its C++ text response.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_segment_existing_response",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.QuerySegmentReturns500ForNonexistentSegment",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_query_segment_missing_is_500",
+    "first_divergence": "No HTTP test proved that an unknown segment maps the service error to the legacy 500 response.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_segment_missing_is_500",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.GetAllSegmentsReturnsSegments",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_get_all_segments_returns_mounted_segment",
+    "first_divergence": "The newly wired Memory-only segment listing route lacked active-service HTTP evidence.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_get_all_segments_returns_mounted_segment",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.GetSegmentsDetailReturnsDetailedInfo",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_segments_detail_response",
+    "first_divergence": "Segment-detail JSON was covered only as a formatter unit, not through an active HTTP service fixture.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segments_detail_response",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.SegmentStatusReturnsDataForExistingSegment",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_segment_status_existing",
+    "first_divergence": "The segment-status success response had no request-level active-service coverage.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segment_status_existing",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.SegmentStatusFailsWithMissingSegment",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_segment_status_missing_parameter_is_400",
+    "first_divergence": "The missing segment query-parameter boundary was not exercised through HTTP.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segment_status_missing_parameter_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.SegmentStatusReturnsErrorForNonexistentSegment",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_segment_status_unknown_is_404",
+    "first_divergence": "The unknown segment-to-404 mapping lacked request-level evidence.",
+    "repair_commit": "0294293a",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segment_status_unknown_is_404",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-segment-routes-goal-019fbe77.typescript"
   }
 ]
