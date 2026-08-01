@@ -332,6 +332,197 @@ fn test_remove_by_regex_tenant_scoped() {
 }
 
 #[test]
+fn regex_lookup_and_removal_are_tenant_scoped_parity() {
+    let service = strict_service(
+        &["default", "tenant_regex_a", "tenant_regex_b"],
+        Duration::ZERO,
+    );
+    let client_id = Uuid::new_v4();
+    mount_seg(&service, "regex-parity:1", client_id, 16 * 1024);
+    for tenant_id in ["default", "tenant_regex_a", "tenant_regex_b"] {
+        put_object(&service, "regex_shared_key", tenant_id, client_id, 1024);
+    }
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let default_matches = MasterService::get_replica_list_by_regex(
+            &service,
+            Request::new(proto::GetReplicaListByRegexRequest {
+                key_regex: "^regex_shared".into(),
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(default_matches.entries.len(), 1);
+
+        let removed_default = MasterService::remove_by_regex(
+            &service,
+            Request::new(proto::RemoveByRegexRequest {
+                pattern: "^regex_shared".into(),
+                force: true,
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(removed_default.removed_count, 1);
+        assert!(MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "regex_shared_key".into(),
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .is_err());
+        for tenant_id in ["tenant_regex_a", "tenant_regex_b"] {
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "regex_shared_key".into(),
+                    tenant_id: tenant_id.into(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let removed_a = MasterService::remove_by_regex(
+            &service,
+            Request::new(proto::RemoveByRegexRequest {
+                pattern: "^regex_shared".into(),
+                force: true,
+                tenant_id: "tenant_regex_a".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(removed_a.removed_count, 1);
+        assert!(MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "regex_shared_key".into(),
+                tenant_id: "tenant_regex_a".into(),
+            }),
+        )
+        .await
+        .is_err());
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "regex_shared_key".into(),
+                tenant_id: "tenant_regex_b".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    });
+}
+
+#[test]
+fn batch_remove_and_remove_all_are_tenant_scoped_parity() {
+    let service = strict_service(
+        &["default", "tenant_batch_remove_a", "tenant_batch_remove_b"],
+        Duration::ZERO,
+    );
+    let client_id = Uuid::new_v4();
+    let key = "tenant_batch_remove_shared_key";
+    mount_seg(&service, "tenant-remove-parity:1", client_id, 16 * 1024);
+    for tenant_id in ["default", "tenant_batch_remove_a", "tenant_batch_remove_b"] {
+        put_object(&service, key, tenant_id, client_id, 1024);
+    }
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let removed_a = MasterService::batch_remove(
+            &service,
+            Request::new(proto::BatchRemoveRequest {
+                keys: vec![key.into()],
+                force: true,
+                tenant_id: "tenant_batch_remove_a".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(removed_a.statuses, [0]);
+        assert!(MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: "tenant_batch_remove_a".into(),
+            }),
+        )
+        .await
+        .is_err());
+        for tenant_id in ["default", "tenant_batch_remove_b"] {
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: key.into(),
+                    tenant_id: tenant_id.into(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+
+        let removed_b = MasterService::remove_all(
+            &service,
+            Request::new(proto::RemoveAllRequest {
+                force: true,
+                tenant_id: "tenant_batch_remove_b".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(removed_b.removed_count, 1);
+        assert!(MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: "tenant_batch_remove_b".into(),
+            }),
+        )
+        .await
+        .is_err());
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let removed_default = MasterService::remove_all(
+            &service,
+            Request::new(proto::RemoveAllRequest {
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(removed_default.removed_count, 1);
+        assert!(MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: "default".into(),
+            }),
+        )
+        .await
+        .is_err());
+    });
+}
+
+#[test]
 fn test_get_all_keys_filters_by_tenant() {
     let service = strict_service(&["tenant-Z", "default"], Duration::ZERO);
     let cid = Uuid::new_v4();
