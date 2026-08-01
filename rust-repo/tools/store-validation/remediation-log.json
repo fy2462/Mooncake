@@ -2630,5 +2630,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_cpp_parity_recovering_fatal_error && cargo test -p mooncake-store-master --lib test_etcd_recovery_fatal_error_transitions_actual_state_machine",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-standby-recovery-terminal-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "buffer_allocator_test.cpp:BufferAllocatorTest.ParallelAllocation",
+    "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_buffer_allocator_test_cpp_bufferallocatortest_parallelallocation_c8e3e399",
+    "first_divergence": "The existing Rust concurrency test held one mutex across allocation, validation, and release, used 128-byte requests, and did not validate the endpoint or non-null effective address of successful descriptors.",
+    "repair_commit": "7c11a538",
+    "focused_command": "cargo test -p mooncake-store-master --test test_allocator cpp_parity_buffer_allocator_test_cpp_bufferallocatortest_parallelallocation_c8e3e399 -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-buffer-allocator-parallel-goal-019fbe77.typescript"
   }
 ]
