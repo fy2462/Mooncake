@@ -2009,5 +2009,14 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_create_accepts_initialized_external_transfer_engine",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-external-engine-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.TestCopyMoveQueryTask",
+    "rust": "python/tests/test_pybind_client_parity.py:test_copy_move_query_task_reports_id_type_and_success",
+    "first_divergence": "The PyO3 query_task conversion discarded QueryTaskResponse.task_type, so Python callers could not distinguish REPLICA_COPY from REPLICA_MOVE even though the core response preserved it.",
+    "repair_commit": "810c3b34",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_copy_move_query_task_reports_id_type_and_success",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-copy-move-task-goal-019fbca4.typescript"
   }
 ]
