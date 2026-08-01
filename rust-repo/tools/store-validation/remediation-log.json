@@ -1825,7 +1825,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.RemoveAllOnEmptyStore",
     "rust": "python/tests/test_pybind_client_parity.py:test_remove_all_empty_store_returns_zero",
     "first_divergence": "No real binding test proved remove_all on an empty Store returns the exact zero count.",
-    "repair_commit": "PENDING",
+    "repair_commit": "33c39d74",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_remove_all_empty_store_returns_zero",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-remove-parts-goal-019fbca4.typescript"
@@ -1834,7 +1834,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.BatchRemoveBasic",
     "rust": "python/tests/test_pybind_client_parity.py:test_batch_remove_preserves_status_order_and_unselected_key",
     "first_divergence": "No real PyO3 test proved ordered success statuses and retention of the unselected key together.",
-    "repair_commit": "PENDING",
+    "repair_commit": "33c39d74",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_batch_remove_preserves_status_order_and_unselected_key",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-remove-parts-goal-019fbca4.typescript"
@@ -1843,7 +1843,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.BatchRemoveNonExistentKeys",
     "rust": "python/tests/test_pybind_client_parity.py:test_batch_remove_missing_keys_preserves_cardinality",
     "first_divergence": "No binding test proved two missing-key removals still return a two-element result vector.",
-    "repair_commit": "PENDING",
+    "repair_commit": "33c39d74",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_batch_remove_missing_keys_preserves_cardinality",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-remove-parts-goal-019fbca4.typescript"
@@ -1852,7 +1852,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.PutPartsBasic",
     "rust": "python/tests/test_pybind_client_parity.py:test_put_parts_concatenates_exact_bytes",
     "first_divergence": "PyO3 put_parts exposed Rust unit as an empty tuple on success and lacked real evidence for exact multipart concatenation; it now returns zero and the test proves length and bytes.",
-    "repair_commit": "PENDING",
+    "repair_commit": "33c39d74",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_put_parts_concatenates_exact_bytes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-remove-parts-goal-019fbca4.typescript"
