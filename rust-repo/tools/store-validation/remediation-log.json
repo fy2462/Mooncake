@@ -2405,5 +2405,59 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_query_key_missing_parameter_is_404",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-key-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.BatchQueryKeysWithNoKeysParamReturns400",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_keys_missing_parameter_is_400",
+    "first_divergence": "The missing keys query-parameter boundary had no active-service request proof.",
+    "repair_commit": "81b2adb8",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_missing_parameter_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.BatchQueryKeysWithEmptyKeysParamReturns400",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_keys_empty_parameter_is_400",
+    "first_divergence": "The empty keys query-parameter boundary had no active-service request proof.",
+    "repair_commit": "81b2adb8",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_empty_parameter_is_400",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.BatchQueryKeysReturnsDataForExistingKey",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_keys_existing_key",
+    "first_divergence": "Existing-object batch-query JSON was not exercised through the active HTTP route.",
+    "repair_commit": "81b2adb8",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_existing_key",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.BatchQueryKeysReturnsErrorForNonexistentKey",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_keys_missing_key_is_embedded_error",
+    "first_divergence": "The unknown-key embedded-error result had no request-level JSON proof.",
+    "repair_commit": "81b2adb8",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_missing_key_is_embedded_error",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.BatchQueryKeysMultipleKeys",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_keys_multiple_keys",
+    "first_divergence": "The multi-key success and cleanup path was not exercised through HTTP.",
+    "repair_commit": "81b2adb8",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_multiple_keys",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerWithServiceTest.BatchQueryKeysWithExistingAndNonexistentKeys",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_batch_query_keys_mixed_results",
+    "first_divergence": "Mixed existing and unknown key results had no request-level per-key success/error proof.",
+    "repair_commit": "81b2adb8",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_keys_mixed_results",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-batch-query-goal-019fbe77.typescript"
   }
 ]
