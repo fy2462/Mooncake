@@ -2558,5 +2558,23 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_drain_job_full_lifecycle",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-drain-routes-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.ServiceUnavailableAfterDelegateCleared",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_segments_delegate_clear_transition",
+    "first_divergence": "The Rust admin service delegate was fixed at router construction and clearing it could not close the shared readiness gate.",
+    "repair_commit": "c5bd4358",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segments_delegate_clear_transition",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-service-gate-transitions-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.ServiceUnavailableAfterSetServiceAvailableFalse",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_segments_service_gate_toggle",
+    "first_divergence": "The service availability gate had no three-request false/true transition proof through one live router.",
+    "repair_commit": "c5bd4358",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_segments_service_gate_toggle",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-service-gate-transitions-goal-019fbe77.typescript"
   }
 ]
