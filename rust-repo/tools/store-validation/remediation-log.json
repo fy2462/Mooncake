@@ -1924,7 +1924,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.UpsertBasic",
     "rust": "python/tests/test_pybind_client_parity.py:test_upsert_create_and_same_size_replace_returns_visible_result_and_bytes",
     "first_divergence": "PyO3 upsert returned replica tuples rather than the C++-compatible integer zero, and no binding test proved same-size replacement bytes.",
-    "repair_commit": "PENDING",
+    "repair_commit": "7c5af864",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_upsert_create_and_same_size_replace_returns_visible_result_and_bytes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-upsert-shapes-goal-019fbca4.typescript"
@@ -1933,7 +1933,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.UpsertFrom",
     "rust": "python/tests/test_pybind_client_parity.py:test_upsert_from_replaces_registered_buffer",
     "first_divergence": "PyO3 upsert_from used the caller thread's absent Tokio reactor and returned replica dictionaries instead of integer zero; the binding test now proves two registered same-size values replace exactly.",
-    "repair_commit": "PENDING",
+    "repair_commit": "7c5af864",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_upsert_from_replaces_registered_buffer",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-upsert-shapes-goal-019fbca4.typescript"
@@ -1942,7 +1942,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.UpsertParts",
     "rust": "python/tests/test_pybind_client_parity.py:test_upsert_parts_concatenates_and_replaces_same_size",
     "first_divergence": "PyO3 upsert_parts returned replica tuples rather than zero and lacked exact concatenation and same-total-size replacement evidence.",
-    "repair_commit": "PENDING",
+    "repair_commit": "7c5af864",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_upsert_parts_concatenates_and_replaces_same_size",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-upsert-shapes-goal-019fbca4.typescript"
@@ -1951,7 +1951,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.BatchUpsertFrom",
     "rust": "python/tests/test_pybind_client_parity.py:test_batch_upsert_from_preserves_status_order_and_bytes",
     "first_divergence": "PyO3 batch_upsert_from used the caller thread's absent Tokio reactor and returned nested replica descriptors instead of one ordered zero status per key.",
-    "repair_commit": "PENDING",
+    "repair_commit": "7c5af864",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_batch_upsert_from_preserves_status_order_and_bytes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-upsert-shapes-goal-019fbca4.typescript"
