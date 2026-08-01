@@ -115,13 +115,34 @@ impl MooncakeClient {
                 continue;
             }
             match self.switch_master(&addr).await {
-                Ok(()) => return Ok(addr),
+                Ok(()) => match self.ping_current_master_and_remount().await {
+                    Ok(()) => return Ok(addr),
+                    Err(err) => last_error = Some(err),
+                },
                 Err(err) => last_error = Some(err),
             }
         }
         Err(last_error.unwrap_or_else(|| {
             StoreError::Internal("no alternate master candidate connected".to_string())
         }))
+    }
+
+    async fn ping_current_master_and_remount(&mut self) -> StoreResult<()> {
+        let response = self
+            .master
+            .ping(self.rpc_request(proto::PingRequest {
+                client_id: Some(self.client_id_proto()),
+                mounted_segments: vec![],
+                tenant_id: self.tenant_id.clone(),
+            }))
+            .await
+            .map_err(Self::rpc_status_to_error)?
+            .into_inner();
+        if response.client_status == proto::ClientStatus::NeedRemount as i32 {
+            self.remount_all().await?;
+        }
+        self.health_state.record_success();
+        Ok(())
     }
 
     /// Send a ping to the master. If the master returns NeedRemount, trigger an

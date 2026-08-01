@@ -133,6 +133,44 @@ fn cpp_chaos_rand_live_config_is_scenario_specific_and_duration_bounded() {
 }
 
 #[test]
+fn cpp_chaos_test_live_config_selects_one_exact_oracle() {
+    let none = BTreeMap::new();
+    assert!(CppChaosTestConfig::from_map(&none).unwrap().is_none());
+
+    let env = BTreeMap::from([
+        (
+            "MOONCAKE_RUN_CPP_CHAOS_TEST".into(),
+            "LeaderKilledFailover".into(),
+        ),
+        (
+            "MOONCAKE_HA_ETCD_ENDPOINT".into(),
+            "http://127.0.0.1:42379".into(),
+        ),
+        (
+            "MOONCAKE_HA_MASTER_BIN".into(),
+            "/tmp/mooncake-master".into(),
+        ),
+        (
+            "MOONCAKE_CPP_CHAOS_TEST_RESULT".into(),
+            "/tmp/cpp-chaos-test/result.json".into(),
+        ),
+        (
+            "MOONCAKE_HA_ARTIFACT_ROOT".into(),
+            "/tmp/cpp-chaos-test".into(),
+        ),
+        ("MOONCAKE_HA_SEED".into(), "0x4d4f4f4e48414348".into()),
+    ]);
+    let config = CppChaosTestConfig::from_map(&env)
+        .unwrap()
+        .expect("enabled exact chaos test");
+    assert_eq!(config.case, CppChaosTestCase::LeaderKilledFailover);
+
+    let mut unknown = env;
+    unknown.insert("MOONCAKE_RUN_CPP_CHAOS_TEST".into(), "UnknownCase".into());
+    assert!(CppChaosTestConfig::from_map(&unknown).is_err());
+}
+
+#[test]
 fn large_profile_exceeds_capacity_and_values_are_key_distinct() {
     let total_value_bytes = LARGE_KEY_COUNT * LARGE_VALUE_LEN;
     let total_client_capacity = LARGE_CLIENT_COUNT * LARGE_CLIENT_SEGMENT_SIZE as usize;
@@ -1407,6 +1445,52 @@ impl CppChaosRandConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+enum CppChaosTestCase {
+    LeaderKilledFailover,
+}
+
+#[derive(Debug, Clone)]
+struct CppChaosTestConfig {
+    gate: GateConfig,
+    case: CppChaosTestCase,
+}
+
+impl CppChaosTestConfig {
+    fn from_env() -> Result<Option<Self>, String> {
+        Self::from_map(&std::env::vars().collect())
+    }
+
+    fn from_map(env: &BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        reject_conflicting_live_opt_ins(env)?;
+        let Some(case) = env.get("MOONCAKE_RUN_CPP_CHAOS_TEST") else {
+            return Ok(None);
+        };
+        let case = match case.as_str() {
+            "LeaderKilledFailover" => CppChaosTestCase::LeaderKilledFailover,
+            other => return Err(format!("unknown MOONCAKE_RUN_CPP_CHAOS_TEST case: {other}")),
+        };
+        let result_path = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_CPP_CHAOS_TEST_RESULT",
+            "MOONCAKE_RUN_CPP_CHAOS_TEST",
+        )?);
+        let artifact_root = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_HA_ARTIFACT_ROOT",
+            "MOONCAKE_RUN_CPP_CHAOS_TEST",
+        )?);
+        let gate = GateConfig::enabled_from_map(
+            env,
+            result_path,
+            artifact_root,
+            "cpp-chaos-test-leader-killed-failover",
+            "MOONCAKE_RUN_CPP_CHAOS_TEST",
+        )?;
+        Ok(Some(Self { gate, case }))
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 struct E2ERandEvidence {
     iterations: u64,
@@ -1559,7 +1643,7 @@ struct LivenessPreflightConfig {
 }
 
 fn reject_conflicting_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(), String> {
-    let enabled = [
+    let mut enabled = [
         "MOONCAKE_RUN_HA_CHAOS",
         "MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT",
         "MOONCAKE_RUN_E2E_RAND",
@@ -1569,6 +1653,9 @@ fn reject_conflicting_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(),
     .into_iter()
     .filter(|name| env.get(*name).map(String::as_str) == Some("1"))
     .collect::<Vec<_>>();
+    if env.contains_key("MOONCAKE_RUN_CPP_CHAOS_TEST") {
+        enabled.push("MOONCAKE_RUN_CPP_CHAOS_TEST");
+    }
     if enabled.len() > 1 {
         return Err(format!(
             "live test opt-ins are mutually exclusive: {}",
@@ -4534,6 +4621,137 @@ async fn run_remount_checkpoint(
     })
 }
 
+async fn run_cpp_leader_killed_failover_live(config: CppChaosTestConfig) -> Result<(), String> {
+    let mut cluster = MasterCluster::start(&config.gate)
+        .await
+        .map_err(|error| format!("start LeaderKilledFailover Masters: {error}"))?;
+    let initial_view = wait_for_stable_leader_without_clients(&config.gate, &cluster).await?;
+    let leader_index = cluster
+        .index_for_address(&initial_view.leader_address)
+        .ok_or_else(|| format!("etcd leader {} is not owned", initial_view.leader_address))?;
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+    let mut clients = create_clients(&config.gate, &masters, 1, CLIENT_SEGMENT_SIZE).await?;
+
+    let operation: Result<serde_json::Value, FailureRecord> = async {
+        clients[0].put("key", b"value").await.map_err(|error| {
+            scenario_failure("bootstrap-put", format!("put key before SIGKILL: {error}"))
+        })?;
+        cluster.hard_kill(leader_index).await.map_err(|error| {
+            scenario_failure(
+                "leader-sigkill",
+                format!("SIGKILL initial leader {leader_index}: {error}"),
+            )
+        })?;
+        let failover_view = wait_for_stable_leader_without_clients(&config.gate, &cluster)
+            .await
+            .map_err(|error| scenario_failure("leader-failover", error))?;
+        if failover_view.leader_address == initial_view.leader_address
+            || failover_view.view_version == initial_view.view_version
+        {
+            return Err(scenario_failure(
+                "leader-failover",
+                format!("leader did not change: {initial_view:?} -> {failover_view:?}"),
+            ));
+        }
+
+        tokio::time::timeout(Duration::from_secs(30), clients[0].put("key2", b"value2"))
+            .await
+            .map_err(|_| {
+                scenario_failure(
+                    "post-failover-put",
+                    "same client timed out putting key2 after leader SIGKILL",
+                )
+            })?
+            .map_err(|error| {
+                scenario_failure(
+                    "post-failover-put",
+                    format!("same client failed putting key2 after leader SIGKILL: {error}"),
+                )
+            })?;
+        let actual = tokio::time::timeout(Duration::from_secs(30), clients[0].get("key2"))
+            .await
+            .map_err(|_| {
+                scenario_failure(
+                    "post-failover-get",
+                    "same client timed out reading key2 after leader SIGKILL",
+                )
+            })?
+            .map_err(|error| {
+                scenario_failure(
+                    "post-failover-get",
+                    format!("same client failed reading key2 after leader SIGKILL: {error}"),
+                )
+            })?;
+        if actual != b"value2" {
+            return Err(scenario_failure(
+                "post-failover-get",
+                format!("same client returned wrong bytes for key2: {actual:?}"),
+            ));
+        }
+        let client_master = clients[0]
+            .current_master_addr()
+            .await
+            .map_err(|error| scenario_failure("evidence", error.to_string()))?;
+        Ok(serde_json::json!({
+            "initial_leader": initial_view.leader_address,
+            "initial_view_version": initial_view.view_version,
+            "killed_index": leader_index,
+            "crash_mode": "SIGKILL",
+            "failover_leader": failover_view.leader_address,
+            "failover_view_version": failover_view.view_version,
+            "same_client_post_failover_puts": 1,
+            "same_client_exact_reads": 1,
+            "byte_comparisons": 6,
+            "client_master_after_get": client_master,
+        }))
+    }
+    .await;
+
+    if !cluster.running_indices().contains(&leader_index) {
+        let _ = cluster.restart(leader_index).await;
+    }
+    let cleanup = tear_down_scenario_clients(&mut clients).await;
+    let (status, evidence, failure) = match operation {
+        Ok(evidence) if cleanup.is_ok() => ("PASS", evidence, None),
+        Ok(evidence) => (
+            "FAIL",
+            evidence,
+            Some(scenario_failure("cleanup", cleanup.unwrap_err())),
+        ),
+        Err(mut failure) => {
+            if let Err(error) = cleanup {
+                failure.message = format!("{}; cleanup: {error}", failure.message);
+            }
+            ("FAIL", serde_json::json!({}), Some(failure))
+        }
+    };
+    write_json_artifact(
+        &config.gate.result_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": status,
+            "case": "LeaderKilledFailover",
+            "seed": format!("0x{:016x}", config.gate.seed),
+            "master_count": 3,
+            "client_count": 1,
+            "segment_size": CLIENT_SEGMENT_SIZE,
+            "shared_oplog": "etcd",
+            "evidence": evidence,
+            "first_failure": failure,
+        }),
+    )?;
+    if let Some(failure) = failure {
+        return Err(format!("{}: {}", failure.stage, failure.message));
+    }
+    Ok(())
+}
+
 async fn cpp_chaos_rand_key_pass(
     config: &CppChaosRandConfig,
     clients: &[ScenarioClient],
@@ -5029,6 +5247,20 @@ async fn cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithl
     run_cpp_chaos_rand_live(config)
         .await
         .expect("C++ large chaos-rand parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_test_cpp_chaostest_leaderkilledfailover_ccc0b621() {
+    let Some(config) = CppChaosTestConfig::from_env().expect("valid C++ chaos-test environment")
+    else {
+        eprintln!(
+            "SKIP C++ LeaderKilledFailover parity: MOONCAKE_RUN_CPP_CHAOS_TEST is not enabled"
+        );
+        return;
+    };
+    run_cpp_leader_killed_failover_live(config)
+        .await
+        .expect("C++ LeaderKilledFailover parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

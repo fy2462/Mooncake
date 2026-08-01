@@ -266,6 +266,32 @@ impl MooncakeClient {
         }
     }
 
+    async fn put_start_with_failover(
+        &mut self,
+        key: &str,
+        request: proto::PutStartRequest,
+    ) -> StoreResult<proto::PutStartResponse> {
+        match self
+            .master
+            .put_start(self.rpc_request(request.clone()))
+            .await
+        {
+            Ok(response) => Ok(response.into_inner()),
+            Err(status) => {
+                let first_error = Self::put_start_error_from_status(key, status);
+                if !matches!(first_error, StoreError::ServiceUnavailable) {
+                    return Err(first_error);
+                }
+                self.failover_master().await?;
+                self.master
+                    .put_start(self.rpc_request(request))
+                    .await
+                    .map(|response| response.into_inner())
+                    .map_err(|status| Self::put_start_error_from_status(key, status))
+            }
+        }
+    }
+
     pub(super) async fn write_parts_from_to_replica(
         &self,
         replica: &ReplicaDescriptor,
@@ -454,11 +480,10 @@ impl MooncakeClient {
         };
 
         tracing::info!(target: "te_debug", %key, "put: calling put_start");
-        let response = match self.master.put_start(self.rpc_request(request)).await {
-            Ok(response) => response.into_inner(),
-            Err(status) => {
-                tracing::error!(target: "te_debug", %key, error = %status, "put: put_start FAILED");
-                let err = Self::put_start_error_from_status(key, status);
+        let response = match self.put_start_with_failover(key, request).await {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(target: "te_debug", %key, error = %err, "put: put_start FAILED");
                 if matches!(err, StoreError::ObjectExists(_)) {
                     if let Some(metrics) = &self.metrics {
                         metrics.observe_put(value.len() as u64, started_at.elapsed());

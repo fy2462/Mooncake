@@ -70,13 +70,18 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.LeaderKilledFailover"
       },
-      "reason": "Rust has etcd-gated live HA tests, but no discoverable live test records a known elected leader, immediately hard-kills that leader, and requires the same client's post-failover put followed by an exact get.",
+    "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_leaderkilledfailover_ccc0b621 starts three external etcd-elected Rust Masters and one real TCP client with a 16-MiB segment, writes the bootstrap object, records and immediately SIGKILLs the etcd leader, observes a new leader/view, then uses the same client without a test-side switch to put key2 and exactly read value2 through automatic candidate validation and remount. Native evidence at /tmp/mooncake-leader-kill-goal-019fbaa7/result.json passed with leader 127.0.0.1:43447 changing to 127.0.0.1:41013, one same-client post-failover put, one exact read, and six compared bytes.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, MasterProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs etcd MasterCluster/run_remount_checkpoint paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+  "rust": [
+    {
+      "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+      "test": "cpp_parity_e2e_chaos_test_cpp_chaostest_leaderkilledfailover_ccc0b621"
+    }
+  ],
+  "status": "covered"
     },
     {
       "behavior": "With etcd serving both leader election and the shared oplog, a mounted client writes through the known leader, SIGKILLs both known non-leader Masters, and exactly reads the original object while the original leader remains available.",
