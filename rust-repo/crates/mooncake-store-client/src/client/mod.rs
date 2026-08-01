@@ -167,7 +167,7 @@ pub struct MooncakeClient {
     /// 数据面传输使用的协议（"tcp"、"rdma" 等）。存储以供 MountSegment/ReMountSegment 在 gRPC 请求中包含。
     pub(crate) protocol: String,
 
-    /// Master-advertised base/size alignment for owned Memory segments.
+    /// Master-advertised capacity alignment for owned Memory segments.
     pub(crate) memory_segment_alignment: usize,
 
     /// Whether tenant IDs participate in object identity on the connected
@@ -234,6 +234,8 @@ pub struct MooncakeClient {
     /// hostname, so UUID is the authoritative identity.
     pub(crate) mounted_segment_ids: RwLock<HashMap<Uuid, String>>,
     pub(crate) mounted_external_segments: RwLock<HashMap<Uuid, MountedExternalSegment>>,
+    pub(crate) mounted_owned_external_registrations:
+        RwLock<HashMap<Uuid, transfer_engine_ffi::RegisteredMemory>>,
 
     /// Exact NoF descriptors owned by this client process. A Master failover
     /// invalidates snapshot-era device addresses, so heartbeat remount must

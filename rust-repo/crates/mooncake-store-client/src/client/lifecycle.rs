@@ -1012,6 +1012,7 @@ impl MooncakeClient {
             local_endpoints: RwLock::new(endpoints),
             mounted_segment_ids: RwLock::new(mounted_segment_ids),
             mounted_external_segments: RwLock::new(HashMap::new()),
+            mounted_owned_external_registrations: RwLock::new(HashMap::new()),
             mounted_nof_segments: RwLock::new(HashMap::new()),
             miss_handler: None,
             hot_cache,

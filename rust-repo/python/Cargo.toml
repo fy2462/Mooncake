@@ -33,6 +33,7 @@ tokio.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 pyo3 = { workspace = true, features = ["auto-initialize"] }

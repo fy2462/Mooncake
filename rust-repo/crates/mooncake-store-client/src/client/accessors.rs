@@ -274,6 +274,25 @@ impl MooncakeClient {
         let mut retained_segment_names = failed_segment_names.clone();
         self.mounted_segment_ids.write().clear();
         self.mounted_external_segments.write().clear();
+        let owned_external_registrations =
+            std::mem::take(&mut *self.mounted_owned_external_registrations.write());
+        for (segment_id, mut registration) in owned_external_registrations {
+            if failed_segment_ids.contains(&segment_id) {
+                external_engine_clean = false;
+                tracing::error!(
+                    %segment_id,
+                    "leaking owned external registration because Master unmount was not proven"
+                );
+                std::mem::forget(registration);
+            } else if let Err(error) = self.engine.unregister_owned_memory(&mut registration) {
+                external_engine_clean = false;
+                tracing::error!(
+                    %error,
+                    %segment_id,
+                    "owned external registration teardown failed; RAII will retain or leak its owner safely"
+                );
+            }
+        }
 
         if let Some(registration) = self.cxl_segment_registration.take() {
             if failed_segment_names.contains(&self.local_hostname) {

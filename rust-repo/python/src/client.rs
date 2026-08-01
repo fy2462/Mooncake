@@ -107,7 +107,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::fs::OpenOptions;
 use std::ops::{Deref, DerefMut};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -142,6 +144,56 @@ pub(crate) struct PythonMooncakeClient {
 
 pub(crate) type SharedClient = Arc<AsyncMutex<Option<MooncakeClient>>>;
 
+struct FileMountBatchGuard {
+    inner: SharedClient,
+    mounted_ids: Vec<Uuid>,
+    armed: bool,
+}
+
+impl FileMountBatchGuard {
+    fn new(inner: SharedClient) -> Self {
+        Self {
+            inner,
+            mounted_ids: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn push(&mut self, segment_id: Uuid) {
+        self.mounted_ids.push(segment_id);
+    }
+
+    fn finish(mut self) -> Vec<Uuid> {
+        self.armed = false;
+        std::mem::take(&mut self.mounted_ids)
+    }
+
+    fn ids_for_rollback(&self) -> Vec<Uuid> {
+        self.mounted_ids.clone()
+    }
+}
+
+impl Drop for FileMountBatchGuard {
+    fn drop(&mut self) {
+        if !self.armed || self.mounted_ids.is_empty() {
+            return;
+        }
+        self.armed = false;
+        let inner = Arc::clone(&self.inner);
+        let mounted_ids = std::mem::take(&mut self.mounted_ids);
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            let Ok(mut client) = take_client(&inner).await else {
+                return;
+            };
+            for segment_id in mounted_ids.into_iter().rev() {
+                let _ = client
+                    .unmount_owned_external_segment_by_id(segment_id, 0)
+                    .await;
+            }
+        });
+    }
+}
+
 pub(crate) struct PythonBufferRegistration {
     registration_id: BufferRegistrationId,
     python_object_identity: usize,
@@ -167,6 +219,91 @@ unsafe impl StableMemoryOwner for PythonBufferMemoryOwner {
 
     fn length(&self) -> usize {
         self.len
+    }
+}
+
+#[derive(Debug)]
+struct FileMappingMemoryOwner {
+    base: NonNull<c_void>,
+    len: usize,
+}
+
+unsafe impl Send for FileMappingMemoryOwner {}
+unsafe impl Sync for FileMappingMemoryOwner {}
+
+unsafe impl StableMemoryOwner for FileMappingMemoryOwner {
+    fn base_address(&self) -> NonNull<c_void> {
+        self.base
+    }
+
+    fn length(&self) -> usize {
+        self.len
+    }
+}
+
+impl FileMappingMemoryOwner {
+    fn map(path: &str, offset: u64, size: u64) -> Result<Self, String> {
+        let len = usize::try_from(size).map_err(|_| "file mapping size exceeds usize")?;
+        if len == 0 {
+            return Err("file mapping size must not be zero".to_string());
+        }
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 || offset % page_size as u64 != 0 {
+            return Err("file mapping offset must be page aligned".to_string());
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("failed to open {path:?}: {error}"))?;
+        let end = offset
+            .checked_add(size)
+            .ok_or_else(|| "file mapping range overflows u64".to_string())?;
+        let file_len = file
+            .metadata()
+            .map_err(|error| format!("failed to stat {path:?}: {error}"))?
+            .len();
+        if end > file_len {
+            return Err(format!(
+                "file mapping range {offset}..{end} exceeds file size {file_len}"
+            ));
+        }
+        let offset = libc::off_t::try_from(offset)
+            .map_err(|_| "file mapping offset exceeds off_t".to_string())?;
+        let pointer = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                offset,
+            )
+        };
+        if pointer == libc::MAP_FAILED {
+            return Err(format!(
+                "failed to mmap {path:?}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let Some(base) = NonNull::new(pointer) else {
+            unsafe {
+                libc::munmap(pointer, len);
+            }
+            return Err("mmap returned null".to_string());
+        };
+        Ok(Self { base, len })
+    }
+}
+
+impl Drop for FileMappingMemoryOwner {
+    fn drop(&mut self) {
+        if unsafe { libc::munmap(self.base.as_ptr(), self.len) } != 0 {
+            tracing::error!(
+                error = %std::io::Error::last_os_error(),
+                "failed to unmap file-backed Store segment"
+            );
+        }
     }
 }
 
@@ -5119,6 +5256,119 @@ impl PythonMooncakeClient {
     // ===================================================================
     // Storage admin / segment queries — 存储管理与 segment 查询
     // ===================================================================
+
+    /// Map, register, and mount a writable file range. Returns the C++
+    /// compatibility carrier `(status, segment_ids)`.
+    fn mount_file_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        path: String,
+        offset: u64,
+        size: u64,
+        protocol: String,
+        location: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut client = take_client(&inner).await?;
+            let chunk_sizes = match client.file_mount_chunk_sizes(size) {
+                Ok(chunk_sizes) => chunk_sizes,
+                Err(error) => {
+                    tracing::warn!(%error, "file-backed Store segment size validation failed");
+                    return Ok((-1_i32, Vec::<String>::new()));
+                }
+            };
+            let mut batch_guard = FileMountBatchGuard::new(Arc::clone(&inner));
+            let mut current_offset = offset;
+            for chunk_size in chunk_sizes {
+                let owner = match FileMappingMemoryOwner::map(&path, current_offset, chunk_size) {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        tracing::warn!(%error, "file-backed Store segment mapping failed");
+                        let mut rollback_complete = true;
+                        for segment_id in batch_guard.ids_for_rollback().into_iter().rev() {
+                            if client
+                                .unmount_owned_external_segment_by_id(segment_id, 0)
+                                .await
+                                .is_err()
+                            {
+                                rollback_complete = false;
+                            }
+                        }
+                        if rollback_complete {
+                            let _ = batch_guard.finish();
+                        }
+                        return Ok((-1_i32, Vec::new()));
+                    }
+                };
+                match client
+                    .mount_owned_external_segment(&path, owner, &protocol, &location)
+                    .await
+                {
+                    Ok(segment_id) => batch_guard.push(segment_id),
+                    Err(error) => {
+                        tracing::warn!(%error, "file-backed Store segment mount failed");
+                        let mut rollback_complete = true;
+                        for segment_id in batch_guard.ids_for_rollback().into_iter().rev() {
+                            if client
+                                .unmount_owned_external_segment_by_id(segment_id, 0)
+                                .await
+                                .is_err()
+                            {
+                                rollback_complete = false;
+                            }
+                        }
+                        if rollback_complete {
+                            let _ = batch_guard.finish();
+                        }
+                        return Ok((-1_i32, Vec::new()));
+                    }
+                }
+                current_offset = current_offset
+                    .checked_add(chunk_size)
+                    .expect("validated file range offset must not overflow");
+            }
+            let segment_ids = batch_guard
+                .finish()
+                .into_iter()
+                .map(|segment_id| segment_id.to_string())
+                .collect();
+            Ok((0_i32, segment_ids))
+        })
+    }
+
+    /// Plain-unmount exact UUIDs owned by `mount_file_segments`.
+    #[pyo3(signature = (segment_ids, grace_period_seconds = 0))]
+    fn unmount_segments<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        segment_ids: Vec<String>,
+        grace_period_seconds: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let grace_period_ms = grace_period_seconds.checked_mul(1000);
+        let inner = slf.borrow().inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let Some(grace_period_ms) = grace_period_ms else {
+                return Ok(-1_i32);
+            };
+            let mut client = take_client(&inner).await?;
+            let mut status = 0_i32;
+            for value in segment_ids {
+                let Ok(segment_id) = Uuid::parse_str(&value) else {
+                    status = -1;
+                    continue;
+                };
+                if client
+                    .unmount_owned_external_segment_by_id(segment_id, grace_period_ms)
+                    .await
+                    .is_err()
+                {
+                    status = -1;
+                }
+            }
+            Ok(status)
+        })
+    }
 
     /// Mount a memory segment by name, size, and base address.
     fn mount_segment<'py>(

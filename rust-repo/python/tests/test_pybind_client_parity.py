@@ -1207,3 +1207,69 @@ async def test_uninitialized_health_check_reports_not_initialized():
     assert await client.close() == 0
     with pytest.raises(StoreError, match="already closed"):
         await client.health_check()
+
+
+@pytest.mark.asyncio
+async def test_file_mount_missing_path_fails_without_ids(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        status, segment_ids = await client.mount_file_segments(
+            "/tmp/mooncake_nonexistent_file_12345", 0, 4096, "tcp", ""
+        )
+        assert status != 0
+        assert segment_ids == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_plain_unmount_rejects_zero_uuid(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        assert (
+            await client.unmount_segments(["00000000-0000-0000-0000-000000000000"]) != 0
+        )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_file_mount_roundtrips_plain_uuid_unmount(
+    cachelib_master, tmp_path, monkeypatch
+):
+    backing_file = tmp_path / "mounted-segment.bin"
+    with backing_file.open("wb") as file:
+        file.truncate(SLAB_SIZE * 2)
+    monkeypatch.setenv("MC_MAX_MR_SIZE", str(SLAB_SIZE))
+
+    client = await _client(cachelib_master)
+    try:
+        status, segment_ids = await client.mount_file_segments(
+            str(backing_file), 0, SLAB_SIZE * 2, "tcp", ""
+        )
+        assert status == 0
+        assert len(segment_ids) == 2
+        assert await client.unmount_segments(segment_ids) == 0
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_plain_unmount_processes_valid_ids_among_invalid_values(
+    cachelib_master, tmp_path
+):
+    backing_file = tmp_path / "mounted-segment.bin"
+    with backing_file.open("wb") as file:
+        file.truncate(SLAB_SIZE)
+
+    client = await _client(cachelib_master)
+    try:
+        status, segment_ids = await client.mount_file_segments(
+            str(backing_file), 0, SLAB_SIZE, "tcp", ""
+        )
+        assert status == 0
+        assert len(segment_ids) == 1
+        assert await client.unmount_segments(["invalid-uuid", segment_ids[0]]) != 0
+        assert await client.unmount_segments(segment_ids) != 0
+    finally:
+        await client.close()

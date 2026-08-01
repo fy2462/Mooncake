@@ -2594,6 +2594,7 @@ dependencies = [
 name = "mooncake-store-py"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "mooncake-p2p-store",
  "mooncake-store-client",
  "mooncake-store-core",

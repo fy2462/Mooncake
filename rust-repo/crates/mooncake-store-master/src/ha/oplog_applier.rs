@@ -1455,8 +1455,7 @@ impl OpLogApplier {
             }
         } else if state.runtime_config.memory_allocator_kind
             == crate::allocator::MemoryAllocatorKind::CachelibLike
-            && (segment.base % crate::allocator::CACHELIB_SLAB_SIZE != 0
-                || segment.size % crate::allocator::CACHELIB_SLAB_SIZE != 0)
+            && segment.size % crate::allocator::CACHELIB_SLAB_SIZE != 0
         {
             return false;
         }
@@ -4656,6 +4655,41 @@ mod tests {
             assert!(state.segments.is_empty());
             assert!(state.nof_segments.is_empty());
         }
+    }
+
+    #[test]
+    fn cachelib_mount_replay_accepts_page_aligned_external_base() {
+        let mut state = make_state();
+        Arc::get_mut(&mut state)
+            .expect("fresh test state must be uniquely owned")
+            .runtime_config
+            .memory_allocator_kind = crate::allocator::MemoryAllocatorKind::CachelibLike;
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let payload = serde_json::json!({
+            "op": "mount_segment",
+            "schema_version": 1,
+            "segment_name": "file-backed-memory",
+            "segment_id": segment_id.to_string(),
+            "base": 4096,
+            "size": crate::allocator::CACHELIB_SLAB_SIZE,
+            "te_endpoint": "tcp://endpoint",
+            "protocol": "tcp",
+            "host_id": "host-a",
+            "client_id": client_id.to_string(),
+        });
+        let applier = OpLogApplier::new(state.clone());
+
+        assert_eq!(
+            applier.apply_op_log_entries(&[OpLogRecord {
+                seq: 1,
+                producer_view_version: 1,
+                payload: payload.to_string(),
+            }]),
+            1
+        );
+        assert!(state.segments.contains_key(&segment_id));
+        assert_eq!(state.allocator.read().used_bytes(&segment_id), Some(0));
     }
 
     #[test]

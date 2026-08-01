@@ -165,10 +165,10 @@ impl MasterServiceImpl {
         }
         if !is_cxl
             && self.state.runtime_config.memory_allocator_kind == MemoryAllocatorKind::CachelibLike
-            && (req.base_addr % CACHELIB_SLAB_SIZE != 0 || req.size % CACHELIB_SLAB_SIZE != 0)
+            && req.size % CACHELIB_SLAB_SIZE != 0
         {
             return Err(Status::invalid_argument(format!(
-                "base_addr and size must be aligned to {CACHELIB_SLAB_SIZE} for cachelib"
+                "size must be aligned to {CACHELIB_SLAB_SIZE} for cachelib"
             )));
         }
 
@@ -864,10 +864,10 @@ impl MasterServiceImpl {
             if !is_cxl
                 && self.state.runtime_config.memory_allocator_kind
                     == MemoryAllocatorKind::CachelibLike
-                && (base % CACHELIB_SLAB_SIZE != 0 || *size % CACHELIB_SLAB_SIZE != 0)
+                && *size % CACHELIB_SLAB_SIZE != 0
             {
                 return Err(Status::invalid_argument(format!(
-                    "base_addr and size must be aligned to {CACHELIB_SLAB_SIZE} for cachelib"
+                    "size must be aligned to {CACHELIB_SLAB_SIZE} for cachelib"
                 )));
             }
             if self.state.runtime_config.memory_allocator_kind == MemoryAllocatorKind::CachelibLike
@@ -1768,6 +1768,31 @@ mod mount_invariant_tests {
         assert_eq!(
             service.state.allocator.read().used_bytes(&segment_id),
             Some(128)
+        );
+    }
+
+    #[tokio::test]
+    async fn cachelib_memory_mount_accepts_page_aligned_external_base() {
+        let runtime_config = MasterRuntimeConfig {
+            memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+            ..MasterRuntimeConfig::default()
+        };
+        let service =
+            MasterServiceImpl::new_with_runtime_config_and_oplog(None, None, runtime_config, None);
+        let client_id = Uuid::new_v4();
+        let request =
+            memory_mount_request(client_id, "file-backed-memory", 0x1000, CACHELIB_SLAB_SIZE);
+        let expected_id = memory_segment(client_id, &request).id;
+
+        service
+            .mount_segment_impl(Request::new(request))
+            .await
+            .expect("Cachelib allocation offsets do not require a slab-aligned external base");
+
+        assert!(service.state.segments.contains_key(&expected_id));
+        assert_eq!(
+            service.state.allocator.read().used_bytes(&expected_id),
+            Some(0)
         );
     }
 

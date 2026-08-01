@@ -10,11 +10,85 @@ use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
+use transfer_engine_ffi::{RegisteredMemory, RegisteredMemoryAccess, StableMemoryOwner};
 use uuid::Uuid;
 
 const RECOVERED_LOCAL_DISK_NOTIFY_BATCH_SIZE: usize = 20_000;
 const EVICTION_NOTIFY_MAX_ATTEMPTS: usize = 3;
 const EVICTION_NOTIFY_RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
+
+struct OwnedExternalMountGuard {
+    master: proto::master_service_client::MasterServiceClient<super::metrics::MetricsChannel>,
+    runtime: tokio::runtime::Handle,
+    client_id: Uuid,
+    expected_segment_id: Uuid,
+    rpc_request_timeout: Option<Duration>,
+    registration: Option<RegisteredMemory>,
+    armed: bool,
+}
+
+struct UnconfirmedResource<T>(Option<T>);
+
+impl<T> UnconfirmedResource<T> {
+    fn confirmed_absent(mut self) {
+        drop(self.0.take());
+    }
+}
+
+impl<T> Drop for UnconfirmedResource<T> {
+    fn drop(&mut self) {
+        if let Some(resource) = self.0.take() {
+            std::mem::forget(resource);
+        }
+    }
+}
+
+impl OwnedExternalMountGuard {
+    fn accept(mut self) -> RegisteredMemory {
+        self.armed = false;
+        self.registration
+            .take()
+            .expect("owned external mount registration must exist")
+    }
+}
+
+impl Drop for OwnedExternalMountGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+        let Some(registration) = self.registration.take() else {
+            return;
+        };
+        let mut master = self.master.clone();
+        let client_id = self.client_id;
+        let segment_id = self.expected_segment_id;
+        let rpc_request_timeout = self.rpc_request_timeout;
+        let registration = UnconfirmedResource(Some(registration));
+        self.runtime.spawn(async move {
+            let absent = super::lifecycle::unmount_confirms_segment_absent(
+                master
+                    .unmount_segment(MooncakeClient::rpc_request_with_timeout(
+                        proto::UnmountSegmentRequest {
+                            segment_id: Some(MooncakeClient::uuid_to_proto_uuid(segment_id)),
+                            client_id: Some(MooncakeClient::uuid_to_proto_uuid(client_id)),
+                        },
+                        rpc_request_timeout,
+                    ))
+                    .await,
+            );
+            if absent {
+                registration.confirmed_absent();
+            } else {
+                tracing::error!(
+                    %segment_id,
+                    "leaking owned external registration because cancelled mount absence was not proven"
+                );
+            }
+        });
+    }
+}
 
 #[derive(Debug, Default)]
 struct TenantEvictionNotification {
@@ -852,6 +926,105 @@ impl MooncakeClient {
             .map(|_| ())
     }
 
+    /// Split a file-backed mount using the C++ page-aligned max-MR rule.
+    pub fn file_mount_chunk_sizes(&self, size: u64) -> StoreResult<Vec<u64>> {
+        if size == 0 {
+            return Err(StoreError::InvalidParams(
+                "file-backed Store segment size must be greater than zero".to_string(),
+            ));
+        }
+        let max_mr_size = Self::resolve_max_mr_size(
+            &self.protocol,
+            size,
+            std::env::var("MC_MAX_MR_SIZE").ok().as_deref(),
+        )?;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return Err(StoreError::Internal(
+                "failed to determine system page size".to_string(),
+            ));
+        }
+        let aligned_max = max_mr_size / page_size as u64 * page_size as u64;
+        if aligned_max == 0 {
+            return Err(StoreError::InvalidParams(format!(
+                "MC_MAX_MR_SIZE {max_mr_size} is smaller than page size {page_size}"
+            )));
+        }
+        let mut chunks = Vec::new();
+        let mut remaining = size;
+        while remaining > 0 {
+            let chunk = remaining.min(aligned_max);
+            chunks.push(chunk);
+            remaining -= chunk;
+        }
+        Ok(chunks)
+    }
+
+    /// Register an owner-bearing local allocation and mount it as an external
+    /// Store segment. The registration owns the allocation until a successful
+    /// UUID unmount or complete client teardown.
+    pub async fn mount_owned_external_segment<O>(
+        &mut self,
+        segment_name: &str,
+        owner: O,
+        protocol: &str,
+        location: &str,
+    ) -> StoreResult<Uuid>
+    where
+        O: StableMemoryOwner,
+    {
+        if protocol != self.protocol {
+            return Err(StoreError::InvalidParams(format!(
+                "mounted segment protocol {protocol:?} does not match client protocol {:?}",
+                self.protocol
+            )));
+        }
+        let registration_location = if location.trim().is_empty() {
+            "cpu:0"
+        } else {
+            location
+        };
+        let registration = self.engine.register_owned_memory(
+            owner,
+            registration_location,
+            true,
+            RegisteredMemoryAccess::ReadWrite,
+        )?;
+        let base_addr = registration.id()?.base_address() as u64;
+        let size = registration.len()? as u64;
+        let expected_segment_id = mooncake_store_core::stable_memory_segment_id(
+            self.client_id,
+            segment_name,
+            base_addr,
+            size,
+            &self.local_transport_endpoint,
+            &self.protocol,
+            &self.host_id,
+        );
+        let guard = OwnedExternalMountGuard {
+            master: self.master.clone(),
+            runtime: tokio::runtime::Handle::current(),
+            client_id: self.client_id,
+            expected_segment_id,
+            rpc_request_timeout: self.rpc_request_timeout,
+            registration: Some(registration),
+            armed: true,
+        };
+        match self
+            .mount_segment_with_id(segment_name, size, base_addr)
+            .await
+        {
+            Ok(segment_id) => {
+                let registration = guard.accept();
+                self.mounted_owned_external_registrations
+                    .write()
+                    .insert(segment_id, registration);
+                Ok(segment_id)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// UUID-returning form of [`mount_segment`](Self::mount_segment).
     ///
     /// Segment names are not unique once a capacity is split into multiple
@@ -873,10 +1046,9 @@ impl MooncakeClient {
             ));
         }
         let alignment = self.memory_segment_alignment as u64;
-        if base_addr % alignment != 0 || size % alignment != 0 {
+        if size % alignment != 0 {
             return Err(StoreError::InvalidParams(format!(
-                "mounted Memory segment base/size must be aligned to Master requirement \
-                 {alignment}"
+                "mounted Memory segment size must be aligned to Master requirement {alignment}"
             )));
         }
         let end = base_addr.checked_add(size).ok_or_else(|| {
@@ -1125,6 +1297,13 @@ impl MooncakeClient {
         let name_still_mounted = mounted.values().any(|name| name == &segment_name);
         drop(mounted);
         let removed_external = self.mounted_external_segments.write().remove(&segment_id);
+        if let Some(mut registration) = self
+            .mounted_owned_external_registrations
+            .write()
+            .remove(&segment_id)
+        {
+            self.engine.unregister_owned_memory(&mut registration)?;
+        }
         let transport_endpoint = removed_external
             .as_ref()
             .map(|segment| segment.te_endpoint.clone())
@@ -1147,6 +1326,24 @@ impl MooncakeClient {
             self.unregister_local_endpoint(&transport_endpoint);
         }
         Ok(())
+    }
+
+    /// Unmount a segment backed by an owner-bearing external registration.
+    /// Client-owned capacity and raw external mounts are rejected.
+    pub async fn unmount_owned_external_segment_by_id(
+        &mut self,
+        segment_id: Uuid,
+        grace_period_ms: u64,
+    ) -> StoreResult<()> {
+        if !self
+            .mounted_owned_external_registrations
+            .read()
+            .contains_key(&segment_id)
+        {
+            return Err(StoreError::SegmentNotFound(segment_id.to_string()));
+        }
+        self.unmount_segment_by_id(segment_id, grace_period_ms)
+            .await
     }
 
     /// Allocate, register and mount a client-owned Store capacity.
@@ -1370,7 +1567,29 @@ mod tests {
     use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
     use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tonic::transport::{Channel, Server};
+
+    #[test]
+    fn unpolled_cleanup_future_retains_unconfirmed_resource() {
+        static DROPPED: AtomicBool = AtomicBool::new(false);
+        struct DropProbe;
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                DROPPED.store(true, Ordering::SeqCst);
+            }
+        }
+
+        DROPPED.store(false, Ordering::SeqCst);
+        let resource = UnconfirmedResource(Some(DropProbe));
+        let cleanup = async move {
+            tokio::task::yield_now().await;
+            resource.confirmed_absent();
+        };
+        drop(cleanup);
+
+        assert!(!DROPPED.load(Ordering::SeqCst));
+    }
 
     #[derive(Default)]
     struct ScriptedEvictionNotifier {
