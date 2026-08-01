@@ -1263,6 +1263,82 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test]
+    async fn test_admin_http_batch_query_keys_missing_parameter_is_400() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, _) = get_router(&router, "/batch_query_keys").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_batch_query_keys_empty_parameter_is_400() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, _) = get_router(&router, "/batch_query_keys?keys=").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_batch_query_keys_existing_key() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, body) = get_router(&router, "/batch_query_keys?keys=admin_test_key").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert!(body["data"].is_object());
+        assert_eq!(body["data"]["admin_test_key"]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_batch_query_keys_missing_key_is_embedded_error() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, body) = get_router(&router, "/batch_query_keys?keys=nonexistent_key").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["nonexistent_key"]["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_batch_query_keys_multiple_keys() {
+        let (service, router, client_id) =
+            service_with_completed_memory_key("admin_test_key").await;
+        put_complete_memory_key(&service, client_id, "second_key").await;
+
+        let (status, body) =
+            get_router(&router, "/batch_query_keys?keys=admin_test_key,second_key").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["admin_test_key"]["ok"], true);
+        assert_eq!(body["data"]["second_key"]["ok"], true);
+
+        service
+            .remove(TonicRequest::new(proto::RemoveRequest {
+                key: "second_key".to_string(),
+                force: false,
+                tenant_id: String::new(),
+            }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_batch_query_keys_mixed_results() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, body) =
+            get_router(&router, "/batch_query_keys?keys=admin_test_key,nonexistent").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["admin_test_key"]["ok"], true);
+        assert_eq!(body["data"]["nonexistent"]["ok"], false);
+    }
+
     #[test]
     fn test_batch_query_keys_formats_local_disk_values() {
         let key = "disk-key".to_string();
