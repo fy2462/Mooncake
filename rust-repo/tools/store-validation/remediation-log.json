@@ -1856,5 +1856,41 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_put_parts_concatenates_exact_bytes",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-remove-parts-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrGetNonExistentKey",
+    "rust": "python/tests/test_pybind_client_parity.py:test_missing_key_has_single_and_batch_python_error_shapes",
+    "first_divergence": "No real binding test jointly proved false existence, single-read exceptions, registered get_into failure, and three ordered None batch results for missing keys.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_missing_key_has_single_and_batch_python_error_shapes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-batch-error-shapes-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.PutBatchThenBatchGetBuffer",
+    "rust": "python/tests/test_pybind_client_parity.py:test_put_batch_then_batch_get_buffer_preserves_order_and_owned_bytes",
+    "first_divergence": "No real PyO3 test proved aggregate batch-put success and ordered owned-byte conversion for all three values.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_put_batch_then_batch_get_buffer_preserves_order_and_owned_bytes",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-batch-error-shapes-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.EmptyBatchOperations",
+    "rust": "python/tests/test_pybind_client_parity.py:test_empty_batch_operation_matrix",
+    "first_divergence": "No binding test covered the complete empty-input matrix across aggregate put and the three list-returning batch operations.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_empty_batch_operation_matrix",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-batch-error-shapes-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrUnmountAndFreeInvalidSegmentIds",
+    "rust": "python/tests/test_pybind_client_parity.py:test_unmount_and_free_unowned_uuid_fails",
+    "first_divergence": "The UUID-list API existed, but no real binding test proved a valid yet unowned UUID is rejected rather than treated as successful cleanup.",
+    "repair_commit": "PENDING",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_unmount_and_free_unowned_uuid_fails",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-pybind-batch-error-shapes-goal-019fbca4.typescript"
   }
 ]

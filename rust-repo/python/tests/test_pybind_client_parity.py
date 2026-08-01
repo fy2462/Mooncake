@@ -311,3 +311,69 @@ async def test_put_parts_concatenates_exact_bytes(cachelib_master):
         assert bytes(value) == b"Hello, Parts!"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_put_batch_then_batch_get_buffer_preserves_order_and_owned_bytes(
+    cachelib_master,
+):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    keys = ["batch_kv_0", "batch_kv_1", "batch_kv_2"]
+    values = [b"value_zero", b"value_one!", b"value_two!"]
+    try:
+        assert await client.put_batch(keys, values) == 0
+        actual = await client.batch_get_buffer(keys)
+        assert len(actual) == 3
+        assert [bytes(value) for value in actual] == values
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_batch_operation_matrix(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        assert await client.put_batch([], []) == 0
+        assert await client.batch_get_buffer([]) == []
+        assert await client.batch_is_exist([]) == []
+        assert await client.batch_remove([]) == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_unmount_and_free_unowned_uuid_fails(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        with pytest.raises(Exception):
+            await client.unmount_and_free_segments(
+                ["00000000-0000-0000-0000-000000000000"]
+            )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_key_has_single_and_batch_python_error_shapes(cachelib_master):
+    client = await _client(cachelib_master)
+    pool = BufferPool(client)
+    lease = pool.acquire(64)
+    destination = lease.buffer
+    try:
+        assert await client.exists("nonexistent_key") is False
+        with pytest.raises(Exception):
+            await client.get_buffer("nonexistent_key")
+        with pytest.raises(Exception):
+            await client.get_size("nonexistent_key")
+        with pytest.raises(Exception):
+            client.get_into("nonexistent_key", destination)
+        assert await client.batch_get_buffer(["no_key_1", "no_key_2", "no_key_3"]) == [
+            None,
+            None,
+            None,
+        ]
+    finally:
+        destination.release()
+        lease.release()
+        pool.close()
+        await client.close()
