@@ -134,7 +134,11 @@ async fn get_all_keys_handler(
     State(state): State<AdminRuntimeState>,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let service = service_or_unavailable(&state)?;
-    Ok(service.all_keys_for_admin().join("\n"))
+    let mut body = service.all_keys_for_admin().join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    Ok(body)
 }
 
 async fn get_all_segments_handler(
@@ -699,12 +703,10 @@ fn segment_status_json_string(status: i32) -> &'static str {
 
 fn buffer_descriptor_json(replica: &proto::ReplicaDescriptor) -> Value {
     json!({
-        "segment_id": uuid_json_string(replica.segment_id.as_ref()),
-        "segment_name": replica.segment_name,
-        "offset": replica.offset,
-        "size": replica.size,
-        "base_addr": replica.base_addr,
-        "transport_endpoint": replica.transport_endpoint,
+        "size_": replica.size,
+        "buffer_address_": replica.base_addr.wrapping_add(replica.offset),
+        "protocol_": replica.protocol,
+        "transport_endpoint_": replica.transport_endpoint,
     })
 }
 
@@ -779,6 +781,59 @@ mod tests {
             .await
             .unwrap();
         admin_router(AdminRuntimeState::serving_with_service(None, service))
+    }
+
+    async fn service_with_completed_memory_key(
+        key: &str,
+    ) -> (Arc<MasterServiceImpl>, Router, Uuid) {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let client_id = Uuid::from_u128(0x200);
+        let (high, low) = client_id.as_u64_pair();
+        service
+            .mount_segment(TonicRequest::new(proto::MountSegmentRequest {
+                client_id: Some(proto::Uuid { high, low }),
+                segment_name: "admin_test_segment".to_string(),
+                size: 8 * 1024 * 1024,
+                base_addr: 0x3000_0000_0,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }))
+            .await
+            .unwrap();
+        put_complete_memory_key(&service, client_id, key).await;
+        let router = admin_router(AdminRuntimeState::serving_with_service(
+            None,
+            service.clone(),
+        ));
+        (service, router, client_id)
+    }
+
+    async fn put_complete_memory_key(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
+        let (high, low) = client_id.as_u64_pair();
+        service
+            .put_start(TonicRequest::new(proto::PutStartRequest {
+                client_id: Some(proto::Uuid { high, low }),
+                key: key.to_owned(),
+                slice_length: 1024,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "admin_test_segment".to_string(),
+                    ..Default::default()
+                }),
+                tenant_id: String::new(),
+            }))
+            .await
+            .unwrap();
+        service
+            .put_end(TonicRequest::new(proto::PutEndRequest {
+                client_id: Some(proto::Uuid { high, low }),
+                key: key.to_owned(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }))
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -1150,6 +1205,60 @@ mod tests {
         let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
         let (status, _) =
             get_router(&router, "/api/v1/segments/status?segment=no_such_segment").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_get_all_keys_returns_stored_key() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, body) = get_router(&router, "/get_all_keys").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "admin_test_key\n");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_get_all_keys_excludes_removed_key() {
+        let (service, router, client_id) =
+            service_with_completed_memory_key("admin_test_key").await;
+        put_complete_memory_key(&service, client_id, "ephemeral_empty_test_key").await;
+        service
+            .remove(TonicRequest::new(proto::RemoveRequest {
+                key: "ephemeral_empty_test_key".to_string(),
+                force: false,
+                tenant_id: String::new(),
+            }))
+            .await
+            .unwrap();
+
+        let (status, body) = get_router(&router, "/get_all_keys").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "admin_test_key\n");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_key_existing_response() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, body) = get_router(&router, "/query_key?key=admin_test_key").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"buffer_address_\""));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_key_missing_is_404() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, _) = get_router(&router, "/query_key?key=nonexistent_key_xyz").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_key_missing_parameter_is_404() {
+        let (_, router, _) = service_with_completed_memory_key("admin_test_key").await;
+        let (status, _) = get_router(&router, "/query_key").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
