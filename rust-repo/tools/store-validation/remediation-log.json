@@ -1258,7 +1258,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.RegexOperationsAreTenantScoped",
     "rust": "mooncake-store-master/tests/test_tenant_isolation.rs:regex_lookup_and_removal_are_tenant_scoped_parity",
     "first_divergence": "Rust already filtered regex lookup and removal by tenant, but existing tests did not populate the identical key in default and two named tenants and verify the exact default-then-tenant-A removal sequence with tenant-B surviving.",
-    "repair_commit": "PENDING",
+    "repair_commit": "9a6a2068",
     "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation regex_lookup_and_removal_are_tenant_scoped_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-tenant-removal-goal-019fbca4.typescript"
@@ -1267,7 +1267,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.TenantBatchRemoveAndRemoveAllAreScoped",
     "rust": "mooncake-store-master/tests/test_tenant_isolation.rs:batch_remove_and_remove_all_are_tenant_scoped_parity",
     "first_divergence": "Rust already scoped BatchRemove and RemoveAll, but no discoverable test ran the C++ sequence across one shared default/A/B key and asserted each operation's count, removed scope, and surviving scopes.",
-    "repair_commit": "PENDING",
+    "repair_commit": "9a6a2068",
     "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation batch_remove_and_remove_all_are_tenant_scoped_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-tenant-removal-goal-019fbca4.typescript"
