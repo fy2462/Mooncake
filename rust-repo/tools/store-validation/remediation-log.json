@@ -1294,7 +1294,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.BatchExistKeyTenantAwarePreservesOrder",
     "rust": "mooncake-store-master/tests/test_tenant_isolation.rs:batch_exist_key_tenant_aware_preserves_order_parity",
     "first_divergence": "Rust already preserved order, completion state, and tenant scope in BatchExistKey, but no discoverable strict-tenant test asserted the exact repeated-key tenant vector and reciprocal default vector from the C++ oracle.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d00290de",
     "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation batch_exist_key_tenant_aware_preserves_order_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-tenant-batch-exist-goal-019fbca4.typescript"
