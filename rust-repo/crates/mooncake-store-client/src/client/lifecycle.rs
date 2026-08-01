@@ -708,7 +708,7 @@ impl MooncakeClient {
                     "failed to populate local HugeTLB buffer before registration: {error}"
                 ))
             })?;
-        let local_buffer = if effective_protocol == "cxl" {
+        let local_buffer = if local_buffer_size == 0 || effective_protocol == "cxl" {
             // CXL accepts raw host pointers for memcpy transfers but rejects
             // registering addresses outside its shared mapping. The scalar
             // and batch paths copy directly through cxl_segment_registration.

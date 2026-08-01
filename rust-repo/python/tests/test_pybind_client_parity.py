@@ -1004,3 +1004,122 @@ async def test_copy_move_query_task_reports_id_type_and_success(cachelib_master)
                 await client2.close()
         finally:
             await client1.close()
+
+
+def _config_dict(cachelib_master, local_hostname, global_size, local_size):
+    rpc_port, _ = cachelib_master
+    return {
+        "local_hostname": local_hostname,
+        "metadata_server": "P2PHANDSHAKE",
+        "global_segment_size": global_size,
+        "local_buffer_size": local_size,
+        "protocol": "tcp",
+        "rdma_devices": "",
+        "master_server_addr": f"127.0.0.1:{rpc_port}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_dict_setup_rejects_empty_and_roundtrips(cachelib_master):
+    with pytest.raises(StoreError, match="local_hostname"):
+        await MooncakeClient.create_from_config({})
+
+    client = await MooncakeClient.create_from_config(
+        _config_dict(
+            cachelib_master,
+            "localhost:17813",
+            str(SLAB_SIZE),
+            str(SLAB_SIZE),
+        )
+    )
+    try:
+        value = b"Hello, ConfigDict!"
+        assert await client.put("test_key_configdict", value) == 0
+        buffer = await client.get_buffer("test_key_configdict")
+        assert buffer is not None
+        assert bytes(buffer) == value
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_dict_setup_accepts_human_readable_sizes(cachelib_master):
+    client = await MooncakeClient.create_from_config(
+        _config_dict(cachelib_master, "localhost:17814", "16MB", "16 MB")
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_dict_setup_accepts_zero_sizes(cachelib_master):
+    client = await MooncakeClient.create_from_config(
+        _config_dict(cachelib_master, "localhost:17815", "0", "0")
+    )
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_config_dict_large_global_size_reaches_transport_failure():
+    config = {
+        "local_hostname": "localhost:17816",
+        "metadata_server": "P2PHANDSHAKE",
+        "global_segment_size": str((1 << 40) + 1),
+        "local_buffer_size": "0",
+        "protocol": "tcp",
+        "rdma_devices": "",
+        "master_server_addr": "127.0.0.1:1",
+    }
+    with pytest.raises(StoreError, match="transport error") as exc_info:
+        await MooncakeClient.create_from_config(config)
+    assert "Invalid global_segment_size" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("local_hostname", "global_size", "local_size"),
+    [
+        ("localhost:17816", "50%", "16MB"),
+        ("localhost:17817", "16MB", "16XB"),
+        ("localhost:17818", "-5", "16MB"),
+        ("localhost:17819", "0", str((1 << 40) + 1)),
+    ],
+)
+async def test_config_dict_rejects_invalid_size_strings(
+    cachelib_master, local_hostname, global_size, local_size
+):
+    with pytest.raises(StoreError):
+        await MooncakeClient.create_from_config(
+            _config_dict(
+                cachelib_master,
+                local_hostname,
+                global_size,
+                local_size,
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("tenant_id", "tenant-a"),
+        ("ipc_socket_path", "/tmp/mooncake.sock"),
+        ("ssd_offload_path", "/tmp/mooncake-ssd"),
+        ("enable_ssd_offload", "true"),
+        ("enable_client_http_server", "true"),
+        ("client_http_port", "50052"),
+    ],
+)
+async def test_config_dict_rejects_known_unsupported_behavioral_fields(key, value):
+    config = {
+        "local_hostname": "localhost:17820",
+        "metadata_server": "P2PHANDSHAKE",
+        "global_segment_size": "0",
+        "local_buffer_size": "0",
+        "protocol": "tcp",
+        "rdma_devices": "",
+        "master_server_addr": "127.0.0.1:1",
+        key: value,
+    }
+    with pytest.raises(StoreError, match=rf"{key}.*not supported"):
+        await MooncakeClient.create_from_config(config)

@@ -219,6 +219,9 @@ struct NormalizedCreateArgs {
     protocol: String,
 }
 
+const CONFIG_DICT_DEFAULT_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+const CONFIG_DICT_MAX_LOCAL_BUFFER_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
+
 // =========================================================================
 // Internal helpers — 内部辅助函数
 // =========================================================================
@@ -286,6 +289,51 @@ fn normalize_create_args(
         master_server_addr,
         protocol,
     })
+}
+
+fn parse_config_dict_size(value: &str) -> PyResult<u64> {
+    let value = value.trim();
+    if value == "infinite" {
+        return Ok(u64::MAX);
+    }
+    let split = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .filter(|index| *index > 0)
+        .rev()
+        .find(|index| value[..*index].parse::<f64>().is_ok())
+        .ok_or_else(|| to_py_err(format!("invalid size value: {value:?}")))?;
+    let number = value[..split]
+        .parse::<f64>()
+        .map_err(|_| to_py_err(format!("invalid size value: {value:?}")))?;
+    if !number.is_finite() || number < 0.0 {
+        return Err(to_py_err(format!("invalid size value: {value:?}")));
+    }
+    let unit = value[split..].trim().to_ascii_uppercase();
+    let multiplier = match unit.as_str() {
+        "" | "B" => 1.0,
+        "K" | "KB" => 1024.0,
+        "M" | "MB" => 1024.0 * 1024.0,
+        "G" | "GB" => 1024.0 * 1024.0 * 1024.0,
+        "T" | "TB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return Err(to_py_err(format!("invalid size value: {value:?}"))),
+    };
+    let bytes = number * multiplier;
+    if bytes > u64::MAX as f64 {
+        return Err(to_py_err(format!("size value is too large: {value:?}")));
+    }
+    Ok(bytes as u64)
+}
+
+fn config_dict_size(
+    config: &HashMap<String, String>,
+    key: &str,
+    default_value: u64,
+) -> PyResult<u64> {
+    config
+        .get(key)
+        .map_or(Ok(default_value), |value| parse_config_dict_size(value))
 }
 
 fn normalize_client_http_config(
@@ -1489,6 +1537,90 @@ impl PythonMooncakeClient {
             // MooncakeClient object via IntoPy.
             // 返回 Rust 结构体 —— future_into_py 通过 IntoPy 将其转换为
             // Python MooncakeClient 对象。
+            let inner = Arc::new(AsyncMutex::new(Some(client)));
+            let background_handle = MooncakeClient::start_background_workers(
+                Arc::clone(&inner),
+                ClientBackgroundConfig::default(),
+            );
+            Ok(PythonMooncakeClient {
+                inner,
+                background: Arc::new(AsyncMutex::new(Some(background_handle))),
+                registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+            })
+        })
+    }
+
+    /// Create a client from the core C++ ConfigDict setup fields.
+    ///
+    /// Behavior-changing fields that are not wired through this binding are
+    /// rejected instead of being silently ignored.
+    #[staticmethod]
+    fn create_from_config<'py>(
+        py: Python<'py>,
+        config: HashMap<String, String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        for key in [
+            "tenant_id",
+            "ipc_socket_path",
+            "ssd_offload_path",
+            "enable_ssd_offload",
+            "enable_client_http_server",
+            "client_http_port",
+        ] {
+            if config.contains_key(key) {
+                return Err(to_py_err(format!(
+                    "ConfigDict key {key:?} is not supported by create_from_config"
+                )));
+            }
+        }
+        let normalized = normalize_create_args(
+            config.get("local_hostname").cloned().unwrap_or_default(),
+            config.get("metadata_server").cloned().unwrap_or_default(),
+            config
+                .get("master_server_addr")
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1:50051".to_string()),
+            config
+                .get("protocol")
+                .cloned()
+                .unwrap_or_else(|| "tcp".to_string()),
+        )?;
+        let global_segment_size = config_dict_size(
+            &config,
+            "global_segment_size",
+            CONFIG_DICT_DEFAULT_SEGMENT_SIZE,
+        )?;
+        let local_buffer_size = config_dict_size(
+            &config,
+            "local_buffer_size",
+            CONFIG_DICT_DEFAULT_SEGMENT_SIZE,
+        )?;
+        if global_segment_size != 0 && global_segment_size < 1024 {
+            return Err(to_py_err(format!(
+                "Invalid global_segment_size: {global_segment_size}, must be 0 or at least 1024"
+            )));
+        }
+        if local_buffer_size != 0
+            && !(1024..=CONFIG_DICT_MAX_LOCAL_BUFFER_SIZE).contains(&local_buffer_size)
+        {
+            return Err(to_py_err(format!(
+                "Invalid local_buffer_size: {local_buffer_size}, must be 0 or between 1024 and {CONFIG_DICT_MAX_LOCAL_BUFFER_SIZE}"
+            )));
+        }
+        let device = config.get("rdma_devices").cloned().unwrap_or_default();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let client = MooncakeClient::create(
+                &normalized.master_server_addr,
+                &normalized.metadata_server,
+                &normalized.local_hostname,
+                &normalized.protocol,
+                &device,
+                global_segment_size,
+                local_buffer_size,
+            )
+            .await
+            .map_err(to_py_err)?;
             let inner = Arc::new(AsyncMutex::new(Some(client)));
             let background_handle = MooncakeClient::start_background_workers(
                 Arc::clone(&inner),
