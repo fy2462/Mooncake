@@ -2711,5 +2711,14 @@
     "focused_command": "cargo test -p mooncake-store-client --test test_file_util --no-default-features -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-file-util-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "posix_file_test.cpp:PosixFileTest.FileLocking",
+    "rust": "mooncake-store-client/tests/test_file_util.rs:cpp_parity_posix_file_test_cpp_posixfiletest_filelocking",
+    "first_divergence": "Rust separately proved backend exclusion and truncated-record recovery but did not hold a scoped exclusive lock across the exact empty-file short read or prove shared reacquisition after scope exit.",
+    "repair_commit": "c10eab31",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --test test_file_util cpp_parity_posix_file_test_cpp_posixfiletest_filelocking -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-posix-file-locking-goal-019fbe77.typescript"
   }
 ]
