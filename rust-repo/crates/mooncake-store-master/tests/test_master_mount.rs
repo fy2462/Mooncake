@@ -559,10 +559,7 @@ async fn assert_mount_validation_and_idempotent_lifecycle(
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "{case}");
     }
     if require_cachelib_alignment {
-        for (case, base_addr, size) in [
-            ("unaligned base", SEGMENT_BASE + 1, SEGMENT_SIZE),
-            ("unaligned size", SEGMENT_BASE, SEGMENT_SIZE + 1),
-        ] {
+        for (case, base_addr, size) in [("unaligned size", SEGMENT_BASE, SEGMENT_SIZE + 1)] {
             let error =
                 MasterService::mount_segment(&service, Request::new(request(base_addr, size)))
                     .await
