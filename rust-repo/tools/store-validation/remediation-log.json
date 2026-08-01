@@ -52,5 +52,14 @@
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=AllMastersOtherThanOneBackedUpKilledFailover MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_allmastersotherthanonebackedupkilledfailover_5d56ddf2 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-one-backup-goal-019fbaa7/result.json"
+  },
+  {
+    "cpp": "e2e/chaos_test.cpp:ChaosTest.AllMastersKilledThenRestartFailover",
+    "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_allmasterskilledthenrestartfailover_d1a97bfb",
+    "first_divergence": "The prior Rust HA schedule explicitly rejected an empty running set, so it never proved that one mounted client survives immediate SIGKILL of all three Masters, restart of every serving process, a newer election, and automatic remount before post-recovery put/get.",
+    "repair_commit": "PENDING",
+    "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=AllMastersKilledThenRestartFailover MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_allmasterskilledthenrestartfailover_d1a97bfb -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
+    "evidence": "/tmp/mooncake-all-restart-goal-019fbaa7/result.json"
   }
 ]

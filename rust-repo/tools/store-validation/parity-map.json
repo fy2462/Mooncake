@@ -157,13 +157,18 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.AllMastersKilledThenRestartFailover"
       },
-      "reason": "Rust's etcd-gated live schedule intentionally stops at most two Masters and rejects an empty running set, so no discoverable live scenario covers all-three-Master loss, restart of every serving process, and existing-client post-recovery put/get.",
+      "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_allmasterskilledthenrestartfailover_d1a97bfb starts three external etcd-elected Rust Masters and one real TCP client with a mounted 16-MiB segment, immediately SIGKILLs all three Masters and proves the running set is empty, restarts all three and proves they survive, waits for a newer stable etcd view, then uses the same existing client without a test-side switch to put and exactly get the object. Native evidence at /tmp/mooncake-all-restart-goal-019fbaa7/result.json passed with all indices 0/1/2 hard-killed and restarted, leader index 2/view 2 replaced by index 1/view 5, one same-client put, one exact read, and five compared bytes.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, MasterProcessHandler::kill/start, ClientTestWrapper, and Rust test_ha_chaos_live.rs ChaosSchedule/MasterCluster paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+          "test": "cpp_parity_e2e_chaos_test_cpp_chaostest_allmasterskilledthenrestartfailover_d1a97bfb"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Client A mounts, client B successfully puts the object, client A gracefully closes, then client B gets OBJECT_NOT_FOUND followed by NO_AVAILABLE_HANDLE for a subsequent put after Master-side cleanup.",
