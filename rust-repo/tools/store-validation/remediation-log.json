@@ -1559,5 +1559,68 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity different_size_upsert_reallocates_and_completes_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-upsert-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertConflictReplicationTask",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:upsert_rejects_active_replication_task_parity",
+    "first_divergence": "Rust covered copy and upsert independently but did not overlap an active segment_1-to-segment_2 copy with exact OBJECT_HAS_REPLICATION_TASK upsert rejection.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity upsert_rejects_active_replication_task_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertPreemptsInProgressPut",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:upsert_preempts_in_progress_put_parity",
+    "first_divergence": "Rust did not prove the distinct two-client Put-to-Upsert preemption, stale PutEnd failure, and successful COMPLETE final state.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity upsert_preempts_in_progress_put_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertRevoke",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:new_key_upsert_revoke_removes_object_parity",
+    "first_divergence": "Rust completed every new-key upsert and did not prove MEMORY revoke before completion leaves existence false.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity new_key_upsert_revoke_removes_object_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertInPlaceThenRevoke",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:in_place_upsert_revoke_removes_object_parity",
+    "first_divergence": "Rust covered same-size completion but not replacement-client revoke of the in-place PROCESSING generation and final absence.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity in_place_upsert_revoke_removes_object_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.BatchUpsertStart",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:mixed_batch_upsert_preserves_order_and_success_parity",
+    "first_divergence": "Rust batch-started one new key only and did not prove the ordered existing-1-KiB/new-2-KiB two-entry success matrix through batch end.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity mixed_batch_upsert_preserves_order_and_success_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertPreemptsInProgressUpsert",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:upsert_preempts_in_progress_upsert_parity",
+    "first_divergence": "Rust repeated upsert starts without the three-client ownership transition, exact mid-flight not-ready observation, stale-end failure, and terminal COMPLETE proof.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity upsert_preempts_in_progress_upsert_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.UpsertDifferentSizeThenRevoke",
+    "rust": "mooncake-store-master/tests/test_master_upsert_parity.rs:different_size_upsert_revoke_removes_old_and_new_object_parity",
+    "first_divergence": "Rust lacked a successful completed-object 1-KiB-to-2-KiB resize followed by MEMORY revoke and final absence of both generations.",
+    "repair_commit": "b227d112",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity different_size_upsert_revoke_removes_old_and_new_object_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_upsert_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-upsert-lifecycle-goal-019fbca4.typescript"
   }
 ]
