@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
-from mooncake_store import MooncakeClient
+from mooncake_store import BufferPool, MooncakeClient
 
 SLAB_SIZE = 1 << 24
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -150,4 +150,24 @@ async def test_put_get_buffer_and_exists_visible_results(cachelib_master):
         assert bytes(retrieved) == value
         assert await client.exists(key) is True
     finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_into_accepts_interior_registered_buffer_range(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    value = b"shared-local-buffer-read"
+    pool = BufferPool(client)
+    lease = pool.acquire(len(value) + 32)
+    owner = lease.buffer
+    destination = owner[16 : 16 + len(value)]
+    try:
+        assert await client.put("local_buffer_subrange_key", value) == 0
+        assert client.get_into("local_buffer_subrange_key", destination) == len(value)
+        assert bytes(destination) == value
+    finally:
+        destination.release()
+        owner.release()
+        lease.release()
+        pool.close()
         await client.close()

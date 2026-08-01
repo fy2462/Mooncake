@@ -3348,7 +3348,7 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         // block_on: future captures raw ptr, not Send-safe
         // block_on: future 捕获了裸指针，不是 Send 的
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.get_into(&key, ptr, size).await;
             result.map_err(to_py_err)
