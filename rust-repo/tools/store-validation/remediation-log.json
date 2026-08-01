@@ -2180,5 +2180,50 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_health_serving_returns_leader",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-http-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.HealthEndpointIncludesLeaderInfoWhenSet",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_health_includes_observed_leader",
+    "first_divergence": "Leader-view fields were covered only through a serving-state formatter unit, not through standby `/health` with the C++ address and view.",
+    "repair_commit": "02245e3c",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_health_includes_observed_leader",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-role-health-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.RoleEndpointReturnsCorrectRoleForServing",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_role_serving_is_leader",
+    "first_divergence": "The serving-to-leader role mapping had no request-level `/role` proof.",
+    "repair_commit": "02245e3c",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_role_serving_is_leader",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-role-health-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.RoleEndpointReturnsCorrectRoleForStandby",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_role_standby_is_standby",
+    "first_divergence": "The standby role mapping existed in source but was not exercised through `/role`.",
+    "repair_commit": "02245e3c",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_role_standby_is_standby",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-role-health-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.RoleEndpointReturnsCorrectRoleForCandidate",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_role_candidate_is_standby",
+    "first_divergence": "Candidate state had no endpoint-level evidence for its C++ standby role projection.",
+    "repair_commit": "02245e3c",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_role_candidate_is_standby",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-role-health-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.RoleEndpointReturnsCorrectRoleForRecovering",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_role_recovering_is_standby",
+    "first_divergence": "Recovering state had no endpoint-level evidence for its C++ standby role projection.",
+    "repair_commit": "02245e3c",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_role_recovering_is_standby",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-role-health-goal-019fbe77.typescript"
   }
 ]
