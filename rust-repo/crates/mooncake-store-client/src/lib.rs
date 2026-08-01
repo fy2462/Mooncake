@@ -73,7 +73,7 @@ pub use dummy::{
     IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
 };
 pub use engram::{EngramStore, EngramStoreConfig};
-pub use hot_cache::LocalHotCache;
+pub use hot_cache::{HotCachePutToken, LocalHotCache};
 pub use local_storage_backend::{
     BucketEvictionPolicy, BucketStorageBackend, BucketStorageConfig, DistributedStorageBackend,
     DistributedStorageConfig, FilePerKeyMigrationReport, LocalStorageBackend, LocalStorageConfig,

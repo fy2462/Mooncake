@@ -1389,10 +1389,13 @@
       "behavior": "A stale asynchronous fill token captured before key invalidation cannot republish removed data, while a current token can publish it.",
       "boundary": ["client", "hot-cache", "invalidation", "async-fill", "concurrency"],
       "reference": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.PutHotKeyWithTokenRejectsStaleFill"},
-      "reason": "No discoverable Rust test races invalidation with an asynchronous hot-cache fill and proves stale data cannot be resurrected.",
+      "reason": "Rust generation tokens make invalidation and conditional publication atomic: cpp_parity_hot_cache_stale_fill_token_cannot_republish_invalidated_key proves stale rejection plus current-token publication, while cpp_parity_hot_cache_client_get_rejects_stale_fill_after_invalidation exercises the production single-get miss/fill race. Native-link evidence is retained at /tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp PutHotKeyWithTokenRejectsStaleFill and mooncake-store/src/local_hot_cache.cpp", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-client/tests/test_hot_cache.rs", "test": "cpp_parity_hot_cache_stale_fill_token_cannot_republish_invalidated_key"},
+        {"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_hot_cache_client_get_rejects_stale_fill_after_invalidation"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "A submitted background hot-cache fill eventually publishes the submitted bytes for retrieval.",
@@ -1433,10 +1436,10 @@
       "behavior": "A client with the local hot cache enabled returns every BatchGet key's exact bytes.",
       "boundary": ["client", "hot-cache", "batch-get", "data-integrity"],
       "reference": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.BatchGetWithHotCacheEnabled"},
-      "reason": "No discoverable Rust test enables a local hot cache and asserts BatchGet returns each requested cached or fetched value in the batch.",
+      "reason": "Rust cpp_parity_hot_cache_batch_get_returns_ordered_exact_bytes attaches a production LocalHotCache, requests keys in reverse insertion order, and asserts every BatchGet slot contains the exact corresponding bytes. Native-link evidence is retained at /tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp BatchGetWithHotCacheEnabled and mooncake-store/src/client_service.cpp", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_hot_cache_batch_get_returns_ordered_exact_bytes"}],
+      "status": "covered"
     },
     {"behavior":"A released accessed block receives its deferred LRU touch before eviction, so it survives while the least-recently-used untouched block is evicted.","boundary":["client","hot-cache","eviction","lru","deferred-touch"],"reference":{"file":"client_local_hot_cache_test.cpp","test":"LocalHotCacheTest.DeferredLRUTouchOrdering"},"reason":"Rust cpp_parity_owned_get_updates_recency_before_reuse executes the production LocalHotCache replacement boundary and asserts the exact C++ observable: A released accessed block receives its deferred LRU touch before eviction, so it survives while the least-recently-used untouched block is evicted. Native-link focused evidence is retained at /tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript.","review":{"oracle":"mooncake-store/tests/client_local_hot_cache_test.cpp:1048-1078 and Rust hot_cache.rs LocalHotCache::get/put","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_hot_cache.rs","test":"cpp_parity_owned_get_updates_recency_before_reuse"}],"status":"covered"},
     {"behavior":"Concurrent readers can repeatedly retrieve an existing hot-cache key without failed lookups or crashes.","boundary":["client","hot-cache","concurrency","get"],"reference":{"file":"client_local_hot_cache_test.cpp","test":"LocalHotCacheTest.ConcurrentGetHotKeySharedLock"},"reason":"Rust cpp_parity_concurrent_hot_cache_readers_all_succeed executes the production LocalHotCache replacement boundary and asserts the exact C++ observable: Concurrent readers can repeatedly retrieve an existing hot-cache key without failed lookups or crashes. Native-link focused evidence is retained at /tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript.","review":{"oracle":"mooncake-store/tests/client_local_hot_cache_test.cpp ConcurrentGetHotKeySharedLock and mooncake-store/src/local_hot_cache.cpp","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_hot_cache.rs","test":"cpp_parity_concurrent_hot_cache_readers_all_succeed"}],"status":"covered"},
@@ -1446,10 +1449,10 @@
       "behavior": "A cache-hit Get returns cached bytes without incrementing frequency-admission state for that key.",
       "boundary": ["client", "hot-cache", "admission", "cache-hit"],
       "reference": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.AdmissionSketchNotIncrementedOnCacheHit"},
-      "reason": "No discoverable Rust integration test asserts hot_cache_admission_count remains unchanged across repeated client cache-hit reads.",
+      "reason": "Rust cpp_parity_hot_cache_hits_preserve_admission_count_and_exact_bytes warms the production client cache, proves three exact-byte cache-hit reads, and asserts the public admission count remains unchanged at zero. Native-link evidence is retained at /tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp AdmissionSketchNotIncrementedOnCacheHit and mooncake-store/src/client_service.cpp", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_hot_cache_hits_preserve_admission_count_and_exact_bytes"}],
+      "status": "covered"
     },
     {
       "behavior": "A Count-Min Sketch increments per-key estimates, reports unseen keys as zero, and halves all counters on explicit decay.",
@@ -1482,10 +1485,10 @@
       "behavior": "With no local hot cache, admission count is zero and admission decisions are false regardless of cache-used input.",
       "boundary": ["client", "hot-cache", "admission", "disabled"],
       "reference": {"file": "client_local_hot_cache_test.cpp", "test": "LocalHotCacheTest.AdmissionHelpersWithoutHotCache"},
-      "reason": "No discoverable Rust test creates a client without a hot cache and asserts both zero admission count and false admission decisions.",
+      "reason": "Rust cpp_parity_hot_cache_admission_helpers_are_disabled_without_cache creates a public client without LocalHotCache and asserts disabled state, count zero, and false admission decisions for both cache_used inputs. Native-link evidence is retained at /tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript.",
       "review": {"oracle": "mooncake-store/tests/client_local_hot_cache_test.cpp AdmissionHelpersWithoutHotCache and mooncake-store/include/client_service.h", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_hot_cache_admission_helpers_are_disabled_without_cache"}],
+      "status": "covered"
     },
     {
       "behavior": "After a warmed key is read twice through DummyClient, each buffer has the stored size and bytes, and a successful remove makes the next get_buffer return no buffer.",

@@ -370,6 +370,18 @@ impl MooncakeClient {
             .map_or(0, |admission| admission.count(cache_key.as_ref()))
     }
 
+    /// Decide whether a non-cache-hit value should be admitted to the local
+    /// hot cache, updating the frequency sketch when one is configured.
+    pub fn should_admit_to_hot_cache(&self, key: &str, cache_used: bool) -> bool {
+        if self.hot_cache.is_none() || cache_used {
+            return false;
+        }
+        let cache_key = super::read::scoped_cache_key(&self.tenant_id, key);
+        self.hot_cache_admission
+            .as_ref()
+            .is_none_or(|admission| admission.should_admit(cache_key.as_ref()))
+    }
+
     /// Return a snapshot of remote miss / hot-cache fallback statistics.
     ///
     /// This exposes the Rust client's local miss-handler counters. It is not a

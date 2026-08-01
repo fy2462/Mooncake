@@ -1010,5 +1010,41 @@
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.PutHotKeyWithTokenRejectsStaleFill",
+    "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_hot_cache_stale_fill_token_cannot_republish_invalidated_key, mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_hot_cache_client_get_rejects_stale_fill_after_invalidation",
+    "first_divergence": "Rust LocalHotCache had no invalidation generation token, so an in-flight single-get miss could unconditionally republish bytes after remove invalidated the key.",
+    "repair_commit": "PENDING",
+    "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_hot_cache cpp_parity_hot_cache_stale_fill_token_cannot_republish_invalidated_key -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_hot_cache_ -- --nocapture",
+    "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_hot_cache --test test_client_inproc_e2e",
+    "evidence": "/tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.BatchGetWithHotCacheEnabled",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_hot_cache_batch_get_returns_ordered_exact_bytes",
+    "first_divergence": "Rust BatchGet already served hot-cache hits, but no discoverable native-link test asserted ordered exact bytes for every requested cached key.",
+    "repair_commit": "PENDING",
+    "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_hot_cache_ -- --nocapture",
+    "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_hot_cache --test test_client_inproc_e2e",
+    "evidence": "/tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.AdmissionSketchNotIncrementedOnCacheHit",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_hot_cache_hits_preserve_admission_count_and_exact_bytes",
+    "first_divergence": "Rust skipped admission updates on cache hits in production, but no public-client test proved repeated exact-byte hits leave the admission count unchanged.",
+    "repair_commit": "PENDING",
+    "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_hot_cache_ -- --nocapture",
+    "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_hot_cache --test test_client_inproc_e2e",
+    "evidence": "/tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.AdmissionHelpersWithoutHotCache",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_hot_cache_admission_helpers_are_disabled_without_cache",
+    "first_divergence": "Rust exposed read-only admission counts but lacked the public admission decision boundary needed to prove both cache_used inputs return false when LocalHotCache is disabled.",
+    "repair_commit": "PENDING",
+    "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_hot_cache_ -- --nocapture",
+    "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_hot_cache --test test_client_inproc_e2e",
+    "evidence": "/tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript"
   }
 ]

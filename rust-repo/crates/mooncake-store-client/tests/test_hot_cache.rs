@@ -33,6 +33,35 @@ fn test_hot_cache_remove() {
 }
 
 #[test]
+fn cpp_parity_hot_cache_stale_fill_token_cannot_republish_invalidated_key() {
+    let cache = LocalHotCache::new(1024, 4);
+
+    let stale = cache.acquire_put_token("stale-fill-key");
+    cache.remove("stale-fill-key");
+    assert!(!cache.put_with_token(stale, b"removed-bytes"));
+    assert_eq!(cache.get("stale-fill-key"), None);
+
+    let current = cache.acquire_put_token("stale-fill-key");
+    assert!(cache.put_with_token(current, b"current-bytes"));
+    assert_eq!(cache.get("stale-fill-key"), Some(b"current-bytes".to_vec()));
+}
+
+#[test]
+fn hot_cache_regex_invalidation_rejects_inflight_absent_fill() {
+    let cache = LocalHotCache::new(1024, 4);
+    let token = cache.acquire_put_token("tenant-a\0regex-key");
+
+    assert_eq!(
+        cache
+            .remove_by_regex_for_tenant("tenant-a", "^regex-")
+            .unwrap(),
+        0
+    );
+    assert!(!cache.put_with_token(token, b"stale-regex-bytes"));
+    assert_eq!(cache.get("tenant-a\0regex-key"), None);
+}
+
+#[test]
 fn test_hot_cache_remove_by_regex_respects_tenant_scope() {
     let cache = LocalHotCache::new(1024 * 1024, 100);
     cache.put("tenant-a\0prefix_1", b"a1");

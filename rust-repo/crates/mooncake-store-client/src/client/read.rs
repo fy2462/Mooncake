@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::ffi::c_void;
 
 use super::MooncakeClient;
+use crate::hot_cache::HotCachePutToken;
 
 pub(super) fn scoped_cache_key<'a>(tenant_id: &str, key: &'a str) -> Cow<'a, str> {
     if tenant_id.is_empty() {
@@ -35,6 +36,19 @@ impl MooncakeClient {
         }
     }
 
+    fn cache_value_if_admitted_with_token(
+        &self,
+        cache_key: &str,
+        data: &[u8],
+        token: Option<HotCachePutToken>,
+    ) {
+        if self.hot_cache_should_admit(cache_key)
+            && let (Some(cache), Some(token)) = (&self.hot_cache, token)
+        {
+            cache.put_with_token(token, data);
+        }
+    }
+
     pub(crate) fn cache_replica_value_if_admitted(
         &self,
         cache_key: &str,
@@ -52,6 +66,25 @@ impl MooncakeClient {
             && let Some(cache) = &self.hot_cache
         {
             cache.put(cache_key, data);
+        }
+    }
+
+    fn cache_replica_value_if_admitted_with_token(
+        &self,
+        cache_key: &str,
+        data: &[u8],
+        replica: &ReplicaDescriptor,
+        token: Option<HotCachePutToken>,
+    ) {
+        if replica.replica_type != ReplicaType::Memory {
+            return;
+        }
+        let admitted = self.hot_cache_should_admit(cache_key);
+        if admitted
+            && !self.is_local_replica(replica)
+            && let (Some(cache), Some(token)) = (&self.hot_cache, token)
+        {
+            cache.put_with_token(token, data);
         }
     }
 
@@ -132,6 +165,10 @@ impl MooncakeClient {
     ) -> StoreResult<Vec<u8>> {
         tracing::info!(target: "te_debug", %key, "get: ENTER");
         let cache_key = scoped_cache_key(tenant_id, key);
+        let cache_fill_token = self
+            .hot_cache
+            .as_ref()
+            .map(|cache| cache.acquire_put_token(cache_key.as_ref()));
 
         // Level 0: check local hot cache (fastest — no network)
         // 第 0 级：检查本地热缓存（最快 —— 零网络开销）
@@ -169,7 +206,12 @@ impl MooncakeClient {
                 );
                 let data = self.read_from_replica_for_tenant(key, tenant_id, r).await?;
                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: read_from_replica success");
-                self.cache_replica_value_if_admitted(cache_key.as_ref(), &data, r);
+                self.cache_replica_value_if_admitted_with_token(
+                    cache_key.as_ref(),
+                    &data,
+                    r,
+                    cache_fill_token,
+                );
                 Ok(data)
             }
             None => {
@@ -181,7 +223,11 @@ impl MooncakeClient {
                         match handler.handle_miss(key).await {
                             Ok(data) => {
                                 tracing::info!(target: "te_debug", %key, data_len = data.len(), "get: remote source success");
-                                self.cache_value_if_admitted(cache_key.as_ref(), &data);
+                                self.cache_value_if_admitted_with_token(
+                                    cache_key.as_ref(),
+                                    &data,
+                                    cache_fill_token,
+                                );
                                 Ok(data)
                             }
                             Err(remote_err) => {

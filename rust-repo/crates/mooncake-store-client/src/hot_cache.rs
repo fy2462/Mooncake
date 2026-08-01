@@ -29,6 +29,10 @@ use parking_lot::Mutex;
 use regex::Regex;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicU64, Ordering},
+};
 
 /// 默认热缓存大小: 256 MiB
 /// (Default hot cache size: 256 MiB)
@@ -154,9 +158,19 @@ struct HotCacheEntry {
     last_access: u64,
 }
 
+/// Captures the invalidation generation for one in-flight cache fill.
+pub struct HotCachePutToken {
+    key: String,
+    key_generation: Arc<AtomicU64>,
+    key_generation_value: u64,
+    clear_generation: u64,
+}
+
 #[derive(Default)]
 struct HotCacheState {
     entries: HashMap<String, HotCacheEntry>,
+    key_generations: HashMap<String, Weak<AtomicU64>>,
+    clear_generation: u64,
     used_size: usize,
     next_access: u64,
 }
@@ -166,6 +180,11 @@ impl HotCacheState {
         let sequence = self.next_access;
         self.next_access = self.next_access.saturating_add(1);
         sequence
+    }
+
+    fn prune_inactive_generations(&mut self) {
+        self.key_generations
+            .retain(|_, generation| generation.strong_count() > 0);
     }
 }
 
@@ -204,19 +223,63 @@ impl LocalHotCache {
     /// Insert a new value. Duplicate keys are LRU touches and retain their
     /// original bytes, matching the C++ LocalHotCache contract.
     pub fn put(&self, key: &str, value: &[u8]) {
+        let mut state = self.state.lock();
+        self.put_locked(&mut state, key, value);
+    }
+
+    /// Capture the current invalidation generation before starting a fill.
+    pub fn acquire_put_token(&self, key: &str) -> HotCachePutToken {
+        let mut state = self.state.lock();
+        state.prune_inactive_generations();
+        let key_generation = state
+            .key_generations
+            .get(key)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let generation = Arc::new(AtomicU64::new(0));
+                state
+                    .key_generations
+                    .insert(key.to_string(), Arc::downgrade(&generation));
+                generation
+            });
+        HotCachePutToken {
+            key: key.to_string(),
+            key_generation_value: key_generation.load(Ordering::Relaxed),
+            key_generation,
+            clear_generation: state.clear_generation,
+        }
+    }
+
+    /// Publish a fill only if no invalidation raced after token acquisition.
+    pub fn put_with_token(&self, token: HotCachePutToken, value: &[u8]) -> bool {
+        let mut state = self.state.lock();
+        let is_current_generation = state
+            .key_generations
+            .get(&token.key)
+            .and_then(Weak::upgrade)
+            .is_some_and(|generation| {
+                Arc::ptr_eq(&generation, &token.key_generation)
+                    && generation.load(Ordering::Relaxed) == token.key_generation_value
+            });
+        if state.clear_generation != token.clear_generation || !is_current_generation {
+            return false;
+        }
+        self.put_locked(&mut state, &token.key, value)
+    }
+
+    fn put_locked(&self, state: &mut HotCacheState, key: &str, value: &[u8]) -> bool {
         if value.is_empty()
             || value.len() > self.max_value_size
             || value.len() > self.max_size
             || self.max_entries == 0
         {
-            return;
+            return false;
         }
 
-        let mut state = self.state.lock();
         let sequence = state.take_access_sequence();
         if let Some(entry) = state.entries.get_mut(key) {
             entry.last_access = sequence;
-            return;
+            return true;
         }
 
         while state.used_size + value.len() > self.max_size
@@ -228,7 +291,7 @@ impl LocalHotCache {
                 .min_by_key(|(_, entry)| entry.last_access)
                 .map(|(key, _)| key.clone());
             let Some(oldest_key) = oldest_key else {
-                return;
+                return false;
             };
             if let Some(removed) = state.entries.remove(&oldest_key) {
                 state.used_size -= removed.value.len();
@@ -243,10 +306,15 @@ impl LocalHotCache {
                 last_access: sequence,
             },
         );
+        true
     }
 
     pub fn remove(&self, key: &str) {
         let mut state = self.state.lock();
+        state.prune_inactive_generations();
+        if let Some(generation) = state.key_generations.get(key).and_then(Weak::upgrade) {
+            generation.fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(entry) = state.entries.remove(key) {
             state.used_size -= entry.value.len();
         }
@@ -260,6 +328,8 @@ impl LocalHotCache {
         let re = Regex::new(pattern)?;
         let prefix = (!tenant_id.is_empty()).then(|| format!("{tenant_id}\0"));
         let mut state = self.state.lock();
+        state.clear_generation = state.clear_generation.wrapping_add(1);
+        state.key_generations.clear();
         let matching_keys = state
             .entries
             .keys()
@@ -285,7 +355,9 @@ impl LocalHotCache {
 
     pub fn clear(&self) {
         let mut state = self.state.lock();
+        state.clear_generation = state.clear_generation.wrapping_add(1);
         state.entries.clear();
+        state.key_generations.clear();
         state.used_size = 0;
     }
 
@@ -352,6 +424,16 @@ mod tests {
 
         assert!(cache.get("too-large").is_none());
         assert_eq!(cache.get("fits").unwrap().len(), 4096);
+    }
+
+    #[test]
+    fn invalidating_uncached_unique_keys_does_not_retain_generation_metadata() {
+        let cache = LocalHotCache::new(1024, 4);
+        for index in 0..1024 {
+            cache.remove(&format!("absent-{index}"));
+        }
+
+        assert!(cache.state.lock().key_generations.is_empty());
     }
 
     #[test]

@@ -2,7 +2,8 @@
 
 use mooncake_store_client::{
     ClientBackgroundConfig, ClientHealthStatus, LocalHotCache, LocalStorageBackend,
-    LocalStorageConfig, MooncakeClient, proto,
+    LocalStorageConfig, MooncakeClient, RemoteSource, RemoteSourceConfig, RemoteSourceResult,
+    proto,
 };
 use mooncake_store_core::{ReplicaType, ReplicateConfig, StoreError};
 use mooncake_store_master::MasterRuntimeConfig;
@@ -453,6 +454,131 @@ async fn hot_cache_hit_bypasses_missing_master_metadata_in_both_handshake_modes(
     let _ = shutdown.send(());
     metadata_server.abort();
     let _ = metadata_server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_hot_cache_batch_get_returns_ordered_exact_bytes() {
+    let (master, shutdown) = start_master().await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    cache.put("batch-hot-key-1", b"Data1");
+    cache.put("batch-hot-key-2", b"Data2");
+    let mut client = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+    let keys = vec!["batch-hot-key-2".to_string(), "batch-hot-key-1".to_string()];
+
+    assert_eq!(
+        client.batch_get(&keys).await.unwrap(),
+        vec![Some(b"Data2".to_vec()), Some(b"Data1".to_vec())]
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_hot_cache_hits_preserve_admission_count_and_exact_bytes() {
+    let (master, shutdown) = start_master().await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    cache.put("admission-cache-hit", b"cache-hit-data");
+    let mut client = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+    let count_before = client.hot_cache_admission_count("admission-cache-hit");
+    assert_eq!(count_before, 0);
+
+    for _ in 0..3 {
+        assert_eq!(
+            client.get("admission-cache-hit").await.unwrap(),
+            b"cache-hit-data"
+        );
+    }
+
+    assert_eq!(
+        client.hot_cache_admission_count("admission-cache-hit"),
+        count_before
+    );
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_hot_cache_admission_helpers_are_disabled_without_cache() {
+    if std::env::var_os("MOONCAKE_HOT_CACHE_DISABLED_TEST").is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .arg("cpp_parity_hot_cache_admission_helpers_are_disabled_without_cache")
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("MOONCAKE_HOT_CACHE_DISABLED_TEST", "1")
+            .env_remove("MC_STORE_LOCAL_HOT_CACHE_SIZE")
+            .env_remove("MC_STORE_LOCAL_HOT_BLOCK_SIZE")
+            .env_remove("MC_STORE_LOCAL_HOT_CACHE_USE_SHM")
+            .env_remove("MC_STORE_LOCAL_HOT_ADMISSION_THRESHOLD")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cache-disabled helper failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let (master, shutdown) = start_master().await;
+    let mut client = create_tcp_client(&master).await;
+
+    assert!(!client.is_hot_cache_enabled());
+    assert_eq!(client.hot_cache_admission_count("any-key"), 0);
+    assert!(!client.should_admit_to_hot_cache("any-key", false));
+    assert!(!client.should_admit_to_hot_cache("any-key", true));
+
+    client.tear_down_all().await.unwrap();
+    let _ = shutdown.send(());
+}
+
+struct BlockingRemoteSource {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    value: Vec<u8>,
+}
+
+#[async_trait::async_trait]
+impl RemoteSource for BlockingRemoteSource {
+    async fn get(&self, _key: &str) -> RemoteSourceResult<Vec<u8>> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(self.value.clone())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_hot_cache_client_get_rejects_stale_fill_after_invalidation() {
+    let (master, shutdown) = start_master().await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = BlockingRemoteSource {
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+        value: b"stale-remote-value".to_vec(),
+    };
+    let mut client = create_tcp_client(&master)
+        .await
+        .with_remote_source(
+            source,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .with_hot_cache(Arc::clone(&cache));
+
+    let get = tokio::spawn(async move { client.get("racing-key").await });
+    started.notified().await;
+    cache.remove("racing-key");
+    release.notify_one();
+
+    assert_eq!(get.await.unwrap().unwrap(), b"stale-remote-value");
+    assert_eq!(cache.get("racing-key"), None);
+    let _ = shutdown.send(());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
