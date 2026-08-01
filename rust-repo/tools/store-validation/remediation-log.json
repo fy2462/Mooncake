@@ -404,5 +404,194 @@
     "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestFailedToStopped",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfailedtostopped_37f0c27a",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestFailedToStopped, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestFailedToConnecting",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfailedtoconnecting_4da976de",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestFailedToConnecting, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestPromotedToStopped",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotedtostopped_176321e3",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestPromotedToStopped, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestInvalidTransitions",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testinvalidtransitions_1bde3c25",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestInvalidTransitions, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestConsecutiveErrors",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconsecutiveerrors_27d72ca6",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestConsecutiveErrors, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestMaxErrorsReachedAutoTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testmaxerrorsreachedautotransition_5ad85f10",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestMaxErrorsReachedAutoTransition, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestMaxErrorsReachedManual",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testmaxerrorsreachedmanual_eed3014c",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestMaxErrorsReachedManual, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestReconnectCount",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectcount_e4579690",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestReconnectCount, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestStateChangeCallback",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_teststatechangecallback_4f5e0014",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestStateChangeCallback, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestMultipleCallbacks",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testmultiplecallbacks_15ac287f",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestMultipleCallbacks, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestCallbackExceptionHandling",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testcallbackexceptionhandling_bf8972f4",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestCallbackExceptionHandling, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestTransitionHistory",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testtransitionhistory_4433d7f2",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestTransitionHistory, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestTransitionHistoryLimit",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testtransitionhistorylimit_a3b098a0",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestTransitionHistoryLimit, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestConcurrentStateQueries",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconcurrentstatequeries_2ac25db5",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestConcurrentStateQueries, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestConcurrentEventProcessing",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconcurrenteventprocessing_a94bdab7",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestConcurrentEventProcessing, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestIsConnected",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testisconnected_828cec77",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestIsConnected, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestIsWatchHealthy",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testiswatchhealthy_d04ecfc3",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestIsWatchHealthy, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestIsReadyForPromotion",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testisreadyforpromotion_91be26ff",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestIsReadyForPromotion, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestCompleteReconnectFlow",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testcompletereconnectflow_bd423bde",
+    "first_divergence": "Existing Rust tests or implementation covered part of StandbyStateMachineTest.TestCompleteReconnectFlow, but no discoverable one-row test asserted its full C++ observable contract through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-extended-goal-019fbaa7.typescript"
   }
 ]
