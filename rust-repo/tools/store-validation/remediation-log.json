@@ -1213,7 +1213,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutEndAllCompletesMemoryAndNoFReplicas",
     "rust": "mooncake-store-master/tests/test_master_object.rs:put_end_all_completes_memory_and_nof_replicas_parity",
     "first_divergence": "Rust already completed both Memory and NoF descriptors for PutEnd ALL, but no discoverable direct test mounted both replica classes and asserted both returned descriptors were COMPLETE.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c275381d",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object put_end_all_completes_memory_and_nof_replicas_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-end-memory-nof-goal-019fbca4.typescript"
@@ -1222,7 +1222,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutEndMemoryDoesNotCompleteNoFReplica",
     "rust": "mooncake-store-master/tests/test_master_object.rs:memory_put_end_leaves_nof_revokeable_parity",
     "first_divergence": "Rust already kept an allocating NoF descriptor incomplete when PutEnd targeted Memory and allowed that NoF descriptor to be revoked, but no discoverable direct test asserted the intermediate and final Memory-only views.",
-    "repair_commit": "PENDING",
+    "repair_commit": "c275381d",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object memory_put_end_leaves_nof_revokeable_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-end-memory-nof-goal-019fbca4.typescript"
