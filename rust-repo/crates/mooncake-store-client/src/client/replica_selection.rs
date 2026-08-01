@@ -343,4 +343,113 @@ mod tests {
             .is_none()
         );
     }
+
+    #[test]
+    fn replica_selection_environment_subprocess_helper() {
+        if std::env::var_os("MOONCAKE_REPLICA_SELECTION_PARITY_CHILD").is_none() {
+            return;
+        }
+
+        let replicas = vec![memory("tcp-node", "tcp"), memory("rdma-node", "rdma")];
+        let policy = ReplicaSelectionPolicy::from_env();
+        assert!(policy.scoring_enabled);
+        let selected = select_best_replica(&replicas, &HashSet::new(), &policy).unwrap();
+        assert_eq!(selected.segment_name, "rdma-node");
+        assert_eq!(selected.protocol, "rdma");
+    }
+
+    #[test]
+    fn cpp_parity_environment_opt_in_uses_builtin_selection() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(
+                "client::replica_selection::tests::replica_selection_environment_subprocess_helper",
+            )
+            .arg("--exact")
+            .arg("--nocapture")
+            .env("MOONCAKE_REPLICA_SELECTION_PARITY_CHILD", "1")
+            .env("MC_STORE_REPLICA_SCORING", "1")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "replica-selection environment helper failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn cpp_parity_scoring_skips_written_better_remote_memory() {
+        let mut written_rdma = memory("written-rdma", "rdma");
+        written_rdma.status = ReplicaStatus::Written;
+        let replicas = vec![written_rdma, memory("complete-tcp", "tcp")];
+
+        let selected = select_best_replica(
+            &replicas,
+            &HashSet::new(),
+            &ReplicaSelectionPolicy::builtin(),
+        )
+        .unwrap();
+
+        assert_eq!(selected.segment_name, "complete-tcp");
+        assert_eq!(selected.status, ReplicaStatus::Complete);
+        assert_eq!(selected.protocol, "tcp");
+    }
+
+    #[test]
+    fn cpp_parity_later_local_disk_overrides_earlier_disk() {
+        let mut disk = memory("first-disk", "");
+        disk.replica_type = ReplicaType::Disk;
+        let mut local_disk = memory("second-local-disk", "");
+        local_disk.replica_type = ReplicaType::LocalDisk;
+        let replicas = vec![disk, local_disk];
+
+        let selected = select_best_replica(
+            &replicas,
+            &HashSet::new(),
+            &ReplicaSelectionPolicy::disabled(),
+        )
+        .unwrap();
+
+        assert_eq!(selected.replica_type, ReplicaType::LocalDisk);
+        assert_eq!(selected.segment_name, "second-local-disk");
+    }
+
+    #[test]
+    fn cpp_parity_disk_is_last_complete_fallback_after_failed_memory() {
+        let mut disk = memory("complete-disk", "");
+        disk.replica_type = ReplicaType::Disk;
+        let mut failed_memory = memory("failed-memory", "rdma");
+        failed_memory.status = ReplicaStatus::Failed;
+        let replicas = vec![disk, failed_memory];
+
+        let selected = select_best_replica(
+            &replicas,
+            &HashSet::new(),
+            &ReplicaSelectionPolicy::disabled(),
+        )
+        .unwrap();
+
+        assert_eq!(selected.replica_type, ReplicaType::Disk);
+        assert_eq!(selected.segment_name, "complete-disk");
+    }
+
+    #[test]
+    fn cpp_parity_processing_memory_and_failed_nof_return_none() {
+        let mut processing_memory = memory("processing-memory", "tcp");
+        processing_memory.status = ReplicaStatus::Written;
+        let mut failed_nof = memory("failed-nof", "nof");
+        failed_nof.replica_type = ReplicaType::NoFSsd;
+        failed_nof.status = ReplicaStatus::Failed;
+
+        assert!(
+            select_best_replica(
+                &[processing_memory, failed_nof],
+                &HashSet::new(),
+                &ReplicaSelectionPolicy::disabled(),
+            )
+            .is_none()
+        );
+    }
 }
