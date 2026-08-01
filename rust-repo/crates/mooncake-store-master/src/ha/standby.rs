@@ -1,7 +1,6 @@
 use super::catalog_snapshot::create_catalog_backed_snapshot_provider;
 use super::snapshot::{
-    LoadedSnapshot, LocalSnapshotProvider, SnapshotCatalogStoreType, SnapshotObjectStoreType,
-    SnapshotProvider,
+    LocalSnapshotProvider, SnapshotObjectStoreType, parse_snapshot_catalog_store_type,
 };
 use super::types::{
     HABackendSpec, HABackendType, HaError, MasterRuntimeState, MasterView, RuntimeStateCallback,
@@ -37,7 +36,7 @@ pub struct MasterServiceSupervisorConfig {
     /// C++-compatible snapshot payload store. None preserves the legacy local provider.
     pub snapshot_object_store_type: Option<SnapshotObjectStoreType>,
     /// Catalog used to resolve the latest C++-compatible snapshot.
-    pub snapshot_catalog_store_type: SnapshotCatalogStoreType,
+    pub snapshot_catalog_store_type: String,
     /// Optional catalog connection string; Redis falls back to the HA connection.
     pub snapshot_catalog_store_connstring: Option<String>,
 }
@@ -51,17 +50,9 @@ impl Default for MasterServiceSupervisorConfig {
             snapshot_backup_dir: None,
             snapshot_backend_type: None,
             snapshot_object_store_type: None,
-            snapshot_catalog_store_type: SnapshotCatalogStoreType::Embedded,
+            snapshot_catalog_store_type: "embedded".to_string(),
             snapshot_catalog_store_connstring: None,
         }
-    }
-}
-
-struct FailedSnapshotProvider(HaError);
-
-impl SnapshotProvider for FailedSnapshotProvider {
-    fn load_latest_snapshot(&self, _cluster_id: &str) -> Result<Option<LoadedSnapshot>, HaError> {
-        Err(self.0.clone())
     }
 }
 
@@ -255,6 +246,7 @@ pub struct CapabilityDrivenStandbyController {
     service: HotStandbyService,
     observed_leader: Option<MasterView>,
     last_error: Option<HaError>,
+    startup_error: Option<HaError>,
     callback: Option<RuntimeStateCallback>,
     last_reported_runtime_state: Option<MasterRuntimeState>,
 }
@@ -283,6 +275,7 @@ impl CapabilityDrivenStandbyController {
             ..Default::default()
         };
         let mut service = HotStandbyService::new(state, service_config);
+        let mut startup_error = None;
 
         if capabilities.has_snapshot_bootstrap {
             if let Some(object_store_type) = config.snapshot_object_store_type {
@@ -293,17 +286,20 @@ impl CapabilityDrivenStandbyController {
                     .or_else(|| {
                         (!spec.connstring.trim().is_empty()).then_some(spec.connstring.as_str())
                     });
-                match create_catalog_backed_snapshot_provider(
-                    config.cluster_id.clone(),
-                    object_store_type,
-                    config.snapshot_catalog_store_type,
-                    config.snapshot_backup_dir.clone(),
-                    connstring,
-                ) {
+                let provider =
+                    parse_snapshot_catalog_store_type(&config.snapshot_catalog_store_type)
+                        .and_then(|catalog_store_type| {
+                            create_catalog_backed_snapshot_provider(
+                                config.cluster_id.clone(),
+                                object_store_type,
+                                catalog_store_type,
+                                config.snapshot_backup_dir.clone(),
+                                connstring,
+                            )
+                        });
+                match provider {
                     Ok(provider) => service.set_snapshot_provider(Box::new(provider)),
-                    Err(error) => {
-                        service.set_snapshot_provider(Box::new(FailedSnapshotProvider(error)))
-                    }
+                    Err(error) => startup_error = Some(error),
                 }
             } else if let (Some(dir), Some(backend_type)) =
                 (&config.snapshot_backup_dir, config.snapshot_backend_type)
@@ -322,6 +318,7 @@ impl CapabilityDrivenStandbyController {
             service,
             observed_leader: None,
             last_error: None,
+            startup_error,
             callback: None,
             last_reported_runtime_state: None,
         }
@@ -347,6 +344,7 @@ impl CapabilityDrivenStandbyController {
             service,
             observed_leader: None,
             last_error: None,
+            startup_error: None,
             callback: None,
             last_reported_runtime_state: None,
         }
@@ -438,6 +436,11 @@ impl StandbyController for CapabilityDrivenStandbyController {
         // A follower thread that exhausted bounded reconnects leaves the state
         // machine in Failed. Stop resets it before creating a fresh follower.
         self.service.stop();
+        if let Some(error) = self.startup_error.clone() {
+            self.last_error = Some(error.clone());
+            self.notify_runtime_state_if_changed();
+            return Err(error);
+        }
         if let Err(error) = self
             .ensure_oplog_store()
             .and_then(|()| block_on_runtime(self.service.start()))

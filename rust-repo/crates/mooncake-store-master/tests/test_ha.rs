@@ -9,9 +9,9 @@ use mooncake_store_master::ha::{
     CapabilityDrivenStandbyController, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
     LeaderRole, LeadershipSession, LocalFileSnapshotObjectStore, LocalSnapshotProvider,
     MasterRuntimeState, MasterServiceSupervisor, MasterServiceSupervisorConfig, MasterView,
-    SnapshotCatalogStore, SnapshotCatalogStoreType, SnapshotDescriptor, SnapshotObjectStore,
-    SnapshotObjectStoreType, SnapshotProvider, StandbyController, StandbyRuntimeCapabilities,
-    StandbyState, StandbySyncStatus, build_standby_runtime_capabilities, map_standby_runtime_state,
+    SnapshotCatalogStore, SnapshotDescriptor, SnapshotObjectStore, SnapshotObjectStoreType,
+    SnapshotProvider, StandbyController, StandbyRuntimeCapabilities, StandbyState,
+    StandbySyncStatus, build_standby_runtime_capabilities, map_standby_runtime_state,
     parse_ha_backend_type,
 };
 use mooncake_store_master::service::{NoFSegmentEntry, ObjectEntry, SegmentEntry, TaskEntry};
@@ -464,19 +464,21 @@ fn test_capability_driven_controller_restores_snapshot_and_reports_state() {
 }
 
 #[test]
-fn test_controller_promotion_preserves_standby_start_failure() {
+fn cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_standbycontrollertest_promotestandbyreturnsstartfailure_85f15d3e()
+ {
     let spec = HABackendSpec {
-        backend_type: HABackendType::Unknown,
-        connstring: String::new(),
-        cluster_namespace: "start-failure".into(),
+        backend_type: HABackendType::Etcd,
+        connstring: "http://127.0.0.1:2379".into(),
+        cluster_namespace: "replication-controller-test".into(),
         pod_identity: None,
     };
     let config = MasterServiceSupervisorConfig {
-        cluster_id: "start-failure".into(),
+        local_hostname: "127.0.0.1:50051".into(),
+        cluster_id: "replication-controller-test".into(),
         enable_snapshot_restore: true,
         snapshot_backup_dir: Some(temp_dir()),
         snapshot_object_store_type: Some(SnapshotObjectStoreType::Local),
-        snapshot_catalog_store_type: SnapshotCatalogStoreType::Redis,
+        snapshot_catalog_store_type: "invalid".into(),
         ..Default::default()
     };
     let mut controller = CapabilityDrivenStandbyController::new(spec, config);

@@ -241,7 +241,11 @@ impl Default for HotStandbyConfig {
 mod tests {
     use super::*;
     use crate::TenantId;
-    use crate::ha::{NoopSnapshotProvider, OpLogPollResult, OpLogRecord, SnapshotProvider};
+    use crate::ha::{
+        LoadedSnapshot, NoopSnapshotProvider, OpLogPollResult, OpLogRecord,
+        SnapshotCatalogStoreType, SnapshotObjectStoreType, SnapshotProvider,
+        create_catalog_backed_snapshot_provider,
+    };
     use crate::oplog::{
         InMemoryOpLog, LocalFsOpLogStore, OpLogChangeNotifier, OpLogEntryCallback,
         OpLogErrorCallback, OpLogManager, OpLogStore,
@@ -905,6 +909,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartbootstrapsfromconfiguredbackend_25d11cb6()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let cluster_id = "configured-snapshot-bootstrap";
+        let provider = create_catalog_backed_snapshot_provider(
+            cluster_id,
+            SnapshotObjectStoreType::Local,
+            SnapshotCatalogStoreType::Embedded,
+            Some(root.path().to_path_buf()),
+            None,
+        )
+        .unwrap();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "snapshot-segment".into(),
+            base: 0x1000,
+            size: 4096,
+            te_endpoint: "tcp://snapshot-leader".into(),
+            protocol: "tcp".into(),
+            host_id: "snapshot-leader".into(),
+        };
+        let snapshot_sequence_id = 42;
+        let mut snapshot_object_entry = snapshot_object("snapshot-key", &segment, 64, 128);
+        snapshot_object_entry.hard_pinned = true;
+        let snapshot = LoadedSnapshot {
+            snapshot_id: "20260801_120000_001".into(),
+            snapshot_sequence_id,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: segment.clone(),
+                used: 128,
+                client_id: Uuid::new_v4(),
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![(
+                TenantId::default().make_scoped_key("snapshot-key"),
+                snapshot_object_entry,
+            )],
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        provider.publish_loaded_snapshot(&snapshot, 7).unwrap();
+
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: cluster_id.into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(provider));
+        service.start().await.unwrap();
+
+        let restored = state
+            .objects
+            .get(&TenantId::default().make_scoped_key("snapshot-key"))
+            .unwrap();
+        assert_eq!(restored.size, 128);
+        drop(restored);
+        assert_eq!(service.latest_applied_sequence_id(), snapshot_sequence_id);
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, snapshot_sequence_id);
+        assert_eq!(status.primary_seq_id, snapshot_sequence_id);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartusesemptybaselinewhensnapshotmissing_42d36515()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let cluster_id = "configured-empty-snapshot-bootstrap";
+        let provider = create_catalog_backed_snapshot_provider(
+            cluster_id,
+            SnapshotObjectStoreType::Local,
+            SnapshotCatalogStoreType::Embedded,
+            Some(root.path().to_path_buf()),
+            None,
+        )
+        .unwrap();
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: cluster_id.into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(provider));
+        service.start().await.unwrap();
+
+        assert!(state.objects.is_empty());
+        assert!(state.segments.is_empty());
+        assert_eq!(service.latest_applied_sequence_id(), 0);
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, 0);
+        assert_eq!(status.primary_seq_id, 0);
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn test_oplog_bootstrap_falls_back_when_snapshot_load_fails() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
@@ -1349,6 +1462,11 @@ impl HotStandbyService {
     /// 获取当前备用同步状态。
     pub fn sync_status(&self) -> StandbySyncStatus {
         self.sync_status.read().clone()
+    }
+
+    /// Return the latest sequence restored or replayed by this standby.
+    pub fn latest_applied_sequence_id(&self) -> u64 {
+        self.sync_status.read().applied_seq_id
     }
 
     pub fn is_running(&self) -> bool {

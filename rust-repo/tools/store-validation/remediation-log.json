@@ -178,5 +178,32 @@
     "focused_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_ -- --nocapture",
     "crate_command": "USE_CXL=ON cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e",
     "evidence": "/tmp/mooncake-cxl-client-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp:HotStandbySnapshotBootstrapTest.SnapshotOnlyStartBootstrapsFromConfiguredBackend",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartbootstrapsfromconfiguredbackend_25d11cb6",
+    "first_divergence": "Rust tested catalog publication and static-provider standby restore separately, but exposed no C++-equivalent latest-applied getter and had no test carrying a configured production catalog provider through snapshot-only startup into restored metadata and all three sequence observables.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_ha && cargo test -p mooncake-store-master --test test_main_config",
+    "evidence": "/tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp:HotStandbySnapshotBootstrapTest.SnapshotOnlyStartUsesEmptyBaselineWhenSnapshotMissing",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartusesemptybaselinewhensnapshotmissing_42d36515",
+    "first_divergence": "Rust's prior empty snapshot-only test injected NoopSnapshotProvider and omitted the distinct latest-applied observable, so it did not prove that an actually configured empty catalog reaches the same zero baseline.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_ha && cargo test -p mooncake-store-master --test test_main_config",
+    "evidence": "/tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp:StandbyControllerTest.PromoteStandbyReturnsStartFailure",
+    "rust": "mooncake-store-master/tests/test_ha.rs:cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_standbycontrollertest_promotestandbyreturnsstartfailure_85f15d3e",
+    "first_divergence": "Rust parsed the raw catalog kind before constructing the standby controller and its existing controller test used Unknown HA plus a missing Redis connection string; additionally Etcd setup could mask a stored snapshot configuration error before startup returned it.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_ha && cargo test -p mooncake-store-master --test test_main_config",
+    "evidence": "/tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript"
   }
 ]

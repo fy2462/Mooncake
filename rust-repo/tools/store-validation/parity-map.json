@@ -348,28 +348,43 @@
       "behavior": "With a configured catalog snapshot, snapshot-only standby startup reaches Watching, restores the published metadata key, size, and last sequence, and sets latest, applied, and primary sequence to the descriptor sequence.",
       "boundary": ["master", "ha", "snapshot", "catalog", "snapshot-only-bootstrap"],
       "reference": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartBootstrapsFromConfiguredBackend"},
-      "reason": "Rust separately tests catalog-provider decoding/factory persistence and static-provider standby restore, but no discoverable Rust test wires a configured CatalogBackedSnapshotProvider into snapshot-only HotStandbyService startup and asserts the restored object plus latest/applied/primary descriptor sequence contract.",
+      "reason": "Rust hot_standby.rs:cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartbootstrapsfromconfiguredbackend_25d11cb6 publishes a hard-pinned 128-byte object and segment through the production Embedded CatalogBackedSnapshotProvider factory, starts the real snapshot-only HotStandbyService, and asserts the exact scoped key, size, Watching state, and separate latest/applied/primary sequence values at descriptor sequence 42. Focused evidence is retained at /tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript.",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and HotStandbyService snapshot bootstrap", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-master/src/hot_standby.rs",
+          "test": "cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartbootstrapsfromconfiguredbackend_25d11cb6"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With a configured Embedded or Redis catalog provider and no published snapshot, snapshot-only standby startup reaches Watching with empty metadata and latest, applied, and primary sequences all zero.",
       "boundary": ["master", "ha", "snapshot", "catalog", "empty-baseline"],
       "reference": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "HotStandbySnapshotBootstrapTest.SnapshotOnlyStartUsesEmptyBaselineWhenSnapshotMissing"},
-      "reason": "Rust tests the empty snapshot-only baseline only with NoopSnapshotProvider and asserts empty objects/segments plus Watching and zero applied/primary sequences; it neither uses a configured CatalogBackedSnapshotProvider (Embedded or Redis) nor asserts the separate latest-applied sequence observable required by the C++ test.",
+      "reason": "Rust hot_standby.rs:cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartusesemptybaselinewhensnapshotmissing_42d36515 constructs the production Embedded CatalogBackedSnapshotProvider over an empty configured local root, starts snapshot-only HotStandbyService, and asserts empty objects/segments plus Watching and distinct latest/applied/primary zero observables. Focused evidence is retained at /tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript.",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and missing-snapshot startup", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-master/src/hot_standby.rs",
+          "test": "cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_hotstandbysnapshotbootstraptest_snapshotonlystartusesemptybaselinewhensnapshotmissing_42d36515"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "For an Etcd HA specification with snapshot restore and an invalid catalog-store kind, standby startup and later promotion both return InvalidParams.",
       "boundary": ["master", "ha", "snapshot", "catalog-configuration", "promotion", "error-propagation"],
       "reference": {"file": "ha/standby/hot_standby_snapshot_bootstrap_test.cpp", "test": "StandbyControllerTest.PromoteStandbyReturnsStartFailure"},
-      "reason": "Rust preserves a startup error through promotion, but its discoverable test uses an Unknown HA backend and Redis catalog with a missing connection string; it does not exercise the C++ Etcd HA configuration whose invalid catalog-store kind fails parsing with InvalidParams before the same promotion propagation check.",
+      "reason": "Rust test_ha.rs:cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_standbycontrollertest_promotestandbyreturnsstartfailure_85f15d3e constructs the production controller with an Etcd HA specification, local snapshot restore, and raw catalog kind invalid; controller-side production parsing returns InvalidParams before etcd setup and PromoteStandby preserves the identical startup error. Focused evidence is retained at /tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript.",
       "review": {"oracle": "mooncake-store/tests/ha/standby/hot_standby_snapshot_bootstrap_test.cpp and StandbyController", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-master/tests/test_ha.rs",
+          "test": "cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_standbycontrollertest_promotestandbyreturnsstartfailure_85f15d3e"
+        }
+      ],
+      "status": "covered"
     },
     {"behavior":"An empty tenant identifier normalizes to the canonical default tenant while named tenants retain their value and default classification.","boundary":["master","tenant","identity"],"reason":"","reference":{"file":"tenant_id_test.cpp","test":"TenantIdTest.NormalizesEmptyTenantToDefault"},"review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId construction","reviewed":true},"rust":[{"file":"mooncake-store-master/src/tenant_id.rs","test":"normalizes_and_validates_canonical_values"}],"status":"covered"},
     {"behavior":"Canonical tenant validation accepts default and ordinary names while rejecting the reserved underscore prefix and control bytes.","boundary":["master","tenant","validation"],"reason":"","reference":{"file":"tenant_id_test.cpp","test":"TenantIdTest.ValidatesCanonicalTenantName"},"review":{"oracle":"mooncake-store/tests/tenant_id_test.cpp and TenantId::IsValid","reviewed":true},"rust":[{"file":"mooncake-store-master/src/tenant_id.rs","test":"normalizes_and_validates_canonical_values"}],"status":"covered"},

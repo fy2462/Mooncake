@@ -12,8 +12,7 @@ use mooncake_store_master::admin_http::AdminRuntimeState;
 use mooncake_store_master::ha::{
     CatalogBackedSnapshotProvider, HABackendSpec, HABackendType, HaError, LeaderCoordinator,
     LeadershipMonitorHandle, LeadershipSession, MasterServiceSupervisor,
-    MasterServiceSupervisorConfig, MasterView, parse_snapshot_catalog_store_type,
-    parse_snapshot_object_store_type,
+    MasterServiceSupervisorConfig, MasterView, parse_snapshot_object_store_type,
 };
 use mooncake_store_master::http_metadata::{
     bind_metadata_listener, serve_metadata_listener_with_service_gate,

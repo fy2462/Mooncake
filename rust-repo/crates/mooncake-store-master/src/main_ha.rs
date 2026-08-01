@@ -94,8 +94,7 @@ fn build_ha_loop_context(args: Args) -> HaLoopResult<HaLoopContext> {
         .as_deref()
         .map(parse_snapshot_object_store_type)
         .transpose()?;
-    let snapshot_catalog_store_type =
-        parse_snapshot_catalog_store_type(&args.snapshot_catalog_store_type)?;
+    let snapshot_catalog_store_type = args.snapshot_catalog_store_type.clone();
     let cluster_id = ha_spec.cluster_namespace.clone();
     let runtime_config = build_runtime_config(&args)?;
     let supervisor_config = MasterServiceSupervisorConfig {
