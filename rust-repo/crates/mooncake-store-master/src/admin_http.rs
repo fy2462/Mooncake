@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -15,20 +16,35 @@ use tonic::Code;
 
 #[derive(Clone)]
 pub struct AdminRuntimeState {
-    pub state: MasterRuntimeState,
-    pub leader_view: Option<MasterView>,
-    pub service_ready: bool,
-    pub service: Option<Arc<MasterServiceImpl>>,
+    runtime: Arc<RwLock<AdminRuntimeSnapshot>>,
+    service: Option<Arc<MasterServiceImpl>>,
+}
+
+#[derive(Clone)]
+struct AdminRuntimeSnapshot {
+    state: MasterRuntimeState,
+    leader_view: Option<MasterView>,
+    service_ready: bool,
 }
 
 impl AdminRuntimeState {
-    pub fn serving(leader_view: Option<MasterView>) -> Self {
+    pub fn new(
+        state: MasterRuntimeState,
+        leader_view: Option<MasterView>,
+        service_ready: bool,
+    ) -> Self {
         Self {
-            state: MasterRuntimeState::Serving,
-            leader_view,
-            service_ready: true,
+            runtime: Arc::new(RwLock::new(AdminRuntimeSnapshot {
+                state,
+                leader_view,
+                service_ready,
+            })),
             service: None,
         }
+    }
+
+    pub fn serving(leader_view: Option<MasterView>) -> Self {
+        Self::new(MasterRuntimeState::Serving, leader_view, true)
     }
 
     pub fn serving_with_service(
@@ -39,6 +55,18 @@ impl AdminRuntimeState {
             service: Some(service),
             ..Self::serving(leader_view)
         }
+    }
+
+    pub fn set_runtime_state(&self, state: MasterRuntimeState) {
+        self.runtime.write().state = state;
+    }
+
+    pub fn set_leader_view(&self, leader_view: Option<MasterView>) {
+        self.runtime.write().leader_view = leader_view;
+    }
+
+    fn snapshot(&self) -> AdminRuntimeSnapshot {
+        self.runtime.read().clone()
     }
 }
 
@@ -77,13 +105,13 @@ async fn health_handler(
 async fn role_handler(
     axum::extract::State(state): axum::extract::State<AdminRuntimeState>,
 ) -> String {
-    state.state.role().to_string()
+    state.snapshot().state.role().to_string()
 }
 
 async fn ha_status_handler(
     axum::extract::State(state): axum::extract::State<AdminRuntimeState>,
 ) -> String {
-    state.state.as_str().to_string()
+    state.snapshot().state.as_str().to_string()
 }
 
 async fn leader_handler(
@@ -276,14 +304,15 @@ async fn delete_tenant_quota_handler(
 }
 
 fn build_metrics_summary_text(state: &AdminRuntimeState) -> String {
-    let service_ready = effective_service_ready(state);
+    let snapshot = state.snapshot();
+    let service_ready = effective_service_ready(state, snapshot.service_ready);
     let mut summary = format!(
         "role={}, state={}, service_ready={}",
-        state.state.role(),
-        state.state.as_str(),
+        snapshot.state.role(),
+        snapshot.state.as_str(),
         service_ready
     );
-    if let Some(view) = &state.leader_view {
+    if let Some(view) = &snapshot.leader_view {
         summary.push_str(&format!(
             ", leader={}, view_version={}",
             view.leader_address, view.view_version
@@ -293,14 +322,15 @@ fn build_metrics_summary_text(state: &AdminRuntimeState) -> String {
 }
 
 fn build_health_json(state: &AdminRuntimeState) -> Value {
-    let service_ready = effective_service_ready(state);
+    let snapshot = state.snapshot();
+    let service_ready = effective_service_ready(state, snapshot.service_ready);
     let mut value = json!({
         "status": "ok",
-        "role": state.state.role(),
-        "ha_state": state.state.as_str(),
+        "role": snapshot.state.role(),
+        "ha_state": snapshot.state.as_str(),
         "service_ready": service_ready,
     });
-    if let (Value::Object(map), Some(view)) = (&mut value, &state.leader_view) {
+    if let (Value::Object(map), Some(view)) = (&mut value, &snapshot.leader_view) {
         map.insert(
             "leader_address".to_string(),
             Value::String(view.leader_address.clone()),
@@ -310,8 +340,8 @@ fn build_health_json(state: &AdminRuntimeState) -> Value {
     value
 }
 
-fn effective_service_ready(state: &AdminRuntimeState) -> bool {
-    state.service_ready
+fn effective_service_ready(state: &AdminRuntimeState, configured_ready: bool) -> bool {
+    configured_ready
         && state
             .service
             .as_ref()
@@ -319,7 +349,7 @@ fn effective_service_ready(state: &AdminRuntimeState) -> bool {
 }
 
 fn build_leader_json(state: &AdminRuntimeState) -> Value {
-    match &state.leader_view {
+    match state.snapshot().leader_view {
         Some(view) => json!({
             "present": true,
             "leader_address": view.leader_address,
@@ -478,14 +508,19 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    async fn get(state: AdminRuntimeState, path: &str) -> (StatusCode, String) {
-        let response = admin_router(state)
+    async fn get_router(router: &Router, path: &str) -> (StatusCode, String) {
+        let response = router
+            .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    async fn get(state: AdminRuntimeState, path: &str) -> (StatusCode, String) {
+        get_router(&admin_router(state), path).await
     }
 
     fn leader_state() -> AdminRuntimeState {
@@ -496,12 +531,7 @@ mod tests {
     }
 
     fn runtime_state(state: MasterRuntimeState) -> AdminRuntimeState {
-        AdminRuntimeState {
-            state,
-            leader_view: None,
-            service_ready: state == MasterRuntimeState::Serving,
-            service: None,
-        }
+        AdminRuntimeState::new(state, None, state == MasterRuntimeState::Serving)
     }
 
     #[test]
@@ -558,12 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_http_health_standby_returns_ok_role() {
-        let state = AdminRuntimeState {
-            state: MasterRuntimeState::Standby,
-            leader_view: None,
-            service_ready: false,
-            service: None,
-        };
+        let state = runtime_state(MasterRuntimeState::Standby);
         let (status, body) = get(state, "/health").await;
         let body: Value = serde_json::from_str(&body).unwrap();
 
@@ -583,15 +608,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_http_health_includes_observed_leader() {
-        let state = AdminRuntimeState {
-            state: MasterRuntimeState::Standby,
-            leader_view: Some(MasterView {
+        let state = AdminRuntimeState::new(
+            MasterRuntimeState::Standby,
+            Some(MasterView {
                 leader_address: "10.0.0.1:19000".to_string(),
                 view_version: 42,
             }),
-            service_ready: false,
-            service: None,
-        };
+            false,
+        );
         let (status, body) = get(state, "/health").await;
         let body: Value = serde_json::from_str(&body).unwrap();
 
@@ -630,6 +654,69 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "standby");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_ha_status_state_matrix() {
+        let state = runtime_state(MasterRuntimeState::Starting);
+        let router = admin_router(state.clone());
+
+        for runtime_state in [
+            MasterRuntimeState::Standby,
+            MasterRuntimeState::Serving,
+            MasterRuntimeState::Recovering,
+            MasterRuntimeState::CatchingUp,
+        ] {
+            state.set_runtime_state(runtime_state);
+            let (status, body) = get_router(&router, "/ha_status").await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, runtime_state.as_str());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_leader_absent_response() {
+        let (status, body) = get(runtime_state(MasterRuntimeState::Standby), "/leader").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["present"], false);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_leader_present_response() {
+        let state = runtime_state(MasterRuntimeState::Standby);
+        state.set_leader_view(Some(MasterView {
+            leader_address: "192.168.1.1:19000".to_string(),
+            view_version: 5,
+        }));
+        let (status, body) = get(state, "/leader").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["present"], true);
+        assert_eq!(body["leader_address"], "192.168.1.1:19000");
+        assert_eq!(body["view_version"], 5);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_leader_clear_transition() {
+        let state = runtime_state(MasterRuntimeState::Standby);
+        let router = admin_router(state.clone());
+        state.set_leader_view(Some(MasterView {
+            leader_address: "192.168.1.1:19000".to_string(),
+            view_version: 5,
+        }));
+        let (present_status, present_body) = get_router(&router, "/leader").await;
+        state.set_leader_view(None);
+        let (absent_status, absent_body) = get_router(&router, "/leader").await;
+        let present_body: Value = serde_json::from_str(&present_body).unwrap();
+        let absent_body: Value = serde_json::from_str(&absent_body).unwrap();
+
+        assert_eq!(present_status, StatusCode::OK);
+        assert_eq!(present_body["present"], true);
+        assert_eq!(absent_status, StatusCode::OK);
+        assert_eq!(absent_body["present"], false);
     }
 
     #[test]
