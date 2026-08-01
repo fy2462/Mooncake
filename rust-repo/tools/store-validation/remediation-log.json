@@ -1694,5 +1694,14 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_earlier_timer_preempts_wait_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-graceful-unmount-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.GracefulUnmountSegment_PreventAllocation",
+    "rust": "mooncake-store-master/tests/test_master_graceful_unmount_parity.rs:graceful_unmount_prevents_new_allocation_parity",
+    "first_divergence": "Rust proved only rejection with no alternative segment, not grace-window readability plus exact rerouting of one new replica to an active second segment.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity graceful_unmount_prevents_new_allocation_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_graceful_unmount_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-graceful-prevent-allocation-goal-019fbca4.typescript"
   }
 ]

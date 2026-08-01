@@ -178,3 +178,87 @@ async fn graceful_unmount_earlier_timer_preempts_wait_parity() {
         proto::SegmentStatus::GracefullyUnmounting as i32
     );
 }
+
+#[tokio::test]
+async fn graceful_unmount_prevents_new_allocation_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment1 = "graceful_seg1";
+    let segment2 = "graceful_seg2";
+    let segment1_id = mount(&service, client_id, segment1, 0x300000000).await;
+    mount(&service, client_id, segment2, 0x400000000).await;
+
+    let first = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_prevent_alloc".into(),
+            slice_length: 1024,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: segment1.into(),
+                ..Default::default()
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(first.replicas.len(), 1);
+    assert_eq!(first.replicas[0].segment_name, segment1);
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_prevent_alloc".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    graceful(&service, segment1_id, client_id, 1000)
+        .await
+        .unwrap();
+    assert_eq!(
+        status_by_name(&service, segment1).await.unwrap(),
+        proto::SegmentStatus::GracefullyUnmounting as i32
+    );
+    let existing = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "test_key_prevent_alloc".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(existing.replicas.len(), 1);
+    assert_eq!(existing.replicas[0].segment_name, segment1);
+    assert_eq!(
+        status_by_name(&service, segment2).await.unwrap(),
+        proto::SegmentStatus::Active as i32
+    );
+
+    let second = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_after_graceful".into(),
+            slice_length: 1024,
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                ..Default::default()
+            }),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(second.replicas.len(), 1);
+    assert_eq!(second.replicas[0].segment_name, segment2);
+}
