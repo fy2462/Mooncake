@@ -128,6 +128,38 @@ fn test_eviction_returns_lru_order() {
 }
 
 #[test]
+fn cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_evictkey_57455bfb() {
+    let mgr = EvictionManager::new(Duration::ZERO, Duration::ZERO);
+    let base = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+    let mut candidates: Vec<(&str, &[ReplicaDescriptor], bool, SystemTime)> = vec![
+        ("key1", &[], false, base),
+        ("key2", &[], false, base + Duration::from_secs(1)),
+    ];
+
+    let first = mgr.select_for_eviction(&candidates, 1);
+    assert_eq!(first, ["key1"]);
+    candidates.retain(|(key, ..)| *key != first[0]);
+
+    candidates.push(("key3", &[], false, base + Duration::from_secs(2)));
+    candidates.push(("key4", &[], false, base + Duration::from_secs(3)));
+    candidates
+        .iter_mut()
+        .find(|(key, ..)| *key == "key2")
+        .unwrap()
+        .3 = base + Duration::from_secs(4);
+    candidates
+        .iter_mut()
+        .find(|(key, ..)| *key == "key3")
+        .unwrap()
+        .3 = base + Duration::from_secs(5);
+
+    let second = mgr.select_for_eviction(&candidates, 1);
+    assert_eq!(second, ["key4"]);
+    candidates.retain(|(key, ..)| *key != second[0]);
+    assert_eq!(candidates.len(), 2);
+}
+
+#[test]
 fn test_eviction_filters_lease_plus_soft_pin() {
     let mgr = EvictionManager::new(Duration::from_secs(1800), Duration::from_millis(1));
     let now = SystemTime::now();

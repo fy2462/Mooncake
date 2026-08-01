@@ -1881,11 +1881,22 @@ impl LocalStorageBackend {
     }
 
     fn install_active_record(&self, record: FileRecord) {
-        self.active_records
+        let previous = self
+            .active_records
             .write()
             .insert(record.relative_path.clone(), record.clone());
         if self.config.enable_eviction {
-            self.write_queue.write().push_back(record);
+            let mut queue = self.write_queue.write();
+            if let Some(previous) = previous {
+                if let Some(entry) = queue.iter_mut().find(|entry| {
+                    entry.relative_path == previous.relative_path
+                        && entry.generation == previous.generation
+                }) {
+                    *entry = record;
+                    return;
+                }
+            }
+            queue.push_back(record);
         }
     }
 
@@ -2773,6 +2784,37 @@ mod tests {
         assert!(!backend.exists("tenant/key-a"));
         assert!(backend.exists("tenant/key-b"));
         assert_eq!(backend.space_usage(), (54, 180));
+    }
+
+    #[test]
+    fn cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_fifoevictkey_8345f96c() {
+        let (backend, _tmp) = backend_with_available_space_sequence(512, vec![u64::MAX]);
+        let value = [b'x'; 16];
+        backend.write_object("key1", &value).unwrap();
+        backend.write_object("key2", &value).unwrap();
+        let record_size = backend.space_usage().0 / 2;
+
+        let evict_one = |backend: &LocalStorageBackend| {
+            let (used, total) = backend.space_usage();
+            let target = used - record_size + 1;
+            let high = (used as f64 - 0.25) / total as f64;
+            let low = (target as f64 + 0.25) / total as f64;
+            let pending = backend.prepare_watermark_eviction(high, low).unwrap();
+            let victims = pending.keys();
+            backend.commit_eviction(pending).unwrap();
+            victims
+        };
+
+        assert_eq!(evict_one(&backend), ["key1"]);
+        backend.write_object("key3", &value).unwrap();
+        backend.write_object("key4", &value).unwrap();
+        backend.write_object("key2", &value).unwrap();
+        backend.write_object("key3", &value).unwrap();
+
+        assert_eq!(evict_one(&backend), ["key2"]);
+        assert_eq!(backend.scan_meta().unwrap().len(), 2);
+        assert!(backend.exists("key3"));
+        assert!(backend.exists("key4"));
     }
 
     #[test]

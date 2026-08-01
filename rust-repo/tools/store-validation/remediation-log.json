@@ -124,5 +124,23 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "eviction_strategy_test.cpp:EvictionStrategyTest.EvictKey",
+    "rust": "mooncake-store-master/tests/test_eviction.rs:cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_evictkey_57455bfb",
+    "first_divergence": "The existing Rust eviction-order test sorted one preconstructed candidate list, but never reproduced the C++ two-selection lifecycle or proved that updates move key2 and key3 behind untouched key4 before the second selection.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_eviction cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_evictkey_57455bfb -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_eviction",
+    "evidence": "/tmp/mooncake-lru-eviction-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "eviction_strategy_test.cpp:EvictionStrategyTest.FIFOEvictKey",
+    "rust": "mooncake-store-client/src/local_storage_backend/mod.rs:cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_fifoevictkey_8345f96c",
+    "first_divergence": "The production Rust FilePerKey backend appended every replacement generation to its FIFO queue, so the exact C++ sequence returned key4 instead of key2 as the second victim after updating key2 and key3.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::tests::cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_fifoevictkey_8345f96c -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib && cargo test -p mooncake-store-client --features link-native --test test_local_storage_backend",
+    "evidence": "/tmp/mooncake-fifo-eviction-goal-019fbaa7.typescript"
   }
 ]
