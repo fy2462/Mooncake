@@ -7,8 +7,12 @@ use mooncake_store_client::{
 use mooncake_store_core::{ReplicaType, ReplicateConfig, StoreError};
 use mooncake_store_master::MasterRuntimeConfig;
 use mooncake_store_master::MasterServiceImpl;
+use mooncake_store_master::allocator::{
+    AllocationStrategy, CACHELIB_SLAB_SIZE, MemoryAllocatorKind,
+};
 use mooncake_store_master::http_metadata::serve_metadata_listener_with_service_gate;
 use mooncake_store_master::proto::master_service_server::MasterServiceServer;
+use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -22,6 +26,160 @@ async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, onesh
     let address = listener.local_addr().unwrap();
     let (shutdown_tx, _server) = spawn_master(listener, config);
     (address.to_string(), shutdown_tx)
+}
+
+fn run_cxl_subprocess(mode: &str, cxl_size: u64) {
+    let device = tempfile::NamedTempFile::new().unwrap();
+    device.as_file().set_len(cxl_size).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg("cxl_client_integration_subprocess_helper")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("MOONCAKE_CXL_PARITY_MODE", mode)
+        .env("MC_CXL_DEV_PATH", device.path())
+        .env("MC_CXL_DEV_SIZE", cxl_size.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "CXL {mode} helper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cxl_client_integration_subprocess_helper() {
+    let Ok(mode) = std::env::var("MOONCAKE_CXL_PARITY_MODE") else {
+        return;
+    };
+    let cxl_path = std::env::var("MC_CXL_DEV_PATH").unwrap();
+    let cxl_size = std::env::var("MC_CXL_DEV_SIZE")
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    let config = MasterRuntimeConfig {
+        allocation_strategy: AllocationStrategy::Cxl,
+        memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+        enable_cxl: true,
+        cxl_path,
+        cxl_size,
+        eviction_interval: std::time::Duration::from_millis(5),
+        eviction_high_watermark_ratio: 0.25,
+        eviction_ratio: 0.25,
+        soft_pin_ttl: std::time::Duration::ZERO,
+        lease_ttl: std::time::Duration::from_millis(20),
+        allow_evict_soft_pinned_objects: true,
+        ..Default::default()
+    };
+    let (master, shutdown) = start_master_with_config(config).await;
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_host = probe.local_addr().unwrap().to_string();
+    drop(probe);
+    let mut client = MooncakeClient::create(
+        &master,
+        "P2PHANDSHAKE",
+        &local_host,
+        "cxl",
+        "",
+        0,
+        8 * 1024 * 1024,
+    )
+    .await
+    .unwrap();
+    let replication = ReplicateConfig {
+        replica_num: 1,
+        ..Default::default()
+    };
+
+    match mode.as_str() {
+        "basic" => {
+            let payload = b"Hello, World!";
+            client
+                .put("test_key", payload, Some(replication.clone()))
+                .await
+                .unwrap();
+            assert_eq!(client.get("test_key").await.unwrap(), payload);
+            client
+                .put("test_key", payload, Some(replication))
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            client.remove("test_key", false).await.unwrap();
+            assert!(!client.exists("test_key").await.unwrap());
+        }
+        "batch" => {
+            let keys = (0..10)
+                .map(|index| format!("test_key_batch_put_{index}"))
+                .collect::<Vec<_>>();
+            let values = (0..10)
+                .map(|index| format!("test_data_{index}").into_bytes())
+                .collect::<Vec<_>>();
+            let borrowed = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            assert_eq!(
+                client
+                    .batch_put(&keys, &borrowed, Some(replication))
+                    .await
+                    .unwrap(),
+                vec![0; 10]
+            );
+            for (key, value) in keys.iter().zip(&values) {
+                assert_eq!(client.get(key).await.unwrap(), *value);
+            }
+            assert_eq!(
+                client.batch_get(&keys).await.unwrap(),
+                values.into_iter().map(Some).collect::<Vec<_>>()
+            );
+        }
+        "evict" => {
+            let payload = vec![b'T'; 1024 * 1024];
+            let mut keys = Vec::new();
+            for index in 0..48 {
+                let key = format!("evict_key_{index}");
+                client
+                    .put(&key, &payload, Some(replication.clone()))
+                    .await
+                    .unwrap();
+                keys.push(key);
+                if index % 4 == 3 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    for key in &keys {
+                        if !client.exists(key).await.unwrap() {
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("CXL pressure did not produce a client-visible eviction");
+        }
+        other => panic!("unknown CXL parity mode {other}"),
+    }
+
+    client.tear_down_all().await.unwrap();
+    let _ = shutdown.send(());
+}
+
+#[test]
+fn cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_basicputgetoperations_88ca6678()
+ {
+    run_cxl_subprocess("basic", CACHELIB_SLAB_SIZE * 4);
+}
+
+#[test]
+fn cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_batchputgetoperations_0423569f()
+ {
+    run_cxl_subprocess("batch", CACHELIB_SLAB_SIZE * 4);
+}
+
+#[test]
+fn cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_evictoperation_a8cef4ce() {
+    run_cxl_subprocess("evict", CACHELIB_SLAB_SIZE * 4);
 }
 
 fn spawn_master(

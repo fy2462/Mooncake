@@ -53,6 +53,18 @@ impl MooncakeClient {
             "write_to_replica: ENTER"
         );
 
+        if replica.protocol == "cxl" {
+            let registration = self.cxl_segment_registration.as_ref().ok_or_else(|| {
+                StoreError::Internal("CXL replica requires a live CXL mapping".to_string())
+            })?;
+            let target_offset = Self::checked_replica_target_offset(replica, 0)?;
+            registration.copy_from_host(target_offset, data)?;
+            if let Some(metrics) = &self.metrics {
+                metrics.observe_transfer_bytes(TransferOperationKind::Write, data.len() as u64);
+            }
+            return Ok(());
+        }
+
         // Fast path: local segment — direct memcpy, no TE overhead.
         // 快速路径：本地 segment —— 直接 memcpy，无 TE 开销。
         if self.is_local_replica(replica) && self.local_owned_segment(replica).is_some() {

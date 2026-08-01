@@ -419,7 +419,12 @@ impl MooncakeClient {
                     "failed to populate local HugeTLB buffer before registration: {error}"
                 ))
             })?;
-        let local_buffer = if let Some(engine) = engine.as_ref() {
+        let local_buffer = if effective_protocol == "cxl" {
+            // CXL accepts raw host pointers for memcpy transfers but rejects
+            // registering addresses outside its shared mapping. The scalar
+            // and batch paths copy directly through cxl_segment_registration.
+            super::staging::StagingBuffer::rpc_only(local_buffer)
+        } else if let Some(engine) = engine.as_ref() {
             let registration = crate::memory_ffi::register_owned_local_memory(
                 engine,
                 local_buffer,

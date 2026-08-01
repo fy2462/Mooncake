@@ -48,6 +48,25 @@ impl MooncakeClient {
             "read_from_replica: ENTER"
         );
 
+        if replica.protocol == "cxl" {
+            let registration = self.cxl_segment_registration.as_ref().ok_or_else(|| {
+                StoreError::Internal("CXL replica requires a live CXL mapping".to_string())
+            })?;
+            let read_len = usize::try_from(replica.size).map_err(|_| {
+                StoreError::InvalidParams(format!(
+                    "CXL replica size cannot fit usize: {}",
+                    replica.size
+                ))
+            })?;
+            let target_offset = Self::checked_replica_target_offset(replica, 0)?;
+            let data = registration.copy_to_host(target_offset, read_len)?;
+            if let Some(metrics) = &self.metrics {
+                metrics.observe_transfer_bytes(TransferOperationKind::Read, data.len() as u64);
+                metrics.observe_read_strategy("cxl_memcpy");
+            }
+            return Ok(data);
+        }
+
         if replica.replica_type == mooncake_store_core::ReplicaType::Disk {
             let storage = self.global_disk.as_ref().ok_or_else(|| {
                 StoreError::InvalidParams(

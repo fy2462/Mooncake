@@ -324,25 +324,25 @@
       "behavior": "A CXL-backed client can put and get an object with exact byte preservation.",
       "boundary": ["client", "cxl", "data-path"],
       "reference": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.BasicPutGetOperations"},
-      "reason": "Rust tests CXL configuration and placement selection but has no end-to-end CXL put/get byte-integrity test.",
+      "reason": "Rust mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_basicputgetoperations_88ca6678 creates a sparse 64-MiB CXL device in an isolated process, starts a CXL/Cachelib Master, creates and mounts a real protocol=cxl client, then proves scalar Put/Get preserves Hello, World! exactly, duplicate Put normalizes to success, lease-delayed non-forced Remove succeeds, existence becomes false, and teardown unmounts/unregisters. It exposed and repaired the Rust lifecycle's invalid attempt to register host staging memory with CXL; bounded direct mapping copies now match native CxlTransport memcpy semantics. The USE_CXL=ON focused gate passed 3/3 at /tmp/mooncake-cxl-client-goal-019fbaa7.typescript, the full CXL-enabled in-process suite passed 22/22, and the classic native client library passed 261/261.",
       "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL client data path", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_basicputgetoperations_88ca6678"}], "status": "covered"
     },
     {
       "behavior": "A CXL-backed client supports batch put and get while preserving every object's bytes.",
       "boundary": ["client", "cxl", "batch", "data-path"],
       "reference": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.BatchPutGetOperations"},
-  "reason": "Rust tests CXL configuration, shared-capacity allocation, alias restoration, and mount validation, but no discoverable test mounts a CXL-backed client, successfully batch-puts ten distinct values, then batch-gets all ten and compares every returned size and byte sequence as this C++ body does.",
+      "reason": "Rust mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_batchputgetoperations_0423569f creates an isolated sparse CXL device and real CXL client, BatchPuts the exact ten test_key_batch_put_N/test_data_N pairs with ten zero statuses, scalar-Gets and compares every value, then BatchGets and compares all ten optional byte vectors in order before clean teardown. The USE_CXL=ON focused gate passed 3/3 at /tmp/mooncake-cxl-client-goal-019fbaa7.typescript, the full CXL-enabled in-process suite passed 22/22, and the classic native client library passed 261/261.",
       "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL batch data path", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_batchputgetoperations_0423569f"}], "status": "covered"
     },
     {
       "behavior": "Evicting a CXL-backed object removes it from the client-visible data path.",
       "boundary": ["client", "cxl", "eviction"],
       "reference": {"file": "cxl_client_integration_test.cpp", "test": "ClientIntegrationTestCxl.EvictOperation"},
-  "reason": "Rust tests CXL capacity accounting and alias allocation, but no discoverable client data-path test writes 1,000 one-MiB CXL objects under pressure and proves through the public existence result that at least one inserted key was evicted, which is the complete C++ oracle.",
+      "reason": "Rust mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_evictoperation_a8cef4ce scales the C++ pressure ratio to a deterministic 64-MiB sparse CXL device: all forty-eight public one-replica Puts of one-MiB T-filled values succeed while the CXL Master runs a 0.25 high-watermark worker, then every inspected exists RPC must succeed and polling proves at least one inserted key is client-visibly absent. The USE_CXL=ON focused gate passed 3/3 at /tmp/mooncake-cxl-client-goal-019fbaa7.typescript, the full CXL-enabled in-process suite passed 22/22, and the classic native client library passed 261/261.",
       "review": {"oracle": "mooncake-store/tests/cxl_client_integration_test.cpp and CXL eviction path", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_cxl_client_integration_test_cpp_clientintegrationtestcxl_evictoperation_a8cef4ce"}], "status": "covered"
     },
     {
       "behavior": "With a configured catalog snapshot, snapshot-only standby startup reaches Watching, restores the published metadata key, size, and last sequence, and sets latest, applied, and primary sequence to the descriptor sequence.",

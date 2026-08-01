@@ -144,8 +144,9 @@ unsafe impl StableMemoryOwner for RegisteredBufferAllocation {
 }
 
 /// Registration lease for the CXL mapping owned by the native Transfer
-/// Engine. Rust never dereferences or frees this address; it only unregisters
-/// the exact range before dropping the engine.
+/// Engine. Rust performs only bounds-checked copies through this live mapping
+/// and never frees it; it unregisters the exact range before dropping the
+/// engine.
 pub(crate) struct CxlSegmentRegistration {
     base_addr: usize,
     len: usize,
@@ -158,6 +159,59 @@ impl CxlSegmentRegistration {
 
     pub(crate) fn len(&self) -> usize {
         self.len
+    }
+
+    pub(crate) fn copy_from_host(&self, offset: u64, source: &[u8]) -> StoreResult<()> {
+        let offset = usize::try_from(offset).map_err(|_| {
+            StoreError::InvalidParams("CXL replica offset exceeds addressable memory".to_string())
+        })?;
+        let end = offset.checked_add(source.len()).ok_or_else(|| {
+            StoreError::InvalidParams("CXL write range overflows address space".to_string())
+        })?;
+        if end > self.len {
+            return Err(StoreError::InvalidParams(format!(
+                "CXL write range {offset}..{end} exceeds mapping length {}",
+                self.len
+            )));
+        }
+        // SAFETY: register_cxl_segment established a live writable mapping of
+        // self.len bytes, and the checked range lies wholly inside it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                source.as_ptr(),
+                (self.base_addr as *mut u8).add(offset),
+                source.len(),
+            );
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) fn copy_to_host(&self, offset: u64, len: usize) -> StoreResult<Vec<u8>> {
+        let offset = usize::try_from(offset).map_err(|_| {
+            StoreError::InvalidParams("CXL replica offset exceeds addressable memory".to_string())
+        })?;
+        let end = offset.checked_add(len).ok_or_else(|| {
+            StoreError::InvalidParams("CXL read range overflows address space".to_string())
+        })?;
+        if end > self.len {
+            return Err(StoreError::InvalidParams(format!(
+                "CXL read range {offset}..{end} exceeds mapping length {}",
+                self.len
+            )));
+        }
+        let mut destination = vec![0_u8; len];
+        // SAFETY: register_cxl_segment established a live readable mapping of
+        // self.len bytes, and the checked range lies wholly inside it.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (self.base_addr as *const u8).add(offset),
+                destination.as_mut_ptr(),
+                len,
+            );
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        Ok(destination)
     }
 }
 
