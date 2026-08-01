@@ -99,13 +99,18 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.BackupMasterKilled"
       },
-      "reason": "Rust's etcd-gated chaos schedule stops one or two index-selected slots without recording that both victims were the known non-leaders, and it does not assert the original leader's exact preexisting-object read under that role-aware fault.",
+  "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_backupmasterkilled_c9ce1b74 starts three external etcd-elected Rust Masters and one real TCP client with a 16-MiB segment, writes the bootstrap object through the recorded leader, immediately SIGKILLs both role-identified followers, proves only the original leader remains and its etcd address/view stay unchanged, then exactly reads the original object through the same client. Native evidence at /tmp/mooncake-backup-kill-goal-019fbaa7/result.json passed with leader index 0, follower indices 1/2 hard-killed, one exact read, and five compared bytes.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, LeaderCoordinator, MasterProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs ChaosSchedule paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+  "rust": [
+    {
+      "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+      "test": "cpp_parity_e2e_chaos_test_cpp_chaostest_backupmasterkilled_c9ce1b74"
+    }
+  ],
+  "status": "covered"
     },
     {
       "behavior": "With etcd serving both leader election and the shared oplog, exactly one known pre-failure backup remains after SIGKILLing the old leader and other backup; that survivor is promoted and the existing client successfully puts and exactly gets an object.",

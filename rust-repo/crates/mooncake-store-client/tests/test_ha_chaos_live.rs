@@ -165,6 +165,16 @@ fn cpp_chaos_test_live_config_selects_one_exact_oracle() {
         .expect("enabled exact chaos test");
     assert_eq!(config.case, CppChaosTestCase::LeaderKilledFailover);
 
+    let mut backup = env.clone();
+    backup.insert(
+        "MOONCAKE_RUN_CPP_CHAOS_TEST".into(),
+        "BackupMasterKilled".into(),
+    );
+    assert_eq!(
+        CppChaosTestConfig::from_map(&backup).unwrap().unwrap().case,
+        CppChaosTestCase::BackupMasterKilled
+    );
+
     let mut unknown = env;
     unknown.insert("MOONCAKE_RUN_CPP_CHAOS_TEST".into(), "UnknownCase".into());
     assert!(CppChaosTestConfig::from_map(&unknown).is_err());
@@ -1448,6 +1458,7 @@ impl CppChaosRandConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 enum CppChaosTestCase {
     LeaderKilledFailover,
+    BackupMasterKilled,
 }
 
 #[derive(Debug, Clone)]
@@ -1468,6 +1479,7 @@ impl CppChaosTestConfig {
         };
         let case = match case.as_str() {
             "LeaderKilledFailover" => CppChaosTestCase::LeaderKilledFailover,
+            "BackupMasterKilled" => CppChaosTestCase::BackupMasterKilled,
             other => return Err(format!("unknown MOONCAKE_RUN_CPP_CHAOS_TEST case: {other}")),
         };
         let result_path = PathBuf::from(required_live_env(
@@ -1484,7 +1496,10 @@ impl CppChaosTestConfig {
             env,
             result_path,
             artifact_root,
-            "cpp-chaos-test-leader-killed-failover",
+            match case {
+                CppChaosTestCase::LeaderKilledFailover => "cpp-chaos-test-leader-killed-failover",
+                CppChaosTestCase::BackupMasterKilled => "cpp-chaos-test-backup-master-killed",
+            },
             "MOONCAKE_RUN_CPP_CHAOS_TEST",
         )?;
         Ok(Some(Self { gate, case }))
@@ -4621,6 +4636,130 @@ async fn run_remount_checkpoint(
     })
 }
 
+async fn run_cpp_backup_master_killed_live(config: CppChaosTestConfig) -> Result<(), String> {
+    let mut cluster = MasterCluster::start(&config.gate)
+        .await
+        .map_err(|error| format!("start BackupMasterKilled Masters: {error}"))?;
+    let initial_view = wait_for_stable_leader_without_clients(&config.gate, &cluster).await?;
+    let leader_index = cluster
+        .index_for_address(&initial_view.leader_address)
+        .ok_or_else(|| format!("etcd leader {} is not owned", initial_view.leader_address))?;
+    let followers = (0..3)
+        .filter(|index| *index != leader_index)
+        .collect::<Vec<_>>();
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+    let mut clients = create_clients(&config.gate, &masters, 1, CLIENT_SEGMENT_SIZE).await?;
+
+    let operation: Result<serde_json::Value, FailureRecord> = async {
+        clients[0].put("key", b"value").await.map_err(|error| {
+            scenario_failure(
+                "bootstrap-put",
+                format!("put key before follower loss: {error}"),
+            )
+        })?;
+        for &index in &followers {
+            cluster.hard_kill(index).await.map_err(|error| {
+                scenario_failure(
+                    "follower-sigkill",
+                    format!("SIGKILL follower Master {index}: {error}"),
+                )
+            })?;
+        }
+        if cluster.running_indices() != BTreeSet::from([leader_index]) {
+            return Err(scenario_failure(
+                "follower-sigkill",
+                format!(
+                    "expected only leader {leader_index} alive, got {:?}",
+                    cluster.running_indices()
+                ),
+            ));
+        }
+        let surviving_view = wait_for_stable_leader_without_clients(&config.gate, &cluster)
+            .await
+            .map_err(|error| scenario_failure("leader-availability", error))?;
+        if surviving_view.leader_address != initial_view.leader_address {
+            return Err(scenario_failure(
+                "leader-availability",
+                format!(
+                    "leader changed after follower loss: {initial_view:?} -> {surviving_view:?}"
+                ),
+            ));
+        }
+        let actual = tokio::time::timeout(Duration::from_secs(30), clients[0].get("key"))
+            .await
+            .map_err(|_| scenario_failure("exact-read", "same client timed out reading key"))?
+            .map_err(|error| {
+                scenario_failure(
+                    "exact-read",
+                    format!("same client failed reading key after follower loss: {error}"),
+                )
+            })?;
+        if actual != b"value" {
+            return Err(scenario_failure(
+                "exact-read",
+                format!("same client returned wrong bytes for key: {actual:?}"),
+            ));
+        }
+        Ok(serde_json::json!({
+            "leader": initial_view.leader_address,
+            "initial_view_version": initial_view.view_version,
+            "surviving_view_version": surviving_view.view_version,
+            "leader_index": leader_index,
+            "killed_follower_indices": followers,
+            "crash_mode": "SIGKILL",
+            "same_client_exact_reads": 1,
+            "byte_comparisons": 5,
+        }))
+    }
+    .await;
+
+    for &index in &followers {
+        if !cluster.running_indices().contains(&index) {
+            let _ = cluster.restart(index).await;
+        }
+    }
+    let cleanup = tear_down_scenario_clients(&mut clients).await;
+    let (status, evidence, failure) = match operation {
+        Ok(evidence) if cleanup.is_ok() => ("PASS", evidence, None),
+        Ok(evidence) => (
+            "FAIL",
+            evidence,
+            Some(scenario_failure("cleanup", cleanup.unwrap_err())),
+        ),
+        Err(mut failure) => {
+            if let Err(error) = cleanup {
+                failure.message = format!("{}; cleanup: {error}", failure.message);
+            }
+            ("FAIL", serde_json::json!({}), Some(failure))
+        }
+    };
+    write_json_artifact(
+        &config.gate.result_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": status,
+            "case": "BackupMasterKilled",
+            "seed": format!("0x{:016x}", config.gate.seed),
+            "master_count": 3,
+            "client_count": 1,
+            "segment_size": CLIENT_SEGMENT_SIZE,
+            "shared_oplog": "etcd",
+            "evidence": evidence,
+            "first_failure": failure,
+        }),
+    )?;
+    if let Some(failure) = failure {
+        return Err(format!("{}: {}", failure.stage, failure.message));
+    }
+    Ok(())
+}
+
 async fn run_cpp_leader_killed_failover_live(config: CppChaosTestConfig) -> Result<(), String> {
     let mut cluster = MasterCluster::start(&config.gate)
         .await
@@ -5258,9 +5397,29 @@ async fn cpp_parity_e2e_chaos_test_cpp_chaostest_leaderkilledfailover_ccc0b621()
         );
         return;
     };
+    if config.case != CppChaosTestCase::LeaderKilledFailover {
+        eprintln!("SKIP C++ LeaderKilledFailover parity: a different chaos case is selected");
+        return;
+    }
     run_cpp_leader_killed_failover_live(config)
         .await
         .expect("C++ LeaderKilledFailover parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_test_cpp_chaostest_backupmasterkilled_c9ce1b74() {
+    let Some(config) = CppChaosTestConfig::from_env().expect("valid C++ chaos-test environment")
+    else {
+        eprintln!("SKIP C++ BackupMasterKilled parity: MOONCAKE_RUN_CPP_CHAOS_TEST is not enabled");
+        return;
+    };
+    if config.case != CppChaosTestCase::BackupMasterKilled {
+        eprintln!("SKIP C++ BackupMasterKilled parity: a different chaos case is selected");
+        return;
+    }
+    run_cpp_backup_master_killed_live(config)
+        .await
+        .expect("C++ BackupMasterKilled parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
