@@ -1402,7 +1402,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.FetchTasksEmptyWhenNoTasks",
     "rust": "mooncake-store-master/tests/test_master_task_queue_parity.rs:empty_task_queue_fetch_succeeds_parity",
     "first_divergence": "Rust covered empty results only through zero-size or capacity-gated fetches; no discoverable test proved a mounted owner's genuinely empty queue succeeds for batch size 16.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d04b761f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity empty_task_queue_fetch_succeeds_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
@@ -1411,7 +1411,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.FetchTasksReturnsAssignedTasksOnlyAndDrainsQueue",
     "rust": "mooncake-store-master/tests/test_master_task_queue_parity.rs:fetch_returns_only_assigned_tasks_and_drains_queue_parity",
     "first_divergence": "Existing Rust coverage eventually fetched both ids under a one-task processing cap, but did not prove one fetch returns exactly both source-owned assignments, excludes the target owner, and immediately drains the source queue.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d04b761f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity fetch_returns_only_assigned_tasks_and_drains_queue_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
@@ -1420,7 +1420,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.FetchTasksRespectsBatchSize",
     "rust": "mooncake-store-master/tests/test_master_task_queue_parity.rs:fetch_tasks_respects_batch_size_and_exhausts_queue_parity",
     "first_divergence": "Existing Rust coverage completed the first assignment between fetches because of a global processing limit; no discoverable ungated test performed two consecutive size-one fetches and proved their ids exhaust exactly the copy and move tasks.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d04b761f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity fetch_tasks_respects_batch_size_and_exhausts_queue_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
@@ -1429,7 +1429,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.UpdateTaskSuccessFlow",
     "rust": "mooncake-store-master/tests/test_master_task_queue_parity.rs:successful_task_update_persists_state_and_drains_queue_parity",
     "first_divergence": "Rust submitted successful completions, but no discoverable test queried and jointly asserted the exact id, SUCCESS status, assigned source owner, message, and empty follow-up queue.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d04b761f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity successful_task_update_persists_state_and_drains_queue_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
@@ -1438,7 +1438,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.UpdateTaskRejectsWrongClient",
     "rust": "mooncake-store-master/tests/test_master_task_queue_parity.rs:task_update_rejects_wrong_client_with_permission_denied_parity",
     "first_divergence": "Rust checked only a generic wrong-client gRPC failure on a copy task; no discoverable test asserted the ILLEGAL_CLIENT mapping after the source owner fetched the sole move assignment.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d04b761f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity task_update_rejects_wrong_client_with_permission_denied_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
@@ -1447,7 +1447,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.UpdateTaskNotFound",
     "rust": "mooncake-store-master/tests/test_master_task_queue_parity.rs:task_update_missing_id_returns_not_found_parity",
     "first_divergence": "Rust task completion tests used only created ids, so TASK_NOT_FOUND for a nonexistent failed-completion request was not directly discoverable.",
-    "repair_commit": "PENDING",
+    "repair_commit": "d04b761f",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity task_update_missing_id_returns_not_found_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
