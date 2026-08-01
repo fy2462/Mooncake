@@ -183,13 +183,18 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.ClientGracefulClose"
       },
-      "reason": "Rust client teardown and Master cleanup tests exist, but no discoverable live two-client scenario explicitly has client A mount, client B successfully put the object, client A gracefully close, then client B assert OBJECT_NOT_FOUND followed by NO_AVAILABLE_HANDLE.",
+      "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_clientgracefulclose_a97d5e36 starts three external etcd-elected Rust Masters, one real TCP client A owning exactly one 16-MiB segment, and one real TCP client B owning zero segments. Client B successfully puts the object into A's only available segment; A then synchronously performs the Rust equivalent of C++ TearDownAll, after which B exactly observes KeyNotFound(\"key\") (C++ OBJECT_NOT_FOUND) followed by NoAvailableHandle. Native evidence at /tmp/mooncake-client-close-goal-019fbaa7/result.json passed with the required 1/0 segment topology, one cross-client put, and both exact post-close error variants.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, ClientTestWrapper destruction, and Rust test_ha_chaos_live.rs ScenarioClient teardown paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+          "test": "cpp_parity_e2e_chaos_test_cpp_chaostest_clientgracefulclose_a97d5e36"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "After a separate mount-only client process is SIGKILLed and its live TTL expires, another client sees the prior object as OBJECT_NOT_FOUND and receives NO_AVAILABLE_HANDLE for a subsequent put after Master-side stale-client cleanup.",

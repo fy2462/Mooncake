@@ -201,6 +201,19 @@ fn cpp_chaos_test_live_config_selects_one_exact_oracle() {
         CppChaosTestCase::AllMastersKilledThenRestartFailover
     );
 
+    let mut graceful_close = env.clone();
+    graceful_close.insert(
+        "MOONCAKE_RUN_CPP_CHAOS_TEST".into(),
+        "ClientGracefulClose".into(),
+    );
+    assert_eq!(
+        CppChaosTestConfig::from_map(&graceful_close)
+            .unwrap()
+            .unwrap()
+            .case,
+        CppChaosTestCase::ClientGracefulClose
+    );
+
     let mut unknown = env;
     unknown.insert("MOONCAKE_RUN_CPP_CHAOS_TEST".into(), "UnknownCase".into());
     assert!(CppChaosTestConfig::from_map(&unknown).is_err());
@@ -1487,6 +1500,7 @@ enum CppChaosTestCase {
     BackupMasterKilled,
     AllMastersOtherThanOneBackedUpKilledFailover,
     AllMastersKilledThenRestartFailover,
+    ClientGracefulClose,
 }
 
 #[derive(Debug, Clone)]
@@ -1514,6 +1528,7 @@ impl CppChaosTestConfig {
             "AllMastersKilledThenRestartFailover" => {
                 CppChaosTestCase::AllMastersKilledThenRestartFailover
             }
+            "ClientGracefulClose" => CppChaosTestCase::ClientGracefulClose,
             other => return Err(format!("unknown MOONCAKE_RUN_CPP_CHAOS_TEST case: {other}")),
         };
         let result_path = PathBuf::from(required_live_env(
@@ -1539,6 +1554,7 @@ impl CppChaosTestConfig {
                 CppChaosTestCase::AllMastersKilledThenRestartFailover => {
                     "cpp-chaos-test-all-masters-restart"
                 }
+                CppChaosTestCase::ClientGracefulClose => "cpp-chaos-test-client-graceful-close",
             },
             "MOONCAKE_RUN_CPP_CHAOS_TEST",
         )?;
@@ -2744,6 +2760,33 @@ async fn create_clients(
         retain_created_or_cleanup(&mut clients, next).await?;
     }
     Ok(clients)
+}
+
+async fn create_unmounted_tcp_client(masters: &[String]) -> Result<MooncakeClient, String> {
+    require_bounded_client_rpc_configuration()?;
+    let reservation = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("reserve TCP endpoint for unmounted client: {error}"))?;
+    let local_host = reservation
+        .local_addr()
+        .map_err(|error| format!("read TCP endpoint for unmounted client: {error}"))?
+        .to_string();
+    drop(reservation);
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        MooncakeClient::create_with_master_candidates(
+            masters,
+            "P2PHANDSHAKE",
+            &local_host,
+            "tcp",
+            "",
+            0,
+            CLIENT_LOCAL_BUFFER_SIZE,
+        ),
+    )
+    .await
+    .map_err(|_| "unmounted TCP client creation timed out".to_string())?
+    .map_err(|error| format!("create unmounted TCP client: {error}"))
 }
 
 struct ScenarioClient {
@@ -4676,6 +4719,193 @@ async fn run_remount_checkpoint(
     })
 }
 
+async fn run_cpp_client_graceful_close_live(config: CppChaosTestConfig) -> Result<(), String> {
+    let cluster = MasterCluster::start(&config.gate)
+        .await
+        .map_err(|error| format!("start ClientGracefulClose Masters: {error}"))?;
+    let initial_view = wait_for_stable_leader_without_clients(&config.gate, &cluster).await?;
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+    let mut mounted_clients =
+        create_clients(&config.gate, &masters, 1, CLIENT_SEGMENT_SIZE).await?;
+    let mut other_client = match create_unmounted_tcp_client(&masters).await {
+        Ok(client) => client,
+        Err(error) => {
+            let cleanup = tear_down_scenario_clients(&mut mounted_clients).await;
+            return Err(format!(
+                "{error}; mounted-client cleanup after setup failure: {cleanup:?}"
+            ));
+        }
+    };
+    let other_client_id = other_client.client_id();
+    let mut mounted_close_attempted = false;
+
+    let operation: Result<serde_json::Value, FailureRecord> = async {
+        let mounted_segment_count = mounted_clients[0]
+            .segment_count()
+            .await
+            .map_err(|error| scenario_failure("segment-topology", error.to_string()))?;
+        let other_segment_count = other_client
+            .get_segments_detail()
+            .await
+            .map_err(|error| scenario_failure("segment-topology", error.to_string()))?
+            .into_iter()
+            .filter(|segment| !segment.nof && segment.client_id == other_client_id)
+            .count();
+        if mounted_segment_count != 1 || other_segment_count != 0 {
+            return Err(scenario_failure(
+                "segment-topology",
+                format!(
+                    "expected mounted client A to own one segment and client B none, got A={mounted_segment_count}, B={other_segment_count}"
+                ),
+            ));
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            other_client.put("key", b"value", None),
+        )
+        .await
+        .map_err(|_| scenario_failure("cross-client-put", "client B put timed out"))?
+        .map_err(|error| {
+            scenario_failure(
+                "cross-client-put",
+                format!("client B failed to put into client A's segment: {error}"),
+            )
+        })?;
+
+        mounted_close_attempted = true;
+        mounted_clients[0]
+            .tear_down_all()
+            .await
+            .map_err(|error| scenario_failure("graceful-close", error))?;
+
+        let missing_key = match tokio::time::timeout(
+            Duration::from_secs(30),
+            other_client.get("key"),
+        )
+        .await
+        {
+            Err(_) => {
+                return Err(scenario_failure(
+                    "post-close-get",
+                    "client B get timed out after client A closed",
+                ));
+            }
+            Ok(Err(StoreError::KeyNotFound(key))) if key == "key" => key,
+            Ok(Err(error)) => {
+                return Err(scenario_failure(
+                    "post-close-get",
+                    format!("expected KeyNotFound(\"key\"), got {error:?}"),
+                ));
+            }
+            Ok(Ok(bytes)) => {
+                return Err(scenario_failure(
+                    "post-close-get",
+                    format!("expected missing object, got {} bytes", bytes.len()),
+                ));
+            }
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            other_client.put("key", b"value", None),
+        )
+        .await
+        {
+            Err(_) => {
+                return Err(scenario_failure(
+                    "post-close-put",
+                    "client B put timed out after client A closed",
+                ));
+            }
+            Ok(Err(StoreError::NoAvailableHandle)) => {}
+            Ok(Err(error)) => {
+                return Err(scenario_failure(
+                    "post-close-put",
+                    format!("expected NoAvailableHandle, got {error:?}"),
+                ));
+            }
+            Ok(Ok(())) => {
+                return Err(scenario_failure(
+                    "post-close-put",
+                    "client B unexpectedly put after the only segment owner closed",
+                ));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "leader": initial_view.leader_address,
+            "view_version": initial_view.view_version,
+            "mounted_client_segment_count": mounted_segment_count,
+            "other_client_segment_count": other_segment_count,
+            "cross_client_puts_before_close": 1,
+            "mounted_client_gracefully_closed": true,
+            "post_close_get_error": "KeyNotFound",
+            "post_close_missing_key": missing_key,
+            "post_close_put_error": "NoAvailableHandle",
+        }))
+    }
+    .await;
+
+    let mut cleanup_errors = Vec::new();
+    if !mounted_close_attempted
+        && let Err(error) = tear_down_scenario_clients(&mut mounted_clients).await
+    {
+        cleanup_errors.push(format!("mounted client: {error}"));
+    }
+    match tokio::time::timeout(
+        SCENARIO_CLIENT_CLEANUP_TIMEOUT,
+        other_client.tear_down_all(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => cleanup_errors.push(format!("unmounted client: {error}")),
+        Err(_) => cleanup_errors.push("unmounted client cleanup timed out".into()),
+    }
+    let cleanup_error = (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; "));
+    let (status, evidence, failure) = match operation {
+        Ok(evidence) if cleanup_error.is_none() => ("PASS", evidence, None),
+        Ok(evidence) => (
+            "FAIL",
+            evidence,
+            Some(scenario_failure("cleanup", cleanup_error.unwrap())),
+        ),
+        Err(mut failure) => {
+            if let Some(error) = cleanup_error {
+                failure.message = format!("{}; cleanup: {error}", failure.message);
+            }
+            ("FAIL", serde_json::json!({}), Some(failure))
+        }
+    };
+    write_json_artifact(
+        &config.gate.result_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": status,
+            "case": "ClientGracefulClose",
+            "seed": format!("0x{:016x}", config.gate.seed),
+            "master_count": 3,
+            "client_count": 2,
+            "mounted_client_segment_size": CLIENT_SEGMENT_SIZE,
+            "other_client_segment_size": 0,
+            "shared_oplog": "etcd",
+            "evidence": evidence,
+            "first_failure": failure,
+        }),
+    )?;
+    if let Some(failure) = failure {
+        return Err(format!("{}: {}", failure.stage, failure.message));
+    }
+    Ok(())
+}
+
 async fn run_cpp_all_masters_restart_failover_live(
     config: CppChaosTestConfig,
 ) -> Result<(), String> {
@@ -5827,6 +6057,24 @@ async fn cpp_parity_e2e_chaos_test_cpp_chaostest_allmasterskilledthenrestartfail
     run_cpp_all_masters_restart_failover_live(config)
         .await
         .expect("C++ all-Master restart parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_test_cpp_chaostest_clientgracefulclose_a97d5e36() {
+    let Some(config) = CppChaosTestConfig::from_env().expect("valid C++ chaos-test environment")
+    else {
+        eprintln!(
+            "SKIP C++ graceful-client-close parity: MOONCAKE_RUN_CPP_CHAOS_TEST is not enabled"
+        );
+        return;
+    };
+    if config.case != CppChaosTestCase::ClientGracefulClose {
+        eprintln!("SKIP C++ graceful-client-close parity: a different chaos case is selected");
+        return;
+    }
+    run_cpp_client_graceful_close_live(config)
+        .await
+        .expect("C++ graceful-client-close parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

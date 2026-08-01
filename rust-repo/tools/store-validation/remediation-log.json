@@ -61,5 +61,14 @@
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=AllMastersKilledThenRestartFailover MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_allmasterskilledthenrestartfailover_d1a97bfb -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-all-restart-goal-019fbaa7/result.json"
+  },
+  {
+    "cpp": "e2e/chaos_test.cpp:ChaosTest.ClientGracefulClose",
+    "rust": "mooncake-store-client/tests/test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_clientgracefulclose_a97d5e36",
+    "first_divergence": "The generic Rust live helper mounted one segment for every client, while the C++ oracle mounts only client A and leaves client B segmentless so B's object is allocated in A's segment and disappears when A gracefully tears down.",
+    "repair_commit": "PENDING",
+    "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=ClientGracefulClose MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_clientgracefulclose_a97d5e36 -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
+    "evidence": "/tmp/mooncake-client-close-goal-019fbaa7/result.json"
   }
 ]
