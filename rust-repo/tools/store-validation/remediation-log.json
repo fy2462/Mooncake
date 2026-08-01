@@ -2288,5 +2288,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_role_all_state_matrix",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-always-available-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.ServiceEndpointsReturn503WhenServiceUnavailable",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_service_unavailable_route_matrix",
+    "first_divergence": "The no-delegate error text differed from C++, and several service-plane admin routes were absent, so the complete unavailable-route matrix could not be observed through Rust HTTP.",
+    "repair_commit": "893f3d04",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_service_unavailable_route_matrix",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-service-unavailable-goal-019fbe77.typescript"
   }
 ]
