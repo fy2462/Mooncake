@@ -1753,7 +1753,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.GetSizeBasic",
     "rust": "python/tests/test_pybind_client_parity.py:test_get_size_returns_exact_stored_length",
     "first_divergence": "No real PyO3 test proved get_size returns the exact stored byte length after a successful put.",
-    "repair_commit": "PENDING",
+    "repair_commit": "44c3ba29",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_get_size_returns_exact_stored_length",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-lifecycle-query-goal-019fbca4.typescript"
@@ -1762,7 +1762,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.HealthCheckAfterSetup",
     "rust": "python/tests/test_pybind_client_parity.py:test_health_check_after_create_reports_healthy",
     "first_divergence": "Core health codes existed, but no real binding test proved a created client exposes the documented healthy boolean.",
-    "repair_commit": "PENDING",
+    "repair_commit": "44c3ba29",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_health_check_after_create_reports_healthy",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-lifecycle-query-goal-019fbca4.typescript"
@@ -1771,7 +1771,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.GetHostnameAfterSetup",
     "rust": "python/tests/test_pybind_client_parity.py:test_get_hostname_returns_configured_value",
     "first_divergence": "No real PyO3 test proved the configured hostname, including its explicit port, survives creation and Python conversion unchanged.",
-    "repair_commit": "PENDING",
+    "repair_commit": "44c3ba29",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_get_hostname_returns_configured_value",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-lifecycle-query-goal-019fbca4.typescript"
@@ -1780,7 +1780,7 @@
     "cpp": "pybind_client_test.cpp:RealClientTest.DoubleTearDownIsIdempotent",
     "rust": "python/tests/test_pybind_client_parity.py:test_close_is_idempotent_with_real_binding_client",
     "first_divergence": "PyO3 close was resource-idempotent but exposed Rust unit as an empty tuple; both the first and already-closed branches now return the C++ success code zero.",
-    "repair_commit": "PENDING",
+    "repair_commit": "44c3ba29",
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_close_is_idempotent_with_real_binding_client",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-lifecycle-query-goal-019fbca4.typescript"
