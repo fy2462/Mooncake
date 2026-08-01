@@ -2063,5 +2063,14 @@
     "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_config_dict_rejects_invalid_size_strings",
     "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py && cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-pybind-config-dict-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "pybind_client_test.cpp:RealClientTest.ErrOperationsBeforeSetup",
+    "rust": "python/tests/test_pybind_client_parity.py:test_uninitialized_client_operation_sentinels",
+    "first_divergence": "PyO3 required static async creation and represented an absent core client only as a closed error state, so callers could not observe the C++ pre-setup sentinel contract.",
+    "repair_commit": "e26e4f77",
+    "focused_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py::test_uninitialized_client_operation_sentinels",
+    "crate_command": "PYTHONPATH=rust-repo/python .venv/bin/python -m pytest -q rust-repo/python/tests/test_pybind_client_parity.py",
+    "evidence": "/tmp/mooncake-pybind-uninitialized-goal-019fbca4.typescript"
   }
 ]
