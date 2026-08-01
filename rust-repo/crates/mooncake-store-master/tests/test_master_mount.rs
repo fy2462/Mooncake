@@ -526,6 +526,124 @@ async fn test_mount_segment_cachelib_requires_slab_alignment() {
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
 }
 
+async fn assert_mount_validation_and_idempotent_lifecycle(
+    memory_allocator_kind: MemoryAllocatorKind,
+    segment_name: &str,
+    require_cachelib_alignment: bool,
+) {
+    const SEGMENT_BASE: u64 = 0x300000000;
+    const SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        memory_allocator_kind,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    let request = |base_addr, size| proto::MountSegmentRequest {
+        client_id: Some(proto_uuid(client_id)),
+        segment_name: segment_name.into(),
+        size,
+        base_addr,
+        te_endpoint: format!("tcp://{segment_name}"),
+        protocol: "tcp".into(),
+        host_id: segment_name.into(),
+    };
+
+    for (case, base_addr, size) in [
+        ("zero base", 0, SEGMENT_SIZE),
+        ("zero size", SEGMENT_BASE, 0),
+    ] {
+        let error = MasterService::mount_segment(&service, Request::new(request(base_addr, size)))
+            .await
+            .expect_err(case);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{case}");
+    }
+    if require_cachelib_alignment {
+        for (case, base_addr, size) in [
+            ("unaligned base", SEGMENT_BASE + 1, SEGMENT_SIZE),
+            ("unaligned size", SEGMENT_BASE, SEGMENT_SIZE + 1),
+        ] {
+            let error =
+                MasterService::mount_segment(&service, Request::new(request(base_addr, size)))
+                    .await
+                    .expect_err(case);
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{case}");
+        }
+    }
+
+    let first_id =
+        MasterService::mount_segment(&service, Request::new(request(SEGMENT_BASE, SEGMENT_SIZE)))
+            .await
+            .unwrap()
+            .into_inner()
+            .segment_id
+            .expect("valid mount returns a segment UUID");
+    let duplicate_id =
+        MasterService::mount_segment(&service, Request::new(request(SEGMENT_BASE, SEGMENT_SIZE)))
+            .await
+            .unwrap()
+            .into_inner()
+            .segment_id
+            .expect("idempotent mount returns the same segment UUID");
+    assert_eq!(duplicate_id, first_id);
+
+    let unmount = |segment_id| proto::UnmountSegmentRequest {
+        segment_id: Some(segment_id),
+        client_id: Some(proto_uuid(client_id)),
+    };
+    MasterService::unmount_segment(&service, Request::new(unmount(first_id.clone())))
+        .await
+        .unwrap();
+    MasterService::unmount_segment(&service, Request::new(unmount(first_id.clone())))
+        .await
+        .unwrap();
+    MasterService::unmount_segment(&service, Request::new(unmount(proto_uuid(Uuid::new_v4()))))
+        .await
+        .unwrap();
+
+    let remounted_id =
+        MasterService::mount_segment(&service, Request::new(request(SEGMENT_BASE, SEGMENT_SIZE)))
+            .await
+            .unwrap()
+            .into_inner()
+            .segment_id
+            .expect("remount returns a segment UUID");
+    assert_eq!(remounted_id, first_id);
+    MasterService::unmount_segment(&service, Request::new(unmount(remounted_id)))
+        .await
+        .unwrap();
+
+    let status = MasterService::query_segment_status(
+        &service,
+        Request::new(proto::QuerySegmentStatusRequest {
+            segment_name: segment_name.into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn cachelib_mount_validation_and_idempotent_lifecycle_parity() {
+    assert_mount_validation_and_idempotent_lifecycle(
+        MemoryAllocatorKind::CachelibLike,
+        "cachelib-lifecycle:3333",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn offset_mount_validation_and_idempotent_lifecycle_parity() {
+    assert_mount_validation_and_idempotent_lifecycle(
+        MemoryAllocatorKind::Offset,
+        "offset-lifecycle:3333",
+        false,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn test_mount_cxl_segment_uses_configured_shared_capacity() {
     let cxl_size = CACHELIB_SLAB_SIZE * 2;
