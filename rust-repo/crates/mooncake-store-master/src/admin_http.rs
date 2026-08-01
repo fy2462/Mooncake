@@ -495,6 +495,15 @@ mod tests {
         }))
     }
 
+    fn runtime_state(state: MasterRuntimeState) -> AdminRuntimeState {
+        AdminRuntimeState {
+            state,
+            leader_view: None,
+            service_ready: state == MasterRuntimeState::Serving,
+            service: None,
+        }
+    }
+
     #[test]
     fn test_admin_health_matches_cpp_shape() {
         let health = build_health_json(&leader_state());
@@ -570,6 +579,57 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["role"], "leader");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_health_includes_observed_leader() {
+        let state = AdminRuntimeState {
+            state: MasterRuntimeState::Standby,
+            leader_view: Some(MasterView {
+                leader_address: "10.0.0.1:19000".to_string(),
+                view_version: 42,
+            }),
+            service_ready: false,
+            service: None,
+        };
+        let (status, body) = get(state, "/health").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["leader_address"], "10.0.0.1:19000");
+        assert_eq!(body["view_version"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_role_serving_is_leader() {
+        let (status, body) = get(runtime_state(MasterRuntimeState::Serving), "/role").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "leader");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_role_standby_is_standby() {
+        let (status, body) = get(runtime_state(MasterRuntimeState::Standby), "/role").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "standby");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_role_candidate_is_standby() {
+        let (status, body) = get(runtime_state(MasterRuntimeState::Candidate), "/role").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "standby");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_role_recovering_is_standby() {
+        let (status, body) = get(runtime_state(MasterRuntimeState::Recovering), "/role").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "standby");
     }
 
     #[test]
