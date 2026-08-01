@@ -111,6 +111,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, OwnedMutexGuard};
 use tracing::warn;
 use transfer_engine_ffi::StableMemoryOwner;
@@ -136,6 +137,7 @@ pub(crate) struct PythonMooncakeClient {
     pub(crate) inner: SharedClient,
     pub(crate) background: Arc<AsyncMutex<Option<ClientBackgroundHandle>>>,
     pub(crate) registered_py_buffers: Arc<Mutex<Vec<PythonBufferRegistration>>>,
+    pub(crate) compat_uninitialized: Arc<AtomicBool>,
 }
 
 pub(crate) type SharedClient = Arc<AsyncMutex<Option<MooncakeClient>>>;
@@ -1410,6 +1412,17 @@ impl PythonMooncakeClient {
     // create - 创建客户端
     // ===================================================================
 
+    /// Construct the C++ compatibility state that exists before setup.
+    #[staticmethod]
+    fn uninitialized() -> Self {
+        Self {
+            inner: Arc::new(AsyncMutex::new(None)),
+            background: Arc::new(AsyncMutex::new(None)),
+            registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+            compat_uninitialized: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     /// Create a new MooncakeClient and connect to the metadata server.
     ///
     /// 创建新的 MooncakeClient 并连接到元数据服务器。
@@ -1546,6 +1559,7 @@ impl PythonMooncakeClient {
                 inner,
                 background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+                compat_uninitialized: Arc::new(AtomicBool::new(false)),
             })
         })
     }
@@ -1630,6 +1644,7 @@ impl PythonMooncakeClient {
                 inner,
                 background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+                compat_uninitialized: Arc::new(AtomicBool::new(false)),
             })
         })
     }
@@ -1693,6 +1708,7 @@ impl PythonMooncakeClient {
                 inner,
                 background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
+                compat_uninitialized: Arc::new(AtomicBool::new(false)),
             })
         })
     }
@@ -1711,6 +1727,9 @@ impl PythonMooncakeClient {
         value: Bound<'py, PyBytes>,
         config: Option<Bound<'py, ReplicateConfigPy>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i32) });
+        }
         // Copy out of Python memory while GIL is held
         // 在持有 GIL 时从 Python 内存中拷贝出来
         let data = value.as_bytes().to_vec();
@@ -2044,6 +2063,9 @@ impl PythonMooncakeClient {
         key: String,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i32) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2060,6 +2082,9 @@ impl PythonMooncakeClient {
         py: Python<'py>,
         key: String,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i64) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2805,6 +2830,9 @@ impl PythonMooncakeClient {
         py: Python<'py>,
         force: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i64) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2821,6 +2849,9 @@ impl PythonMooncakeClient {
         py: Python<'py>,
         key: String,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(-1_i64) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2911,6 +2942,9 @@ impl PythonMooncakeClient {
     /// Tear down all resources: buffers, segments, metadata entries.
     /// 销毁所有资源：缓冲区、段、元数据条目。用于整个集群的清理。
     fn tear_down_all<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(0_i32) });
+        }
         let inner = slf.borrow().inner.clone();
         let background = slf.borrow().background.clone();
 
@@ -2920,13 +2954,16 @@ impl PythonMooncakeClient {
             }
             let mut client = take_client(&inner).await?;
             let result = client.tear_down_all().await;
-            result.map_err(to_py_err)
+            result.map(|()| 0).map_err(to_py_err)
         })
     }
 
     /// Check whether this client has been closed.
     /// 检查此客户端是否已关闭。
     fn is_closed(&self) -> bool {
+        if self.compat_uninitialized.load(Ordering::Acquire) {
+            return false;
+        }
         match self.inner.try_lock() {
             Ok(slot) => slot.as_ref().is_none_or(MooncakeClient::is_closed),
             // A contended slot still contains the live client.
@@ -2940,12 +2977,14 @@ impl PythonMooncakeClient {
         let inner = slf.borrow().inner.clone();
         let background = slf.borrow().background.clone();
         let registered_py_buffers = slf.borrow().registered_py_buffers.clone();
+        let compat_uninitialized = slf.borrow().compat_uninitialized.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             if let Some(handle) = background.lock().await.take() {
                 handle.shutdown().await;
             }
             let mut slot = inner.lock().await;
             let Some(client) = slot.as_mut() else {
+                compat_uninitialized.store(false, Ordering::Release);
                 registered_py_buffers.lock().clear();
                 return Ok(0);
             };
@@ -2957,9 +2996,11 @@ impl PythonMooncakeClient {
         })
     }
 
-    /// String representation: "MooncakeClient(connected)" or
-    /// "MooncakeClient(closed)".
+    /// String representation of the compatibility lifecycle state.
     fn __repr__(&self) -> String {
+        if self.compat_uninitialized.load(Ordering::Acquire) {
+            return "MooncakeClient(uninitialized)".to_string();
+        }
         match self.inner.try_lock() {
             Ok(slot) if slot.is_none() => "MooncakeClient(closed)".to_string(),
             Ok(_) | Err(_) => "MooncakeClient(connected)".to_string(),
@@ -4424,6 +4465,9 @@ impl PythonMooncakeClient {
         py: Python<'py>,
         key: String,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if slf.borrow().compat_uninitialized.load(Ordering::Acquire) {
+            return pyo3_async_runtimes::tokio::future_into_py(py, async { Ok(None::<Vec<u8>>) });
+        }
         let inner = slf.borrow().inner.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

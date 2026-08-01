@@ -1123,3 +1123,43 @@ async def test_config_dict_rejects_known_unsupported_behavioral_fields(key, valu
     }
     with pytest.raises(StoreError, match=rf"{key}.*not supported"):
         await MooncakeClient.create_from_config(config)
+
+
+@pytest.mark.asyncio
+async def test_uninitialized_client_operation_sentinels():
+    client = MooncakeClient.uninitialized()
+    config = ReplicateConfig(replica_num=1)
+
+    assert client.is_closed() is False
+    assert repr(client) == "MooncakeClient(uninitialized)"
+    assert await client.put("before_setup_key", b"test_data", config) != 0
+    assert await client.get_buffer("before_setup_key") is None
+    assert await client.exists("before_setup_key") < 0
+    assert await client.remove("before_setup_key") != 0
+    assert await client.get_size("before_setup_key") < 0
+    assert await client.remove_all() != 0
+    assert await client.tear_down_all() == 0
+    assert client.is_closed() is False
+    assert await client.close() == 0
+    assert client.is_closed() is True
+    assert repr(client) == "MooncakeClient(closed)"
+    with pytest.raises(StoreError, match="already closed"):
+        await client.put("before_setup_key", b"test_data", config)
+
+
+@pytest.mark.asyncio
+async def test_live_tear_down_all_returns_integer_zero(cachelib_master):
+    rpc_port, _ = cachelib_master
+    client = await MooncakeClient.create(
+        local_hostname="localhost:17821",
+        metadata_server="P2PHANDSHAKE",
+        master_server_addr=f"127.0.0.1:{rpc_port}",
+        protocol="tcp",
+        device="",
+        global_segment_size=SLAB_SIZE,
+        local_buffer_size=SLAB_SIZE,
+    )
+    try:
+        assert await client.tear_down_all() == 0
+    finally:
+        await client.close()
