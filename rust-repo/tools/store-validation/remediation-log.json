@@ -637,7 +637,7 @@
     "cpp": "serializer_test.cpp:SerializerTest.MountedSegmentSerializationPreservesHostId",
     "rust": "mooncake-store-master/src/ha/catalog_snapshot.rs:cpp_parity_serializer_test_cpp_serializertest_mountedsegmentserializationpreserveshostid_75440f87",
     "first_divergence": "Rust decoded a synthetic C++ mounted segment containing host_id, but no test exercised the Rust production encoder, so an omitted write-side host_id would remain undetected.",
-    "repair_commit": "PENDING",
+    "repair_commit": "586d9d6d",
     "focused_command": "cargo test -p mooncake-store-master --lib ha::catalog_snapshot::tests::cpp_parity_serializer_test_cpp_serializertest_mountedsegmentserializationpreserveshostid_75440f87 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-mounted-segment-serializer-goal-019fbaa7.typescript"
