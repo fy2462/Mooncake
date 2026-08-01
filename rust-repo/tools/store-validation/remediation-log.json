@@ -2261,5 +2261,32 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_leader_clear_transition",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-dynamic-state-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.AllAlwaysAvailableEndpointsInStartingState",
+    "rust": "mooncake-store-master/src/metrics.rs:test_admin_http_starting_always_available_matrix",
+    "first_divergence": "The production merged metrics/admin router existed, but no single request-level test proved all six always-available endpoints and their exact starting-state projections.",
+    "repair_commit": "5188e135",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_starting_always_available_matrix",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-always-available-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.AlwaysAvailableEndpointsInLeaderWarmup",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_leader_warmup_role_and_health",
+    "first_divergence": "Leader-warmup role and health formatting existed but lacked request-level proof through both always-available endpoints.",
+    "repair_commit": "5188e135",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_leader_warmup_role_and_health",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-always-available-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.RoleWithAllStates",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_role_all_state_matrix",
+    "first_divergence": "The seven-state role mapping was implemented but not exercised through successive requests against one mutable admin router.",
+    "repair_commit": "5188e135",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_role_all_state_matrix",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-admin-always-available-goal-019fbe77.typescript"
   }
 ]
