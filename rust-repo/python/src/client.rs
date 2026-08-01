@@ -3331,10 +3331,13 @@ impl PythonMooncakeClient {
     ) -> PyResult<usize> {
         let (ptr, size) = get_pointer_and_size(&buffer, size)?;
         let inner = slf.borrow().inner.clone();
-        // block_on: future captures raw ptr, not Send-safe
-        // block_on: future 捕获了裸指针，不是 Send 的
+        let mut client = slf.py().detach(move || {
+            pyo3_async_runtimes::tokio::get_runtime().block_on(take_client(&inner))
+        })?;
+        // The transfer future captures a raw pointer and is therefore !Send;
+        // acquire the shared client slot without the GIL, then poll the
+        // pointer-bearing future synchronously while the Python owner lives.
         pyo3_async_runtimes::tokio::get_runtime().block_on(async {
-            let mut client = take_client(&inner).await?;
             let result = client.get_into(&key, ptr, size).await;
             result.map_err(to_py_err)
         })

@@ -1,12 +1,15 @@
 import asyncio
+import concurrent.futures
 import os
+import random
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import pytest
-from mooncake_store import BufferPool, MooncakeClient
+from mooncake_store import BufferPool, MooncakeClient, StoreError
 
 SLAB_SIZE = 1 << 24
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -667,4 +670,136 @@ async def test_lease_expiry_preserves_single_and_batch_failure_shapes(
         for view in batch_views:
             view.release()
         source_view.release()
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    "cachelib_master",
+    [{"lease_ttl_ms": 1, "memory_allocator": "offset"}],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_concurrent_expiring_reads_never_return_stale_bytes(cachelib_master):
+    segment_size = 16 * 1024 * 1024
+    num_threads = 4
+    num_iterations = 100
+    client = await _client(
+        cachelib_master,
+        global_segment_size=segment_size,
+        local_buffer_size=segment_size,
+    )
+
+    def run_workers(worker):
+        barrier = threading.Barrier(num_threads)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as pool:
+            futures = [
+                pool.submit(worker, index, barrier) for index in range(num_threads)
+            ]
+            for future in futures:
+                future.result(timeout=180)
+
+    def single_worker(thread_index, barrier):
+        slice_size = segment_size // num_threads + 1024
+        key = f"concurrent_test_key_{thread_index}"
+        put_data = bytes([ord("a") + thread_index]) * slice_size
+        get_data = bytearray(slice_size)
+        assert client.register_buffer(get_data, len(get_data)) == 0
+        barrier.wait(timeout=30)
+
+        async def exercise():
+            rng = random.Random(0x51A9 + thread_index)
+            for _ in range(num_iterations):
+                try:
+                    await client.put(key, put_data)
+                except StoreError:
+                    await asyncio.sleep(0)
+                if rng.randrange(2) == 0:
+                    try:
+                        value = await client.get_buffer(key)
+                    except StoreError:
+                        value = None
+                    if value is not None:
+                        assert len(value) == slice_size
+                        assert bytes(value) == put_data
+                else:
+                    try:
+                        bytes_read = client.get_into(key, get_data)
+                    except StoreError:
+                        bytes_read = -1
+                    if bytes_read > 0:
+                        assert bytes_read == slice_size
+                        assert bytes(get_data) == put_data
+                await asyncio.sleep(0.000001)
+
+        try:
+            asyncio.run(exercise())
+        finally:
+            assert client.unregister_buffer(get_data) == 0
+
+    def batch_worker(thread_index, barrier):
+        num_slices = 32
+        slice_size = segment_size // (num_threads * num_slices) + 1024
+        data_size = num_slices * slice_size
+        put_data = random.Random(0xDA7A + thread_index).randbytes(data_size)
+        keys = [
+            f"batch_concurrent_key_{thread_index}_{slice_index}"
+            for slice_index in range(num_slices)
+        ]
+        values = [
+            put_data[offset : offset + slice_size]
+            for offset in range(0, data_size, slice_size)
+        ]
+        get_data = bytearray(data_size)
+        assert client.register_buffer(get_data, len(get_data)) == 0
+        get_views = [
+            memoryview(get_data)[offset : offset + slice_size]
+            for offset in range(0, data_size, slice_size)
+        ]
+        barrier.wait(timeout=30)
+
+        async def exercise():
+            rng = random.Random(0xBA7C + thread_index)
+            for _ in range(num_iterations):
+                try:
+                    await client.put_batch(keys, values)
+                except StoreError:
+                    await asyncio.sleep(0)
+                if rng.randrange(2) == 0:
+                    handles = await client.batch_get_buffer(keys)
+                    for index, handle in enumerate(handles):
+                        if handle is not None:
+                            assert len(handle) == slice_size
+                            assert bytes(handle) == values[index]
+                else:
+                    results = client.batch_get_into(
+                        keys, get_views, [slice_size] * num_slices
+                    )
+                    for index, bytes_read in enumerate(results):
+                        if bytes_read > 0:
+                            assert bytes_read == slice_size
+                            assert bytes(get_views[index]) == values[index]
+                await asyncio.sleep(0.000001)
+
+        try:
+            asyncio.run(exercise())
+        finally:
+            for view in get_views:
+                view.release()
+            assert client.unregister_buffer(get_data) == 0
+
+    try:
+        await asyncio.to_thread(run_workers, single_worker)
+        await asyncio.sleep(0.001)
+        try:
+            await client.remove_all()
+        except StoreError:
+            await asyncio.sleep(0)
+
+        await asyncio.to_thread(run_workers, batch_worker)
+        await asyncio.sleep(0.001)
+        try:
+            await client.remove_all()
+        except StoreError:
+            await asyncio.sleep(0)
+    finally:
         await client.close()
