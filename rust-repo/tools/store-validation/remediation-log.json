@@ -205,5 +205,204 @@
     "focused_command": "cargo test -p mooncake-store-master cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib && cargo test -p mooncake-store-master --test test_ha && cargo test -p mooncake-store-master --test test_main_config",
     "evidence": "/tmp/mooncake-ha-snapshot-bootstrap-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestInitialState",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testinitialstate_85bbd34f",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestInitialState, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestStartTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_teststarttransition_3245b7a6",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestStartTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestConnectedTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconnectedtransition_f6750002",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestConnectedTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestSyncCompleteTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testsynccompletetransition_bfeadd1a",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestSyncCompleteTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestWatchHealthyNoOp",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testwatchhealthynoop_03a093d9",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestWatchHealthyNoOp, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestWatchBrokenTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testwatchbrokentransition_54fee57f",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestWatchBrokenTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestDisconnectedFromWatching",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testdisconnectedfromwatching_cda0a6f2",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestDisconnectedFromWatching, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestPromoteTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotetransition_11401b75",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestPromoteTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestPromotionSuccessTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotionsuccesstransition_c41fac41",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestPromotionSuccessTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestPromotionFailedTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotionfailedtransition_7d20105b",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestPromotionFailedTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestStopTransition",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_teststoptransition_a3fafb9f",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestStopTransition, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestConnectionFailedFromConnecting",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconnectionfailedfromconnecting_a2ec4421",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestConnectionFailedFromConnecting, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestFatalErrorFromConnecting",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfatalerrorfromconnecting_10c4292c",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestFatalErrorFromConnecting, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestSyncFailedFromSyncing",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testsyncfailedfromsyncing_6c234d39",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestSyncFailedFromSyncing, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestDisconnectedFromSyncing",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testdisconnectedfromsyncing_7f0611d8",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestDisconnectedFromSyncing, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestFatalErrorFromSyncing",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfatalerrorfromsyncing_16b165cc",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestFatalErrorFromSyncing, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestFatalErrorFromWatching",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfatalerrorfromwatching_84fe4c46",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestFatalErrorFromWatching, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestReconnectingToSyncing",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectingtosyncing_96a3584a",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestReconnectingToSyncing, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestReconnectingToFailed",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectingtofailed_2c0e9796",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestReconnectingToFailed, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
+  }
+,
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestReconnectingMaxErrors",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectingmaxerrors_1f249cdb",
+    "first_divergence": "Existing Rust tests covered part of StandbyStateMachineTest.TestReconnectingMaxErrors, but no discoverable one-row test asserted its exact transition endpoints, committed state, and named predicates or counters through the production state machine.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_ha_standby_standby_state_machine_test_cpp_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-state-machine-goal-019fbaa7.typescript"
   }
 ]

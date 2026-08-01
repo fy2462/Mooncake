@@ -293,6 +293,390 @@ impl StandbyStateMachine {
 mod tests {
     use super::*;
 
+    fn assert_transition(
+        sm: &StandbyStateMachine,
+        event: StandbyEvent,
+        old_state: StandbyState,
+        new_state: StandbyState,
+    ) {
+        let result = sm.process_event(event);
+        assert!(result.allowed);
+        assert_eq!(result.old_state, old_state);
+        assert_eq!(result.new_state, new_state);
+        assert_eq!(sm.get_state(), new_state);
+    }
+
+    fn reach_syncing(sm: &StandbyStateMachine) {
+        assert_transition(
+            sm,
+            StandbyEvent::Start,
+            StandbyState::Stopped,
+            StandbyState::Connecting,
+        );
+        assert_transition(
+            sm,
+            StandbyEvent::Connected,
+            StandbyState::Connecting,
+            StandbyState::Syncing,
+        );
+    }
+
+    fn reach_watching(sm: &StandbyStateMachine) {
+        reach_syncing(sm);
+        assert_transition(
+            sm,
+            StandbyEvent::SyncComplete,
+            StandbyState::Syncing,
+            StandbyState::Watching,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testinitialstate_85bbd34f()
+     {
+        let sm = StandbyStateMachine::new();
+
+        assert_eq!(sm.get_state(), StandbyState::Stopped);
+        assert!(!sm.is_running());
+        assert!(!sm.is_connected());
+        assert!(!sm.is_watch_healthy());
+        assert!(!sm.is_ready_for_promotion());
+        assert_eq!(sm.get_consecutive_errors(), 0);
+        assert_eq!(sm.get_reconnect_count(), 0);
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_teststarttransition_3245b7a6()
+     {
+        let sm = StandbyStateMachine::new();
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Start,
+            StandbyState::Stopped,
+            StandbyState::Connecting,
+        );
+        assert!(!sm.is_running());
+        assert!(!sm.is_connected());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconnectedtransition_f6750002()
+     {
+        let sm = StandbyStateMachine::new();
+        assert_transition(
+            &sm,
+            StandbyEvent::Start,
+            StandbyState::Stopped,
+            StandbyState::Connecting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Connected,
+            StandbyState::Connecting,
+            StandbyState::Syncing,
+        );
+        assert!(sm.is_running());
+        assert!(sm.is_connected());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testsynccompletetransition_bfeadd1a()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_syncing(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::SyncComplete,
+            StandbyState::Syncing,
+            StandbyState::Watching,
+        );
+        assert!(sm.is_running());
+        assert!(sm.is_connected());
+        assert!(sm.is_watch_healthy());
+        assert!(sm.is_ready_for_promotion());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testwatchhealthynoop_03a093d9()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::WatchHealthy,
+            StandbyState::Watching,
+            StandbyState::Watching,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testwatchbrokentransition_54fee57f()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::WatchBroken,
+            StandbyState::Watching,
+            StandbyState::Reconnecting,
+        );
+        assert!(sm.is_running());
+        assert!(!sm.is_watch_healthy());
+        assert!(!sm.is_ready_for_promotion());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testdisconnectedfromwatching_cda0a6f2()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Disconnected,
+            StandbyState::Watching,
+            StandbyState::Reconnecting,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotetransition_11401b75()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Promote,
+            StandbyState::Watching,
+            StandbyState::Promoting,
+        );
+        assert!(sm.is_running());
+        assert!(sm.is_connected());
+        assert!(!sm.is_watch_healthy());
+        assert!(!sm.is_ready_for_promotion());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotionsuccesstransition_c41fac41()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::Promote,
+            StandbyState::Watching,
+            StandbyState::Promoting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::PromotionSuccess,
+            StandbyState::Promoting,
+            StandbyState::Promoted,
+        );
+        assert!(!sm.is_running());
+        assert!(!sm.is_connected());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testpromotionfailedtransition_7d20105b()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::Promote,
+            StandbyState::Watching,
+            StandbyState::Promoting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::PromotionFailed,
+            StandbyState::Promoting,
+            StandbyState::Failed,
+        );
+        assert!(!sm.is_running());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_teststoptransition_a3fafb9f()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Stop,
+            StandbyState::Watching,
+            StandbyState::Stopped,
+        );
+        assert!(!sm.is_running());
+        assert!(!sm.is_connected());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testconnectionfailedfromconnecting_a2ec4421()
+     {
+        let sm = StandbyStateMachine::new();
+        assert_transition(
+            &sm,
+            StandbyEvent::Start,
+            StandbyState::Stopped,
+            StandbyState::Connecting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::ConnectionFailed,
+            StandbyState::Connecting,
+            StandbyState::Failed,
+        );
+        assert!(!sm.is_running());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfatalerrorfromconnecting_10c4292c()
+     {
+        let sm = StandbyStateMachine::new();
+        assert_transition(
+            &sm,
+            StandbyEvent::Start,
+            StandbyState::Stopped,
+            StandbyState::Connecting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::FatalError,
+            StandbyState::Connecting,
+            StandbyState::Failed,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testsyncfailedfromsyncing_6c234d39()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_syncing(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::SyncFailed,
+            StandbyState::Syncing,
+            StandbyState::Reconnecting,
+        );
+        assert!(sm.is_running());
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testdisconnectedfromsyncing_7f0611d8()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_syncing(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Disconnected,
+            StandbyState::Syncing,
+            StandbyState::Reconnecting,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfatalerrorfromsyncing_16b165cc()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_syncing(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::FatalError,
+            StandbyState::Syncing,
+            StandbyState::Failed,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testfatalerrorfromwatching_84fe4c46()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::FatalError,
+            StandbyState::Watching,
+            StandbyState::Failed,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectingtosyncing_96a3584a()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::WatchBroken,
+            StandbyState::Watching,
+            StandbyState::Reconnecting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Connected,
+            StandbyState::Reconnecting,
+            StandbyState::Syncing,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectingtofailed_2c0e9796()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::WatchBroken,
+            StandbyState::Watching,
+            StandbyState::Reconnecting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::FatalError,
+            StandbyState::Reconnecting,
+            StandbyState::Failed,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testreconnectingmaxerrors_1f249cdb()
+     {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+        assert_transition(
+            &sm,
+            StandbyEvent::WatchBroken,
+            StandbyState::Watching,
+            StandbyState::Reconnecting,
+        );
+
+        assert_transition(
+            &sm,
+            StandbyEvent::MaxErrorsReached,
+            StandbyState::Reconnecting,
+            StandbyState::Failed,
+        );
+    }
+
     #[test]
     fn test_stopped_start() {
         let sm = StandbyStateMachine::new();
