@@ -749,6 +749,16 @@ mod tests {
         request_router(router, Method::GET, path, "").await
     }
 
+    async fn post_router(router: &Router, path: &str, body: &str) -> (StatusCode, String) {
+        request_router(router, Method::POST, path, body).await
+    }
+
+    async fn create_drain_job(router: &Router, segment_name: &str) -> (StatusCode, Value) {
+        let body = json!({ "segments": [segment_name] }).to_string();
+        let (status, body) = post_router(router, "/api/v1/drain_jobs", &body).await;
+        (status, serde_json::from_str(&body).unwrap())
+    }
+
     async fn get(state: AdminRuntimeState, path: &str) -> (StatusCode, String) {
         get_router(&admin_router(state), path).await
     }
@@ -1337,6 +1347,157 @@ mod tests {
         assert_eq!(body["success"], true);
         assert_eq!(body["data"]["admin_test_key"]["ok"], true);
         assert_eq!(body["data"]["nonexistent"]["ok"], false);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_create_drain_job() {
+        let router = router_with_memory_segment("drain_create_segment").await;
+        let (status, body) = create_drain_job(&router, "drain_create_segment").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert!(
+            body["job_id"]
+                .as_str()
+                .is_some_and(|job_id| !job_id.is_empty())
+        );
+        assert_eq!(body["status"], "CREATED");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_create_drain_job_invalid_json() {
+        let router = router_with_memory_segment("drain_invalid_json_segment").await;
+        let (status, body) = post_router(&router, "/api/v1/drain_jobs", "not json").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["success"], false);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_create_drain_job_empty_segments_is_400() {
+        let router = router_with_memory_segment("drain_empty_segment").await;
+        let (status, _) = post_router(&router, "/api/v1/drain_jobs", "{}").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_created_drain_job() {
+        let router = router_with_memory_segment("drain_query_segment").await;
+        let (create_status, create_body) = create_drain_job(&router, "drain_query_segment").await;
+        let job_id = create_body["job_id"].as_str().unwrap();
+        let (query_status, query_body) = get_router(
+            &router,
+            &format!("/api/v1/drain_jobs/query?job_id={job_id}"),
+        )
+        .await;
+        let query_body: Value = serde_json::from_str(&query_body).unwrap();
+
+        assert_eq!(create_status, StatusCode::OK);
+        assert_eq!(query_status, StatusCode::OK);
+        assert_eq!(query_body["success"], true);
+        assert_eq!(query_body["job_id"], job_id);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_drain_job_invalid_id_is_400() {
+        let router = router_with_memory_segment("drain_query_invalid_segment").await;
+        let (status, _) = get_router(&router, "/api/v1/drain_jobs/query?job_id=not-a-uuid").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_drain_job_missing_id_is_400() {
+        let router = router_with_memory_segment("drain_query_missing_segment").await;
+        let (status, _) = get_router(&router, "/api/v1/drain_jobs/query").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_drain_job_unknown_id_is_404() {
+        let router = router_with_memory_segment("drain_query_unknown_segment").await;
+        let (status, _) = get_router(
+            &router,
+            "/api/v1/drain_jobs/query?job_id=00000000-0000-0000-0000-000000000001",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_cancel_drain_job() {
+        let router = router_with_memory_segment("drain_cancel_segment").await;
+        let (create_status, create_body) = create_drain_job(&router, "drain_cancel_segment").await;
+        let job_id = create_body["job_id"].as_str().unwrap();
+        let (cancel_status, cancel_body) = post_router(
+            &router,
+            &format!("/api/v1/drain_jobs/cancel?job_id={job_id}"),
+            "",
+        )
+        .await;
+        let cancel_body: Value = serde_json::from_str(&cancel_body).unwrap();
+
+        assert_eq!(create_status, StatusCode::OK);
+        assert_eq!(cancel_status, StatusCode::OK);
+        assert_eq!(cancel_body["success"], true);
+        assert_eq!(cancel_body["job_id"], job_id);
+        assert_eq!(cancel_body["status"], "CANCELED");
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_cancel_drain_job_invalid_id_is_400() {
+        let router = router_with_memory_segment("drain_cancel_invalid_segment").await;
+        let (status, _) =
+            post_router(&router, "/api/v1/drain_jobs/cancel?job_id=not-a-uuid", "").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_cancel_drain_job_missing_id_is_400() {
+        let router = router_with_memory_segment("drain_cancel_missing_segment").await;
+        let (status, _) = post_router(&router, "/api/v1/drain_jobs/cancel", "").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_drain_job_full_lifecycle() {
+        let router = router_with_memory_segment("drain_lifecycle_segment").await;
+        let (create_status, create_body) =
+            create_drain_job(&router, "drain_lifecycle_segment").await;
+        let job_id = create_body["job_id"].as_str().unwrap();
+
+        let query_path = format!("/api/v1/drain_jobs/query?job_id={job_id}");
+        let (first_query_status, first_query_body) = get_router(&router, &query_path).await;
+        let first_query_body: Value = serde_json::from_str(&first_query_body).unwrap();
+
+        let (cancel_status, cancel_body) = post_router(
+            &router,
+            &format!("/api/v1/drain_jobs/cancel?job_id={job_id}"),
+            "",
+        )
+        .await;
+        let cancel_body: Value = serde_json::from_str(&cancel_body).unwrap();
+
+        let (final_query_status, final_query_body) = get_router(&router, &query_path).await;
+        let final_query_body: Value = serde_json::from_str(&final_query_body).unwrap();
+
+        assert_eq!(create_status, StatusCode::OK);
+        assert_eq!(create_body["success"], true);
+        assert_eq!(first_query_status, StatusCode::OK);
+        assert_eq!(first_query_body["success"], true);
+        assert_eq!(first_query_body["job_id"], job_id);
+        assert_eq!(cancel_status, StatusCode::OK);
+        assert_eq!(cancel_body["success"], true);
+        assert_eq!(cancel_body["job_id"], job_id);
+        assert_eq!(cancel_body["status"], "CANCELED");
+        assert_eq!(final_query_status, StatusCode::OK);
+        assert_eq!(final_query_body["success"], true);
     }
 
     #[test]
