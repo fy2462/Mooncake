@@ -762,6 +762,25 @@ mod tests {
         AdminRuntimeState::new(state, None, state == MasterRuntimeState::Serving)
     }
 
+    async fn router_with_memory_segment(segment_name: &str) -> Router {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let client_id = Uuid::from_u128(0x100);
+        let (high, low) = client_id.as_u64_pair();
+        service
+            .mount_segment(TonicRequest::new(proto::MountSegmentRequest {
+                client_id: Some(proto::Uuid { high, low }),
+                segment_name: segment_name.to_owned(),
+                size: 8 * 1024 * 1024,
+                base_addr: 0x3000_0000_0,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }))
+            .await
+            .unwrap();
+        admin_router(AdminRuntimeState::serving_with_service(None, service))
+    }
+
     #[test]
     fn test_admin_health_matches_cpp_shape() {
         let health = build_health_json(&leader_state());
@@ -1052,6 +1071,87 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Used(bytes): 0"));
         assert!(body.contains("Capacity(bytes) : 12288"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_segment_existing_response() {
+        let router = router_with_memory_segment("admin_test_segment").await;
+        let (status, body) = get_router(&router, "/query_segment?segment=admin_test_segment").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("admin_test_segment"));
+        assert!(body.contains("Used(bytes)"));
+        assert!(body.contains("Capacity(bytes)"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_segment_missing_is_500() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
+        let (status, _) = get_router(&router, "/query_segment?segment=nonexistent_seg").await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_get_all_segments_returns_mounted_segment() {
+        let router = router_with_memory_segment("admin_test_segment").await;
+        let (status, body) = get_router(&router, "/get_all_segments").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("admin_test_segment"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_segments_detail_response() {
+        let router = router_with_memory_segment("admin_test_segment").await;
+        let (status, body) = get_router(&router, "/get_segments_detail").await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+        let segments = body["segments"].as_array().unwrap();
+        let segment = segments
+            .iter()
+            .find(|segment| segment["segment_name"] == "admin_test_segment")
+            .unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["total_segments"].as_u64().unwrap() > 0);
+        assert!(segment.get("allocator_used_bytes").is_some());
+        assert!(segment.get("allocator_capacity_bytes").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_segment_status_existing() {
+        let router = router_with_memory_segment("admin_test_segment").await;
+        let (status, body) = get_router(
+            &router,
+            "/api/v1/segments/status?segment=admin_test_segment",
+        )
+        .await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true);
+        assert_eq!(body["segment"], "admin_test_segment");
+        assert!(!body["status_name"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_segment_status_missing_parameter_is_400() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
+        let (status, _) = get_router(&router, "/api/v1/segments/status").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_segment_status_unknown_is_404() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
+        let (status, _) =
+            get_router(&router, "/api/v1/segments/status?segment=no_such_segment").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[test]
