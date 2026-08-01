@@ -1303,7 +1303,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.ResolveMooncakeHostIdUsesLocalHostnameAndRejectsLoopback",
     "rust": "mooncake-store-core/tests/test_types.rs:resolve_host_id_exact_cpp_vector_parity",
     "first_divergence": "The production Rust resolver already matched C++, but its direct test omitted hostB's second port and bracketed unspecified IPv6 without a port, so the complete eleven-input oracle was not discoverable.",
-    "repair_commit": "PENDING",
+    "repair_commit": "4d8c4026",
     "focused_command": "cargo test -p mooncake-store-core --test test_types resolve_host_id_exact_cpp_vector_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-core --test test_types && cargo test -p mooncake-store-core --lib",
     "evidence": "/tmp/mooncake-core-host-id-goal-019fbca4.typescript"
