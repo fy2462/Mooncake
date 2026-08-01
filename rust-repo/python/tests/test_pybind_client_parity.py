@@ -9,7 +9,13 @@ import time
 from pathlib import Path
 
 import pytest
-from mooncake_store import BufferPool, ClassicTransferEngine, MooncakeClient, StoreError
+from mooncake_store import (
+    BufferPool,
+    ClassicTransferEngine,
+    MooncakeClient,
+    ReplicateConfig,
+    StoreError,
+)
 
 SLAB_SIZE = 1 << 24
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -930,3 +936,71 @@ async def test_external_transfer_engine_allows_only_one_live_client(cachelib_mas
 
     replacement = await MooncakeClient.create_with_transfer_engine(**create_args)
     await replacement.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_move_query_task_reports_id_type_and_success(cachelib_master):
+    rpc_port, _ = cachelib_master
+
+    async def create_client(local_hostname):
+        return await MooncakeClient.create(
+            local_hostname=local_hostname,
+            metadata_server="P2PHANDSHAKE",
+            master_server_addr=f"127.0.0.1:{rpc_port}",
+            protocol="tcp",
+            device="",
+            global_segment_size=SLAB_SIZE,
+            local_buffer_size=SLAB_SIZE,
+        )
+
+    async def wait_for_task(client, task_id, expected_type):
+        deadline = asyncio.get_running_loop().time() + 10
+        last_result = None
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                last_result = await client.query_task(task_id)
+            except StoreError:
+                await asyncio.sleep(0.1)
+                continue
+            returned_id, task_type, status, message = last_result
+            if status in (2, 3):
+                assert returned_id == task_id
+                assert task_type == expected_type
+                assert status == 2, message
+                return
+            await asyncio.sleep(0.1)
+        last_result = await client.query_task(task_id)
+        returned_id, task_type, status, message = last_result
+        assert returned_id == task_id
+        assert task_type == expected_type
+        assert (
+            status == 2
+        ), f"task did not finish within 10 seconds: status={status}, message={message}"
+
+    client1_addr = "localhost:17813"
+    client2_addr = "localhost:17814"
+    client1 = await create_client(client1_addr)
+    client2 = None
+    try:
+        client2 = await create_client(client2_addr)
+        config = ReplicateConfig(replica_num=1, preferred_segment=client1_addr)
+        assert (
+            await client1.put("test_key_copymove", b"Hello, CopyMoveQueryTask!", config)
+            == 0
+        )
+
+        copy_task_id = await client1.create_copy_task(
+            "test_key_copymove", [client2_addr]
+        )
+        await wait_for_task(client1, copy_task_id, 0)
+
+        move_task_id = await client1.create_move_task(
+            "test_key_copymove", client1_addr, client2_addr
+        )
+        await wait_for_task(client1, move_task_id, 1)
+    finally:
+        try:
+            if client2 is not None:
+                await client2.close()
+        finally:
+            await client1.close()

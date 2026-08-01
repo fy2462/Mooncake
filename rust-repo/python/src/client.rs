@@ -3256,7 +3256,7 @@ impl PythonMooncakeClient {
     }
 
     /// Query the status of a task by its UUID.
-    /// 根据 UUID 查询任务状态。返回 (task_id, status, message)。
+    /// 根据 UUID 查询任务状态。返回 (task_id, task_type, status, message)。
     fn query_task<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
@@ -3275,7 +3275,7 @@ impl PythonMooncakeClient {
             let task_id_str = resp
                 .id
                 .map(|id| Uuid::from_u64_pair(id.high, id.low).to_string());
-            Ok((task_id_str, resp.status, resp.message))
+            Ok((task_id_str, resp.task_type, resp.status, resp.message))
         })
     }
 
