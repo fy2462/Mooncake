@@ -1384,7 +1384,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.ReplicaSegmentsAreUnique",
     "rust": "mooncake-store-master/tests/test_master_allocator_eviction.rs:ten_service_replicas_use_unique_segments_parity",
     "first_divergence": "Rust allocator tests already kept replicas on distinct segments, but no discoverable service test asserted the exact ten-replica RPC descriptor cardinality, type, size, unique transport endpoints, and successful PutEnd.",
-    "repair_commit": "PENDING",
+    "repair_commit": "ab19177e",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_allocator_eviction ten_service_replicas_use_unique_segments_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_allocator_eviction && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-replica-allocation-goal-019fbca4.typescript"
@@ -1393,7 +1393,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.ReplicationFactorTwoWithSingleSegment",
     "rust": "mooncake-store-master/tests/test_master_allocator_eviction.rs:replication_two_single_segment_best_effort_parity",
     "first_divergence": "Rust allocator returned one best-effort replica, but PutStart rejected any partial Memory allocation and retained the requested two-replica quota; the service now accepts a nonempty Memory-only allocation and shrinks its reservation to the actual physical replica count before durable publication.",
-    "repair_commit": "PENDING",
+    "repair_commit": "ab19177e",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_allocator_eviction replication_two_single_segment_best_effort_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_allocator_eviction && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-replica-allocation-goal-019fbca4.typescript"
