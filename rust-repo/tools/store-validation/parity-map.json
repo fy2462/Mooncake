@@ -210,13 +210,18 @@
         "file": "e2e/chaos_test.cpp",
         "test": "ChaosTest.ClientKilledFailover"
       },
-      "reason": "Rust has client-TTL and liveness support, but no discoverable live test SIGKILLs a mounted client process, waits for stale-client reaping, and asserts the other client's missing-object then no-available-handle error sequence.",
+      "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_test_cpp_chaostest_clientkilledfailover_992dc564 starts three external etcd-elected Rust Masters, a separate real Rust client process owning exactly one 16-MiB segment with registered liveness heartbeats, and a real segmentless TCP client B. B puts and exactly gets the object through the child-owned segment; the parent then directly SIGKILLs the mounted process, verifies signal 9, waits the configured two-second client TTL plus the C++ five-second crash-detection margin, and proves B receives KeyNotFound(\"key\") followed by NoAvailableHandle. Native evidence and the killed helper log are retained under /tmp/mooncake-client-killed-goal-019fbaa7/.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_test.cpp, ClientProcessHandler::kill, ClientTestWrapper, and Rust test_ha_chaos_live.rs client liveness paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+          "test": "cpp_parity_e2e_chaos_test_cpp_chaostest_clientkilledfailover_992dc564"
+        }
+      ],
+      "status": "covered"
     },
     {"behavior":"An RPC bind host already expressed as a bare IPv4 address passes through unchanged and can start the RPC server.","boundary":["client","rpc","configuration"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"host_port_fix_test.cpp","test":"HostPortFixTest.BareHostPassesThrough"},"review":{"oracle":"mooncake-store/tests/host_port_fix_test.cpp and getHostNameWithoutPort","reviewed":true},"rust":[{"file":"mooncake-store-client/src/client/endpoint.rs","test":"explicit_and_bare_ipv4_derive_bindable_rpc_host"}],"status":"covered"},
     {"behavior":"A configured IPv4 host with a data-plane port is stripped to the bare host before RPC server binding, allowing the server to start.","boundary":["client","rpc","configuration"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"host_port_fix_test.cpp","test":"HostPortFixTest.StripsPortForRpcServer"},"review":{"oracle":"mooncake-store/tests/host_port_fix_test.cpp, getHostNameWithoutPort, and coro_rpc_server startup","reviewed":true},"rust":[{"file":"mooncake-store-client/src/client/endpoint.rs","test":"explicit_and_bare_ipv4_derive_bindable_rpc_host"}],"status":"covered"},

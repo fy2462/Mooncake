@@ -3,8 +3,9 @@ use std::{
     fs::OpenOptions,
     io::Write,
     net::TcpListener,
+    os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -212,6 +213,19 @@ fn cpp_chaos_test_live_config_selects_one_exact_oracle() {
             .unwrap()
             .case,
         CppChaosTestCase::ClientGracefulClose
+    );
+
+    let mut killed_client = env.clone();
+    killed_client.insert(
+        "MOONCAKE_RUN_CPP_CHAOS_TEST".into(),
+        "ClientKilledFailover".into(),
+    );
+    assert_eq!(
+        CppChaosTestConfig::from_map(&killed_client)
+            .unwrap()
+            .unwrap()
+            .case,
+        CppChaosTestCase::ClientKilledFailover
     );
 
     let mut unknown = env;
@@ -1102,6 +1116,10 @@ const SCENARIO_CLIENT_PING_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(200
 const SCENARIO_CLIENT_PING_CYCLE_TIMEOUT: Duration = Duration::from_millis(750);
 const SCENARIO_CLIENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SCENARIO_CLIENT_PINGER_JOIN_GRACE: Duration = Duration::from_secs(2);
+const CPP_KILLED_CLIENT_HELPER_ENV: &str = "MOONCAKE_CPP_KILLED_CLIENT_HELPER";
+const CPP_KILLED_CLIENT_MASTERS_ENV: &str = "MOONCAKE_CPP_KILLED_CLIENT_MASTERS";
+const CPP_KILLED_CLIENT_READY_ENV: &str = "MOONCAKE_CPP_KILLED_CLIENT_READY";
+const CPP_KILLED_CLIENT_HELPER_TEST: &str = "cpp_client_killed_mount_helper_process";
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
 
@@ -1501,6 +1519,7 @@ enum CppChaosTestCase {
     AllMastersOtherThanOneBackedUpKilledFailover,
     AllMastersKilledThenRestartFailover,
     ClientGracefulClose,
+    ClientKilledFailover,
 }
 
 #[derive(Debug, Clone)]
@@ -1529,6 +1548,7 @@ impl CppChaosTestConfig {
                 CppChaosTestCase::AllMastersKilledThenRestartFailover
             }
             "ClientGracefulClose" => CppChaosTestCase::ClientGracefulClose,
+            "ClientKilledFailover" => CppChaosTestCase::ClientKilledFailover,
             other => return Err(format!("unknown MOONCAKE_RUN_CPP_CHAOS_TEST case: {other}")),
         };
         let result_path = PathBuf::from(required_live_env(
@@ -1555,6 +1575,7 @@ impl CppChaosTestConfig {
                     "cpp-chaos-test-all-masters-restart"
                 }
                 CppChaosTestCase::ClientGracefulClose => "cpp-chaos-test-client-graceful-close",
+                CppChaosTestCase::ClientKilledFailover => "cpp-chaos-test-client-killed",
             },
             "MOONCAKE_RUN_CPP_CHAOS_TEST",
         )?;
@@ -2474,6 +2495,128 @@ fn spawn_master_child(
         .map_err(|error| format!("spawn Master command {command:?}: {error}"))
 }
 
+fn spawn_killed_client_helper(
+    masters: &[String],
+    ready_path: &Path,
+    log_path: &Path,
+) -> Result<Child, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("locate HA integration-test executable: {error}"))?;
+    let masters = serde_json::to_string(masters)
+        .map_err(|error| format!("serialize killed-client Master candidates: {error}"))?;
+    let log = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(log_path)
+        .map_err(|error| {
+            format!(
+                "open killed-client helper log {}: {error}",
+                log_path.display()
+            )
+        })?;
+    let stderr = log.try_clone().map_err(|error| {
+        format!(
+            "clone killed-client helper log {}: {error}",
+            log_path.display()
+        )
+    })?;
+    Command::new(executable)
+        .args(["--exact", CPP_KILLED_CLIENT_HELPER_TEST, "--nocapture"])
+        .env(CPP_KILLED_CLIENT_HELPER_ENV, "1")
+        .env(CPP_KILLED_CLIENT_MASTERS_ENV, masters)
+        .env(CPP_KILLED_CLIENT_READY_ENV, ready_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| format!("spawn killed-client helper process: {error}"))
+}
+
+async fn wait_for_killed_client_helper_ready(
+    child: &mut Child,
+    ready_path: &Path,
+) -> Result<serde_json::Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if ready_path.exists() {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(ready_path).map_err(|error| {
+                    format!(
+                        "read killed-client READY artifact {}: {error}",
+                        ready_path.display()
+                    )
+                })?)
+                .map_err(|error| {
+                    format!(
+                        "parse killed-client READY artifact {}: {error}",
+                        ready_path.display()
+                    )
+                })?;
+            if value.get("status").and_then(serde_json::Value::as_str) != Some("READY")
+                || value
+                    .get("segment_count")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+            {
+                return Err(format!("invalid killed-client READY artifact: {value}"));
+            }
+            return Ok(value);
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("inspect killed-client helper: {error}"))?
+        {
+            return Err(format!(
+                "killed-client helper exited before READY with status {status}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "killed-client helper did not publish READY at {}",
+                ready_path.display()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn hard_kill_client_process(child: &mut Child) -> Result<ExitStatus, String> {
+    if let Some(status) = child
+        .try_wait()
+        .map_err(|error| format!("inspect client helper before SIGKILL: {error}"))?
+    {
+        return Err(format!(
+            "client helper exited before parent SIGKILL with status {status}"
+        ));
+    }
+    child
+        .kill()
+        .map_err(|error| format!("send SIGKILL to client helper pid {}: {error}", child.id()))?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("wait for client helper SIGKILL: {error}"))?
+        {
+            if status.signal() != Some(libc::SIGKILL) {
+                return Err(format!(
+                    "client helper exited with {status}, expected SIGKILL ({})",
+                    libc::SIGKILL
+                ));
+            }
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "client helper pid {} did not exit after SIGKILL",
+                child.id()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn monotonic_timestamp_ns() -> Result<u128, String> {
     let mut timestamp = libc::timespec {
         tv_sec: 0,
@@ -2729,46 +2872,27 @@ async fn create_clients(
     require_bounded_client_rpc_configuration()?;
     let mut clients = Vec::with_capacity(count);
     for client_index in 0..count {
-        let next = async {
-            let reservation = TcpListener::bind(("127.0.0.1", 0)).map_err(|error| {
-                format!("reserve TCP endpoint for client {client_index}: {error}")
-            })?;
-            let local_host = reservation
-                .local_addr()
-                .map_err(|error| format!("read TCP endpoint for client {client_index}: {error}"))?
-                .to_string();
-            drop(reservation);
-
-            let client = tokio::time::timeout(
-                Duration::from_secs(30),
-                MooncakeClient::create_with_master_candidates(
-                    masters,
-                    "P2PHANDSHAKE",
-                    &local_host,
-                    "tcp",
-                    "",
-                    segment_size,
-                    CLIENT_LOCAL_BUFFER_SIZE,
-                ),
-            )
-            .await
-            .map_err(|_| format!("client {client_index} creation timed out"))?
-            .map_err(|error| format!("create TCP client {client_index}: {error}"))?;
-            ScenarioClient::new(client).await
-        }
-        .await;
+        let label = format!("client {client_index}");
+        let next = match create_tcp_client(masters, segment_size, &label).await {
+            Ok(client) => ScenarioClient::new(client).await,
+            Err(error) => Err(error),
+        };
         retain_created_or_cleanup(&mut clients, next).await?;
     }
     Ok(clients)
 }
 
-async fn create_unmounted_tcp_client(masters: &[String]) -> Result<MooncakeClient, String> {
+async fn create_tcp_client(
+    masters: &[String],
+    segment_size: u64,
+    label: &str,
+) -> Result<MooncakeClient, String> {
     require_bounded_client_rpc_configuration()?;
     let reservation = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|error| format!("reserve TCP endpoint for unmounted client: {error}"))?;
+        .map_err(|error| format!("reserve TCP endpoint for {label}: {error}"))?;
     let local_host = reservation
         .local_addr()
-        .map_err(|error| format!("read TCP endpoint for unmounted client: {error}"))?
+        .map_err(|error| format!("read TCP endpoint for {label}: {error}"))?
         .to_string();
     drop(reservation);
 
@@ -2780,13 +2904,17 @@ async fn create_unmounted_tcp_client(masters: &[String]) -> Result<MooncakeClien
             &local_host,
             "tcp",
             "",
-            0,
+            segment_size,
             CLIENT_LOCAL_BUFFER_SIZE,
         ),
     )
     .await
-    .map_err(|_| "unmounted TCP client creation timed out".to_string())?
-    .map_err(|error| format!("create unmounted TCP client: {error}"))
+    .map_err(|_| format!("{label} creation timed out"))?
+    .map_err(|error| format!("create TCP {label}: {error}"))
+}
+
+async fn create_unmounted_tcp_client(masters: &[String]) -> Result<MooncakeClient, String> {
+    create_tcp_client(masters, 0, "unmounted client").await
 }
 
 struct ScenarioClient {
@@ -4719,6 +4847,227 @@ async fn run_remount_checkpoint(
     })
 }
 
+async fn run_cpp_client_killed_failover_live(config: CppChaosTestConfig) -> Result<(), String> {
+    let cluster = MasterCluster::start(&config.gate)
+        .await
+        .map_err(|error| format!("start ClientKilledFailover Masters: {error}"))?;
+    let initial_view = wait_for_stable_leader_without_clients(&config.gate, &cluster).await?;
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+
+    let ready_path = config
+        .gate
+        .artifact_root
+        .join(format!("killed-client-ready-{}.json", std::process::id()));
+    let helper_log_path = config.gate.artifact_root.join("killed-client-helper.log");
+    let mut mounted_child = spawn_killed_client_helper(&masters, &ready_path, &helper_log_path)?;
+    let mounted_child_pid = mounted_child.id();
+    let helper_ready =
+        match wait_for_killed_client_helper_ready(&mut mounted_child, &ready_path).await {
+            Ok(ready) => ready,
+            Err(error) => {
+                let cleanup = hard_kill_client_process(&mut mounted_child).await;
+                return Err(format!("{error}; helper cleanup: {cleanup:?}"));
+            }
+        };
+    let mut other_client = match create_unmounted_tcp_client(&masters).await {
+        Ok(client) => client,
+        Err(error) => {
+            let cleanup = hard_kill_client_process(&mut mounted_child).await;
+            return Err(format!("{error}; helper cleanup: {cleanup:?}"));
+        }
+    };
+    let other_client_id = other_client.client_id();
+    let mut parent_sigkill_completed = false;
+
+    let operation: Result<serde_json::Value, FailureRecord> = async {
+        let other_segment_count = other_client
+            .get_segments_detail()
+            .await
+            .map_err(|error| scenario_failure("segment-topology", error.to_string()))?
+            .into_iter()
+            .filter(|segment| !segment.nof && segment.client_id == other_client_id)
+            .count();
+        if other_segment_count != 0 {
+            return Err(scenario_failure(
+                "segment-topology",
+                format!("expected client B to own no segments, got {other_segment_count}"),
+            ));
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            other_client.put("key", b"value", None),
+        )
+        .await
+        .map_err(|_| scenario_failure("pre-kill-put", "client B put timed out"))?
+        .map_err(|error| {
+            scenario_failure(
+                "pre-kill-put",
+                format!("client B failed to put into child client's segment: {error}"),
+            )
+        })?;
+        let before_kill = tokio::time::timeout(Duration::from_secs(30), other_client.get("key"))
+            .await
+            .map_err(|_| scenario_failure("pre-kill-get", "client B get timed out"))?
+            .map_err(|error| {
+                scenario_failure("pre-kill-get", format!("client B get failed: {error}"))
+            })?;
+        if before_kill != b"value" {
+            return Err(scenario_failure(
+                "pre-kill-get",
+                format!("client B returned wrong pre-kill bytes: {before_kill:?}"),
+            ));
+        }
+
+        let exit_status = hard_kill_client_process(&mut mounted_child)
+            .await
+            .map_err(|error| scenario_failure("client-sigkill", error))?;
+        parent_sigkill_completed = true;
+        let killed_at = Instant::now();
+        let crash_detection_wait = MASTER_CLIENT_TTL + Duration::from_secs(5);
+        tokio::time::sleep(crash_detection_wait).await;
+        let missing_key =
+            match tokio::time::timeout(Duration::from_secs(30), other_client.get("key")).await {
+                Err(_) => {
+                    return Err(scenario_failure(
+                        "client-ttl-cleanup",
+                        "client B get timed out after the stale-client detection wait",
+                    ));
+                }
+                Ok(Err(StoreError::KeyNotFound(key))) if key == "key" => key,
+                Ok(Err(error)) => {
+                    return Err(scenario_failure(
+                        "client-ttl-cleanup",
+                        format!("expected KeyNotFound(\"key\"), got {error:?}"),
+                    ));
+                }
+                Ok(Ok(actual)) => {
+                    return Err(scenario_failure(
+                        "client-ttl-cleanup",
+                        format!(
+                            "object remained available after stale-client detection wait: {} bytes",
+                            actual.len()
+                        ),
+                    ));
+                }
+            };
+        let cleanup_elapsed = killed_at.elapsed();
+
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            other_client.put("key", b"value", None),
+        )
+        .await
+        {
+            Err(_) => {
+                return Err(scenario_failure(
+                    "post-ttl-put",
+                    "client B put timed out after stale-client cleanup",
+                ));
+            }
+            Ok(Err(StoreError::NoAvailableHandle)) => {}
+            Ok(Err(error)) => {
+                return Err(scenario_failure(
+                    "post-ttl-put",
+                    format!("expected NoAvailableHandle, got {error:?}"),
+                ));
+            }
+            Ok(Ok(())) => {
+                return Err(scenario_failure(
+                    "post-ttl-put",
+                    "client B unexpectedly put after killed segment owner was reaped",
+                ));
+            }
+        }
+
+        Ok(serde_json::json!({
+            "leader": initial_view.leader_address,
+            "view_version": initial_view.view_version,
+            "helper_ready": helper_ready,
+            "mounted_client_pid": mounted_child_pid,
+            "mounted_client_segment_count": 1,
+            "other_client_segment_count": other_segment_count,
+            "cross_client_puts_before_kill": 1,
+            "pre_kill_exact_reads": 1,
+            "crash_mode": "SIGKILL",
+            "exit_signal": exit_status.signal(),
+            "client_live_ttl_milliseconds": MASTER_CLIENT_TTL.as_millis(),
+            "client_monitor_interval_milliseconds": MASTER_CLIENT_MONITOR_INTERVAL.as_millis(),
+            "crash_detection_wait_milliseconds": crash_detection_wait.as_millis(),
+            "ttl_cleanup_elapsed_milliseconds": cleanup_elapsed.as_millis(),
+            "post_cleanup_get_error": "KeyNotFound",
+            "post_cleanup_missing_key": missing_key,
+            "post_cleanup_put_error": "NoAvailableHandle",
+        }))
+    }
+    .await;
+
+    let mut cleanup_errors = Vec::new();
+    if !parent_sigkill_completed {
+        match mounted_child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = hard_kill_client_process(&mut mounted_child).await {
+                    cleanup_errors.push(format!("mounted child: {error}"));
+                }
+            }
+            Err(error) => cleanup_errors.push(format!("inspect mounted child: {error}")),
+        }
+    }
+    match tokio::time::timeout(
+        SCENARIO_CLIENT_CLEANUP_TIMEOUT,
+        other_client.tear_down_all(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => cleanup_errors.push(format!("unmounted client: {error}")),
+        Err(_) => cleanup_errors.push("unmounted client cleanup timed out".into()),
+    }
+    let cleanup_error = (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("; "));
+    let (status, evidence, failure) = match operation {
+        Ok(evidence) if cleanup_error.is_none() => ("PASS", evidence, None),
+        Ok(evidence) => (
+            "FAIL",
+            evidence,
+            Some(scenario_failure("cleanup", cleanup_error.unwrap())),
+        ),
+        Err(mut failure) => {
+            if let Some(error) = cleanup_error {
+                failure.message = format!("{}; cleanup: {error}", failure.message);
+            }
+            ("FAIL", serde_json::json!({}), Some(failure))
+        }
+    };
+    write_json_artifact(
+        &config.gate.result_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": status,
+            "case": "ClientKilledFailover",
+            "seed": format!("0x{:016x}", config.gate.seed),
+            "master_count": 3,
+            "client_count": 2,
+            "mounted_client_segment_size": CLIENT_SEGMENT_SIZE,
+            "other_client_segment_size": 0,
+            "shared_oplog": "etcd",
+            "helper_log": helper_log_path,
+            "evidence": evidence,
+            "first_failure": failure,
+        }),
+    )?;
+    if let Some(failure) = failure {
+        return Err(format!("{}: {}", failure.stage, failure.message));
+    }
+    Ok(())
+}
+
 async fn run_cpp_client_graceful_close_live(config: CppChaosTestConfig) -> Result<(), String> {
     let cluster = MasterCluster::start(&config.gate)
         .await
@@ -6075,6 +6424,74 @@ async fn cpp_parity_e2e_chaos_test_cpp_chaostest_clientgracefulclose_a97d5e36() 
     run_cpp_client_graceful_close_live(config)
         .await
         .expect("C++ graceful-client-close parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_client_killed_mount_helper_process() {
+    if std::env::var(CPP_KILLED_CLIENT_HELPER_ENV).as_deref() != Ok("1") {
+        eprintln!("SKIP killed-client mount helper: helper environment is not enabled");
+        return;
+    }
+    let masters: Vec<String> = serde_json::from_str(
+        &std::env::var(CPP_KILLED_CLIENT_MASTERS_ENV)
+            .expect("killed-client helper Master candidates"),
+    )
+    .expect("valid killed-client helper Master candidates");
+    let ready_path = PathBuf::from(
+        std::env::var(CPP_KILLED_CLIENT_READY_ENV).expect("killed-client helper READY path"),
+    );
+    let raw_client = create_tcp_client(&masters, CLIENT_SEGMENT_SIZE, "killed-client helper")
+        .await
+        .expect("create killed-client helper");
+    let client_id = raw_client.client_id();
+    let client = ScenarioClient::new(raw_client)
+        .await
+        .expect("start killed-client helper liveness");
+    assert_eq!(
+        client.segment_count().await.expect("helper segment count"),
+        1
+    );
+    let registered_master = client
+        .current_master_addr()
+        .await
+        .expect("helper current Master");
+    client
+        .pinger
+        .as_ref()
+        .expect("helper liveness pinger")
+        .wait_for_registered_target(&registered_master, Instant::now() + Duration::from_secs(10))
+        .await
+        .expect("helper client registered with leader");
+    write_json_artifact(
+        &ready_path,
+        &serde_json::json!({
+            "schema_version": 1,
+            "status": "READY",
+            "pid": std::process::id(),
+            "client_id": client_id,
+            "segment_count": 1,
+            "registered_master": registered_master,
+        }),
+    )
+    .expect("publish killed-client helper READY");
+
+    std::future::pending::<()>().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_test_cpp_chaostest_clientkilledfailover_992dc564() {
+    let Some(config) = CppChaosTestConfig::from_env().expect("valid C++ chaos-test environment")
+    else {
+        eprintln!("SKIP C++ killed-client parity: MOONCAKE_RUN_CPP_CHAOS_TEST is not enabled");
+        return;
+    };
+    if config.case != CppChaosTestCase::ClientKilledFailover {
+        eprintln!("SKIP C++ killed-client parity: a different chaos case is selected");
+        return;
+    }
+    run_cpp_client_killed_failover_live(config)
+        .await
+        .expect("C++ killed-client parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
