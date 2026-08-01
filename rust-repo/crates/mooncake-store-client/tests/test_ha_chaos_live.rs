@@ -29,6 +29,110 @@ fn canonical_schedule_keeps_one_master_alive_and_rotates_every_index() {
 }
 
 #[test]
+fn cpp_chaos_rand_profiles_preserve_the_exact_small_and_large_workload_shapes() {
+    let small = CppChaosRandProfile::small();
+    let large = CppChaosRandProfile::large();
+
+    for profile in [&small, &large] {
+        assert_eq!(profile.master_count, 3);
+        assert_eq!(profile.client_count, 5);
+        assert_eq!(profile.segment_size, 16 * 1024 * 1024);
+        assert_eq!(profile.key_count, 100);
+        assert_eq!(profile.master_kill_percent, 50);
+        assert_eq!(profile.master_start_percent, 50);
+        assert_eq!(profile.run_duration, Duration::from_secs(3_600));
+        assert_eq!(profile.crash_mode, MasterCrashMode::Sigkill);
+        assert!(profile.allow_all_masters_down);
+    }
+
+    assert_eq!(small.value_size, None);
+    assert_eq!(small.value(12), b"value_12");
+    assert_eq!(large.value_size, Some(1024 * 1024));
+    assert_eq!(large.value(12).len(), 1024 * 1024);
+    assert_eq!(&large.value(12)[..16], b"value_12_12_12_1");
+    assert!(large.value_size.unwrap() * large.key_count >= large.segment_size as usize * 5);
+}
+
+#[test]
+fn cpp_chaos_rand_schedule_uses_independent_fifty_percent_hard_crash_choices() {
+    let schedule = CppChaosRandSchedule::new(0x4d4f_4f4e_4841_4348, 64, 3);
+
+    assert_eq!(schedule.rounds.len(), 64);
+    assert!(
+        schedule
+            .rounds
+            .iter()
+            .any(|round| round.running_after_kill.is_empty())
+    );
+    assert!(schedule.rounds.iter().any(|round| !round.kill.is_empty()));
+    assert!(
+        schedule
+            .rounds
+            .iter()
+            .any(|round| !round.restart.is_empty())
+    );
+    assert!(schedule.kill_choices > 0 && schedule.kill_choices <= 64 * 3);
+    assert!(schedule.restart_choices > 0 && schedule.restart_choices <= 64 * 3);
+    assert_eq!(schedule.kill_percent, 50);
+    assert_eq!(schedule.restart_percent, 50);
+}
+
+#[test]
+fn cpp_chaos_rand_live_config_is_scenario_specific_and_duration_bounded() {
+    let none = BTreeMap::new();
+    assert!(
+        CppChaosRandConfig::from_map(&none, CppChaosRandKind::Small)
+            .unwrap()
+            .is_none()
+    );
+
+    let mut env = BTreeMap::from([
+        ("MOONCAKE_RUN_CPP_CHAOS_RAND_SMALL".into(), "1".into()),
+        (
+            "MOONCAKE_HA_ETCD_ENDPOINT".into(),
+            "http://127.0.0.1:42379".into(),
+        ),
+        (
+            "MOONCAKE_HA_MASTER_BIN".into(),
+            "/tmp/mooncake-master".into(),
+        ),
+        (
+            "MOONCAKE_CPP_CHAOS_RAND_RESULT".into(),
+            "/tmp/cpp-chaos-rand/result.json".into(),
+        ),
+        (
+            "MOONCAKE_HA_ARTIFACT_ROOT".into(),
+            "/tmp/cpp-chaos-rand".into(),
+        ),
+        ("MOONCAKE_HA_SEED".into(), "0x4d4f4f4e48414348".into()),
+    ]);
+    let canonical = CppChaosRandConfig::from_map(&env, CppChaosRandKind::Small)
+        .unwrap()
+        .expect("enabled small config");
+    assert_eq!(canonical.profile, CppChaosRandProfile::small());
+
+    env.insert("MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS".into(), "7".into());
+    assert_eq!(
+        CppChaosRandConfig::from_map(&env, CppChaosRandKind::Small)
+            .unwrap()
+            .unwrap()
+            .profile
+            .run_duration,
+        Duration::from_secs(7)
+    );
+    env.insert("MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS".into(), "0".into());
+    assert!(CppChaosRandConfig::from_map(&env, CppChaosRandKind::Small).is_err());
+
+    env.insert("MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS".into(), "7".into());
+    env.insert("MOONCAKE_RUN_CPP_CHAOS_RAND_LARGE".into(), "1".into());
+    assert!(
+        CppChaosRandConfig::from_map(&env, CppChaosRandKind::Small)
+            .unwrap_err()
+            .contains("mutually exclusive")
+    );
+}
+
+#[test]
 fn large_profile_exceeds_capacity_and_values_are_key_distinct() {
     let total_value_bytes = LARGE_KEY_COUNT * LARGE_VALUE_LEN;
     let total_client_capacity = LARGE_CLIENT_COUNT * LARGE_CLIENT_SEGMENT_SIZE as usize;
@@ -896,6 +1000,14 @@ const CPP_E2E_RAND_CLIENT_COUNT: usize = 2;
 const CPP_E2E_RAND_SEGMENT_SIZE: u64 = 256 * 1024 * 1024;
 const CPP_E2E_RAND_VALUE_SIZE: usize = 15 * 1024 * 1024;
 const CPP_E2E_RAND_RUN_SECONDS: u64 = 3_600;
+const CPP_CHAOS_RAND_MASTER_COUNT: usize = 3;
+const CPP_CHAOS_RAND_CLIENT_COUNT: usize = 5;
+const CPP_CHAOS_RAND_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+const CPP_CHAOS_RAND_KEY_COUNT: usize = 100;
+const CPP_CHAOS_RAND_LARGE_VALUE_SIZE: usize = 1024 * 1024;
+const CPP_CHAOS_RAND_RUN_SECONDS: u64 = 3_600;
+const CPP_CHAOS_RAND_KILL_PERCENT: u8 = 50;
+const CPP_CHAOS_RAND_START_PERCENT: u8 = 50;
 const MASTER_CLIENT_TTL: Duration = Duration::from_secs(2);
 const MASTER_CLIENT_MONITOR_INTERVAL: Duration = Duration::from_secs(1);
 const SCENARIO_CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
@@ -905,6 +1017,128 @@ const SCENARIO_CLIENT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SCENARIO_CLIENT_PINGER_JOIN_GRACE: Duration = Duration::from_secs(2);
 const LCG_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const LCG_INCREMENT: u64 = 1_442_695_040_888_963_407;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MasterCrashMode {
+    Sigkill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CppChaosRandProfile {
+    master_count: usize,
+    client_count: usize,
+    segment_size: u64,
+    key_count: usize,
+    value_size: Option<usize>,
+    master_kill_percent: u8,
+    master_start_percent: u8,
+    run_duration: Duration,
+    crash_mode: MasterCrashMode,
+    allow_all_masters_down: bool,
+}
+
+impl CppChaosRandProfile {
+    fn small() -> Self {
+        Self::new(None)
+    }
+
+    fn large() -> Self {
+        Self::new(Some(CPP_CHAOS_RAND_LARGE_VALUE_SIZE))
+    }
+
+    fn new(value_size: Option<usize>) -> Self {
+        Self {
+            master_count: CPP_CHAOS_RAND_MASTER_COUNT,
+            client_count: CPP_CHAOS_RAND_CLIENT_COUNT,
+            segment_size: CPP_CHAOS_RAND_SEGMENT_SIZE,
+            key_count: CPP_CHAOS_RAND_KEY_COUNT,
+            value_size,
+            master_kill_percent: CPP_CHAOS_RAND_KILL_PERCENT,
+            master_start_percent: CPP_CHAOS_RAND_START_PERCENT,
+            run_duration: Duration::from_secs(CPP_CHAOS_RAND_RUN_SECONDS),
+            crash_mode: MasterCrashMode::Sigkill,
+            allow_all_masters_down: true,
+        }
+    }
+
+    fn value(&self, key_index: usize) -> Vec<u8> {
+        let Some(value_size) = self.value_size else {
+            return format!("value_{key_index}").into_bytes();
+        };
+        let pattern = format!("{key_index}_");
+        let mut value = b"value_".to_vec();
+        while value.len() < value_size {
+            value.extend_from_slice(pattern.as_bytes());
+        }
+        value.truncate(value_size);
+        value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CppChaosRandRound {
+    kill: Vec<usize>,
+    restart: Vec<usize>,
+    running_after_kill: BTreeSet<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CppChaosRandSchedule {
+    rounds: Vec<CppChaosRandRound>,
+    kill_choices: usize,
+    restart_choices: usize,
+    kill_percent: u8,
+    restart_percent: u8,
+}
+
+impl CppChaosRandSchedule {
+    fn new(seed: u64, rounds: usize, master_count: usize) -> Self {
+        let mut state = seed;
+        let mut running = (0..master_count).collect::<BTreeSet<_>>();
+        let mut schedule = Vec::with_capacity(rounds);
+        let mut kill_choices = 0;
+        let mut restart_choices = 0;
+
+        for _ in 0..rounds {
+            let mut kill = Vec::new();
+            for index in 0..master_count {
+                if running.contains(&index) {
+                    kill_choices += 1;
+                    if advance_seeded_index(&mut state, 100) < CPP_CHAOS_RAND_KILL_PERCENT as usize
+                    {
+                        running.remove(&index);
+                        kill.push(index);
+                    }
+                }
+            }
+            let running_after_kill = running.clone();
+            let mut restart = Vec::new();
+            for index in 0..master_count {
+                if !running.contains(&index) {
+                    restart_choices += 1;
+                    if advance_seeded_index(&mut state, 100) < CPP_CHAOS_RAND_START_PERCENT as usize
+                    {
+                        running.insert(index);
+                        restart.push(index);
+                    }
+                }
+            }
+            schedule.push(CppChaosRandRound {
+                kill,
+                restart,
+                running_after_kill,
+            });
+        }
+
+        Self {
+            rounds: schedule,
+            kill_choices,
+            restart_choices,
+            kill_percent: CPP_CHAOS_RAND_KILL_PERCENT,
+            restart_percent: CPP_CHAOS_RAND_START_PERCENT,
+        }
+    }
+}
 
 fn expected_large_value(seed: u64, key_index: usize, len: usize) -> Vec<u8> {
     (0..len)
@@ -1001,6 +1235,175 @@ impl E2ERandConfig {
         }
 
         Ok(Some(Self { gate, profile }))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CppChaosRandKind {
+    Small,
+    Large,
+}
+
+impl CppChaosRandKind {
+    fn opt_in(self) -> &'static str {
+        match self {
+            Self::Small => "MOONCAKE_RUN_CPP_CHAOS_RAND_SMALL",
+            Self::Large => "MOONCAKE_RUN_CPP_CHAOS_RAND_LARGE",
+        }
+    }
+
+    fn profile(self) -> CppChaosRandProfile {
+        match self {
+            Self::Small => CppChaosRandProfile::small(),
+            Self::Large => CppChaosRandProfile::large(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CppChaosRandConfig {
+    gate: GateConfig,
+    kind: CppChaosRandKind,
+    profile: CppChaosRandProfile,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+struct CppChaosRandEvidence {
+    rounds: u64,
+    hard_crashes: u64,
+    restarts: u64,
+    all_masters_down_rounds: u64,
+    successful_unstable_puts: u64,
+    exact_reads: u64,
+    byte_comparisons: u64,
+    elapsed_milliseconds: u128,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CppChaosRandResult {
+    schema_version: u32,
+    status: ResultStatus,
+    kind: CppChaosRandKind,
+    seed: String,
+    master_count: usize,
+    client_count: usize,
+    segment_size: u64,
+    key_count: usize,
+    value_size: Option<usize>,
+    kill_percent: u8,
+    start_percent: u8,
+    crash_mode: &'static str,
+    allow_all_masters_down: bool,
+    configured_run_seconds: u64,
+    evidence: CppChaosRandEvidence,
+    first_failure: Option<FailureRecord>,
+}
+
+impl CppChaosRandResult {
+    fn new(
+        config: &CppChaosRandConfig,
+        status: ResultStatus,
+        evidence: CppChaosRandEvidence,
+        first_failure: Option<FailureRecord>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            status,
+            kind: config.kind,
+            seed: format!("0x{:016x}", config.gate.seed),
+            master_count: config.profile.master_count,
+            client_count: config.profile.client_count,
+            segment_size: config.profile.segment_size,
+            key_count: config.profile.key_count,
+            value_size: config.profile.value_size,
+            kill_percent: config.profile.master_kill_percent,
+            start_percent: config.profile.master_start_percent,
+            crash_mode: "SIGKILL",
+            allow_all_masters_down: config.profile.allow_all_masters_down,
+            configured_run_seconds: config.profile.run_duration.as_secs(),
+            evidence,
+            first_failure,
+        }
+    }
+
+    fn write_atomic(&self, path: &Path) -> Result<(), String> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| format!("result path {} has no parent", path.display()))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create result directory {}: {error}", parent.display()))?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+            format!("create chaos-rand result in {}: {error}", parent.display())
+        })?;
+        serde_json::to_writer_pretty(&mut temporary, self)
+            .map_err(|error| format!("serialize chaos-rand result: {error}"))?;
+        temporary
+            .write_all(b"\n")
+            .map_err(|error| format!("terminate chaos-rand result: {error}"))?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|error| format!("sync chaos-rand result: {error}"))?;
+        temporary.persist(path).map_err(|error| {
+            format!(
+                "publish chaos-rand result to {}: {}",
+                path.display(),
+                error.error
+            )
+        })?;
+        Ok(())
+    }
+}
+
+impl CppChaosRandConfig {
+    fn from_env(kind: CppChaosRandKind) -> Result<Option<Self>, String> {
+        Self::from_map(&std::env::vars().collect(), kind)
+    }
+
+    fn from_map(
+        env: &BTreeMap<String, String>,
+        kind: CppChaosRandKind,
+    ) -> Result<Option<Self>, String> {
+        reject_conflicting_live_opt_ins(env)?;
+        let opt_in = kind.opt_in();
+        if env.get(opt_in).map(String::as_str) != Some("1") {
+            return Ok(None);
+        }
+        let result_path = PathBuf::from(required_live_env(
+            env,
+            "MOONCAKE_CPP_CHAOS_RAND_RESULT",
+            opt_in,
+        )?);
+        let artifact_root =
+            PathBuf::from(required_live_env(env, "MOONCAKE_HA_ARTIFACT_ROOT", opt_in)?);
+        let gate = GateConfig::enabled_from_map(
+            env,
+            result_path,
+            artifact_root,
+            match kind {
+                CppChaosRandKind::Small => "cpp-chaos-rand-small",
+                CppChaosRandKind::Large => "cpp-chaos-rand-large",
+            },
+            opt_in,
+        )?;
+        let mut profile = kind.profile();
+        if let Some(value) = env.get("MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS") {
+            let seconds = value.parse::<u64>().map_err(|_| {
+                format!("MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS must be a positive integer: {value}")
+            })?;
+            if seconds == 0 {
+                return Err(format!(
+                    "MOONCAKE_CPP_CHAOS_RAND_RUN_SECONDS must be a positive integer: {value}"
+                ));
+            }
+            profile.run_duration = Duration::from_secs(seconds);
+        }
+        Ok(Some(Self {
+            gate,
+            kind,
+            profile,
+        }))
     }
 }
 
@@ -1160,6 +1563,8 @@ fn reject_conflicting_live_opt_ins(env: &BTreeMap<String, String>) -> Result<(),
         "MOONCAKE_RUN_HA_CHAOS",
         "MOONCAKE_RUN_HA_LIVENESS_PREFLIGHT",
         "MOONCAKE_RUN_E2E_RAND",
+        "MOONCAKE_RUN_CPP_CHAOS_RAND_SMALL",
+        "MOONCAKE_RUN_CPP_CHAOS_RAND_LARGE",
     ]
     .into_iter()
     .filter(|name| env.get(*name).map(String::as_str) == Some("1"))
@@ -1645,6 +2050,40 @@ impl MasterSlot {
         Err(error)
     }
 
+    async fn hard_kill(&mut self) -> Result<(), String> {
+        let Some(mut child) = self.child.take() else {
+            return Ok(());
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(()),
+            Ok(None) => {}
+            Err(error) => {
+                self.child = Some(child);
+                return Err(format!(
+                    "inspect Master {} before SIGKILL: {error}",
+                    self.index
+                ));
+            }
+        }
+        if let Err(error) = child.kill() {
+            self.child = Some(child);
+            return Err(format!("send SIGKILL to Master {}: {error}", self.index));
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => tokio::time::sleep(Duration::from_millis(25)).await,
+                Err(error) => {
+                    self.child = Some(child);
+                    return Err(format!("wait for Master {} SIGKILL: {error}", self.index));
+                }
+            }
+        }
+        self.child = Some(child);
+        Err(format!("Master {} did not exit after SIGKILL", self.index))
+    }
+
     fn restart(&mut self) -> Result<(), String> {
         if let Some(child) = self.child.as_mut() {
             match child
@@ -1789,6 +2228,14 @@ impl MasterCluster {
             .get_mut(index)
             .ok_or_else(|| format!("Master index {index} is out of range"))?
             .stop(Duration::from_secs(5))
+            .await
+    }
+
+    async fn hard_kill(&mut self, index: usize) -> Result<(), String> {
+        self.slots
+            .get_mut(index)
+            .ok_or_else(|| format!("Master index {index} is out of range"))?
+            .hard_kill()
             .await
     }
 
@@ -4087,6 +4534,253 @@ async fn run_remount_checkpoint(
     })
 }
 
+async fn cpp_chaos_rand_key_pass(
+    config: &CppChaosRandConfig,
+    clients: &[ScenarioClient],
+    rng: &mut u64,
+    stable: bool,
+    evidence: &mut CppChaosRandEvidence,
+) -> Result<(), FailureRecord> {
+    for key_index in 0..config.profile.key_count {
+        let key = format!("key_{key_index}");
+        let value = config.profile.value(key_index);
+        let put_client = advance_seeded_index(rng, clients.len());
+        let get_client = advance_seeded_index(rng, clients.len());
+
+        match config.kind {
+            CppChaosRandKind::Small => {
+                let put = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    clients[put_client].put(&key, &value),
+                )
+                .await;
+                match put {
+                    Ok(Ok(())) => evidence.successful_unstable_puts += (!stable) as u64,
+                    Ok(Err(StoreError::ObjectExists(_))) => {}
+                    Ok(Err(error))
+                        if !stable
+                            && is_expected_unstable_error(UnstableOperation::Put, &error) =>
+                    {
+                        continue;
+                    }
+                    Err(_) if !stable => continue,
+                    Ok(Err(error)) => {
+                        return Err(scenario_failure(
+                            "stable-put",
+                            format!("client {put_client} failed putting {key}: {error}"),
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(scenario_failure(
+                            "stable-put",
+                            format!("client {put_client} timed out putting {key}"),
+                        ));
+                    }
+                }
+                let actual = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    clients[get_client].get(&key),
+                )
+                .await
+                .map_err(|_| {
+                    scenario_failure(
+                        if stable {
+                            "stable-read"
+                        } else {
+                            "unstable-read"
+                        },
+                        format!("client {get_client} timed out reading successful put {key}"),
+                    )
+                })?
+                .map_err(|error| {
+                    scenario_failure(
+                        if stable {
+                            "stable-read"
+                        } else {
+                            "unstable-read"
+                        },
+                        format!("client {get_client} failed reading successful put {key}: {error}"),
+                    )
+                })?;
+                evidence.exact_reads += 1;
+                evidence.byte_comparisons += value.len() as u64;
+                if actual != value {
+                    return Err(scenario_failure(
+                        if stable {
+                            "stable-read"
+                        } else {
+                            "unstable-read"
+                        },
+                        format!("client {get_client} returned wrong bytes for {key}"),
+                    ));
+                }
+            }
+            CppChaosRandKind::Large => {
+                if advance_seeded_index(rng, 2) == 0 {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        clients[put_client].put(&key, &value),
+                    )
+                    .await;
+                }
+                if let Ok(Ok(actual)) =
+                    tokio::time::timeout(Duration::from_secs(2), clients[get_client].get(&key))
+                        .await
+                {
+                    evidence.exact_reads += 1;
+                    evidence.byte_comparisons += value.len() as u64;
+                    if actual != value {
+                        return Err(scenario_failure(
+                            if stable {
+                                "stable-read"
+                            } else {
+                                "unstable-read"
+                            },
+                            format!(
+                                "client {get_client} returned {} corrupt bytes for {key}; expected {}",
+                                actual.len(),
+                                value.len()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn execute_cpp_chaos_rand_workload(
+    config: &CppChaosRandConfig,
+    cluster: &mut MasterCluster,
+    clients: &[ScenarioClient],
+) -> Result<CppChaosRandEvidence, FailureRecord> {
+    let coordinator = LeaderCoordinator::new_etcd(
+        vec![config.gate.etcd_endpoint.clone()],
+        &cluster.cluster_namespace,
+    )
+    .await
+    .map_err(|error| scenario_failure("setup", format!("create coordinator: {error}")))?;
+    let schedule = CppChaosRandSchedule::new(config.gate.seed, 4_096, config.profile.master_count);
+    let started = Instant::now();
+    let deadline = started + config.profile.run_duration;
+    let mut rng = config.gate.seed ^ 0x4348_414f_5352_414e;
+    let mut evidence = CppChaosRandEvidence::default();
+
+    for round in &schedule.rounds {
+        if Instant::now() >= deadline {
+            break;
+        }
+        evidence.rounds += 1;
+        for &index in &round.kill {
+            cluster.hard_kill(index).await.map_err(|error| {
+                scenario_failure("sigkill", format!("hard-kill Master {index}: {error}"))
+            })?;
+            evidence.hard_crashes += 1;
+        }
+        if cluster.running_indices().is_empty() {
+            evidence.all_masters_down_rounds += 1;
+        }
+
+        cpp_chaos_rand_key_pass(config, clients, &mut rng, false, &mut evidence).await?;
+
+        if cluster.running_indices().is_empty() {
+            tokio::time::sleep(Duration::from_secs(9)).await;
+        } else {
+            let stable_view = wait_for_stable_leader(
+                &coordinator,
+                cluster,
+                &mut [],
+                Instant::now() + Duration::from_secs(45),
+            )
+            .await
+            .map_err(|error| scenario_failure("stabilize", error))?;
+            recover_scenario_clients(clients, &stable_view)
+                .await
+                .map_err(|error| scenario_failure("recover", error))?;
+            cpp_chaos_rand_key_pass(config, clients, &mut rng, true, &mut evidence).await?;
+        }
+
+        for &index in &round.restart {
+            cluster.restart(index).await.map_err(|error| {
+                scenario_failure("restart", format!("restart Master {index}: {error}"))
+            })?;
+            evidence.restarts += 1;
+        }
+    }
+    evidence.elapsed_milliseconds = started.elapsed().as_millis();
+    if evidence.rounds == 0
+        || evidence.hard_crashes == 0
+        || evidence.restarts == 0
+        || evidence.exact_reads == 0
+    {
+        return Err(scenario_failure(
+            "evidence",
+            format!(
+                "insufficient chaos-rand evidence: rounds={}, hard_crashes={}, restarts={}, exact_reads={}",
+                evidence.rounds, evidence.hard_crashes, evidence.restarts, evidence.exact_reads
+            ),
+        ));
+    }
+    Ok(evidence)
+}
+
+async fn run_cpp_chaos_rand_live(config: CppChaosRandConfig) -> Result<(), String> {
+    let mut cluster = MasterCluster::start_with_count(&config.gate, config.profile.master_count)
+        .await
+        .map_err(|error| format!("start C++ chaos-rand Master cluster: {error}"))?;
+    let initial_view = wait_for_stable_leader_without_clients(&config.gate, &cluster).await?;
+    let mut masters = vec![initial_view.leader_address.clone()];
+    masters.extend(
+        cluster
+            .addresses()
+            .into_iter()
+            .filter(|address| address != &initial_view.leader_address),
+    );
+    let mut clients = create_clients(
+        &config.gate,
+        &masters,
+        config.profile.client_count,
+        config.profile.segment_size,
+    )
+    .await?;
+
+    let workload = execute_cpp_chaos_rand_workload(&config, &mut cluster, &clients).await;
+    for index in 0..config.profile.master_count {
+        if !cluster.running_indices().contains(&index) {
+            let _ = cluster.restart(index).await;
+        }
+    }
+    if let Ok(view) = wait_for_stable_leader_without_clients(&config.gate, &cluster).await {
+        let _ = recover_scenario_clients(&clients, &view).await;
+    }
+    let cleanup = tear_down_scenario_clients(&mut clients).await;
+    let (status, evidence, first_failure) = match workload {
+        Ok(evidence) if cleanup.is_ok() => (ResultStatus::Pass, evidence, None),
+        Ok(evidence) => (
+            ResultStatus::Fail,
+            evidence,
+            Some(scenario_failure("cleanup", cleanup.unwrap_err())),
+        ),
+        Err(mut failure) => {
+            if let Err(error) = cleanup {
+                failure.message = format!("{}; cleanup: {error}", failure.message);
+            }
+            (
+                ResultStatus::Fail,
+                CppChaosRandEvidence::default(),
+                Some(failure),
+            )
+        }
+    };
+    CppChaosRandResult::new(&config, status, evidence, first_failure.clone())
+        .write_atomic(&config.gate.result_path)?;
+    if let Some(failure) = first_failure {
+        return Err(format!("{}: {}", failure.stage, failure.message));
+    }
+    Ok(())
+}
+
 fn cpp_e2e_rand_value(key_index: usize, value_size: usize) -> Vec<u8> {
     let mut value = b"value_".to_vec();
     let pattern = format!("{key_index}_").into_bytes();
@@ -4303,6 +4997,38 @@ async fn cpp_parity_e2e_e2e_rand_test_cpp_e2erandtest_randomsequentialdeleteputg
     run_cpp_e2e_rand_live(config)
         .await
         .expect("C++ E2E rand parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithsmallvalue_1ecb1b92()
+{
+    let Some(config) = CppChaosRandConfig::from_env(CppChaosRandKind::Small)
+        .expect("valid C++ small chaos-rand environment")
+    else {
+        eprintln!(
+            "SKIP C++ small chaos-rand parity: MOONCAKE_RUN_CPP_CHAOS_RAND_SMALL is not enabled"
+        );
+        return;
+    };
+    run_cpp_chaos_rand_live(config)
+        .await
+        .expect("C++ small chaos-rand parity workload");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithlargevalue_00768aca()
+{
+    let Some(config) = CppChaosRandConfig::from_env(CppChaosRandKind::Large)
+        .expect("valid C++ large chaos-rand environment")
+    else {
+        eprintln!(
+            "SKIP C++ large chaos-rand parity: MOONCAKE_RUN_CPP_CHAOS_RAND_LARGE is not enabled"
+        );
+        return;
+    };
+    run_cpp_chaos_rand_live(config)
+        .await
+        .expect("C++ large chaos-rand parity workload");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

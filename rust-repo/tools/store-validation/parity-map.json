@@ -14,13 +14,18 @@
         "file": "e2e/chaos_rand_test.cpp",
         "test": "ChaosRandTest.RandomMasterCrashWithSmallValue"
       },
-      "reason": "Partial evidence only: Rust test_ha_chaos_live::three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes exercises deterministic one- or two-slot failures with three clients and rejects an all-down set; it stops with SIGTERM and only escalates to SIGKILL after timeout. The C++ test uses randomized 50% kill/start choices, permits all Masters down, hard-kills with SIGKILL, and uses five clients, so no Rust test covers its randomized hard-crash availability and integrity oracle.",
+    "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithsmallvalue_1ecb1b92 starts three external etcd-elected Rust Masters and five real TCP clients with 16-MiB segments, applies independent seeded 50% SIGKILL and 50% restart choices while permitting all Masters down, accepts availability errors only while unstable, and requires every successful small-object put to read back exact bytes plus strict service after a surviving leader stabilizes. The default duration is the C++ 3,600 seconds with a positive bounded override. Native evidence at /tmp/mooncake-chaos-rand-small-goal-019fbaa7/result.json passed with one hard crash, one restart, 100 successful unstable puts, 200 exact reads, and 1,580 compared bytes.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_rand_test.cpp, LeaderCoordinator, MasterProcessHandler, and ClientTestWrapper paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+    "rust": [
+      {
+        "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+        "test": "cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithsmallvalue_1ecb1b92"
+      }
+    ],
+    "status": "covered"
     },
     {
       "behavior": "During repeated random crashes and restarts of a three-Master HA group under eviction-prone large-object pressure, every successful read preserves exact object bytes and stable surviving leaders resume service.",
@@ -36,13 +41,18 @@
         "file": "e2e/chaos_rand_test.cpp",
         "test": "ChaosRandTest.RandomMasterCrashWithLargeValue"
       },
-      "reason": "Partial evidence only: Rust test_ha_chaos_live::three_master_etcd_ha_chaos_preserves_small_and_large_object_bytes exercises deterministic one- or two-slot failures with three clients and rejects an all-down set; it stops with SIGTERM and only escalates to SIGKILL after timeout. The C++ test uses randomized 50% kill/start choices, permits all Masters down, hard-kills with SIGKILL, and uses five clients, so no Rust test covers its randomized hard-crash, eviction-pressure, and byte-integrity oracle.",
+    "reason": "Rust test_ha_chaos_live.rs:cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithlargevalue_00768aca starts three external etcd-elected Rust Masters and five real TCP clients with 16-MiB segments, generates the exact C++ 1-MiB key-distinct pattern over 100 keys, applies independent seeded 50% SIGKILL and 50% restart choices while permitting all Masters down, and compares every successful unstable or stable read byte-for-byte under aggregate-capacity pressure. The default duration is the C++ 3,600 seconds with a positive bounded override. Native evidence at /tmp/mooncake-chaos-rand-large-goal-019fbaa7/result.json passed with one hard crash, one restart, 49 exact reads, and 51,380,224 compared bytes.",
       "review": {
         "oracle": "mooncake-store/tests/e2e/chaos_rand_test.cpp, LeaderCoordinator, MasterProcessHandler, and ClientTestWrapper paths",
         "reviewed": true
       },
-      "rust": [],
-      "status": "missing"
+    "rust": [
+      {
+        "file": "mooncake-store-client/tests/test_ha_chaos_live.rs",
+        "test": "cpp_parity_e2e_chaos_rand_test_cpp_chaosrandtest_randommastercrashwithlargevalue_00768aca"
+      }
+    ],
+    "status": "covered"
     },
     {
       "behavior": "With etcd serving both leader election and the shared oplog, a mounted client writes an object, SIGKILLs the etcd-recorded leader, waits for failover, then successfully puts and exactly reads a new object through the remounted data path.",
