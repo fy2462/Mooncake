@@ -79,5 +79,14 @@
     "focused_command": "MOONCAKE_RUN_CPP_CHAOS_TEST=ClientKilledFailover MOONCAKE_HA_ETCD_ENDPOINT=http://127.0.0.1:<port> MOONCAKE_HA_MASTER_BIN=<path>/mooncake-master MOONCAKE_CPP_CHAOS_TEST_RESULT=<artifact-root>/result.json MOONCAKE_HA_ARTIFACT_ROOT=<artifact-root> MOONCAKE_HA_SEED=0x4d4f4f4e48414348 MC_RPC_TIMEOUT_MS=30000 MC_RPC_CONNECT_TIMEOUT_MS=30000 cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live cpp_parity_e2e_chaos_test_cpp_chaostest_clientkilledfailover_992dc564 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_ha_chaos_live",
     "evidence": "/tmp/mooncake-client-killed-goal-019fbaa7/result.json"
+  },
+  {
+    "cpp": "kv_event_publisher_test.cpp:KvEventPublisherTest.PublishesSglangObjectKeyOverZmq",
+    "rust": "mooncake-store-master/src/kv_event.rs:cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c",
+    "first_divergence": "The existing Rust ZMQ test retried publish up to twenty times to cross the PUB/SUB slow-joiner window and therefore asserted only at-least-one counters; it did not prove that one synchronized publish yields one event batch and exact 1/1/0 publish statistics.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --lib kv_event::tests::cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-kv-event-goal-019fbaa7.typescript"
   }
 ]

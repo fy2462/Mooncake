@@ -606,6 +606,80 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c()
+     {
+        let ipc_root = tempfile::tempdir().unwrap();
+        let endpoint = format!("ipc://{}", ipc_root.path().join("kv-events.sock").display());
+        let object_key = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855_0_k";
+        let group_id =
+            "sglang-hicache:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let publisher = KvEventPublisher::new(KvEventConfig {
+            enabled: true,
+            bind_endpoint: endpoint.clone(),
+            backend_id: "mooncake-test".to_string(),
+            emit_object_key: true,
+            emit_legacy_compat: true,
+            queue_capacity: 64,
+            ..Default::default()
+        });
+        assert!(publisher.enabled());
+
+        let context = zmq::Context::new();
+        let subscriber = context.socket(zmq::SUB).unwrap();
+        subscriber.set_subscribe(b"").unwrap();
+        subscriber.set_rcvtimeo(2_000).unwrap();
+        subscriber.connect(&endpoint).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+
+        let tenant_id = TenantId::new("tenant-a".to_string()).unwrap();
+        publisher.publish_stored(object_key, "cpu", &tenant_id, group_id);
+        let frames = subscriber
+            .recv_multipart(0)
+            .expect("single SGLang publish must reach the synchronized subscriber");
+
+        assert_eq!(frames.len(), 3);
+        assert!(frames[0].is_empty());
+        assert_eq!(frames[1].len(), std::mem::size_of::<u64>());
+        assert_eq!(
+            u64::from_be_bytes(frames[1].as_slice().try_into().unwrap()),
+            1
+        );
+
+        let decoded = rmpv::decode::read_value(&mut frames[2].as_slice()).unwrap();
+        let Value::Array(batch) = &decoded else {
+            panic!("expected three-element event batch");
+        };
+        assert_eq!(batch.len(), 3);
+        let Value::Array(events) = &batch[1] else {
+            panic!("expected event array");
+        };
+        assert_eq!(events.len(), 1);
+        let Value::Map(fields) = &events[0] else {
+            panic!("expected event map");
+        };
+        assert_eq!(map_string(fields, "event_type").as_deref(), Some("stored"));
+        assert_eq!(
+            map_string(fields, "backend_id").as_deref(),
+            Some("mooncake-test")
+        );
+        assert_eq!(map_string(fields, "tenant_id").as_deref(), Some("tenant-a"));
+        assert_eq!(map_string(fields, "group_id").as_deref(), Some(group_id));
+        assert_eq!(
+            map_string(fields, "object_key").as_deref(),
+            Some(object_key)
+        );
+        assert_eq!(map_array_len(fields, "seq_hashes"), Some(0));
+
+        let stats = wait_for_stats(&publisher, |stats| {
+            stats.published_events == 1 && stats.published_batches == 1
+        });
+        assert_eq!(stats.published_events, 1);
+        assert_eq!(stats.published_batches, 1);
+        assert_eq!(stats.dropped_events, 0);
+        assert_eq!(stats.skipped_unparsed_keys, 1);
+    }
+
+    #[test]
     fn test_queue_capacity_drops_oldest_and_reserves_sequence_gap() {
         let publisher = KvEventPublisher {
             config: KvEventConfig {
