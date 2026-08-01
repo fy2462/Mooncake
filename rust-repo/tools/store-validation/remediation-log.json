@@ -1451,5 +1451,32 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity task_update_missing_id_returns_not_found_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_queue_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-queue-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.CreateCopyTaskTest",
+    "rust": "mooncake-store-master/tests/test_master_task_creation_parity.rs:create_copy_task_validation_matrix_parity",
+    "first_divergence": "Rust covered a one-target copy task but not the exact two-target success and empty-target, unknown-key, and unmounted-target validation matrix; unmounted targets also mapped to FailedPrecondition instead of C++ INVALID_PARAMS.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity create_copy_task_validation_matrix_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-task-creation-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.CreateMoveTaskTest",
+    "rust": "mooncake-store-master/tests/test_master_task_creation_parity.rs:create_move_task_validation_matrix_parity",
+    "first_divergence": "Rust created valid move tasks but lacked the exact source-owner query and five-case rejection matrix; unmounted targets also mapped to FailedPrecondition instead of C++ INVALID_PARAMS.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity create_move_task_validation_matrix_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-task-creation-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.QueryTaskTest",
+    "rust": "mooncake-store-master/tests/test_master_task_creation_parity.rs:query_missing_and_live_move_task_parity",
+    "first_divergence": "Rust queried a copy task and timeout, but no discoverable test combined UUID-zero TASK_NOT_FOUND with a live move task's exact id, type, and source-segment owner.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity query_missing_and_live_move_task_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-task-creation-goal-019fbca4.typescript"
   }
 ]

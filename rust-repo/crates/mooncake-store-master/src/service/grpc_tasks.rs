@@ -70,6 +70,21 @@ impl MasterServiceImpl {
         // domain. Rust permits same-name segment mounts, so ambiguity must not
         // be delegated to the worker.
         for target in &req.targets {
+            let target_name_exists = self
+                .state
+                .segments
+                .iter()
+                .any(|entry| entry.segment.name == *target)
+                || self
+                    .state
+                    .nof_segments
+                    .iter()
+                    .any(|entry| entry.segment.name == *target);
+            if !target_name_exists {
+                return Err(Status::invalid_argument(format!(
+                    "target segment is not mounted: {target}"
+                )));
+            }
             let Some((target_segment_id, target_replica_type)) =
                 unique_active_replica_segment_identity(&self.state, target)
             else {
@@ -238,6 +253,19 @@ impl MasterServiceImpl {
         // 任务分配给拥有源 segment 的客户端。
         let assigned_client = client_id_by_exact_replica_segment(&self.state, source)
             .ok_or(Status::failed_precondition("source segment missing"))?;
+        let target_name_exists = self
+            .state
+            .segments
+            .iter()
+            .any(|entry| entry.segment.name == req.target)
+            || self
+                .state
+                .nof_segments
+                .iter()
+                .any(|entry| entry.segment.name == req.target);
+        if !target_name_exists {
+            return Err(Status::invalid_argument("target segment is not mounted"));
+        }
         let Some((target_segment_id, target_replica_type)) =
             unique_active_replica_segment_identity(&self.state, &req.target)
         else {
