@@ -880,7 +880,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.ConstructionWithCustomBlockSize",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_local_hot_cache_custom_block_geometry",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -889,7 +889,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.ZeroSizeCache",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_zero_capacity_has_no_blocks",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -898,7 +898,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.PutHotKeyTouchExisting",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_duplicate_hot_cache_put_touches_without_overwrite",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -907,7 +907,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.PutHotKeyInvalidParams",
     "rust": "mooncake-store-client/src/hot_cache.rs:cache_rejects_values_larger_than_cpp_compatible_block, mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_zero_length_hot_cache_put_is_rejected",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -916,7 +916,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.LRUEviction",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_lru_eviction_retains_every_newer_entry",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -925,7 +925,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.GetHotKeyUpdatesLRU",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_hot_cache_get_refreshes_lru",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -934,7 +934,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.GetHotKeyProtectsBlockFromReuse",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_owned_hot_cache_get_survives_storage_reuse",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -943,7 +943,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.ConcurrentAccess",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_concurrent_hot_cache_put_get_preserves_writer_identity",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -952,7 +952,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.InitLocalHotCacheViaClientCreate_ZeroSize",
     "rust": "mooncake-store-client/src/hot_cache.rs:cpp_parity_zero_hot_cache_size_disables_cache",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -961,7 +961,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.InitLocalHotCacheViaClientCreate_LessThanOneBlock",
     "rust": "mooncake-store-client/src/hot_cache.rs:cpp_parity_sub_default_block_disables_cache_without_failing_client",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -970,7 +970,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.InitLocalHotCacheViaClientCreate_LessThanOneBlock_CustomBlockSize",
     "rust": "mooncake-store-client/src/hot_cache.rs:cpp_parity_sub_custom_block_disables_cache_without_failing_client",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -979,7 +979,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.DeferredLRUTouchOrdering",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_owned_get_updates_recency_before_reuse",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -988,7 +988,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.ConcurrentGetHotKeySharedLock",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_concurrent_hot_cache_readers_all_succeed",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -997,7 +997,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.HotCacheRefCountViewMode",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_owned_buffer_handle_retains_hot_cache_value",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
@@ -1006,7 +1006,7 @@
     "cpp": "client_local_hot_cache_test.cpp:LocalHotCacheTest.CacheBlockWriteAndRetrieve",
     "rust": "mooncake-store-client/tests/test_hot_cache.rs:cpp_parity_hot_cache_publish_returns_exact_owned_buffer",
     "first_divergence": "Rust lacked this exact fixed-block, LRU, input-policy, concurrent access, disabled-configuration, or owned-value lifecycle assertion; several rows also exposed FIFO/overwrite/empty-value production conflicts.",
-    "repair_commit": "PENDING",
+    "repair_commit": "55015243",
     "focused_command": "cargo test -p mooncake-store-client --test test_hot_cache cpp_parity_ -- --nocapture && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib hot_cache::tests::cpp_parity_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --test test_hot_cache && <native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hot-cache-lru-goal-019fbaa7.typescript"
