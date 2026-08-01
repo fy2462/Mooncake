@@ -1177,7 +1177,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.MountUnmountSegmentWithCachelibAllocator",
     "rust": "mooncake-store-master/tests/test_master_mount.rs:cachelib_mount_validation_and_idempotent_lifecycle_parity",
     "first_divergence": "Rust already enforced zero and Cachelib slab-alignment inputs and implemented idempotent mount/unmount, but its discoverable tests split isolated validation cases from lifecycle cases and never proved the C++ four-error matrix followed by duplicate mount, duplicate and unknown-ID unmount, remount, and final cleanup on one Cachelib service.",
-    "repair_commit": "PENDING",
+    "repair_commit": "4ee94e53",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_mount mount_validation_and_idempotent_lifecycle_parity -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_mount && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-mount-lifecycle-goal-019fbca4.typescript"
@@ -1186,7 +1186,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.MountUnmountSegmentWithOffsetAllocator",
     "rust": "mooncake-store-master/tests/test_master_mount.rs:offset_mount_validation_and_idempotent_lifecycle_parity",
     "first_divergence": "Rust defaulted to the Offset allocator and implemented the requested validation and idempotent lifecycle, but no single discoverable test selected Offset explicitly and reproduced zero-base, zero-size, duplicate mount, duplicate and unknown-ID unmount, remount, and final cleanup in the C++ order.",
-    "repair_commit": "PENDING",
+    "repair_commit": "4ee94e53",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_mount mount_validation_and_idempotent_lifecycle_parity -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_mount && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-mount-lifecycle-goal-019fbca4.typescript"
