@@ -2751,13 +2751,13 @@ impl PythonMooncakeClient {
             let mut slot = inner.lock().await;
             let Some(client) = slot.as_mut() else {
                 registered_py_buffers.lock().clear();
-                return Ok(());
+                return Ok(0);
             };
             client.tear_down_all().await.map_err(to_py_err)?;
             drop(slot.take());
             drop(slot);
             registered_py_buffers.lock().clear();
-            Ok(())
+            Ok(0)
         })
     }
 

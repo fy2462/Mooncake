@@ -76,10 +76,15 @@ def cachelib_master():
             process.wait(timeout=5)
 
 
-async def _client(cachelib_master, *, global_segment_size: int = 0):
+async def _client(
+    cachelib_master,
+    *,
+    global_segment_size: int = 0,
+    local_hostname: str = "localhost",
+):
     rpc_port, metadata_port = cachelib_master
     return await MooncakeClient.create(
-        local_hostname="localhost",
+        local_hostname=local_hostname,
         metadata_server=f"http://127.0.0.1:{metadata_port}/metadata",
         master_server_addr=f"127.0.0.1:{rpc_port}",
         protocol="tcp",
@@ -171,3 +176,39 @@ async def test_get_into_accepts_interior_registered_buffer_range(cachelib_master
         lease.release()
         pool.close()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_size_returns_exact_stored_length(cachelib_master):
+    client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
+    value = b"getsize_payload_123"
+    try:
+        assert await client.put("getsize_key", value) == 0
+        assert await client.get_size("getsize_key") == len(value)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_health_check_after_create_reports_healthy(cachelib_master):
+    client = await _client(cachelib_master)
+    try:
+        assert await client.health_check() is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_hostname_returns_configured_value(cachelib_master):
+    client = await _client(cachelib_master, local_hostname="localhost:17813")
+    try:
+        assert client.get_hostname() == "localhost:17813"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent_with_real_binding_client(cachelib_master):
+    client = await _client(cachelib_master)
+    assert await client.close() == 0
+    assert await client.close() == 0
