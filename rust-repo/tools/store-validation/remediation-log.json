@@ -1478,5 +1478,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity query_missing_and_live_move_task_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_task_creation_parity && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-task-creation-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.TenantTasksCarryTenantInPayload",
+    "rust": "mooncake-store-master/tests/test_tenant_id_parity.rs:tenant_tasks_carry_tenant_in_payload",
+    "first_divergence": "Rust rejected unregistered task tenants but had no registered non-default tenant flow proving both copy and move assignments preserve the exact tenant and key in their serialized payloads.",
+    "repair_commit": "1c680524",
+    "focused_command": "cargo test -p mooncake-store-master --test test_tenant_id_parity tenant_tasks_carry_tenant_in_payload -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_tenant_id_parity && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-master-tenant-task-payload-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.LegacyTaskPayloadDefaultsTenant",
+    "rust": "mooncake-store-client/src/client/tasks.rs:legacy_task_payload_defaults_to_default_tenant",
+    "first_divergence": "Rust directly proved the missing-tenant fallback for both legacy payload schemas, but did not assert the decoded key, source, copy targets, or move target routing fields.",
+    "repair_commit": "1c680524",
+    "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --lib client::tasks::tests::legacy_task_payload_defaults_to_default_tenant -- --exact --nocapture",
+    "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-master-tenant-task-payload-goal-019fbca4.typescript"
   }
 ]
