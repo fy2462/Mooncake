@@ -1,18 +1,21 @@
 use crate::ha::{MasterRuntimeState, MasterView};
 use crate::proto;
+use crate::proto::master_service_server::MasterService;
 use crate::{MasterServiceImpl, TenantId};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Query, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tonic::Code;
+use tonic::{Code, Request as TonicRequest};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AdminRuntimeState {
@@ -78,9 +81,16 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
         .route("/ha_status", get(ha_status_handler))
         .route("/leader", get(leader_handler))
         .route("/kv_events/status", get(kv_events_status_handler))
+        .route("/query_key", get(query_key_handler))
         .route("/get_all_keys", get(get_all_keys_handler))
+        .route("/get_all_segments", get(get_all_segments_handler))
         .route("/get_segments_detail", get(get_segments_detail_handler))
+        .route("/query_segment", get(query_segment_handler))
         .route("/batch_query_keys", get(batch_query_keys_handler))
+        .route("/api/v1/drain_jobs", post(create_drain_job_handler))
+        .route("/api/v1/drain_jobs/query", get(query_drain_job_handler))
+        .route("/api/v1/drain_jobs/cancel", post(cancel_drain_job_handler))
+        .route("/api/v1/segments/status", get(segment_status_handler))
         .route(
             "/api/v1/tenant_quotas",
             get(get_tenant_quotas_handler)
@@ -125,6 +135,208 @@ async fn get_all_keys_handler(
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let service = service_or_unavailable(&state)?;
     Ok(service.all_keys_for_admin().join("\n"))
+}
+
+async fn get_all_segments_handler(
+    State(state): State<AdminRuntimeState>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let response = service
+        .get_all_segments_for_admin(TonicRequest::new(proto::GetAllSegmentsForAdminRequest {}))
+        .await
+        .map_err(status_error)?
+        .into_inner();
+    let mut body = response.segments.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    Ok(body)
+}
+
+async fn query_key_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let key = query.get("key").map(String::as_str).unwrap_or_default();
+    let response = service
+        .replica_list_for_key_for_admin(&TenantId::default(), key)
+        .map_err(status_error)?;
+    let data = response
+        .replicas
+        .iter()
+        .filter(|replica| {
+            proto::replica_descriptor::ReplicaType::try_from(replica.replica_type)
+                == Ok(proto::replica_descriptor::ReplicaType::Memory)
+        })
+        .map(buffer_descriptor_json)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+async fn query_segment_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let service = service_or_unavailable(&state)?;
+    let segment_name = query.get("segment").map(String::as_str).unwrap_or_default();
+    let segment = service
+        .query_segment_for_admin(TonicRequest::new(proto::QuerySegmentsRequest {
+            segment_name: segment_name.to_owned(),
+        }))
+        .await
+        .map_err(|_| json_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to query segment"))?
+        .into_inner();
+    Ok(format!(
+        "{}\nUsed(bytes): {}\nCapacity(bytes) : {}\n",
+        segment_name, segment.used_size, segment.total_size
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDrainJobBody {
+    #[serde(default)]
+    segments: Vec<String>,
+    #[serde(default)]
+    target_segments: Vec<String>,
+    #[serde(default = "default_drain_max_concurrency")]
+    max_concurrency: u32,
+}
+
+fn default_drain_max_concurrency() -> u32 {
+    4
+}
+
+async fn create_drain_job_handler(
+    State(state): State<AdminRuntimeState>,
+    body: Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let body: CreateDrainJobBody = serde_json::from_slice(&body).map_err(|error| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            &format!("Invalid JSON body: {error}"),
+        )
+    })?;
+    let service = service_or_unavailable(&state)?;
+    let response = service
+        .create_drain_job(TonicRequest::new(proto::CreateDrainJobRequest {
+            segments: body.segments,
+            target_segments: body.target_segments,
+            max_concurrency: body.max_concurrency,
+        }))
+        .await
+        .map_err(status_error)?
+        .into_inner();
+    let job_id = proto_uuid_string(response.job_id.as_ref());
+    Ok(Json(json!({
+        "success": true,
+        "job_id": job_id,
+        "status": "CREATED",
+    })))
+}
+
+async fn query_drain_job_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (job_id, proto_job_id) = parse_job_id(&query)?;
+    let service = service_or_unavailable(&state)?;
+    let response = service
+        .query_drain_job(TonicRequest::new(proto::QueryDrainJobRequest {
+            job_id: Some(proto_job_id),
+        }))
+        .await
+        .map_err(status_error)?
+        .into_inner();
+    Ok(Json(json!({
+        "success": true,
+        "job_id": response
+            .id
+            .as_ref()
+            .map_or_else(|| job_id.to_string(), |id| proto_uuid_string(Some(id))),
+        "type": response.r#type,
+        "type_name": "DRAIN",
+        "status": response.status,
+        "status_name": job_status_name(response.status),
+        "created_at_ms_epoch": response.created_at_ms_epoch,
+        "last_updated_at_ms_epoch": response.last_updated_at_ms_epoch,
+        "segments": response.segments,
+        "succeeded_units": response.succeeded_units,
+        "failed_units": response.failed_units,
+        "blocked_units": response.blocked_units,
+        "active_units": response.active_units,
+        "migrated_bytes": response.migrated_bytes,
+        "message": response.message,
+    })))
+}
+
+async fn cancel_drain_job_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (job_id, proto_job_id) = parse_job_id(&query)?;
+    let service = service_or_unavailable(&state)?;
+    service
+        .cancel_drain_job(TonicRequest::new(proto::CancelDrainJobRequest {
+            job_id: Some(proto_job_id),
+        }))
+        .await
+        .map_err(status_error)?;
+    Ok(Json(json!({
+        "success": true,
+        "job_id": job_id.to_string(),
+        "status": "CANCELED",
+    })))
+}
+
+async fn segment_status_handler(
+    State(state): State<AdminRuntimeState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let segment_name = query
+        .get("segment")
+        .filter(|segment| !segment.is_empty())
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "Missing segment query parameter"))?;
+    let service = service_or_unavailable(&state)?;
+    let segment = service
+        .segments_detail_snapshot()
+        .into_iter()
+        .find(|segment| segment.segment_name == *segment_name)
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "segment not found"))?;
+    Ok(Json(json!({
+        "success": true,
+        "segment": segment_name,
+        "status": segment.status,
+        "status_name": segment_status_json_string(segment.status),
+    })))
+}
+
+fn parse_job_id(
+    query: &HashMap<String, String>,
+) -> Result<(Uuid, proto::Uuid), (StatusCode, Json<Value>)> {
+    let job_id = query
+        .get("job_id")
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "Missing or invalid job_id"))?;
+    let (high, low) = job_id.as_u64_pair();
+    Ok((job_id, proto::Uuid { high, low }))
+}
+
+fn proto_uuid_string(uuid: Option<&proto::Uuid>) -> String {
+    uuid.map(|uuid| Uuid::from_u64_pair(uuid.high, uuid.low).to_string())
+        .unwrap_or_default()
+}
+
+fn job_status_name(status: i32) -> &'static str {
+    match proto::JobStatus::try_from(status) {
+        Ok(proto::JobStatus::Created) => "CREATED",
+        Ok(proto::JobStatus::Planning) => "PLANNING",
+        Ok(proto::JobStatus::Running) => "RUNNING",
+        Ok(proto::JobStatus::Succeeded) => "SUCCEEDED",
+        Ok(proto::JobStatus::Failed) => "FAILED",
+        Ok(proto::JobStatus::Canceled) => "CANCELED",
+        _ => "UNKNOWN_JOB_STATUS",
+    }
 }
 
 async fn batch_query_keys_handler(
@@ -187,7 +399,7 @@ fn service_or_unavailable(
             Json(json!({
                 "success": false,
                 "error_code": Code::Unavailable as i32,
-                "error_message": "master service unavailable"
+                "error_message": "service plane is not active"
             })),
         )
     })?;
@@ -505,18 +717,34 @@ fn uuid_json_string(uuid: Option<&proto::Uuid>) -> String {
 mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
-    use axum::http::Request;
+    use axum::http::{Method, Request};
     use tower::ServiceExt;
 
-    async fn get_router(router: &Router, path: &str) -> (StatusCode, String) {
+    async fn request_router(
+        router: &Router,
+        method: Method,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, String) {
         let response = router
             .clone()
-            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    async fn get_router(router: &Router, path: &str) -> (StatusCode, String) {
+        request_router(router, Method::GET, path, "").await
     }
 
     async fn get(state: AdminRuntimeState, path: &str) -> (StatusCode, String) {
@@ -754,6 +982,76 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(body, expected_role, "state={}", runtime_state.as_str());
         }
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_service_unavailable_route_matrix() {
+        let router = admin_router(runtime_state(MasterRuntimeState::Standby));
+        let unavailable = "service plane is not active";
+
+        for path in [
+            "/get_all_keys",
+            "/get_all_segments",
+            "/get_segments_detail",
+            "/query_segment?segment=foo",
+            "/query_key?key=foo",
+            "/batch_query_keys?keys=foo",
+            "/api/v1/segments/status?segment=foo",
+            "/api/v1/tenant_quotas",
+        ] {
+            let (status, body) = get_router(&router, path).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "path={path}");
+            assert!(body.contains(unavailable), "path={path}, body={body}");
+        }
+
+        let valid_job_id = "00000000-0000-0000-0000-000000000001";
+        for (method, path, body) in [
+            (Method::POST, "/api/v1/drain_jobs".to_string(), "{}"),
+            (
+                Method::GET,
+                format!("/api/v1/drain_jobs/query?job_id={valid_job_id}"),
+                "",
+            ),
+            (
+                Method::POST,
+                format!("/api/v1/drain_jobs/cancel?job_id={valid_job_id}"),
+                "",
+            ),
+        ] {
+            let (status, _) = request_router(&router, method, &path, body).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "path={path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_query_segment_aggregates_same_name_memory_shards() {
+        let service = Arc::new(MasterServiceImpl::new(None, None));
+        for (client_id, base_addr, size) in [
+            (Uuid::from_u128(1), 0x1000_0000, 4096),
+            (Uuid::from_u128(2), 0x2000_0000, 8192),
+        ] {
+            let (high, low) = client_id.as_u64_pair();
+            service
+                .mount_segment(TonicRequest::new(proto::MountSegmentRequest {
+                    client_id: Some(proto::Uuid { high, low }),
+                    segment_name: "sharded-admin-segment".to_string(),
+                    size,
+                    base_addr,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                    host_id: String::new(),
+                }))
+                .await
+                .unwrap();
+        }
+        let router = admin_router(AdminRuntimeState::serving_with_service(None, service));
+
+        let (status, body) =
+            get_router(&router, "/query_segment?segment=sharded-admin-segment").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Used(bytes): 0"));
+        assert!(body.contains("Capacity(bytes) : 12288"));
     }
 
     #[test]

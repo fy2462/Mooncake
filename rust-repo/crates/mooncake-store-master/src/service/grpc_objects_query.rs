@@ -347,15 +347,27 @@ impl MasterServiceImpl {
         request: Request<proto::QuerySegmentsRequest>,
     ) -> Result<Response<proto::QuerySegmentsResponse>, Status> {
         let req = request.into_inner();
+        let mut total_size = 0u64;
+        let mut used_size = 0u64;
+        let mut found = false;
         for entry in self.state.segments.iter() {
             if entry.segment.name == req.segment_name {
-                return Ok(Response::new(proto::QuerySegmentsResponse {
-                    total_size: entry.segment.size,
-                    used_size: entry.used,
-                }));
+                found = true;
+                total_size = total_size.checked_add(entry.segment.size).ok_or_else(|| {
+                    Status::internal("segment capacity overflow while aggregating shards")
+                })?;
+                used_size = used_size.checked_add(entry.used).ok_or_else(|| {
+                    Status::internal("segment usage overflow while aggregating shards")
+                })?;
             }
         }
-        Err(Status::not_found("segment not found"))
+        if !found {
+            return Err(Status::not_found("segment not found"));
+        }
+        Ok(Response::new(proto::QuerySegmentsResponse {
+            total_size,
+            used_size,
+        }))
     }
 
     // ---- QueryIp ----
