@@ -1231,7 +1231,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutStartEndFlow",
     "rust": "mooncake-store-master/tests/test_master_object.rs:put_start_end_flow_parity",
     "first_divergence": "Rust already enforced processing visibility, owner authorization, and completion state, but no discoverable direct test reproduced the complete C++ start/read/remove/foreign-end/foreign-revoke/owner-end sequence with exact gRPC outcomes.",
-    "repair_commit": "PENDING",
+    "repair_commit": "ba21135a",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object put_start_end_flow_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-flow-preference-goal-019fbca4.typescript"
@@ -1240,7 +1240,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutWithPreferredSegment",
     "rust": "mooncake-store-master/tests/test_master_object.rs:singular_preferred_segment_put_parity",
     "first_divergence": "Rust allocator unit coverage selected one singular preference, but no discoverable service-level test asserted the PROCESSING transport endpoint and successful PutEnd across three mounted segments.",
-    "repair_commit": "PENDING",
+    "repair_commit": "ba21135a",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object singular_preferred_segment_put_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-flow-preference-goal-019fbca4.typescript"
@@ -1249,7 +1249,7 @@
     "cpp": "master_service_test.cpp:MasterServiceTest.PutWithPreferredSegments",
     "rust": "mooncake-store-master/tests/test_master_object.rs:multiple_preferred_segments_put_parity",
     "first_divergence": "Rust allocator coverage exercised plural candidate selection, but no discoverable service-level test asserted two PROCESSING descriptors, the exact preferred endpoint set, and successful PutEnd.",
-    "repair_commit": "PENDING",
+    "repair_commit": "ba21135a",
     "focused_command": "cargo test -p mooncake-store-master --test test_master_object multiple_preferred_segments_put_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_master_object && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-put-flow-preference-goal-019fbca4.typescript"
