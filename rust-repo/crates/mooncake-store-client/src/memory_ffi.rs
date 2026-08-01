@@ -381,14 +381,8 @@ impl OwnedBuffer {
             page_size,
         } = self
         {
-            let page_count = len.div_ceil(*page_size);
-            let workers = std::thread::available_parallelism()
-                .map(usize::from)
-                .unwrap_or(1)
-                .min(16)
-                .min(page_count);
             unsafe {
-                populate_hugetlb_pages(ptr.as_ptr(), *len, *page_size, workers)?;
+                populate_hugetlb_mapping(ptr.as_ptr(), *len, *page_size)?;
             }
         }
         Ok(())
@@ -789,6 +783,23 @@ unsafe fn populate_hugetlb_pages(
 }
 
 #[cfg(target_os = "linux")]
+unsafe fn populate_hugetlb_mapping(ptr: *mut u8, len: usize, page_size: usize) -> io::Result<()> {
+    if ptr.is_null() || len == 0 || page_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mapping, length, and page size must be valid",
+        ));
+    }
+    let page_count = len.div_ceil(page_size);
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(16)
+        .min(page_count);
+    unsafe { populate_hugetlb_pages(ptr, len, page_size, workers) }
+}
+
+#[cfg(target_os = "linux")]
 fn align_up(size: usize, alignment: usize) -> Option<usize> {
     if alignment == 0 {
         return Some(size);
@@ -805,9 +816,8 @@ fn align_up(size: usize, alignment: usize) -> Option<usize> {
 mod tests {
     use super::{
         HUGEPAGE_1_GIB, HUGEPAGE_2_MIB, HugepagePolicy, OwnedBuffer, page_ranges,
-        populate_hugetlb_pages,
+        populate_hugetlb_mapping, populate_hugetlb_pages,
     };
-
     #[test]
     fn vec_fallback_is_mutable_and_stable() {
         let mut buffer = OwnedBuffer::allocate(16);
@@ -880,6 +890,66 @@ mod tests {
                 0, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0
             ]
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_populatehugetlbmappingusesconfiguredpagestride_906d02d3()
+     {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "memory_ffi::tests::configured_hugetlb_stride_subprocess_helper",
+                "--nocapture",
+            ])
+            .env("MC_STORE_HUGEPAGE_STRIDE_SUBPROCESS", "1")
+            .env("MC_STORE_USE_HUGEPAGE", "1")
+            .env("MC_STORE_HUGEPAGE_SIZE", "2MB")
+            .output()
+            .expect("spawn isolated HugeTLB stride verifier");
+        assert!(
+            output.status.success(),
+            "HugeTLB stride subprocess failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configured_hugetlb_stride_subprocess_helper() {
+        if std::env::var_os("MC_STORE_HUGEPAGE_STRIDE_SUBPROCESS").is_none() {
+            return;
+        }
+
+        const PAGE_COUNT: usize = 3;
+        const MAP_SIZE: usize = PAGE_COUNT * HUGEPAGE_2_MIB;
+        let mapping = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                MAP_SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(mapping, libc::MAP_FAILED);
+        let bytes = mapping.cast::<u8>();
+        for page in 0..PAGE_COUNT {
+            unsafe { bytes.add(page * HUGEPAGE_2_MIB).write(0xab) };
+        }
+
+        let policy = HugepagePolicy::from_environment();
+        assert!(policy.requested);
+        assert!(policy.strict);
+        assert_eq!(policy.page_size, HUGEPAGE_2_MIB);
+        unsafe { populate_hugetlb_mapping(bytes, MAP_SIZE, policy.page_size) }
+            .expect("configured population succeeds");
+        for page in 0..PAGE_COUNT {
+            assert_eq!(unsafe { bytes.add(page * HUGEPAGE_2_MIB).read() }, 0);
+        }
+        assert_eq!(unsafe { libc::munmap(mapping, MAP_SIZE) }, 0);
     }
 
     #[test]
