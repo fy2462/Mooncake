@@ -2,8 +2,8 @@
 
 use mooncake_store_client::{
     ClientBackgroundConfig, ClientHealthStatus, LocalHotCache, LocalStorageBackend,
-    LocalStorageConfig, MooncakeClient, RemoteSource, RemoteSourceConfig, RemoteSourceResult,
-    proto,
+    LocalStorageConfig, MooncakeClient, RegisteredBufferAllocation, RemoteSource,
+    RemoteSourceConfig, RemoteSourceResult, proto,
 };
 use mooncake_store_core::{ReplicaType, ReplicateConfig, StoreError};
 use mooncake_store_master::MasterRuntimeConfig;
@@ -1102,6 +1102,77 @@ async fn dynamic_owned_segment_mount_routes_data_and_unmounts_by_canonical_id() 
 
     drop(writer);
     drop(reader);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_client_integration_test_cpp_clientintegrationtest_basicputgetoperations_d96c1745()
+ {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(20),
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client(&master).await;
+    let payload = b"Hello, World!";
+    let replication = ReplicateConfig {
+        replica_num: 1,
+        ..Default::default()
+    };
+
+    client
+        .put("test_key", payload, Some(replication.clone()))
+        .await
+        .unwrap();
+    let fetched = client.get("test_key").await.unwrap();
+    assert_eq!(fetched.len(), payload.len());
+    assert_eq!(fetched, payload);
+    client
+        .put("test_key", payload, Some(replication))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    client.remove("test_key", false).await.unwrap();
+    assert!(!client.exists("test_key").await.unwrap());
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_client_integration_test_cpp_clientintegrationtest_mountsegmentandgetidandunmountsegmentbyid_998a1ea2()
+ {
+    const SEGMENT_SIZE: usize = 16 * 1024 * 1024;
+    const SEGMENT_ALIGNMENT: usize = 4096;
+
+    let (master, shutdown) = start_master().await;
+    let mut client = create_tcp_client_with_segment_size(&master, 0).await;
+    let allocation = RegisteredBufferAllocation::allocate(SEGMENT_SIZE, SEGMENT_ALIGNMENT).unwrap();
+    let registration = client
+        .register_owned_buffer(allocation.clone(), "cpu:0")
+        .unwrap();
+    let base_addr = allocation.as_ptr() as u64;
+    let segment_id = client
+        .mount_segment_with_id("legacy-mount-segment", SEGMENT_SIZE as u64, base_addr)
+        .await
+        .unwrap();
+    let (high, low) = segment_id.as_u64_pair();
+    assert_ne!(high, 0);
+    assert_ne!(low, 0);
+    client.unmount_segment_by_id(segment_id, 0).await.unwrap();
+
+    client
+        .mount_segment("legacy-mount-segment", SEGMENT_SIZE as u64, base_addr)
+        .await
+        .unwrap();
+    client
+        .unmount_segment("legacy-mount-segment", 0)
+        .await
+        .unwrap();
+    client.unregister_buffer_handle(registration).unwrap();
+
+    drop(allocation);
+    drop(client);
     let _ = shutdown.send(());
 }
 

@@ -1154,5 +1154,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-read-snapshot-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "client_integration_test.cpp:ClientIntegrationTest.BasicPutGetOperations",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_client_integration_test_cpp_clientintegrationtest_basicputgetoperations_d96c1745",
+    "first_divergence": "Rust already preserved the exact bytes and treated ObjectExists as a successful repeated put, but the discoverable in-process TCP evidence stopped after one cross-client put/get and did not assert returned length, the repeated put, lease expiry, successful remove, and post-remove absence in one oracle-aligned lifecycle.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_client_integration_test_cpp_clientintegrationtest_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_client_integration_test_cpp_clientintegrationtest_ -- --nocapture && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-client-integration-lifecycle-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "client_integration_test.cpp:ClientIntegrationTest.MountSegmentAndGetIdAndUnmountSegmentById",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_client_integration_test_cpp_clientintegrationtest_mountsegmentandgetidandunmountsegmentbyid_998a1ea2",
+    "first_divergence": "Rust already exposed canonical UUID and legacy mount APIs, but the discoverable owned-segment test did not assert both UUID halves, reuse one live registered allocation after ID-based unmount, or exercise the legacy mount/unmount delegation pair end to end.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_client_integration_test_cpp_clientintegrationtest_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_client_integration_test_cpp_clientintegrationtest_ -- --nocapture && cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-client-integration-lifecycle-goal-019fbca4.typescript"
   }
 ]
