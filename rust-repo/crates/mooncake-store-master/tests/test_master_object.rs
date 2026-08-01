@@ -107,6 +107,176 @@ async fn object_exists(service: &MasterServiceImpl, key: &str) -> bool {
     .exists
 }
 
+async fn mount_put_start_parity_segment(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 16 * 1024 * 1024,
+            base_addr: 0x300000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn mount_put_start_parity_nof_segment(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+) {
+    MasterService::mount_no_f_segment(
+        service,
+        Request::new(proto::MountNoFSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment: Some(proto::NoFSegment {
+                id: Some(proto_uuid(Uuid::new_v4())),
+                name: segment_name.into(),
+                base: 0x400000000,
+                size: 16 * 1024 * 1024,
+                te_endpoint: format!("nof://{segment_name}"),
+                client_id: Some(proto_uuid(client_id)),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn put_start_invalid_parameter_matrix_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_put_start_parity_segment(&service, client_id, "put-invalid:3333").await;
+    let request = |slice_length, config| proto::PutStartRequest {
+        client_id: Some(proto_uuid(client_id)),
+        key: "test_key".into(),
+        slice_length,
+        tenant_id: String::new(),
+        config: Some(config),
+    };
+
+    for (case, request) in [
+        (
+            "zero total replicas",
+            request(
+                1024,
+                proto::ReplicateConfig {
+                    replica_num: 0,
+                    nof_replica_num: 0,
+                    ..Default::default()
+                },
+            ),
+        ),
+        (
+            "zero slice length",
+            request(
+                0,
+                proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                },
+            ),
+        ),
+        (
+            "same-node preference with NoF",
+            request(
+                1024,
+                proto::ReplicateConfig {
+                    replica_num: 1,
+                    nof_replica_num: 1,
+                    prefer_alloc_in_same_node: true,
+                    ..Default::default()
+                },
+            ),
+        ),
+    ] {
+        let error = MasterService::put_start(&service, Request::new(request))
+            .await
+            .expect_err(case);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn one_plus_one_allows_available_memory_only_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_put_start_parity_segment(&service, client_id, "one-plus-one:3333").await;
+
+    let response = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_one_plus_one".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 1,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.replicas.len(), 1);
+    assert_eq!(
+        response.replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::Memory as i32
+    );
+}
+
+#[tokio::test]
+async fn one_plus_one_flexible_mode_also_allows_available_nof_only() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_put_start_parity_nof_segment(&service, client_id, "one-plus-one-nof:3333").await;
+
+    let response = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_one_plus_one_nof".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 1,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.replicas.len(), 1);
+    assert_eq!(
+        response.replicas[0].replica_type,
+        proto::replica_descriptor::ReplicaType::NofSsd as i32
+    );
+}
+
 #[tokio::test]
 async fn batch_replica_clear_empty_input_parity() {
     let service = MasterServiceImpl::new(None, None);

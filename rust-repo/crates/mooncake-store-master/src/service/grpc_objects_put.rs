@@ -141,6 +141,7 @@ impl MasterServiceImpl {
         if !self.state.runtime_config.enable_nof && config.nof_replica_num > 0 {
             return Err(Status::invalid_argument("NoF is not enabled"));
         }
+        let flexible_dual = config.replica_num == 1 && config.nof_replica_num == 1;
         let group_id = Self::group_id_for_key(&config, 1, 0)?;
         let replica_count = config.replica_num as usize;
         let requested_quota_charge =
@@ -163,6 +164,7 @@ impl MasterServiceImpl {
                 "object already exists: {user_key}"
             )));
         }
+        let mut reserved_quota_charge = requested_quota_charge;
 
         // 分配 Memory 副本 / Allocate Memory replicas
         let mut replicas = if replica_count > 0 {
@@ -179,11 +181,15 @@ impl MasterServiceImpl {
         };
         if replicas.len() != replica_count {
             release_replicas(&self.state, &replicas)?;
-            self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
-            return Err(Status::resource_exhausted(format!(
-                "failed to allocate {replica_count} replica(s) for key {user_key}{}",
-                PUT_NO_SPACE_HELPER_STR,
-            )));
+            replicas.clear();
+            self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
+            reserved_quota_charge = 0;
+            if !flexible_dual {
+                return Err(Status::resource_exhausted(format!(
+                    "failed to allocate {replica_count} replica(s) for key {user_key}{}",
+                    PUT_NO_SPACE_HELPER_STR,
+                )));
+            }
         }
         // NoF 副本分配：使用显式 preferred_nof_segments；same-node NoF 组合按 C++ 拒绝。
         // NoF replica allocation: use explicit preferred_nof_segments; same-node NoF is rejected like C++.
@@ -197,9 +203,19 @@ impl MasterServiceImpl {
             ) {
                 Ok(replicas) => replicas,
                 Err(status) => {
-                    release_replicas(&self.state, &replicas)?;
-                    self.abort_tenant_quota(&tenant_id, requested_quota_charge)?;
-                    return Err(status);
+                    let unavailable_side_of_flexible_dual = flexible_dual
+                        && !replicas.is_empty()
+                        && matches!(
+                            status.code(),
+                            tonic::Code::FailedPrecondition | tonic::Code::ResourceExhausted
+                        );
+                    if unavailable_side_of_flexible_dual {
+                        Vec::new()
+                    } else {
+                        release_replicas(&self.state, &replicas)?;
+                        self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
+                        return Err(status);
+                    }
                 }
             };
             replicas.extend(nof_replicas);
@@ -236,7 +252,7 @@ impl MasterServiceImpl {
                 tenant_id: tenant_id.clone(),
                 group_id,
                 quota_committed: false,
-                reserved_quota_charge_bytes: requested_quota_charge,
+                reserved_quota_charge_bytes: reserved_quota_charge,
                 committed_quota_charge_bytes: 0,
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
