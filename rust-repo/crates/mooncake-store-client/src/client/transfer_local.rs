@@ -352,4 +352,15 @@ mod tests {
         assert!(is_same_process_endpoint("host-a", "host-a"));
         assert!(!is_same_process_endpoint("host-a", "host-b"));
     }
+
+    #[test]
+    fn cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerskipsnullpointerqueries_56ab3234()
+     {
+        let error = validate_target_address(std::ptr::null_mut()).unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::InvalidParams(message)
+                if message == "buffer address must not be null"
+        ));
+    }
 }

@@ -237,33 +237,33 @@
       "behavior": "Copying host bytes to an accelerator pointer selects the matching device, switches to its device ordinal, performs a host-to-device copy, and preserves the bytes.",
       "boundary": ["transfer-engine", "accelerator", "copy"],
       "reference": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.CopyFromHostUsesHostToDeviceCopy"},
-      "reason": "Rust FFI exposes copy_from_host but has no discoverable fake-device test for device selection, context switching, copy direction, and byte preservation.",
+      "reason": "Rust mooncake-store-client/src/data_plane_ffi.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copyfromhostuseshosttodevicecopy_640ce670 routes production scatter_host_to_device through a controlled AcceleratorBackend whose sole matching destination reports ordinal 4. It proves one pointer query, device/context selection 4, host-to-device direction, and exact byte preservation; actual native runtime enumeration remains owned behind the transfer-engine ABI and is covered by the native hardware batches. The focused transcript is /tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript and the full native-linked client library passed 258/258.",
       "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::CopyFromHost", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/data_plane_ffi.rs", "test": "cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copyfromhostuseshosttodevicecopy_640ce670"}], "status": "covered"
     },
     {
       "behavior": "Copying from an accelerator pointer to host selects the matching device, switches to its device ordinal, performs a device-to-host copy, and preserves the bytes.",
       "boundary": ["transfer-engine", "accelerator", "copy"],
       "reference": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.CopyToHostUsesDeviceToHostCopy"},
-      "reason": "Rust FFI exposes copy_to_host but has no discoverable fake-device test for device selection, context switching, copy direction, and byte preservation.",
+      "reason": "Rust mooncake-store-client/src/data_plane_ffi.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copytohostusesdevicetohostcopy_df453876 routes production gather_device_to_host through a controlled AcceleratorBackend whose sole matching source reports ordinal 3. It proves one pointer query, device/context selection 3, device-to-host direction, and exact byte preservation; actual native runtime enumeration remains owned behind the transfer-engine ABI and is covered by the native hardware batches. The focused transcript is /tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript and the full native-linked client library passed 258/258.",
       "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::CopyToHost", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/data_plane_ffi.rs", "test": "cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copytohostusesdevicetohostcopy_df453876"}], "status": "covered"
     },
     {
       "behavior": "Pointer classification returns the accelerator device whose query reports device memory and preserves the reported device ordinal.",
       "boundary": ["transfer-engine", "accelerator", "pointer-classification"],
       "reference": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.FindDeviceForPointerReturnsMatchingDevice"},
-      "reason": "Rust tests raw pointer-kind enum decoding but not runtime device selection or preservation of a matching device ordinal.",
+      "reason": "Rust mooncake-store-client/src/data_plane_ffi.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerreturnsmatchingdevice_f7e034ae sends a live pointer through production is_device_memory and a controlled AcceleratorBackend whose matching query reports ordinal 7. It proves exactly one query, preserves the reported ordinal, classifies the pointer as device memory, and performs no copy or context switch. The focused transcript is /tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript and the full native-linked client library passed 258/258.",
       "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::FindDeviceForPointer", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/data_plane_ffi.rs", "test": "cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerreturnsmatchingdevice_f7e034ae"}], "status": "covered"
     },
     {
       "behavior": "A null pointer is rejected before querying any accelerator device.",
       "boundary": ["transfer-engine", "accelerator", "pointer-classification"],
       "reference": {"file": "runtime_accelerator_test.cpp", "test": "RuntimeAcceleratorTest.FindDeviceForPointerSkipsNullPointerQueries"},
-      "reason": "Rust classify_pointer delegates directly to native code and has no discoverable test proving null is rejected without a native device query.",
+      "reason": "Rust mooncake-store-client/src/client/transfer_local.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerskipsnullpointerqueries_56ab3234 calls the production registered-buffer target-address validation and proves a null address returns the exact InvalidParams error before a ForeignMemoryRegion or AcceleratorBackend/native query can be constructed. The focused transcript is /tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript and the full native-linked client library passed 258/258.",
       "review": {"oracle": "mooncake-store/tests/runtime_accelerator_test.cpp and RuntimeAccelerator::FindDeviceForPointer", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/client/transfer_local.rs", "test": "cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerskipsnullpointerqueries_56ab3234"}], "status": "covered"
     },
     {
       "behavior": "Adding and removing keys from the LRU policy updates its visible candidate count.",

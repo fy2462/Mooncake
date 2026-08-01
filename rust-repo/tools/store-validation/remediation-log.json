@@ -88,5 +88,41 @@
     "focused_command": "cargo test -p mooncake-store-master --lib kv_event::tests::cpp_parity_kv_event_publisher_test_cpp_kveventpublishertest_publishessglangobjectkeyoverzmq_a0abdd7c -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-kv-event-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "runtime_accelerator_test.cpp:RuntimeAcceleratorTest.CopyFromHostUsesHostToDeviceCopy",
+    "rust": "mooncake-store-client/src/data_plane_ffi.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copyfromhostuseshosttodevicecopy_640ce670",
+    "first_divergence": "Rust exposed host-to-device staging through AcceleratorBackend but had no controlled runtime double proving pointer lookup, preservation and selection of the matching device ordinal, copy direction, and exact bytes through the production staging function.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "runtime_accelerator_test.cpp:RuntimeAcceleratorTest.CopyToHostUsesDeviceToHostCopy",
+    "rust": "mooncake-store-client/src/data_plane_ffi.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copytohostusesdevicetohostcopy_df453876",
+    "first_divergence": "Rust exposed device-to-host staging through AcceleratorBackend but had no controlled runtime double proving pointer lookup, preservation and selection of the matching device ordinal, copy direction, and exact bytes through the production staging function.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "runtime_accelerator_test.cpp:RuntimeAcceleratorTest.FindDeviceForPointerReturnsMatchingDevice",
+    "rust": "mooncake-store-client/src/data_plane_ffi.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerreturnsmatchingdevice_f7e034ae",
+    "first_divergence": "Rust decoded native pointer-kind values, but no stable test sent a live pointer through production classification and proved exactly one matching query, preservation of its reported ordinal, and absence of copy/context side effects.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "runtime_accelerator_test.cpp:RuntimeAcceleratorTest.FindDeviceForPointerSkipsNullPointerQueries",
+    "rust": "mooncake-store-client/src/client/transfer_local.rs:cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerskipsnullpointerqueries_56ab3234",
+    "first_divergence": "Rust rejected null registered-buffer targets in production, but had no discoverable parity test proving the exact error occurs before a ForeignMemoryRegion and therefore before any accelerator/native pointer query can exist.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-runtime-accelerator-goal-019fbaa7.typescript"
   }
 ]

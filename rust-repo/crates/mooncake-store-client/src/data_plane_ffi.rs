@@ -118,6 +118,136 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RecordedCopyDirection {
+        HostToDevice,
+        DeviceToHost,
+    }
+
+    #[derive(Debug)]
+    struct FakeDevice {
+        pointer: usize,
+        device_ordinal: i32,
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeRuntimeState {
+        query_count: usize,
+        last_reported_device: Option<i32>,
+        current_device: Option<i32>,
+        last_direction: Option<RecordedCopyDirection>,
+    }
+
+    struct FakeRuntimeAccelerator {
+        devices: Vec<FakeDevice>,
+        state: Mutex<FakeRuntimeState>,
+    }
+
+    impl FakeRuntimeAccelerator {
+        fn one(pointer: *mut c_void, device_ordinal: i32) -> Self {
+            Self {
+                devices: vec![FakeDevice {
+                    pointer: pointer as usize,
+                    device_ordinal,
+                }],
+                state: Mutex::new(FakeRuntimeState::default()),
+            }
+        }
+
+        fn matching_device(&self, address: usize) -> Option<i32> {
+            self.devices
+                .iter()
+                .find(|device| device.pointer == address)
+                .map(|device| device.device_ordinal)
+        }
+
+        fn query_device(&self, address: usize) -> Option<i32> {
+            let device = self.matching_device(address);
+            let mut state = self.state.lock().unwrap();
+            state.query_count += 1;
+            state.last_reported_device = device;
+            device
+        }
+
+        fn select_for_copy(
+            &self,
+            address: usize,
+            direction: RecordedCopyDirection,
+            query: bool,
+        ) -> StoreResult<i32> {
+            let device = if query {
+                self.query_device(address)
+            } else {
+                self.matching_device(address)
+            }
+            .ok_or_else(|| StoreError::Internal("fake device pointer not found".into()))?;
+            let mut state = self.state.lock().unwrap();
+            state.current_device = Some(device);
+            state.last_direction = Some(direction);
+            Ok(device)
+        }
+    }
+
+    impl AcceleratorBackend for FakeRuntimeAccelerator {
+        fn classify(&self, region: ForeignMemoryRegion) -> StoreResult<PointerMemoryType> {
+            Ok(if self.query_device(region.address).is_some() {
+                PointerMemoryType::Device
+            } else {
+                PointerMemoryType::Host
+            })
+        }
+
+        fn copy_to_host(
+            &self,
+            destination: &mut [u8],
+            source: ForeignMemoryRegion,
+        ) -> StoreResult<()> {
+            self.select_for_copy(source.address, RecordedCopyDirection::DeviceToHost, false)?;
+            if destination.len() > source.len() {
+                return Err(StoreError::InvalidParams(
+                    "fake accelerator source is too small".into(),
+                ));
+            }
+            // SAFETY: each parity test constructs the region from a live array
+            // that remains readable for the entire copy.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source.as_ptr().cast::<u8>(),
+                    destination.as_mut_ptr(),
+                    destination.len(),
+                );
+            }
+            Ok(())
+        }
+
+        fn copy_from_host(
+            &self,
+            destination: ForeignMemoryRegion,
+            source: &[u8],
+        ) -> StoreResult<()> {
+            self.select_for_copy(
+                destination.address,
+                RecordedCopyDirection::HostToDevice,
+                true,
+            )?;
+            if source.len() > destination.len() {
+                return Err(StoreError::InvalidParams(
+                    "fake accelerator destination is too small".into(),
+                ));
+            }
+            // SAFETY: each parity test constructs the region from a live array
+            // that remains writable for the entire copy.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source.as_ptr(),
+                    destination.as_mut_ptr().cast::<u8>(),
+                    source.len(),
+                );
+            }
+            Ok(())
+        }
+    }
+
     struct MockAccelerator {
         memory_type: PointerMemoryType,
         fail_copy: bool,
@@ -213,5 +343,68 @@ mod tests {
             gather_device_to_host(&backend, region, &mut [0_u8; 4]),
             Err(StoreError::InvalidParams(_))
         ));
+    }
+
+    #[test]
+    fn cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copyfromhostuseshosttodevicecopy_640ce670()
+     {
+        let source = *b"abc\0";
+        let mut destination = [0_u8; 4];
+        let backend = FakeRuntimeAccelerator::one(destination.as_mut_ptr().cast(), 4);
+        let region = ForeignMemoryRegion::from_caller_owned_raw(
+            destination.as_mut_ptr().cast(),
+            destination.len(),
+        );
+
+        scatter_host_to_device(&backend, region, &source).unwrap();
+
+        assert_eq!(destination, source);
+        let state = backend.state.lock().unwrap();
+        assert_eq!(state.query_count, 1);
+        assert_eq!(state.last_reported_device, Some(4));
+        assert_eq!(state.current_device, Some(4));
+        assert_eq!(
+            state.last_direction,
+            Some(RecordedCopyDirection::HostToDevice)
+        );
+    }
+
+    #[test]
+    fn cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_copytohostusesdevicetohostcopy_df453876()
+     {
+        let mut source = *b"abc\0";
+        let mut destination = [0_u8; 4];
+        let backend = FakeRuntimeAccelerator::one(source.as_mut_ptr().cast(), 3);
+        let region =
+            ForeignMemoryRegion::from_caller_owned_raw(source.as_mut_ptr().cast(), source.len());
+
+        assert!(gather_device_to_host(&backend, region, &mut destination).unwrap());
+
+        assert_eq!(destination, source);
+        let state = backend.state.lock().unwrap();
+        assert_eq!(state.query_count, 1);
+        assert_eq!(state.last_reported_device, Some(3));
+        assert_eq!(state.current_device, Some(3));
+        assert_eq!(
+            state.last_direction,
+            Some(RecordedCopyDirection::DeviceToHost)
+        );
+    }
+
+    #[test]
+    fn cpp_parity_runtime_accelerator_test_cpp_runtimeacceleratortest_finddeviceforpointerreturnsmatchingdevice_f7e034ae()
+     {
+        let mut device_byte = b'd';
+        let backend = FakeRuntimeAccelerator::one((&mut device_byte as *mut u8).cast(), 7);
+        let region =
+            ForeignMemoryRegion::from_caller_owned_raw((&mut device_byte as *mut u8).cast(), 1);
+
+        assert!(is_device_memory(&backend, region).unwrap());
+
+        let state = backend.state.lock().unwrap();
+        assert_eq!(state.query_count, 1);
+        assert_eq!(state.last_reported_device, Some(7));
+        assert_eq!(state.current_device, None);
+        assert_eq!(state.last_direction, None);
     }
 }
