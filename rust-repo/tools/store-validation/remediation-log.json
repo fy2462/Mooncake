@@ -2594,5 +2594,23 @@
     "focused_command": "cargo test -p mooncake-store-master --lib test_admin_http_batch_query_local_disk_response",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-admin-local-disk-query-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestRecoveringToWatching",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:test_cpp_parity_recovering_success; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_success_transitions_actual_state_machine",
+    "first_divergence": "Etcd notifier errors immediately emitted WatchBroken, so the production follower never reached Recovering and successful fallback recovery never emitted RecoverySuccess.",
+    "repair_commit": "e840795b",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_cpp_parity_recovering_success && cargo test -p mooncake-store-master --lib test_etcd_recovery_success_transitions_actual_state_machine",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-recovery-success-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestRecoveringToReconnecting",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:test_cpp_parity_recovering_failure; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_failure_transitions_actual_state_machine",
+    "first_divergence": "A fallback read failure attempted WatchBroken from Recovering, an invalid transition, instead of committing RecoveryFailed to Reconnecting.",
+    "repair_commit": "e840795b",
+    "focused_command": "cargo test -p mooncake-store-master --lib test_cpp_parity_recovering_failure && cargo test -p mooncake-store-master --lib test_etcd_recovery_failure_transitions_actual_state_machine",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-recovery-success-goal-019fbe77.typescript"
   }
 ]
