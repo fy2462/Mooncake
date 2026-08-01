@@ -1298,5 +1298,14 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_tenant_isolation batch_exist_key_tenant_aware_preserves_order_parity -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_tenant_isolation && cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-master-tenant-batch-exist-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "master_service_test.cpp:MasterServiceTest.ResolveMooncakeHostIdUsesLocalHostnameAndRejectsLoopback",
+    "rust": "mooncake-store-core/tests/test_types.rs:resolve_host_id_exact_cpp_vector_parity",
+    "first_divergence": "The production Rust resolver already matched C++, but its direct test omitted hostB's second port and bracketed unspecified IPv6 without a port, so the complete eleven-input oracle was not discoverable.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-core --test test_types resolve_host_id_exact_cpp_vector_parity -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-core --test test_types && cargo test -p mooncake-store-core --lib",
+    "evidence": "/tmp/mooncake-core-host-id-goal-019fbca4.typescript"
   }
 ]

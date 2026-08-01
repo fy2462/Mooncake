@@ -31,21 +31,25 @@ fn memory_segment_identity_is_stable_and_field_delimited() {
 }
 
 #[test]
-fn resolve_host_id_matches_store_identity_rules() {
-    assert_eq!(
-        mooncake_store_core::resolve_host_id(" node-a:1234 "),
-        "node-a"
-    );
-    assert_eq!(
-        mooncake_store_core::resolve_host_id("2001:db8::1"),
-        "2001:db8::1"
-    );
-    assert_eq!(
-        mooncake_store_core::resolve_host_id("[2001:db8::1]:1234"),
-        "2001:db8::1"
-    );
-    for local in ["localhost:1", "127.0.0.1:1", "[::1]:1", "::", "0.0.0.0:1"] {
-        assert!(mooncake_store_core::resolve_host_id(local).is_empty());
+fn resolve_host_id_exact_cpp_vector_parity() {
+    for (local_hostname, expected) in [
+        ("hostB:5000", "hostB"),
+        ("hostB:5001", "hostB"),
+        ("[2001:db8::1]:5000", "2001:db8::1"),
+        ("localhost:5000", ""),
+        ("127.0.0.1:5000", ""),
+        ("0.0.0.0:5000", ""),
+        ("::1", ""),
+        ("[::1]:5000", ""),
+        ("::", ""),
+        ("[::]", ""),
+        ("[::]:5000", ""),
+    ] {
+        assert_eq!(
+            mooncake_store_core::resolve_host_id(local_hostname),
+            expected,
+            "{local_hostname}"
+        );
     }
 }
 use uuid::Uuid;
