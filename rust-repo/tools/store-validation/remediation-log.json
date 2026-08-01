@@ -142,5 +142,14 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::tests::cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_fifoevictkey_8345f96c -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib && cargo test -p mooncake-store-client --features link-native --test test_local_storage_backend",
     "evidence": "/tmp/mooncake-fifo-eviction-goal-019fbaa7.typescript"
+  },
+  {
+    "cpp": "rpc_timeout_test.cpp:RpcTimeoutTest.RpcTimesOutAgainstUnresponsiveMaster",
+    "rust": "mooncake-store-client/src/client/tests.rs:cpp_parity_rpc_timeout_test_cpp_rpctimeouttest_rpctimesoutagainstunresponsivemaster_4ef20575",
+    "first_divergence": "The existing Rust test injected a timeout directly into one tonic request after connection, so it did not prove MC_RPC_TIMEOUT_MS is read before a full production client bootstrap or that the resulting bootstrap failure is classified as RpcTimeout.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib cpp_parity_rpc_timeout_test_cpp_rpctimeouttest_rpctimesoutagainstunresponsivemaster_4ef20575 -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-rpc-timeout-goal-019fbaa7.typescript"
   }
 ]

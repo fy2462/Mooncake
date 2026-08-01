@@ -7,6 +7,7 @@ use super::read::scoped_cache_key;
 use super::{CachedQueryResultResponse, ClientHttpConfig, MooncakeClient, proto};
 use mooncake_store_core::{ReplicaDescriptor, ReplicaType, ReplicateConfig, StoreError};
 use std::ffi::c_void;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -172,6 +173,68 @@ async fn rpc_request_timeout_bounds_unresponsive_master() {
     assert!(
         elapsed < Duration::from_secs(1),
         "request exceeded its bounded deadline: {elapsed:?}"
+    );
+}
+
+#[test]
+fn rpc_timeout_production_client_subprocess_helper() {
+    let Ok(master_addr) = std::env::var("MOONCAKE_RPC_TIMEOUT_HELPER_MASTER") else {
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async move {
+        let timeout = Duration::from_millis(200);
+        let started = Instant::now();
+        let result = MooncakeClient::create(
+            &master_addr,
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "rpc_only",
+            "",
+            0,
+            0,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("black-hole master unexpectedly created a client"),
+        };
+        let elapsed = started.elapsed();
+
+        assert!(matches!(error, StoreError::RpcTimeout(_)), "{error:?}");
+        assert!(
+            elapsed >= timeout - Duration::from_millis(50),
+            "production client returned before configured timeout: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "production client exceeded bounded timeout: {elapsed:?}"
+        );
+    });
+}
+
+#[test]
+fn cpp_parity_rpc_timeout_test_cpp_rpctimeouttest_rpctimesoutagainstunresponsivemaster_4ef20575() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let master_addr = listener.local_addr().unwrap().to_string();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg("client::tests::rpc_timeout_production_client_subprocess_helper")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env("MOONCAKE_RPC_TIMEOUT_HELPER_MASTER", master_addr)
+        .env("MC_RPC_TIMEOUT_MS", "200")
+        .env("MC_RPC_CONNECT_TIMEOUT_MS", "1000")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "timeout helper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
