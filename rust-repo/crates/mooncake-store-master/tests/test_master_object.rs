@@ -151,6 +151,52 @@ async fn mount_put_start_parity_nof_segment(
     .unwrap();
 }
 
+async fn start_memory_nof_parity_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    memory_segment: &str,
+    nof_segment: &str,
+) {
+    let response = MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 1,
+                preferred_segment: memory_segment.into(),
+                preferred_nof_segments: vec![nof_segment.into()],
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.replicas.len(), 2);
+}
+
+async fn get_memory_nof_parity_replicas(
+    service: &MasterServiceImpl,
+    key: &str,
+) -> Vec<proto::ReplicaDescriptor> {
+    MasterService::get_replica_list(
+        service,
+        Request::new(proto::GetReplicaListRequest {
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas
+}
+
 #[tokio::test]
 async fn put_start_invalid_parameter_matrix_parity() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
@@ -275,6 +321,104 @@ async fn one_plus_one_flexible_mode_also_allows_available_nof_only() {
         response.replicas[0].replica_type,
         proto::replica_descriptor::ReplicaType::NofSsd as i32
     );
+}
+
+#[tokio::test]
+async fn put_end_all_completes_memory_and_nof_replicas_parity() {
+    use proto::replica_descriptor::{ReplicaStatus as Status, ReplicaType as Type};
+
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_put_start_parity_segment(&service, client_id, "put-end-all-memory:3333").await;
+    mount_put_start_parity_nof_segment(&service, client_id, "put-end-all-nof:3333").await;
+    start_memory_nof_parity_object(
+        &service,
+        client_id,
+        "put-end-all-key",
+        "put-end-all-memory:3333",
+        "put-end-all-nof:3333",
+    )
+    .await;
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "put-end-all-key".into(),
+            replica_type: Type::All as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let replicas = get_memory_nof_parity_replicas(&service, "put-end-all-key").await;
+    assert!(replicas.iter().any(|replica| {
+        replica.replica_type == Type::Memory as i32
+            && replica.status == Status::Complete as i32
+    }));
+    assert!(replicas.iter().any(|replica| {
+        replica.replica_type == Type::NofSsd as i32
+            && replica.status == Status::Complete as i32
+    }));
+}
+
+#[tokio::test]
+async fn memory_put_end_leaves_nof_revokeable_parity() {
+    use proto::replica_descriptor::{ReplicaStatus as Status, ReplicaType as Type};
+
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_put_start_parity_segment(&service, client_id, "split-put-end-memory:3333").await;
+    mount_put_start_parity_nof_segment(&service, client_id, "split-put-end-nof:3333").await;
+    start_memory_nof_parity_object(
+        &service,
+        client_id,
+        "split-put-end-key",
+        "split-put-end-memory:3333",
+        "split-put-end-nof:3333",
+    )
+    .await;
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "split-put-end-key".into(),
+            replica_type: Type::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let memory_only = get_memory_nof_parity_replicas(&service, "split-put-end-key").await;
+    assert_eq!(memory_only.len(), 1);
+    assert_eq!(memory_only[0].replica_type, Type::Memory as i32);
+    assert_eq!(memory_only[0].status, Status::Complete as i32);
+
+    MasterService::put_revoke(
+        &service,
+        Request::new(proto::PutRevokeRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "split-put-end-key".into(),
+            replica_type: Type::NofSsd as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let final_replicas = get_memory_nof_parity_replicas(&service, "split-put-end-key").await;
+    assert_eq!(final_replicas.len(), 1);
+    assert_eq!(final_replicas[0].replica_type, Type::Memory as i32);
+    assert_eq!(final_replicas[0].status, Status::Complete as i32);
 }
 
 #[tokio::test]
