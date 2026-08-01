@@ -270,6 +270,89 @@ fn test_etcd_keeps_legacy_put_end_marker_untyped() {
 }
 
 #[test]
+fn cpp_parity_localfs_init_creates_durable_structure_without_eager_snapshots() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("oplog");
+    assert!(!root.exists());
+
+    let store = LocalFsOpLogStore::new(&root, 100).unwrap();
+
+    assert!(root.is_dir());
+    assert_eq!(std::fs::read_to_string(root.join("latest")).unwrap(), "0");
+    assert!(!root.join("snapshots").exists());
+    assert_eq!(store.latest_sequence(), 0);
+}
+
+#[test]
+fn cpp_parity_localfs_fresh_store_persists_latest_zero() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("oplog");
+
+    let store = LocalFsOpLogStore::new(&root, 100).unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("latest")).unwrap(), "0");
+    drop(store);
+
+    let reopened = LocalFsOpLogStore::new(&root, 100).unwrap();
+    assert_eq!(reopened.latest_sequence(), 0);
+    assert_eq!(std::fs::read_to_string(root.join("latest")).unwrap(), "0");
+}
+
+#[test]
+fn cpp_parity_localfs_init_removes_only_owned_stale_temp_files() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("oplog");
+    std::fs::create_dir(&root).unwrap();
+    let stale_segment = root.join("oplog_00000000000000000001.tmp");
+    let unrelated = root.join("keep.tmp");
+    std::fs::write(&stale_segment, b"partial segment").unwrap();
+    std::fs::write(&unrelated, b"caller-owned").unwrap();
+
+    LocalFsOpLogStore::new(&root, 100).unwrap();
+
+    assert!(!stale_segment.exists());
+    assert_eq!(std::fs::read(&unrelated).unwrap(), b"caller-owned");
+    assert_eq!(std::fs::read_to_string(root.join("latest")).unwrap(), "0");
+}
+
+#[cfg(unix)]
+#[test]
+fn localfs_unremovable_stale_temp_does_not_block_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("oplog");
+    std::fs::create_dir(&root).unwrap();
+    let stale_segment = root.join("oplog_00000000000000000001.tmp");
+    std::fs::write(&stale_segment, b"partial segment").unwrap();
+    std::fs::write(root.join("latest"), b"0").unwrap();
+
+    let mut permissions = std::fs::metadata(&root).unwrap().permissions();
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(&root, permissions).unwrap();
+    let write_probe = root.join("write-probe");
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&write_probe)
+        .is_ok()
+    {
+        let mut permissions = std::fs::metadata(&root).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&root, permissions).unwrap();
+        std::fs::remove_file(write_probe).unwrap();
+        return;
+    }
+    let result = LocalFsOpLogStore::new(&root, 100);
+    let mut permissions = std::fs::metadata(&root).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&root, permissions).unwrap();
+
+    let store = result.expect("stale-temp cleanup failure must not block recovery");
+    assert_eq!(store.latest_sequence(), 0);
+    assert!(stale_segment.exists());
+}
+
+#[test]
 fn test_local_fs_append_and_read() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LocalFsOpLogStore::new(dir.path(), 100).unwrap();
@@ -385,6 +468,11 @@ fn test_local_fs_reads_legacy_v1_segment() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].producer_view_version, 0);
     assert_eq!(entries[1].payload, "two");
+    assert_eq!(store.latest_sequence(), 2);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("latest")).unwrap(),
+        "2"
+    );
 }
 
 #[test]

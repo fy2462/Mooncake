@@ -1046,5 +1046,32 @@
     "focused_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_hot_cache_ -- --nocapture",
     "crate_command": "<native-link-env> cargo test -p mooncake-store-client --features link-native --test test_hot_cache --test test_client_inproc_e2e",
     "evidence": "/tmp/mooncake-hot-cache-token-batch-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.InitCreatesDirectoryStructure",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_init_creates_durable_structure_without_eager_snapshots",
+    "first_divergence": "Rust created the LocalFS oplog root but did not persist an initial latest marker, so fresh writer topology was not durable or directly observable.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.InitWriterCreatesLatestFile",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_fresh_store_persists_latest_zero",
+    "first_divergence": "Rust kept the fresh sequence zero only in memory and left the literal latest file absent until the first durable advancement.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.InitCleansTmpFiles",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_localfs_init_removes_only_owned_stale_temp_files",
+    "first_divergence": "Rust recovery ignored crash-left segment temporary files instead of removing recognized atomic-write artifacts during initialization.",
+    "repair_commit": "PENDING",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_localfs_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog && cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-init-goal-019fbca4.typescript"
   }
 ]

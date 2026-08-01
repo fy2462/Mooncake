@@ -44,6 +44,7 @@ impl LocalFsOpLogStore {
     pub fn new(dir: &Path, max_entries_per_segment: usize) -> Result<Self, HaError> {
         fs::create_dir_all(dir)
             .map_err(|e| HaError::InvalidBackend(format!("oplog dir create: {e}")))?;
+        Self::cleanup_stale_temp_files(dir);
 
         let dir_buf = dir.to_path_buf();
 
@@ -57,7 +58,68 @@ impl LocalFsOpLogStore {
         };
         // Recover latest sequence from existing segment files
         store.recover()?;
+        if !store
+            .latest_path()
+            .try_exists()
+            .map_err(|e| HaError::InvalidBackend(format!("oplog inspect latest: {e}")))?
+        {
+            store.write_latest(store.last_seq)?;
+        }
         Ok(store)
+    }
+
+    fn cleanup_stale_temp_files(dir: &Path) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    path = %dir.display(),
+                    %error,
+                    "failed to inspect local oplog temporary files"
+                );
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to inspect local oplog directory entry");
+                    continue;
+                }
+            };
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let is_segment_temp = name
+                .strip_prefix("oplog_")
+                .and_then(|name| name.strip_suffix(".tmp"))
+                .is_some_and(|sequence| {
+                    sequence.len() == 20 && sequence.bytes().all(|byte| byte.is_ascii_digit())
+                });
+            let is_file = match entry.file_type() {
+                Ok(file_type) => file_type.is_file(),
+                Err(error) => {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        %error,
+                        "failed to inspect local oplog temporary file type"
+                    );
+                    continue;
+                }
+            };
+            if is_segment_temp && is_file {
+                let path = entry.path();
+                if let Err(error) = fs::remove_file(&path) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "failed to remove stale local oplog temporary file"
+                    );
+                }
+            }
+        }
     }
 
     /// Recover last_seq from existing segment files: scan for the highest-
