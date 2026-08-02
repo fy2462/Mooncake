@@ -33,6 +33,14 @@ fn test_parse_k8s_lease_connstring_rejects_invalid_values() {
 }
 
 #[test]
+fn cpp_parity_high_availability_k8s_test_highavailabilitytest_k8sconnstringemptyisrejected() {
+    assert!(matches!(
+        parse_k8s_lease_connstring_for_test("/"),
+        Err(HaError::InvalidParams(_))
+    ));
+}
+
+#[test]
 fn test_k8s_lease_expiration_uses_renew_time_and_ttl() {
     let now = chrono::Utc::now();
     let fresh = LeaseSpec {
