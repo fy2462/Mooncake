@@ -2363,6 +2363,15 @@ mod tests {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
+    const CPP_VERSIONED_MSGPACK_PAYLOAD_BASE64: &str = concat!(
+        "TUNPUE1FVEExiKJvcKdwdXRfZW5ko2tlea10ZW5hbnQtYS9rZXkxpHNpemXNEACpY2xpZW50X2lk",
+        "2SQwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDGpdGVuYW50X2lkqHRlbmFudC1h",
+        "qGdyb3VwX2lkp2dyb3VwLWGodXNlcl9rZXmka2V5MahyZXBsaWNhc5GKqnNlZ21lbnRfaWTZJDAwMDAw",
+        "MDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMqxzZWdtZW50X25hbWWrbm9kZS1hOjEyMzSm",
+        "b2Zmc2V0zICkc2l6Zc0QAKZzdGF0dXOoQ29tcGxldGWscmVwbGljYV90eXBlpk1lbW9yebBob2xk",
+        "ZXJfY2xpZW50X2lk2SQwMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDGmcmVmY250",
+        "AKxoYW5kbGVfdmFsaWTDqWJhc2VfYWRkcs0gAA==",
+    );
 
     fn cpp_wire_record(sequence_id: u64, op_type: u8) -> OpLogRecord {
         cpp_wire_record_for_key(sequence_id, op_type, "key1")
@@ -2394,6 +2403,14 @@ mod tests {
     }
 
     fn cpp_put_end_wire_record_with_payload(sequence_id: u64, payload_bytes: &[u8]) -> OpLogRecord {
+        cpp_put_end_wire_record_for_key_with_payload(sequence_id, "key1", payload_bytes)
+    }
+
+    fn cpp_put_end_wire_record_for_key_with_payload(
+        sequence_id: u64,
+        key: &str,
+        payload_bytes: &[u8],
+    ) -> OpLogRecord {
         use crate::oplog::test_support::{
             CppWireTestEntry, TEST_CPP_OP_PUT_END, compute_cpp_checksum_for_test,
             compute_cpp_prefix_hash_for_test, deserialize_etcd_value_for_test,
@@ -2405,10 +2422,10 @@ mod tests {
             sequence_id,
             timestamp_ms: 1,
             op_type: TEST_CPP_OP_PUT_END,
-            object_key: "key1".to_string(),
+            object_key: key.to_string(),
             payload: BASE64_STANDARD.encode(payload_bytes),
             checksum: compute_cpp_checksum_for_test(payload_bytes),
-            prefix_hash: compute_cpp_prefix_hash_for_test("key1"),
+            prefix_hash: compute_cpp_prefix_hash_for_test(key),
         };
         deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap()
     }
@@ -2786,6 +2803,98 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend_versionedmsgpackpayload()
+     {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let state = make_state();
+        let client_id = Uuid::from_u128(1);
+        let segment_id = Uuid::from_u128(2);
+        insert_memory_segment_with_transport(
+            &state,
+            segment_id,
+            client_id,
+            "node-a:1234",
+            8192,
+            8192,
+            "tcp",
+        );
+        let applier = OpLogApplier::new(state.clone());
+        let payload = BASE64_STANDARD
+            .decode(CPP_VERSIONED_MSGPACK_PAYLOAD_BASE64)
+            .unwrap();
+        assert_eq!(payload.len(), 373);
+
+        let record = cpp_put_end_wire_record_for_key_with_payload(1, "tenant-a/key1", &payload);
+        assert_eq!(applier.apply_op_log_entries(&[record]), 1);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert_eq!(state.objects.len(), 1);
+        let object = state.objects.get("tenant-a\0key1").unwrap();
+        assert_eq!(object.client_id, client_id);
+        assert_eq!(object.size, 4096);
+        assert_eq!(object.tenant_id.as_str(), "tenant-a");
+        assert_eq!(object.group_id, "group-a");
+        assert_eq!(object.user_key, "key1");
+        assert_eq!(object.replicas.len(), 1);
+        let replica = &object.replicas[0];
+        assert_eq!(replica.segment_id, segment_id);
+        assert_eq!(replica.segment_name, "node-a:1234");
+        assert_eq!(replica.offset, 128);
+        assert_eq!(replica.size, 4096);
+        assert_eq!(replica.status, ReplicaStatus::Complete);
+        assert_eq!(replica.replica_type, ReplicaType::Memory);
+        assert_eq!(replica.holder_client_id, Some(client_id));
+        assert_eq!(replica.refcnt, 0);
+        assert!(!replica.handle_valid);
+        assert_eq!(replica.base_addr, 0);
+        assert!(replica.protocol.is_empty());
+        assert_eq!(state.allocator.read().used_bytes(&segment_id), Some(4096));
+        let segment = state.segments.get(&segment_id).unwrap();
+        assert_eq!(segment.segment.base, 8192);
+        assert_eq!(segment.segment.protocol, "tcp");
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_batch() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let entries = (1..=3)
+            .map(|sequence| {
+                cpp_wire_record_for_key(sequence, TEST_CPP_OP_PUT_END, &format!("key{sequence}"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(applier.apply_op_log_entries(&entries), 3);
+        assert_eq!(applier.get_expected_sequence_id(), 4);
+        assert_eq!(state.objects.len(), 3);
+        for key in ["key1", "key2", "key3"] {
+            assert!(state.objects.contains_key(&format!("default\0{key}")));
+        }
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_withgaps()
+    {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let entries = [1, 3, 2].map(|sequence| {
+            cpp_wire_record_for_key(sequence, TEST_CPP_OP_PUT_END, &format!("key{sequence}"))
+        });
+
+        assert_eq!(applier.apply_op_log_entries(&entries), 3);
+        assert_eq!(applier.get_expected_sequence_id(), 4);
+        assert_eq!(state.objects.len(), 3);
+        for key in ["key1", "key2", "key3"] {
+            assert!(state.objects.contains_key(&format!("default\0{key}")));
+        }
+    }
+
+    #[test]
     fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_success()
     {
         use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
@@ -3082,13 +3191,27 @@ mod tests {
     }
 
     fn insert_memory_segment(state: &MasterState, segment_id: Uuid, client_id: Uuid, size: u64) {
+        insert_memory_segment_with_transport(
+            state, segment_id, client_id, "seg-a", 4096, size, "rdma",
+        );
+    }
+
+    fn insert_memory_segment_with_transport(
+        state: &MasterState,
+        segment_id: Uuid,
+        client_id: Uuid,
+        name: &str,
+        base: u64,
+        size: u64,
+        protocol: &str,
+    ) {
         let segment = Segment {
             id: segment_id,
-            name: "seg-a".to_string(),
-            base: 4096,
+            name: name.to_string(),
+            base,
             size,
             te_endpoint: String::new(),
-            protocol: "rdma".to_string(),
+            protocol: protocol.to_string(),
             host_id: String::new(),
         };
         state.segments.insert(

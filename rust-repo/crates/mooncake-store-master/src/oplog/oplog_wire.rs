@@ -274,8 +274,26 @@ pub(super) fn decode_put_end_msgpack_typed(
         .strip_prefix(PUT_END_MSGPACK_MAGIC_V2)
         .or_else(|| bytes.strip_prefix(PUT_END_MSGPACK_MAGIC_V1))
         .ok_or_else(|| HaError::InvalidBackend("put_end msgpack magic mismatch".into()))?;
-    let payload: PutEndMetadataPayloadV2 = rmp_serde::from_slice(body)
-        .map_err(|e| HaError::InvalidBackend(format!("put_end msgpack decode: {e}")))?;
+    let payload: PutEndMetadataPayloadV2 = match rmp_serde::from_slice(body) {
+        Ok(payload) => payload,
+        Err(typed_error) if bytes.starts_with(PUT_END_MSGPACK_MAGIC_V1) => {
+            let value: serde_json::Value = rmp_serde::from_slice(body).map_err(|value_error| {
+                HaError::InvalidBackend(format!(
+                    "put_end msgpack decode: {typed_error}; compatibility decode: {value_error}"
+                ))
+            })?;
+            serde_json::from_value(value).map_err(|compatibility_error| {
+                HaError::InvalidBackend(format!(
+                    "put_end msgpack decode: {typed_error}; compatibility mapping: {compatibility_error}"
+                ))
+            })?
+        }
+        Err(error) => {
+            return Err(HaError::InvalidBackend(format!(
+                "put_end msgpack decode: {error}"
+            )));
+        }
+    };
     recover_object_identity(&payload.key, &payload.tenant_id, &payload.user_key)?;
     Ok(payload)
 }
