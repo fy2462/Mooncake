@@ -809,6 +809,98 @@ fn test_oplog_size_validation_matches_cpp_limits() {
 }
 
 #[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testchecksumcomputation() {
+    let checksum_x1 = compute_cpp_checksum_for_test(b"payload-X");
+    let checksum_x2 = compute_cpp_checksum_for_test(b"payload-X");
+    let checksum_y = compute_cpp_checksum_for_test(b"payload-Y");
+
+    assert_eq!(checksum_x1, checksum_x2);
+    assert_ne!(checksum_x1, checksum_y);
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testprefixhashcomputation() {
+    let same_key_v1 = compute_cpp_prefix_hash_for_test("same-key");
+    let same_key_v2 = compute_cpp_prefix_hash_for_test("same-key");
+    let other_key = compute_cpp_prefix_hash_for_test("other-key");
+
+    assert_eq!(same_key_v1, same_key_v2);
+    assert_ne!(same_key_v1, other_key);
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_valid() {
+    let wire = CppWireTestEntry {
+        sequence_id: 1,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "normal-key".to_string(),
+        payload: BASE64_STANDARD.encode(b"small-payload"),
+        checksum: compute_cpp_checksum_for_test(b"small-payload"),
+        prefix_hash: compute_cpp_prefix_hash_for_test("normal-key"),
+    };
+
+    assert!(validate_wire_entry_size_for_test(wire).is_ok());
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_keytoolarge() {
+    let oversized_key = "k".repeat(TEST_MAX_OBJECT_KEY_SIZE + 1);
+    let wire = CppWireTestEntry {
+        sequence_id: 1,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: oversized_key.clone(),
+        payload: BASE64_STANDARD.encode(b"payload"),
+        checksum: compute_cpp_checksum_for_test(b"payload"),
+        prefix_hash: compute_cpp_prefix_hash_for_test(&oversized_key),
+    };
+
+    let error = validate_wire_entry_size_for_test(wire).unwrap_err();
+    assert!(error.to_string().contains(&format!(
+        "oplog object key too large: {}",
+        oversized_key.len()
+    )));
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_payloadtoolarge()
+ {
+    let oversized_payload = vec![b'p'; TEST_MAX_PAYLOAD_SIZE + 1];
+    let wire = CppWireTestEntry {
+        sequence_id: 1,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "key".to_string(),
+        payload: BASE64_STANDARD.encode(&oversized_payload),
+        checksum: compute_cpp_checksum_for_test(&oversized_payload),
+        prefix_hash: compute_cpp_prefix_hash_for_test("key"),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+    assert!(error.to_string().contains(&format!(
+        "oplog payload too large: {}",
+        oversized_payload.len()
+    )));
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_emptykey() {
+    let wire = CppWireTestEntry {
+        sequence_id: 1,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: String::new(),
+        payload: BASE64_STANDARD.encode(b"ordinary-payload"),
+        checksum: compute_cpp_checksum_for_test(b"ordinary-payload"),
+        prefix_hash: compute_cpp_prefix_hash_for_test(""),
+    };
+
+    assert!(validate_wire_entry_size_for_test(wire).is_ok());
+}
+
+#[test]
 fn test_etcd_oplog_entry_key_matches_cpp_format() {
     let key = format_etcd_entry_key_for_test("/oplog/cluster-a", 42);
     assert_eq!(key, "/oplog/cluster-a/00000000000000000042");
