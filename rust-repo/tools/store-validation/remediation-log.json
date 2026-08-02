@@ -2981,5 +2981,41 @@
     "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentry_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-oplog-applier-validation-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestRecover",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testrecover",
+    "first_divergence": "Rust implemented base-sequence recovery but lacked one direct test for the exact recover-ten, apply-eleven, expected-twelve C++ sequence.",
+    "repair_commit": "30a1f466",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testrecover -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-recovery-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestRecover_ZeroSequenceId",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testrecover_zerosequenceid",
+    "first_divergence": "Rust implemented the zero recovery boundary but lacked a direct recover-zero then golden-sequence-one application oracle.",
+    "repair_commit": "30a1f466",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testrecover -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-recovery-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestRecover_AfterGap",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testrecover_aftergap",
+    "first_divergence": "Rust clears pending entries during recovery while C++ retains them, and no test isolated their shared weak oracle that Recover(3) sets expected sequence four after a gap.",
+    "repair_commit": "30a1f466",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testrecover -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-recovery-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestProcessPendingEntries",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoutoforder",
+    "first_divergence": "The manifest did not connect the exact golden-wire out-of-order test to the complete blocked-then-contiguous pending-drain state oracle.",
+    "repair_commit": "30a1f466",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoutoforder -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-recovery-goal-019fbe77.typescript"
   }
 ]
