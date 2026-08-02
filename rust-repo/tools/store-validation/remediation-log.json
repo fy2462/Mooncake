@@ -3044,5 +3044,59 @@
     "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentries_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-oplog-applier-msgpack-batch-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestChecksumComputation",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testchecksumcomputation",
+    "first_divergence": "Rust had the production seeded XXH32 helper but no discoverable exact equal-payload and different-payload matrix matching the C++ oracle.",
+    "repair_commit": "514971da",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestPrefixHashComputation",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testprefixhashcomputation",
+    "first_divergence": "Rust had the production prefix-hash helper but no discoverable exact equal-key and different-key matrix matching the C++ oracle.",
+    "repair_commit": "514971da",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestValidateEntrySize_Valid",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_valid",
+    "first_divergence": "Rust had isolated size rejection coverage but no positive production-validator test for the exact normal-key and small-payload pair.",
+    "repair_commit": "514971da",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestValidateEntrySize_KeyTooLarge",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_keytoolarge",
+    "first_divergence": "Rust's existing isolated 4097-byte-key rejection did not assert the C++ oracle's meaningful nonempty reason with the exact rejected length.",
+    "repair_commit": "514971da",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestValidateEntrySize_PayloadTooLarge",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_payloadtoolarge",
+    "first_divergence": "Rust lacked a direct production-deserializer oracle for a decoded 10 MiB plus one payload, including its exact nonempty length reason across base64 rounding.",
+    "repair_commit": "514971da",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestValidateEntrySize_EmptyKey",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentrysize_emptykey",
+    "first_divergence": "Rust had no direct acceptance test proving that the production upper-bound-only wire-size validator permits an empty key without claiming it is an applicable object identity.",
+    "repair_commit": "514971da",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
   }
 ]
