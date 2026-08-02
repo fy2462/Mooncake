@@ -2046,10 +2046,10 @@
       "behavior": "Writing then reading a C++ oplog entry preserves its sequence, type, key, and payload through serialization and etcd persistence.",
       "boundary": ["master", "ha", "etcd", "shared-oplog", "serialization", "durable-round-trip"],
       "reference": {"file": "ha/oplog/etcd_oplog_store_test.cpp", "test": "EtcdOpLogStoreTest.TestSerializeDeserializeRoundTrip"},
-      "reason": "Rust test_etcd_oplog_value_writes_cpp_outer_json_for_put_end covers a different direct structured payload/wire mapping, not this opaque C++ entry's service-backed WriteOpLog/ReadOpLog round trip.",
-      "review": {"oracle": "etcd_oplog_store_test.cpp TestSerializeDeserializeRoundTrip and EtcdOpLogStore::WriteOpLog/ReadOpLog plus oplog_serializer; Rust tests/test_oplog.rs test_etcd_oplog_value_writes_cpp_outer_json_for_put_end", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Against live etcd, Rust durably persists a sequence-42-equivalent PUT_END roundtrip-key/roundtrip-value record through the production serializer and reads it through the production deserializer, asserting exact sequence, operation, key, and payload.",
+      "review": {"oracle": "etcd_oplog_store_test.cpp TestSerializeDeserializeRoundTrip and EtcdOpLogStore::WriteOpLog/ReadOpLog plus oplog_serializer; Rust test_etcd_oplog_live.rs", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_etcd_oplog_live.rs", "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testserializedeserializeroundtrip"}],
+      "status": "covered"
     },
     {
       "behavior": "A malformed JSON value planted at sequence 77 causes the subsequent oplog read to return INTERNAL_ERROR.",
@@ -2082,10 +2082,10 @@
       "behavior": "After writes of sequences 1 and 2, the persisted latest sequence reads as 2.",
       "boundary": ["master", "ha", "etcd", "shared-oplog", "latest-pointer"],
       "reference": {"file": "ha/oplog/etcd_oplog_store_test.cpp", "test": "EtcdOpLogStoreTest.TestGetLatestSequenceId"},
-      "reason": "Rust latest_sequence_parser_is_fail_closed only parses an injected value; no discoverable real-etcd lifecycle test writes entries then observes latest 2.",
-      "review": {"oracle": "etcd_oplog_store_test.cpp TestGetLatestSequenceId and EtcdOpLogStore::GetLatestSequenceId; Rust oplog_etcd.rs latest_sequence_parser_is_fail_closed", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Against live etcd, Rust durably flushes two entries through the production fenced writer and reads the literal persisted /latest value 2 directly from etcd.",
+      "review": {"oracle": "etcd_oplog_store_test.cpp TestGetLatestSequenceId and EtcdOpLogStore::GetLatestSequenceId; Rust test_etcd_oplog_live.rs and oplog_etcd.rs flush_unpoisoned", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_etcd_oplog_live.rs", "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testgetlatestsequenceid"}],
+      "status": "covered"
     },
     {
       "behavior": "An empty oplog reports entry-not-found for maximum sequence, and after writes 10 through 15 the maximum reads as 15.",
@@ -2136,10 +2136,10 @@
       "behavior": "Cleaning before sequence 100 on an empty oplog succeeds.",
       "boundary": ["master", "ha", "etcd", "shared-oplog", "cleanup", "empty-state"],
       "reference": {"file": "ha/oplog/etcd_oplog_store_test.cpp", "test": "EtcdOpLogStoreTest.TestCleanupOpLogBefore_Empty"},
-      "reason": "No discoverable Rust EtcdOpLogStore test asserts successful empty-range deletion against etcd.",
-      "review": {"oracle": "etcd_oplog_store_test.cpp TestCleanupOpLogBefore_Empty and EtcdOpLogStore::CleanupOpLogBefore; Rust oplog_etcd.rs cleanup_before", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Against a unique empty live-etcd namespace, Rust executes the production revision-fenced cleanup_before(100) transaction successfully and confirms the oplog remains empty.",
+      "review": {"oracle": "etcd_oplog_store_test.cpp TestCleanupOpLogBefore_Empty and EtcdOpLogStore::CleanupOpLogBefore; Rust test_etcd_oplog_live.rs and oplog_etcd.rs cleanup_before", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_etcd_oplog_live.rs", "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcleanupoplogbefore_empty"}],
+      "status": "covered"
     },
     {
       "behavior": "A cluster identifier containing an embedded slash is rejected during store construction with the Invalid cluster_id failure.",
@@ -2154,28 +2154,28 @@
       "behavior": "A cluster identifier with trailing slashes normalizes to the same namespace, so an entry written through the normalized store is readable through the original store.",
       "boundary": ["master", "ha", "etcd", "shared-oplog", "namespace-normalization", "cross-instance"],
       "reference": {"file": "ha/oplog/etcd_oplog_store_test.cpp", "test": "EtcdOpLogStoreTest.TestClusterIdNormalization"},
-      "reason": "Rust new_inner trims trailing slashes, but no discoverable test asserts normalization or proves cross-instance durable namespace sharing; the key-format unit is source-only support.",
-      "review": {"oracle": "etcd_oplog_store_test.cpp TestClusterIdNormalization and EtcdOpLogStore constructor/BuildOpLogKey; Rust oplog_etcd.rs new_inner/format_entry_key", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Against live etcd, Rust constructs a revision-fenced writer with three trailing slashes, durably writes exact sequence 999 PUT_END norm-key/norm-val, and reads the complete operation/key/payload through the normalized no-slash instance.",
+      "review": {"oracle": "etcd_oplog_store_test.cpp TestClusterIdNormalization and EtcdOpLogStore constructor/BuildOpLogKey; Rust test_etcd_oplog_live.rs and oplog_etcd.rs new_inner/format_entry_key", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_etcd_oplog_live.rs", "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testclusteridnormalization"}],
+      "status": "covered"
     },
     {
       "behavior": "A range read of 20 persisted entries with limit 20 returns all entries ordered from sequence 1 through 20.",
       "boundary": ["master", "ha", "etcd", "shared-oplog", "range-limit", "ordering", "pagination"],
       "reference": {"file": "ha/oplog/etcd_oplog_store_test.cpp", "test": "EtcdOpLogStoreTest.TestReadOpLogSince_Pagination"},
-      "reason": "No discoverable Rust real-etcd test asserts multi-entry durable range ordering under this limit; this C++ test issues one range but still proves ordered persisted retrieval.",
-      "review": {"oracle": "etcd_oplog_store_test.cpp TestReadOpLogSince_Pagination and EtcdOpLogStore::ReadOpLogSinceWithRevision; Rust oplog_etcd.rs read_since_with_revision_async", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Against live etcd, Rust durably persists 20 entries, reads with limit 20 through the production range path, and asserts exact cardinality and ordered sequences 1 through 20.",
+      "review": {"oracle": "etcd_oplog_store_test.cpp TestReadOpLogSince_Pagination and EtcdOpLogStore::ReadOpLogSinceWithRevision; Rust test_etcd_oplog_live.rs and oplog_etcd.rs read_since_with_revision_async", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_etcd_oplog_live.rs", "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_pagination"}],
+      "status": "covered"
     },
     {
       "behavior": "From 200 persisted entries, a range read with limit 150 returns exactly ordered sequences 1 through 150.",
       "boundary": ["master", "ha", "etcd", "shared-oplog", "range-limit", "ordering", "large-dataset"],
       "reference": {"file": "ha/oplog/etcd_oplog_store_test.cpp", "test": "EtcdOpLogStoreTest.TestReadOpLogSince_LargeDataset"},
-      "reason": "No discoverable Rust real-etcd test covers a large durable ordered range with this limit; read_since_with_revision_async source alone is insufficient coverage.",
-      "review": {"oracle": "etcd_oplog_store_test.cpp TestReadOpLogSince_LargeDataset and EtcdOpLogStore::ReadOpLogSinceWithRevision; Rust oplog_etcd.rs read_since_with_revision_async", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Against live etcd, Rust durably persists 200 entries in transaction-sized batches, reads with limit 150 through the production range path, and asserts exact cardinality and ordered sequences 1 through 150.",
+      "review": {"oracle": "etcd_oplog_store_test.cpp TestReadOpLogSince_LargeDataset and EtcdOpLogStore::ReadOpLogSinceWithRevision; Rust test_etcd_oplog_live.rs and oplog_etcd.rs read_since_with_revision_async", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_etcd_oplog_live.rs", "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_largedataset"}],
+      "status": "covered"
     },
     {
       "behavior": "A snapshot at sequence 10 establishes expected sequence 11; replaying shared-oplog entries 11 through 20 produces 20 objects and expected sequence 21.",

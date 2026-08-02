@@ -39,6 +39,7 @@ fn put_end_record(view: u64, key: &str, payload: &str) -> OpLogRecord {
 struct LiveEtcdFixture {
     client: etcd_client::Client,
     prefix: String,
+    election_key: String,
     view: u64,
     store: EtcdOpLogStore,
 }
@@ -67,12 +68,13 @@ impl LiveEtcdFixture {
                 .revision(),
         )
         .expect("positive etcd revision");
-        let store = EtcdOpLogStore::new_leader(client.clone(), &prefix, election_key, view)
+        let store = EtcdOpLogStore::new_leader(client.clone(), &prefix, election_key.clone(), view)
             .await
             .expect("create fenced etcd oplog writer");
         Some(Self {
             client,
             prefix,
+            election_key,
             view,
             store,
         })
@@ -236,4 +238,158 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcl
         [3, 4, 5]
     );
     assert_eq!(fixture.latest_from_etcd().await, 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testserializedeserializeroundtrip()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("serializer-roundtrip").await else {
+        return;
+    };
+    fixture.store.update_latest_sequence_id(41).unwrap();
+    let sequence = fixture
+        .store
+        .append(&put_end_record(
+            fixture.view,
+            "roundtrip-key",
+            "roundtrip-value",
+        ))
+        .unwrap();
+    fixture.store.flush_async().await.unwrap();
+
+    let entries = fixture.store.read_since_async(42, 1).await.unwrap();
+    assert_eq!(sequence, 42);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, 42);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&entries[0].payload).unwrap(),
+        serde_json::json!({
+            "op": "put_end",
+            "schema_version": 1,
+            "key": "roundtrip-key",
+            "payload": "roundtrip-value"
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testgetlatestsequenceid()
+{
+    let Some(mut fixture) = LiveEtcdFixture::new("latest-two").await else {
+        return;
+    };
+    fixture
+        .store
+        .append(&opaque_record(fixture.view, "v1"))
+        .unwrap();
+    fixture
+        .store
+        .append(&opaque_record(fixture.view, "v2"))
+        .unwrap();
+    fixture.store.flush_async().await.unwrap();
+
+    assert_eq!(fixture.latest_from_etcd().await, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcleanupoplogbefore_empty()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("cleanup-empty").await else {
+        return;
+    };
+
+    fixture.store.cleanup_before(100).unwrap();
+
+    assert!(
+        fixture
+            .store
+            .read_since_async(1, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testclusteridnormalization()
+ {
+    let Some(fixture) = LiveEtcdFixture::new("prefix-normalization").await else {
+        return;
+    };
+    let trailing_prefix = format!("{}///", fixture.prefix);
+    let mut normalized_writer = EtcdOpLogStore::new_leader(
+        fixture.client.clone(),
+        &trailing_prefix,
+        fixture.election_key.clone(),
+        fixture.view,
+    )
+    .await
+    .unwrap();
+    normalized_writer.update_latest_sequence_id(998).unwrap();
+    let sequence = normalized_writer
+        .append(&put_end_record(fixture.view, "norm-key", "norm-val"))
+        .unwrap();
+    normalized_writer.flush_async().await.unwrap();
+
+    let entries = fixture.store.read_since_async(999, 1).await.unwrap();
+    assert_eq!(sequence, 999);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, 999);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&entries[0].payload).unwrap(),
+        serde_json::json!({
+            "op": "put_end",
+            "schema_version": 1,
+            "key": "norm-key",
+            "payload": "norm-val"
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_pagination()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("pagination-20").await else {
+        return;
+    };
+    for sequence in 1..=20 {
+        fixture
+            .store
+            .append(&opaque_record(fixture.view, &format!("value-{sequence}")))
+            .unwrap();
+    }
+    fixture.store.flush_async().await.unwrap();
+
+    let entries = fixture.store.read_since_async(1, 20).await.unwrap();
+    assert_eq!(entries.len(), 20);
+    for (index, entry) in entries.iter().enumerate() {
+        let sequence = u64::try_from(index).unwrap() + 1;
+        assert_eq!(entry.seq, sequence);
+        assert_eq!(entry.payload, format!("value-{sequence}"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_largedataset()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("large-dataset-200").await else {
+        return;
+    };
+    for sequence in 1..=200 {
+        fixture
+            .store
+            .append(&opaque_record(fixture.view, &format!("value-{sequence}")))
+            .unwrap();
+        if sequence % 100 == 0 {
+            fixture.store.flush_async().await.unwrap();
+        }
+    }
+
+    let entries = fixture.store.read_since_async(1, 150).await.unwrap();
+    assert_eq!(entries.len(), 150);
+    for (index, entry) in entries.iter().enumerate() {
+        let sequence = u64::try_from(index).unwrap() + 1;
+        assert_eq!(entry.seq, sequence);
+        assert_eq!(entry.payload, format!("value-{sequence}"));
+    }
 }
