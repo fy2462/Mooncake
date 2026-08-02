@@ -2756,5 +2756,14 @@
     "focused_command": "MOONCAKE_REDIS_E2E=1 MOONCAKE_REDIS_E2E_URL=redis://127.0.0.1:32768 cargo test -p mooncake-store-master --test test_redis_ha_live -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-redis-coordinator-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sConnstringEmptyIsRejected",
+    "rust": "mooncake-store-master/tests/test_coordinator.rs:cpp_parity_high_availability_k8s_test_highavailabilitytest_k8sconnstringemptyisrejected",
+    "first_divergence": "The existing invalid Kubernetes Lease connection-string matrix omitted the exact slash produced when both namespace and lease name are empty.",
+    "repair_commit": "a9be6461",
+    "focused_command": "cargo test -p mooncake-store-master --test test_coordinator cpp_parity_high_availability_k8s_test_highavailabilitytest_k8sconnstringemptyisrejected -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-k8s-empty-identity-goal-019fbe77.typescript"
   }
 ]
