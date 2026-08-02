@@ -2247,6 +2247,7 @@ impl OpLogApplier {
         let mut memory = SegmentAllocator::new()
             .with_strategy(state.runtime_config.allocation_strategy)
             .with_memory_allocator(state.runtime_config.memory_allocator_kind)
+            .try_with_offset_max_allocation_nodes(state.runtime_config.offset_max_allocation_nodes)?
             .with_cxl_capacity(if state.runtime_config.enable_cxl {
                 state.runtime_config.cxl_size
             } else {
@@ -2260,7 +2261,10 @@ impl OpLogApplier {
                     state.runtime_config.allocation_strategy
                 },
             )
-            .with_memory_allocator(state.runtime_config.memory_allocator_kind);
+            .with_memory_allocator(state.runtime_config.memory_allocator_kind)
+            .try_with_offset_max_allocation_nodes(
+                state.runtime_config.offset_max_allocation_nodes,
+            )?;
         let mut memory_used = HashMap::new();
         let mut nof_used = HashMap::new();
         let cxl_segment_ids = state

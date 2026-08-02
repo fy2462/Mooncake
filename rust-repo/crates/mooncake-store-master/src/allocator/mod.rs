@@ -84,6 +84,9 @@ struct OffsetSegmentState {
     /// equivalent of C++ `AllocatedBuffer` ownership and prevents a stale or
     /// duplicate descriptor from manufacturing free space.
     allocations: HashMap<u64, u64>,
+    /// Optional C++-compatible budget for all active partition nodes. Both
+    /// allocated ranges and free ranges consume one node.
+    max_allocation_nodes: Option<u64>,
 }
 
 /// The two possible memory layout modes within a segment.
@@ -134,6 +137,7 @@ pub struct SegmentAllocator {
     segments: HashMap<Uuid, SegmentState>,
     strategy: AllocationStrategy,
     memory_allocator_kind: MemoryAllocatorKind,
+    offset_max_allocation_nodes: Option<u64>,
     /// C++ mounts every client-visible `protocol=cxl` segment against one
     /// global allocator. Keeping a single state here prevents each client
     /// alias from multiplying the physical CXL capacity.
@@ -313,6 +317,7 @@ impl SegmentAllocator {
             segments: HashMap::new(),
             strategy: AllocationStrategy::Random,
             memory_allocator_kind: MemoryAllocatorKind::Offset,
+            offset_max_allocation_nodes: None,
             cxl_global: None,
         }
     }
@@ -326,9 +331,48 @@ impl SegmentAllocator {
 
     /// Builder method: set the memory allocator kind.
     /// 构建器方法：设置内存分配器类型。
-    pub fn with_memory_allocator(mut self, memory_allocator_kind: MemoryAllocatorKind) -> Self {
+    pub fn with_memory_allocator(self, memory_allocator_kind: MemoryAllocatorKind) -> Self {
+        self.try_with_memory_allocator(memory_allocator_kind)
+            .expect("invalid memory allocator configuration")
+    }
+
+    /// Fallible allocator-kind builder for configuration assembled in stages.
+    pub fn try_with_memory_allocator(
+        mut self,
+        memory_allocator_kind: MemoryAllocatorKind,
+    ) -> Result<Self, String> {
+        if self.offset_max_allocation_nodes.is_some()
+            && memory_allocator_kind != MemoryAllocatorKind::Offset
+        {
+            return Err("allocation node limits are only supported by Offset segments".to_string());
+        }
         self.memory_allocator_kind = memory_allocator_kind;
-        self
+        Ok(self)
+    }
+
+    /// Configure the C++-compatible active partition-node budget applied to
+    /// every Offset segment created or restored by this allocator.
+    pub fn try_with_offset_max_allocation_nodes(
+        mut self,
+        maximum: Option<u64>,
+    ) -> Result<Self, String> {
+        if maximum == Some(0) {
+            return Err("Offset maximum allocation node count must be positive".to_string());
+        }
+        if maximum.is_some() && self.memory_allocator_kind != MemoryAllocatorKind::Offset {
+            return Err("allocation node limits are only supported by Offset segments".to_string());
+        }
+        self.offset_max_allocation_nodes = maximum;
+        Ok(self)
+    }
+
+    /// Return the allocator choices that must remain stable across recovery.
+    pub fn snapshot_config(&self) -> AllocatorSnapshotConfig {
+        AllocatorSnapshotConfig {
+            allocation_strategy: self.strategy,
+            memory_allocator_kind: self.memory_allocator_kind,
+            offset_max_allocation_nodes: self.offset_max_allocation_nodes,
+        }
     }
 
     /// Configure the single physical CXL address space. Client mounts are
@@ -377,7 +421,7 @@ impl SegmentAllocator {
                 segment.id, segment.size, global_size
             ));
         }
-        self.add_segment(segment.clone(), 0, client_id);
+        self.try_add_segment(segment.clone(), 0, client_id)?;
         self.invalidate_segment_runtime(&segment.id)
     }
 
@@ -442,6 +486,9 @@ impl SegmentAllocator {
     ///   创建剩余未预留 slab，并分配默认 "main" 池。
     ///   剩余归入默认池。
     pub fn add_segment(&mut self, segment: Segment, used: u64, client_id: Uuid) {
+        if self.segments.contains_key(&segment.id) {
+            return;
+        }
         if segment.protocol == "cxl" {
             self.segments.insert(
                 segment.id,
@@ -454,6 +501,7 @@ impl SegmentAllocator {
                     layout: SegmentLayout::Offset(OffsetSegmentState {
                         free_ranges: Vec::new(),
                         allocations: HashMap::new(),
+                        max_allocation_nodes: None,
                     }),
                     client_id,
                     runtime_bound: true,
@@ -473,6 +521,7 @@ impl SegmentAllocator {
                     SegmentLayout::Offset(OffsetSegmentState {
                         free_ranges,
                         allocations: HashMap::new(),
+                        max_allocation_nodes: self.offset_max_allocation_nodes,
                     }),
                     used,
                 )
@@ -489,6 +538,21 @@ impl SegmentAllocator {
                 runtime_bound: true,
             },
         );
+    }
+
+    /// Register a segment without replacing an existing UUID.
+    pub fn try_add_segment(
+        &mut self,
+        segment: Segment,
+        used: u64,
+        client_id: Uuid,
+    ) -> Result<(), String> {
+        let segment_id = segment.id;
+        if self.segments.contains_key(&segment_id) {
+            return Err(format!("segment {segment_id} already exists"));
+        }
+        self.add_segment(segment, used, client_id);
+        Ok(())
     }
 
     /// Restore one segment from the exact set of live replica descriptors.
@@ -590,6 +654,33 @@ impl SegmentAllocator {
                     }
                     if cursor < segment.size {
                         free_ranges.push((cursor, segment.size - cursor));
+                    }
+                    let active_nodes = u64::try_from(replicas.len())
+                        .map_err(|_| {
+                            format!(
+                                "restored allocation count is not representable in segment {}",
+                                segment.id
+                            )
+                        })?
+                        .checked_add(u64::try_from(free_ranges.len()).map_err(|_| {
+                            format!(
+                                "restored free-range count is not representable in segment {}",
+                                segment.id
+                            )
+                        })?)
+                        .ok_or_else(|| {
+                            format!(
+                                "restored partition count overflow in segment {}",
+                                segment.id
+                            )
+                        })?;
+                    if let Some(maximum) = offset.max_allocation_nodes {
+                        if active_nodes > maximum {
+                            return Err(format!(
+                                "restored segment {} requires {active_nodes} allocation nodes, exceeding configured maximum {maximum}",
+                                segment.id
+                            ));
+                        }
                     }
                     offset.free_ranges = free_ranges;
                     offset.allocations = replicas

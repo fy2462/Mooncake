@@ -222,6 +222,7 @@ pub fn build_runtime_config(
             MemoryAllocatorKind::parse(&args.memory_allocator)
                 .ok_or("memory_allocator must be 'offset' or 'cachelib'")?
         },
+        offset_max_allocation_nodes: None,
         enable_cxl: args.enable_cxl,
         cxl_path: args.cxl_path.clone(),
         cxl_size: args.cxl_size,

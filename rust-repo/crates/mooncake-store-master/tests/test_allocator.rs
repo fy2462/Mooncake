@@ -1036,6 +1036,34 @@ fn test_cxl_aliases_share_one_global_capacity_and_require_preferred_alias() {
 }
 
 #[test]
+fn test_duplicate_cxl_alias_restore_is_rejected_without_unbinding_live_alias() {
+    let capacity = CACHELIB_SLAB_SIZE * 2;
+    let mut allocator = SegmentAllocator::new()
+        .with_strategy(AllocationStrategy::Cxl)
+        .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+        .with_cxl_capacity(capacity);
+    let alias = cxl_alias("cxl-duplicate:1", capacity);
+    allocator.add_segment(alias.clone(), 0, Uuid::new_v4());
+
+    assert!(
+        allocator
+            .restore_cxl_alias(alias.clone(), Uuid::new_v4())
+            .is_err()
+    );
+    let replicas = allocator.allocate(
+        "still-bound",
+        128,
+        1,
+        &ReplicateConfig {
+            preferred_segment: alias.name,
+            ..Default::default()
+        },
+    );
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].segment_id, alias.id);
+}
+
+#[test]
 fn test_cxl_restore_rebuilds_global_layout_once_across_aliases() {
     let capacity = CACHELIB_SLAB_SIZE * 2;
     let alias_a = cxl_alias("restore-cxl-a:1", capacity);

@@ -1474,7 +1474,8 @@ mod tests {
         let cancelled = AtomicBool::new(false);
         let allocator_config = AllocatorSnapshotConfig {
             allocation_strategy: crate::allocator::AllocationStrategy::FreeRatioFirst,
-            memory_allocator_kind: crate::allocator::MemoryAllocatorKind::CachelibLike,
+            memory_allocator_kind: crate::allocator::MemoryAllocatorKind::Offset,
+            offset_max_allocation_nodes: Some(4),
         };
         let captured = StorageBackend::capture_runtime_state_cancellable(
             &DashMap::new(),

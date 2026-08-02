@@ -20,6 +20,9 @@ pub struct MasterRuntimeConfig {
     /// 段内内存分配器：Offset（简单连续分配）或 CachelibLike（slab + class 分配）。
     /// Memory allocator within segment: Offset (simple sequential) or CachelibLike (slab + class).
     pub memory_allocator_kind: MemoryAllocatorKind,
+    /// Optional C++-compatible active partition-node budget for each Offset segment.
+    /// `None` preserves Rust's historical unlimited behavior.
+    pub offset_max_allocation_nodes: Option<u64>,
     /// Enable the single shared CXL allocator and CXL-only segment aliases.
     pub enable_cxl: bool,
     /// DAX device identity used by CXL clients and deployment validation.
@@ -149,6 +152,7 @@ impl Default for MasterRuntimeConfig {
             put_start_release_timeout: Duration::from_secs(600),
             allocation_strategy: AllocationStrategy::Random,
             memory_allocator_kind: MemoryAllocatorKind::Offset,
+            offset_max_allocation_nodes: None,
             enable_cxl: false,
             cxl_path: "/dev/dax0.0".to_string(),
             cxl_size: 8 * 1024 * 1024 * 1024,

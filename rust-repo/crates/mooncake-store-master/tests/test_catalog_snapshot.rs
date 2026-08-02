@@ -718,6 +718,7 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
         allocator_config: Some(AllocatorSnapshotConfig {
             allocation_strategy: AllocationStrategy::FreeRatioFirst,
             memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+            offset_max_allocation_nodes: None,
         }),
         segments: vec![
             SegmentEntry {
@@ -860,7 +861,7 @@ fn test_catalog_provider_publishes_cpp_compatible_snapshot_payloads() {
         object_store
             .download_string(&descriptor.manifest_key)
             .unwrap(),
-        "messagepack|1.0.0|20260610_120001_002"
+        "messagepack|1.0.0|20260610_120001_002|rust_allocator_config_v1"
     );
 
     let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
@@ -936,6 +937,7 @@ fn test_catalog_provider_restores_cxl_protocol_from_allocator_extension() {
         allocator_config: Some(AllocatorSnapshotConfig {
             allocation_strategy: AllocationStrategy::Cxl,
             memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+            offset_max_allocation_nodes: None,
         }),
         segments: vec![SegmentEntry {
             segment: Segment {
@@ -967,6 +969,54 @@ fn test_catalog_provider_restores_cxl_protocol_from_allocator_extension() {
     assert_eq!(loaded.segments.len(), 1);
     assert_eq!(loaded.segments[0].segment.id, segment_id);
     assert_eq!(loaded.segments[0].segment.protocol, "cxl");
+}
+
+#[test]
+fn test_catalog_provider_round_trips_offset_node_limit() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    let mut snapshot = empty_loaded_snapshot("20260610_120002_004", 79);
+    snapshot.allocator_config = Some(AllocatorSnapshotConfig {
+        allocation_strategy: AllocationStrategy::Random,
+        memory_allocator_kind: MemoryAllocatorKind::Offset,
+        offset_max_allocation_nodes: Some(4),
+    });
+
+    provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(loaded.allocator_config, snapshot.allocator_config);
+}
+
+#[test]
+fn test_catalog_provider_rejects_rust_snapshot_missing_required_allocator_extension() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider =
+        CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store.clone());
+    let mut snapshot = empty_loaded_snapshot("20260610_120002_005", 80);
+    snapshot.allocator_config = Some(AllocatorSnapshotConfig {
+        allocation_strategy: AllocationStrategy::Random,
+        memory_allocator_kind: MemoryAllocatorKind::Offset,
+        offset_max_allocation_nodes: Some(4),
+    });
+    let descriptor = provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
+    std::fs::remove_file(root.path().join(format!(
+        "{}rust_allocator_config_v1",
+        descriptor.object_prefix
+    )))
+    .unwrap();
+
+    let error = provider.load_latest_snapshot("cluster-a").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("required Rust allocator configuration extension is missing"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

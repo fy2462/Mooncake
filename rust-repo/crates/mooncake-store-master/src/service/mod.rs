@@ -321,6 +321,7 @@ pub(crate) fn restore_loaded_snapshot_state(
         let runtime_config = AllocatorSnapshotConfig {
             allocation_strategy: state.runtime_config.allocation_strategy,
             memory_allocator_kind: state.runtime_config.memory_allocator_kind,
+            offset_max_allocation_nodes: state.runtime_config.offset_max_allocation_nodes,
         };
         if snapshot_config != runtime_config {
             return Err(format!(
@@ -1174,6 +1175,7 @@ pub(crate) fn restore_loaded_snapshot_state(
     let mut restored_memory_allocator = SegmentAllocator::new()
         .with_strategy(state.runtime_config.allocation_strategy)
         .with_memory_allocator(state.runtime_config.memory_allocator_kind)
+        .try_with_offset_max_allocation_nodes(state.runtime_config.offset_max_allocation_nodes)?
         .with_cxl_capacity(if state.runtime_config.enable_cxl {
             state.runtime_config.cxl_size
         } else {
@@ -1187,7 +1189,8 @@ pub(crate) fn restore_loaded_snapshot_state(
                 state.runtime_config.allocation_strategy
             },
         )
-        .with_memory_allocator(state.runtime_config.memory_allocator_kind);
+        .with_memory_allocator(state.runtime_config.memory_allocator_kind)
+        .try_with_offset_max_allocation_nodes(state.runtime_config.offset_max_allocation_nodes)?;
     let mut restored_segments = Vec::with_capacity(segments.len());
     for mut entry in segments {
         let is_cxl = cxl_segment_ids.contains(&entry.segment.id);
@@ -1962,6 +1965,27 @@ impl MasterServiceImpl {
         let kv_event_publisher = Arc::new(KvEventPublisher::new(
             runtime_config.kv_event_config.clone(),
         ));
+        let memory_allocator = SegmentAllocator::new()
+            .with_strategy(runtime_config.allocation_strategy)
+            .with_memory_allocator(runtime_config.memory_allocator_kind)
+            .try_with_offset_max_allocation_nodes(runtime_config.offset_max_allocation_nodes)
+            .map_err(HaError::InvalidParams)?
+            .with_cxl_capacity(if runtime_config.enable_cxl {
+                runtime_config.cxl_size
+            } else {
+                0
+            });
+        let nof_allocator = SegmentAllocator::new()
+            .with_strategy(
+                if runtime_config.allocation_strategy == AllocationStrategy::Cxl {
+                    AllocationStrategy::Random
+                } else {
+                    runtime_config.allocation_strategy
+                },
+            )
+            .with_memory_allocator(runtime_config.memory_allocator_kind)
+            .try_with_offset_max_allocation_nodes(runtime_config.offset_max_allocation_nodes)
+            .map_err(HaError::InvalidParams)?;
         let state = Arc::new(MasterState {
             // ── 客户端注册 / client registry ──
             // client_id → ClientEntry：客户端信息、地址、心跳时间
@@ -2011,28 +2035,9 @@ impl MasterServiceImpl {
 
             // ── 分配器 / allocators ──
             // Memory segment 的段内空间分配器（offset 连续分配 / cachelib slab 分配）
-            allocator: RwLock::new(
-                SegmentAllocator::new()
-                    .with_strategy(runtime_config.allocation_strategy)
-                    .with_memory_allocator(runtime_config.memory_allocator_kind)
-                    .with_cxl_capacity(if runtime_config.enable_cxl {
-                        runtime_config.cxl_size
-                    } else {
-                        0
-                    }),
-            ),
+            allocator: RwLock::new(memory_allocator),
             // NoF segment 的段内空间分配器
-            nof_allocator: RwLock::new(
-                SegmentAllocator::new()
-                    .with_strategy(
-                        if runtime_config.allocation_strategy == AllocationStrategy::Cxl {
-                            AllocationStrategy::Random
-                        } else {
-                            runtime_config.allocation_strategy
-                        },
-                    )
-                    .with_memory_allocator(runtime_config.memory_allocator_kind),
-            ),
+            nof_allocator: RwLock::new(nof_allocator),
             nof_eviction_requested: AtomicBool::new(false),
 
             // ── 持久化 / persistence ──
@@ -2366,6 +2371,9 @@ impl MasterServiceImpl {
                             Some(AllocatorSnapshotConfig {
                                 allocation_strategy: state.runtime_config.allocation_strategy,
                                 memory_allocator_kind: state.runtime_config.memory_allocator_kind,
+                                offset_max_allocation_nodes: state
+                                    .runtime_config
+                                    .offset_max_allocation_nodes,
                             }),
                             last_included_seq,
                             &worker_cancelled,
@@ -2451,6 +2459,7 @@ impl MasterServiceImpl {
             allocator_config: Some(AllocatorSnapshotConfig {
                 allocation_strategy: self.state.runtime_config.allocation_strategy,
                 memory_allocator_kind: self.state.runtime_config.memory_allocator_kind,
+                offset_max_allocation_nodes: self.state.runtime_config.offset_max_allocation_nodes,
             }),
             segments: self
                 .state
@@ -3655,11 +3664,77 @@ mod snapshot_restore_tests {
             Some(AllocatorSnapshotConfig {
                 allocation_strategy: state.runtime_config.allocation_strategy,
                 memory_allocator_kind: MemoryAllocatorKind::CachelibLike,
+                offset_max_allocation_nodes: None,
             }),
         );
 
         assert!(result.is_err());
         assert!(state.objects.contains_key(&sentinel_key));
+    }
+
+    #[test]
+    fn snapshot_restore_reapplies_offset_node_budget_to_rebuilt_segments() {
+        let maximum = 4;
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            offset_max_allocation_nodes: Some(maximum),
+            ..MasterRuntimeConfig::default()
+        });
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let segment = SegmentEntry {
+            segment: mooncake_store_core::Segment {
+                id: segment_id,
+                name: "restored-offset-limit".to_string(),
+                base: 16 * 1024,
+                size: 1_000,
+                te_endpoint: "127.0.0.1:12345".to_string(),
+                protocol: "tcp".to_string(),
+                host_id: "restored-offset-host".to_string(),
+            },
+            used: 0,
+            client_id,
+            status: proto::SegmentStatus::Active,
+        };
+        let runtime_segment = segment.segment.clone();
+        let snapshot_config = AllocatorSnapshotConfig {
+            allocation_strategy: service.state.runtime_config.allocation_strategy,
+            memory_allocator_kind: service.state.runtime_config.memory_allocator_kind,
+            offset_max_allocation_nodes: Some(maximum),
+        };
+
+        restore_loaded_snapshot_state(
+            &service.state,
+            vec![segment],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Some(snapshot_config),
+        )
+        .expect("restore matching allocator configuration");
+        assert_eq!(
+            service
+                .capture_loaded_snapshot("offset-node-budget")
+                .allocator_config,
+            Some(snapshot_config)
+        );
+
+        let mut allocator = service.state.allocator.write();
+        allocator
+            .rebind_segment(runtime_segment, client_id)
+            .expect("restore requires a runtime remount before allocation");
+        for _ in 0..3 {
+            allocator
+                .allocate_from_segment_id(segment_id, 100)
+                .expect("three sequential allocations fit four active nodes");
+        }
+        assert!(matches!(
+            allocator.allocate_from_segment_id(segment_id, 100),
+            Err(SegmentAllocationError::NoAvailableHandle)
+        ));
     }
 
     #[test]

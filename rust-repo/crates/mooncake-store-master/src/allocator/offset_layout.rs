@@ -60,6 +60,15 @@ impl SegmentState {
     pub(super) fn allocate(&mut self, size: u64) -> Option<(u64, u64)> {
         match &mut self.layout {
             SegmentLayout::Offset(offset) => {
+                let active_nodes = u64::try_from(offset.allocations.len())
+                    .ok()?
+                    .checked_add(u64::try_from(offset.free_ranges.len()).ok()?)?;
+                if offset
+                    .max_allocation_nodes
+                    .is_some_and(|maximum| active_nodes >= maximum)
+                {
+                    return None;
+                }
                 let start = reserve_range(&mut offset.free_ranges, size)?;
                 if offset.allocations.insert(start, size).is_some() {
                     insert_free_range(&mut offset.free_ranges, start, size);
@@ -432,6 +441,7 @@ mod tests {
             layout: SegmentLayout::Offset(OffsetSegmentState {
                 free_ranges: vec![(0, capacity)],
                 allocations: HashMap::new(),
+                max_allocation_nodes: None,
             }),
             client_id: Uuid::new_v4(),
             runtime_bound: true,
@@ -454,6 +464,32 @@ mod tests {
             0,
             Uuid::new_v4(),
         );
+        (allocator, segment_id)
+    }
+
+    fn limited_offset_allocator_facade(
+        capacity: u64,
+        max_allocations: u64,
+    ) -> (SegmentAllocator, Uuid) {
+        let mut allocator = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(max_allocations))
+            .expect("valid Offset node budget");
+        let segment_id = Uuid::new_v4();
+        allocator
+            .try_add_segment(
+                Segment {
+                    id: segment_id,
+                    name: "offset-limit-parity".to_string(),
+                    base: 16 * 1024,
+                    size: capacity,
+                    te_endpoint: "127.0.0.1:12345".to_string(),
+                    protocol: "tcp".to_string(),
+                    host_id: "offset-limit-host".to_string(),
+                },
+                0,
+                Uuid::new_v4(),
+            )
+            .expect("limited Offset segment");
         (allocator, segment_id)
     }
 
@@ -824,6 +860,279 @@ mod tests {
             let allocation = allocate_facade_exact(&mut allocator, segment_id, capacity, largest);
             assert_eq!((allocation.offset, allocation.size), (0, largest));
         }
+    }
+
+    #[test]
+    fn cpp_parity_max_1000_allows_exactly_999_live_handles() {
+        const GIB: u64 = 1024 * MIB;
+        let (mut allocator, segment_id) = limited_offset_allocator_facade(GIB, 1_000);
+        let mut handles = Vec::with_capacity(999);
+
+        for _ in 0..999 {
+            handles.push(allocate_facade_exact(
+                &mut allocator,
+                segment_id,
+                GIB,
+                1_024,
+            ));
+        }
+        let ranges = handles
+            .iter()
+            .map(|replica| (replica.offset, replica.size))
+            .collect::<Vec<_>>();
+        assert_live_ranges_scalable(&ranges, GIB);
+        let report = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(report.allocation_count, 999);
+        assert_eq!(report.total_free_space, GIB - 999 * 1_024);
+        assert!(report.total_free_space > 0);
+
+        assert!(matches!(
+            allocator.allocate_from_segment_id(segment_id, 1_024),
+            Err(SegmentAllocationError::NoAvailableHandle)
+        ));
+        assert_eq!(
+            allocator
+                .offset_allocator_report(&segment_id)
+                .expect("failed allocation leaves report available"),
+            report
+        );
+    }
+
+    #[test]
+    fn cpp_parity_handle_limit_nine_fail_tenth_reuse_one_slot() {
+        let (mut allocator, segment_id) = limited_offset_allocator_facade(MIB, 10);
+        let mut handles = (0..9)
+            .map(|_| allocate_facade_exact(&mut allocator, segment_id, MIB, 1_024))
+            .collect::<Vec<_>>();
+        assert_live_ranges_scalable(
+            &handles
+                .iter()
+                .map(|replica| (replica.offset, replica.size))
+                .collect::<Vec<_>>(),
+            MIB,
+        );
+        assert!(matches!(
+            allocator.allocate_from_segment_id(segment_id, 1_024),
+            Err(SegmentAllocationError::NoAvailableHandle)
+        ));
+
+        let released = handles.pop().expect("ninth handle");
+        release_facade_exact(&mut allocator, released);
+        handles.push(allocate_facade_exact(
+            &mut allocator,
+            segment_id,
+            MIB,
+            1_024,
+        ));
+        assert_live_ranges_scalable(
+            &handles
+                .iter()
+                .map(|replica| (replica.offset, replica.size))
+                .collect::<Vec<_>>(),
+            MIB,
+        );
+        let report = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(report.allocation_count, 9);
+        assert!(report.total_free_space > 0);
+    }
+
+    #[test]
+    fn offset_node_limit_requires_coalescing_before_fragmented_capacity_reopens() {
+        let (mut allocator, segment_id) = limited_offset_allocator_facade(1_000, 4);
+        let first = allocate_facade_exact(&mut allocator, segment_id, 1_000, 100);
+        let middle = allocate_facade_exact(&mut allocator, segment_id, 1_000, 100);
+        let last = allocate_facade_exact(&mut allocator, segment_id, 1_000, 100);
+
+        assert!(matches!(
+            allocator.allocate_from_segment_id(segment_id, 100),
+            Err(SegmentAllocationError::NoAvailableHandle)
+        ));
+
+        release_facade_exact(&mut allocator, middle);
+        assert!(matches!(
+            allocator.allocate_from_segment_id(segment_id, 100),
+            Err(SegmentAllocationError::NoAvailableHandle)
+        ));
+
+        release_facade_exact(&mut allocator, last);
+        let replacement = allocate_facade_exact(&mut allocator, segment_id, 1_000, 100);
+        assert_live_ranges_scalable(
+            &[
+                (first.offset, first.size),
+                (replacement.offset, replacement.size),
+            ],
+            1_000,
+        );
+    }
+
+    #[test]
+    fn offset_limited_registration_rejects_duplicate_segment_without_losing_allocations() {
+        let (mut allocator, segment_id) = limited_offset_allocator_facade(1_000, 4);
+        let live = allocate_facade_exact(&mut allocator, segment_id, 1_000, 100);
+        let duplicate = Segment {
+            id: segment_id,
+            name: "replacement-must-not-win".to_string(),
+            base: 99_999,
+            size: 2_000,
+            te_endpoint: "127.0.0.1:54321".to_string(),
+            protocol: "tcp".to_string(),
+            host_id: "replacement-host".to_string(),
+        };
+
+        assert!(
+            allocator
+                .try_add_segment(duplicate, 0, Uuid::new_v4())
+                .is_err()
+        );
+        release_facade_exact(&mut allocator, live);
+        let report = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("original segment remains registered");
+        assert_eq!(report.capacity, 1_000);
+        assert_eq!(report.allocation_count, 0);
+        assert_eq!(report.total_free_space, 1_000);
+    }
+
+    #[test]
+    fn offset_node_limit_configuration_rejects_invalid_modes_and_default_stays_unlimited() {
+        assert!(
+            SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(0))
+                .is_err()
+        );
+        assert!(
+            SegmentAllocator::new()
+                .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+                .try_with_offset_max_allocation_nodes(Some(4))
+                .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                SegmentAllocator::new()
+                    .try_with_offset_max_allocation_nodes(Some(4))
+                    .expect("valid Offset node budget")
+                    .with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+            })
+            .is_err(),
+            "changing a limited Offset allocator to Cachelib must reject the invalid combination"
+        );
+        assert!(
+            SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(4))
+                .expect("valid Offset node budget")
+                .try_with_memory_allocator(MemoryAllocatorKind::CachelibLike)
+                .is_err()
+        );
+
+        let (mut ordinary, segment_id) = offset_allocator_facade(16);
+        let handles = (0..16)
+            .map(|_| allocate_facade_exact(&mut ordinary, segment_id, 16, 1))
+            .collect::<Vec<_>>();
+        assert_eq!(handles.len(), 16);
+        assert_eq!(ordinary.snapshot_config().offset_max_allocation_nodes, None);
+    }
+
+    #[test]
+    fn offset_limited_public_registration_does_not_replace_duplicate_segment() {
+        let (mut allocator, segment_id) = limited_offset_allocator_facade(1_000, 4);
+        let live = allocate_facade_exact(&mut allocator, segment_id, 1_000, 100);
+        allocator.add_segment(
+            Segment {
+                id: segment_id,
+                name: "replacement-must-not-win".to_string(),
+                base: 99_999,
+                size: 2_000,
+                te_endpoint: "127.0.0.1:54321".to_string(),
+                protocol: "tcp".to_string(),
+                host_id: "replacement-host".to_string(),
+            },
+            0,
+            Uuid::new_v4(),
+        );
+
+        release_facade_exact(&mut allocator, live);
+        let report = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("original segment remains registered");
+        assert_eq!(report.capacity, 1_000);
+        assert_eq!(report.allocation_count, 0);
+        assert_eq!(report.total_free_space, 1_000);
+    }
+
+    #[test]
+    fn offset_node_limit_survives_serialized_config_and_descriptor_restore() {
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: segment_id,
+            name: "offset-limit-restore".to_string(),
+            base: 16 * 1024,
+            size: 1_000,
+            te_endpoint: "127.0.0.1:12345".to_string(),
+            protocol: "tcp".to_string(),
+            host_id: "offset-limit-host".to_string(),
+        };
+        let mut original = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(4))
+            .expect("valid Offset node budget");
+        original
+            .try_add_segment(segment.clone(), 0, client_id)
+            .expect("fresh segment");
+        let live = (0..3)
+            .map(|_| allocate_facade_exact(&mut original, segment_id, 1_000, 100))
+            .collect::<Vec<_>>();
+
+        let encoded = rmp_serde::to_vec_named(&original.snapshot_config())
+            .expect("serialize allocator config");
+        let restored_config: AllocatorSnapshotConfig =
+            rmp_serde::from_slice(&encoded).expect("deserialize allocator config");
+        let mut restored = SegmentAllocator::new()
+            .with_strategy(restored_config.allocation_strategy)
+            .with_memory_allocator(restored_config.memory_allocator_kind)
+            .try_with_offset_max_allocation_nodes(restored_config.offset_max_allocation_nodes)
+            .expect("restored Offset node budget");
+        restored
+            .restore_segment(segment, client_id, &live)
+            .expect("descriptor-driven restore");
+
+        assert!(matches!(
+            restored.allocate_from_segment_id(segment_id, 100),
+            Err(SegmentAllocationError::NoAvailableHandle)
+        ));
+        release_facade_exact(&mut restored, live[2].clone());
+        allocate_facade_exact(&mut restored, segment_id, 1_000, 100);
+    }
+
+    #[test]
+    fn offset_restore_rejects_snapshot_whose_partitions_exceed_node_budget() {
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: segment_id,
+            name: "offset-limit-overfull-restore".to_string(),
+            base: 16 * 1024,
+            size: 1_000,
+            te_endpoint: "127.0.0.1:12345".to_string(),
+            protocol: "tcp".to_string(),
+            host_id: "offset-limit-host".to_string(),
+        };
+        let mut source = SegmentAllocator::new();
+        source
+            .try_add_segment(segment.clone(), 0, client_id)
+            .expect("fresh source segment");
+        let live = (0..4)
+            .map(|_| allocate_facade_exact(&mut source, segment_id, 1_000, 100))
+            .collect::<Vec<_>>();
+        let mut restored = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(4))
+            .expect("valid Offset node budget");
+
+        assert!(restored.restore_segment(segment, client_id, &live).is_err());
+        assert!(restored.offset_allocator_report(&segment_id).is_none());
     }
 
     #[test]

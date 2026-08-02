@@ -221,6 +221,11 @@ pub enum MemoryAllocatorKind {
 pub struct AllocatorSnapshotConfig {
     pub allocation_strategy: AllocationStrategy,
     pub memory_allocator_kind: MemoryAllocatorKind,
+    /// Optional C++-compatible active partition-node budget for each Offset
+    /// segment. Legacy snapshots omit it and therefore preserve Rust's
+    /// historical unlimited behavior.
+    #[serde(default)]
+    pub offset_max_allocation_nodes: Option<u64>,
 }
 
 impl MemoryAllocatorKind {

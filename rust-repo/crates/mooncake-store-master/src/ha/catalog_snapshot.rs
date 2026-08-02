@@ -162,13 +162,19 @@ impl CatalogBackedSnapshotProvider {
                 &encode_allocator_config_extension(config)?,
             )?;
         }
-        self.object_store.upload_string(
-            &descriptor.manifest_key,
-            &format!(
+        let manifest = if snapshot.allocator_config.is_some() {
+            format!(
+                "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}|{RUST_ALLOCATOR_CONFIG_EXTENSION}",
+                descriptor.snapshot_id
+            )
+        } else {
+            format!(
                 "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}",
                 descriptor.snapshot_id
-            ),
-        )?;
+            )
+        };
+        self.object_store
+            .upload_string(&descriptor.manifest_key, &manifest)?;
         self.catalog_store.publish(&descriptor)?;
         Ok(descriptor)
     }
@@ -577,12 +583,17 @@ impl CatalogBackedSnapshotProvider {
         } else {
             descriptor.manifest_key.clone()
         };
-        validate_manifest(
+        let allocator_config_required = validate_manifest(
             &self.object_store.download_string(&manifest_key)?,
             &descriptor.snapshot_id,
         )?;
         let allocator_config =
             load_allocator_config_extension(self.object_store.as_ref(), &prefix)?;
+        if allocator_config_required && allocator_config.is_none() {
+            return Err(snapshot_error(
+                "required Rust allocator configuration extension is missing",
+            ));
+        }
         let segment_payload = self
             .object_store
             .download_buffer(&format!("{prefix}segments"))?;
@@ -683,16 +694,17 @@ struct DecodedSegment {
     entry: SegmentEntry,
     has_allocator: bool,
 }
-fn validate_manifest(manifest: &str, snapshot_id: &str) -> Result<(), HaError> {
+fn validate_manifest(manifest: &str, snapshot_id: &str) -> Result<bool, HaError> {
     let fields: Vec<_> = manifest.trim().split('|').collect();
-    if fields.len() != 3
+    if !(fields.len() == 3 || fields.len() == 4)
         || fields[0] != MANIFEST_PROTOCOL
         || fields[1] != MANIFEST_VERSION
         || (fields[2] != snapshot_id && fields[2] != "rust")
+        || (fields.len() == 4 && fields[3] != RUST_ALLOCATOR_CONFIG_EXTENSION)
     {
         return Err(snapshot_error("unsupported snapshot manifest"));
     }
-    Ok(())
+    Ok(fields.len() == 4)
 }
 
 fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
