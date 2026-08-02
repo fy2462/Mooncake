@@ -2936,5 +2936,50 @@
     "focused_command": "cargo test -p mooncake-store-master --lib oplogappliergaptest_requestmissingoplog -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-oplog-applier-gap-resolution-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntry_ValidChecksum",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend",
+    "first_divergence": "The manifest did not connect the checksum-valid golden C++ wire PUT_END to its complete decoder, application, sequence, and object-state oracle.",
+    "repair_commit": "5e4ce6a3",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-validation-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntry_InvalidChecksum",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentry_invalidchecksum",
+    "first_divergence": "Rust rejected checksum-corrupt C++ envelopes at ingress but lacked an integrated decoder-to-applier test proving no sequence or object-state mutation.",
+    "repair_commit": "5e4ce6a3",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentry_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-validation-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntry_ValidSize",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend",
+    "first_divergence": "The manifest did not connect the bounded golden C++ wire PUT_END to its complete production size-validation and successful-application oracle.",
+    "repair_commit": "5e4ce6a3",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-validation-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntry_InvalidSize",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentry_invalidsize",
+    "first_divergence": "Rust tested the 4096-byte key limit in isolation but lacked an integrated maximum-plus-one C++ wire rejection test proving unchanged applier sequence and state.",
+    "repair_commit": "5e4ce6a3",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentry_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-validation-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntry_PayloadTooLarge",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentry_payloadtoolarge",
+    "first_divergence": "Rust's encoded-length precheck could accept a decoded 10 MiB-plus-one payload sharing the legal boundary's base64 length, and no integrated rejection/state oracle covered that rounding case.",
+    "repair_commit": "5e4ce6a3",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentry_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-validation-goal-019fbe77.typescript"
   }
 ]
