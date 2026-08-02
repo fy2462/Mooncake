@@ -301,23 +301,21 @@ impl OwnedBuffer {
         if size == 0 {
             return Ok(Self::Vec(Vec::new()));
         }
-        let policy = HugepagePolicy::from_environment();
-        if !policy.requested {
-            return Self::allocate_regular_registration(size, alignment);
-        }
 
         #[cfg(target_os = "linux")]
         {
-            return Self::allocate_with_hugepage_allocator(
+            return Self::allocate_for_registration_with_allocators(
                 size,
                 alignment,
-                policy,
                 |page_size| unsafe { allocate_hugepage_mmap(size, page_size) },
+                Self::allocate_regular_registration,
             );
         }
+
         #[cfg(not(target_os = "linux"))]
         {
-            if policy.strict {
+            let policy = HugepagePolicy::from_environment();
+            if policy.requested && policy.strict {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "MC_STORE_USE_HUGEPAGE requires Linux HugeTLB support",
@@ -325,6 +323,29 @@ impl OwnedBuffer {
             }
             Self::allocate_regular_registration(size, alignment)
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn allocate_for_registration_with_allocators(
+        size: usize,
+        alignment: usize,
+        allocate_hugepage: impl FnOnce(usize) -> Option<Self>,
+        allocate_regular: impl FnOnce(usize, usize) -> io::Result<Self>,
+    ) -> io::Result<Self> {
+        if size == 0 {
+            return Ok(Self::Vec(Vec::new()));
+        }
+        let policy = HugepagePolicy::from_environment();
+        if !policy.requested {
+            return allocate_regular(size, alignment);
+        }
+        Self::allocate_with_hugepage_allocator(
+            size,
+            alignment,
+            policy,
+            allocate_hugepage,
+            allocate_regular,
+        )
     }
 
     fn allocate_regular_registration(size: usize, alignment: usize) -> io::Result<Self> {
@@ -340,6 +361,7 @@ impl OwnedBuffer {
         alignment: usize,
         policy: HugepagePolicy,
         allocate_hugepage: impl FnOnce(usize) -> Option<Self>,
+        allocate_regular: impl FnOnce(usize, usize) -> io::Result<Self>,
     ) -> io::Result<Self> {
         if let Some(buffer) = allocate_hugepage(policy.page_size) {
             if buffer.as_ptr() as usize % alignment.max(1) == 0 {
@@ -367,7 +389,7 @@ impl OwnedBuffer {
             page_size = policy.page_size,
             "legacy hugepage request failed; falling back to regular aligned allocation"
         );
-        Self::allocate_regular_registration(size, alignment)
+        allocate_regular(size, alignment)
     }
 
     pub(crate) fn populate_before_registration(&mut self, protocol: &str) -> io::Result<()> {
@@ -952,6 +974,58 @@ mod tests {
         assert_eq!(unsafe { libc::munmap(mapping, MAP_SIZE) }, 0);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_explicithugepagerequestdoesnotsilentlyfallbacktoregularpages_16ac58db()
+     {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "memory_ffi::tests::strict_hugetlb_failure_subprocess_helper",
+                "--nocapture",
+            ])
+            .env("MC_STORE_STRICT_HUGEPAGE_SUBPROCESS", "1")
+            .env("MC_STORE_USE_HUGEPAGE", "1")
+            .env("MC_STORE_HUGEPAGE_SIZE", "2MB")
+            .output()
+            .expect("spawn isolated strict HugeTLB verifier");
+        assert!(
+            output.status.success(),
+            "strict HugeTLB subprocess failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn strict_hugetlb_failure_subprocess_helper() {
+        if std::env::var_os("MC_STORE_STRICT_HUGEPAGE_SUBPROCESS").is_none() {
+            return;
+        }
+        let hugepage_attempts = std::cell::Cell::new(0);
+        let regular_attempts = std::cell::Cell::new(0);
+        let result = OwnedBuffer::allocate_for_registration_with_allocators(
+            64 * 1024,
+            64,
+            |_| {
+                hugepage_attempts.set(hugepage_attempts.get() + 1);
+                None
+            },
+            |size, alignment| {
+                regular_attempts.set(regular_attempts.get() + 1);
+                OwnedBuffer::allocate_regular_registration(size, alignment)
+            },
+        );
+        let error = match result {
+            Ok(_) => panic!("explicit HugeTLB failure must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(hugepage_attempts.get(), 1);
+        assert_eq!(regular_attempts.get(), 0);
+        assert!(error.to_string().contains("HugeTLB mmap failed"));
+    }
+
     #[test]
     fn population_rejects_zero_sized_inputs() {
         let mut byte = 0u8;
@@ -968,8 +1042,14 @@ mod tests {
             strict: false,
             page_size: HUGEPAGE_2_MIB,
         };
-        let buffer =
-            OwnedBuffer::allocate_with_hugepage_allocator(16, 1, legacy, |_| None).unwrap();
+        let buffer = OwnedBuffer::allocate_with_hugepage_allocator(
+            16,
+            1,
+            legacy,
+            |_| None,
+            OwnedBuffer::allocate_regular_registration,
+        )
+        .unwrap();
 
         assert_eq!(buffer.len(), 16);
         assert_eq!(buffer.as_ptr() as usize % 4096, 0);
@@ -978,7 +1058,16 @@ mod tests {
             strict: true,
             ..legacy
         };
-        assert!(OwnedBuffer::allocate_with_hugepage_allocator(16, 1, strict, |_| None).is_err());
+        assert!(
+            OwnedBuffer::allocate_with_hugepage_allocator(
+                16,
+                1,
+                strict,
+                |_| None,
+                OwnedBuffer::allocate_regular_registration,
+            )
+            .is_err()
+        );
     }
 
     #[test]
