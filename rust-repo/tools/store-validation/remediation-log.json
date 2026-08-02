@@ -2801,5 +2801,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testdataconsistency -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-prepopulated-consistency-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_hot_standby_integration_test.cpp:LocalFsHotStandbyIntegrationTest.TestHighThroughputSync",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testhighthroughputsync",
+    "first_divergence": "The existing LocalFS test mixed 100 live puts with 20 removes and therefore did not preserve the C++ pure 100-put standby-first workload and final zero-lag observation contract.",
+    "repair_commit": "d1661e3f",
+    "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testhighthroughputsync -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-live-throughput-goal-019fbe77.typescript"
   }
 ]
