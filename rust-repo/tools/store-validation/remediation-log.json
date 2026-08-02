@@ -2729,5 +2729,14 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests::cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_populatehugetlbmappingusesconfiguredpagestride_906d02d3 -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hugetlb-configured-stride-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "mmap_arena_fallback_test.cpp:MmapArenaFallbackTest.ExplicitHugepageRequestDoesNotSilentlyFallbackToRegularPages",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_explicithugepagerequestdoesnotsilentlyfallbacktoregularpages_16ac58db",
+    "first_divergence": "The existing Rust test injected a synthetic strict policy directly and did not drive MC_STORE_USE_HUGEPAGE through the production allocation entry or prove that a failed HugeTLB attempt never invokes the regular allocator.",
+    "repair_commit": "d284eb66",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests::cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_explicithugepagerequestdoesnotsilentlyfallbacktoregularpages_16ac58db -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-hugetlb-strict-failure-goal-019fbe77.typescript"
   }
 ]
