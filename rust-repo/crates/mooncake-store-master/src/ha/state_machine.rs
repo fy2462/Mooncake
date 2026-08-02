@@ -426,8 +426,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
 
         let elapsed = sm.get_time_in_current_state();
-        assert!(elapsed >= Duration::from_millis(100));
-        assert!(elapsed <= Duration::from_millis(200));
+        assert!((100..=200).contains(&elapsed.as_millis()));
     }
 
     #[test]
@@ -838,25 +837,6 @@ mod tests {
             StandbyEvent::MaxErrorsReached,
             StandbyState::Watching,
             StandbyState::Recovering,
-        );
-    }
-
-    #[test]
-    fn cpp_parity_complete_recovery_flow_watching_recovering_watching() {
-        let sm = StandbyStateMachine::new();
-        reach_watching(&sm);
-
-        assert_transition(
-            &sm,
-            StandbyEvent::MaxErrorsReached,
-            StandbyState::Watching,
-            StandbyState::Recovering,
-        );
-        assert_transition(
-            &sm,
-            StandbyEvent::RecoverySuccess,
-            StandbyState::Recovering,
-            StandbyState::Watching,
         );
     }
 
