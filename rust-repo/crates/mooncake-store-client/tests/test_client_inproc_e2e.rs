@@ -582,6 +582,248 @@ async fn cpp_parity_hot_cache_client_get_rejects_stale_fill_after_invalidation()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_dummy_stable_hot_cache_get_buffer_invalidated_by_remove() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client(&master).await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    let mut reader = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+    let payload = b"stable-hot-cache-owned-buffer";
+    writer
+        .put(
+            "stable-hot-buffer",
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let first = reader.get_buffer("stable-hot-buffer").await.unwrap();
+    assert_eq!(first.key, "stable-hot-buffer");
+    assert_eq!(first.size, 29);
+    assert_eq!(first.data, b"stable-hot-cache-owned-buffer");
+    let second = reader.get_buffer("stable-hot-buffer").await.unwrap();
+    assert_eq!(second.key, "stable-hot-buffer");
+    assert_eq!(second.size, 29);
+    assert_eq!(second.data, b"stable-hot-cache-owned-buffer");
+
+    reader.remove("stable-hot-buffer", true).await.unwrap();
+    assert_eq!(cache.get("stable-hot-buffer"), None);
+    assert!(matches!(
+        reader.get_buffer("stable-hot-buffer").await,
+        Err(StoreError::KeyNotFound(key)) if key == "stable-hot-buffer"
+    ));
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+struct OneShotBlockingRemoteSource {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl RemoteSource for OneShotBlockingRemoteSource {
+    async fn get(&self, key: &str) -> RemoteSourceResult<Vec<u8>> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(b"inflight-owned-stale-value".to_vec())
+        } else {
+            Err(mooncake_store_client::RemoteSourceError::NotFound(
+                key.to_string(),
+            ))
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_dummy_inflight_get_buffer_fill_cannot_resurrect_removed_key() {
+    let (master, shutdown) = start_master().await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = OneShotBlockingRemoteSource {
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let reader = create_tcp_client(&master)
+        .await
+        .with_remote_source(
+            source,
+            RemoteSourceConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        )
+        .with_hot_cache(Arc::clone(&cache));
+    let mut writer = create_tcp_client(&master).await;
+    let mut remover = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+
+    let inflight = tokio::spawn(async move {
+        let mut reader = reader;
+        let result = reader.get_buffer("inflight-remove-key").await;
+        (reader, result)
+    });
+    started.notified().await;
+    writer
+        .put(
+            "inflight-remove-key",
+            b"temporary-store-value",
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    remover.remove("inflight-remove-key", true).await.unwrap();
+    release.notify_one();
+
+    let (mut reader, stale_owner) = inflight.await.unwrap();
+    let stale_owner = stale_owner.unwrap();
+    assert_eq!(stale_owner.key, "inflight-remove-key");
+    assert_eq!(stale_owner.size, 26);
+    assert_eq!(stale_owner.data, b"inflight-owned-stale-value");
+    assert_eq!(cache.get("inflight-remove-key"), None);
+    assert!(matches!(
+        reader.get_buffer("inflight-remove-key").await,
+        Err(StoreError::KeyNotFound(key)) if key == "inflight-remove-key"
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert!(matches!(
+        reader.get_buffer("inflight-remove-key").await,
+        Err(StoreError::KeyNotFound(key)) if key == "inflight-remove-key"
+    ));
+    assert_eq!(cache.get("inflight-remove-key"), None);
+
+    drop(reader);
+    drop(remover);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_dummy_get_buffer_warmed_hot_cache_returns_exact_handle() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client(&master).await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    let mut reader = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+    writer
+        .put(
+            "warmed-hot-buffer",
+            b"hot-buffer-exact-data",
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let cold = reader.get_buffer("warmed-hot-buffer").await.unwrap();
+    assert_eq!(cold.data, b"hot-buffer-exact-data");
+    let hot = reader.get_buffer("warmed-hot-buffer").await.unwrap();
+    assert_eq!(hot.key, "warmed-hot-buffer");
+    assert_eq!(hot.size, 21);
+    assert_eq!(hot.data, b"hot-buffer-exact-data");
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"local_memcpy\"}",
+        1,
+    );
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_dummy_batch_get_buffer_mixed_hot_cold_preserves_order() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client(&master).await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    let mut reader = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+    for (key, value) in [
+        ("batch-hot-owned", b"hot-five".as_slice()),
+        ("batch-cold-owned-a", b"cold-seven-a".as_slice()),
+        ("batch-cold-owned-b", b"cold-seven-b".as_slice()),
+    ] {
+        writer
+            .put(
+                key,
+                value,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: writer.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        reader.get_buffer("batch-hot-owned").await.unwrap().data,
+        b"hot-five"
+    );
+    assert_eq!(cache.get("batch-hot-owned"), Some(b"hot-five".to_vec()));
+
+    let keys = vec![
+        "batch-cold-owned-b".to_string(),
+        "batch-hot-owned".to_string(),
+        "batch-cold-owned-a".to_string(),
+    ];
+    let handles = reader.batch_get_buffer(&keys).await.unwrap();
+    assert_eq!(handles.len(), 3);
+    for (handle, expected_key, expected_size, expected_data) in [
+        (
+            handles[0].as_ref(),
+            "batch-cold-owned-b",
+            12,
+            b"cold-seven-b".as_slice(),
+        ),
+        (
+            handles[1].as_ref(),
+            "batch-hot-owned",
+            8,
+            b"hot-five".as_slice(),
+        ),
+        (
+            handles[2].as_ref(),
+            "batch-cold-owned-a",
+            12,
+            b"cold-seven-a".as_slice(),
+        ),
+    ] {
+        let handle = handle.expect("every stored key returns one owned handle");
+        assert_eq!(handle.key, expected_key);
+        assert_eq!(handle.size, expected_size);
+        assert_eq!(handle.data, expected_data);
+    }
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn zero_segment_heartbeat_activates_after_first_memory_mount() {
     let (master, shutdown) = start_master().await;
     let client = create_tcp_client_with_segment_size(&master, 0).await;

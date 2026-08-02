@@ -1494,19 +1494,19 @@
       "behavior": "After a warmed key is read twice through DummyClient, each buffer has the stored size and bytes, and a successful remove makes the next get_buffer return no buffer.",
       "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "remove", "data-integrity"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.StableHotCacheEntryShouldBeInvalidatedByRemove"},
-      "reason": "No discoverable Rust test warms a public client get_buffer result, removes the key through that client, and asserts a later get_buffer fails without returning stale bytes.",
+      "reason": "Rust's public MooncakeClient replacement boundary reads the exact owned get_buffer twice (including a warmed local-cache hit), removes the key successfully through that cache-owning client, and proves the next get_buffer returns KeyNotFound. C++ SHM pointer identity is not claimed.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp StableHotCacheEntryShouldBeInvalidatedByRemove, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/remove.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_stable_hot_cache_get_buffer_invalidated_by_remove"}],
+      "status": "covered"
     },
     {
       "behavior": "After fallback reads trigger hot-cache admission, removing the key leaves subsequent dummy get_buffer reads absent both immediately and after an asynchronous fill could have completed.",
       "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "remove", "concurrency", "stale-read"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.RemoveShouldNotBeResurrectedByAsyncHotCacheFill"},
-      "reason": "No discoverable Rust test races an in-flight ordinary cacheable read/cache publication with remove and then asserts that later reads cannot return resurrected stale bytes; the C++ SHM async-fill mechanism itself is not the required parity boundary.",
+      "reason": "Rust races a blocked public get_buffer fallback fill against a successful public remove sharing the same LocalHotCache, proves the in-flight caller may retain its owned bytes, then proves immediate and delayed get_buffer calls both remain KeyNotFound and the cache remains empty. The production generation token is the Rust replacement for C++ SHM async-fill fencing.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp RemoveShouldNotBeResurrectedByAsyncHotCacheFill, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_inflight_get_buffer_fill_cannot_resurrect_removed_key"}],
+      "status": "covered"
     },
     {
       "behavior": "An unwarmed key fetched through DummyClient get_buffer returns a non-null owned buffer whose size and bytes exactly equal the stored payload.",
@@ -1521,19 +1521,19 @@
       "behavior": "A warmed key fetched through DummyClient get_buffer has the stored size and exact bytes on the hot-cache path.",
       "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "data-integrity"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.GetBuffer_HotCachePath"},
-      "reason": "Discoverable Rust tests prove cached bytes through get and direct LocalHotCache access, but none invokes public get_buffer on a warmed process-local cache and asserts BufferHandle metadata and bytes; C++ SHM pointer identity and zero-copy acquisition are separately deferred.",
+      "reason": "Rust warms a real remote Store object through public get_buffer, then invokes public get_buffer again and asserts the exact key, size, and bytes while the local_memcpy metric proves the warmed process-local hot-cache path. C++ SHM pointer identity and zero-copy acquisition remain separately deferred.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp GetBuffer_HotCachePath, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_get_buffer_warmed_hot_cache_returns_exact_handle"}],
+      "status": "covered"
     },
     {
       "behavior": "A mixed warmed and cold batch returns one non-null buffer per input key in input order, with each buffer's size and bytes matching its key's stored payload.",
       "boundary": ["client", "dummy-client", "hot-cache", "batch-get-buffer", "ordering", "data-integrity"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.BatchGetBuffer"},
-      "reason": "Rust MooncakeClient::batch_get_buffer preserves per-key results and represents failures as None, but no discoverable Rust test invokes it with mixed warmed and cold keys and asserts ordered BufferHandle key, size, bytes, and per-key miss behavior.",
+      "reason": "Rust warms one real Store key into LocalHotCache, leaves two real Store keys cold, calls public batch_get_buffer in a deliberately mixed order, and asserts exactly one non-null owned handle per input with literal key, size, and byte identity in input order.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp BatchGetBuffer, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_batch_get_buffer_mixed_hot_cold_preserves_order"}],
+      "status": "covered"
     },
     {
       "behavior": "setup_dummy maps the C++ shared-memory hot cache so a warmed buffer is located in that mapping and its mapped bytes match the payload.",
