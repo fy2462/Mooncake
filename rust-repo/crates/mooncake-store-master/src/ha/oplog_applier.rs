@@ -2413,6 +2413,95 @@ mod tests {
         deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap()
     }
 
+    enum GapReadResult {
+        Entries(Vec<OpLogRecord>),
+        Error,
+    }
+
+    struct GapResolutionStore {
+        latest: u64,
+        read_result: GapReadResult,
+        reads: Mutex<Vec<(u64, usize)>>,
+    }
+
+    impl GapResolutionStore {
+        fn new(latest: u64, read_result: GapReadResult) -> Self {
+            Self {
+                latest,
+                read_result,
+                reads: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl OpLogStore for GapResolutionStore {
+        fn append(&mut self, _entry: &OpLogRecord) -> Result<u64, crate::ha::HaError> {
+            Err(crate::ha::HaError::InvalidBackend(
+                "gap fixture is read-only".into(),
+            ))
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, crate::ha::HaError> {
+            self.reads.lock().push((since_seq, max_count));
+            match &self.read_result {
+                GapReadResult::Entries(entries) => Ok(entries.clone()),
+                GapReadResult::Error => Err(crate::ha::HaError::InvalidBackend(
+                    "injected gap-store read failure".into(),
+                )),
+            }
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.latest
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, crate::ha::HaError> {
+            Ok(self.latest)
+        }
+
+        fn update_latest_sequence_id(
+            &mut self,
+            sequence_id: u64,
+        ) -> Result<(), crate::ha::HaError> {
+            self.latest = sequence_id;
+            Ok(())
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            _snapshot_id: &str,
+            _sequence_id: u64,
+        ) -> Result<(), crate::ha::HaError> {
+            Ok(())
+        }
+
+        fn get_snapshot_sequence_id(&self, _snapshot_id: &str) -> Result<u64, crate::ha::HaError> {
+            Err(crate::ha::HaError::InvalidBackend(
+                "gap fixture has no snapshots".into(),
+            ))
+        }
+
+        fn cleanup_before(&mut self, _before_sequence_id: u64) -> Result<(), crate::ha::HaError> {
+            Ok(())
+        }
+
+        fn flush_durable(&mut self) -> Result<(), crate::ha::HaError> {
+            Ok(())
+        }
+
+        fn poll_from(&self, since_seq: u64, _max_count: usize) -> crate::ha::OpLogPollResult {
+            crate::ha::OpLogPollResult {
+                records: Vec::new(),
+                next_seq: since_seq,
+                timed_out: true,
+            }
+        }
+    }
+
     fn make_state_with_tenant_quota(enable_tenant_quota: bool) -> Arc<MasterState> {
         let mut runtime_config = crate::service::state::MasterRuntimeConfig::default();
         runtime_config.enable_tenant_quota = enable_tenant_quota;
@@ -2609,6 +2698,97 @@ mod tests {
         assert_eq!(applier.get_expected_sequence_id(), 2);
         assert!(state.objects.contains_key("default\0key1"));
         assert!(!state.objects.contains_key("default\0key1_dup"));
+        assert_eq!(state.objects.len(), 1);
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_success()
+    {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                1,
+                TEST_CPP_OP_PUT_END,
+                "key1",
+            )]),
+            1
+        );
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                3,
+                TEST_CPP_OP_PUT_END,
+                "key3",
+            )]),
+            0
+        );
+
+        let store = GapResolutionStore::new(
+            2,
+            GapReadResult::Entries(vec![cpp_wire_record_for_key(
+                2,
+                TEST_CPP_OP_PUT_END,
+                "key2",
+            )]),
+        );
+        assert_eq!(applier.try_resolve_gaps_once(&store, 10), (1, 1));
+        assert_eq!(*store.reads.lock(), vec![(2, 1)]);
+        assert_eq!(applier.get_expected_sequence_id(), 4);
+        assert_eq!(state.objects.len(), 3);
+        for key in ["key1", "key2", "key3"] {
+            assert!(state.objects.contains_key(&format!("default\0{key}")));
+        }
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_storeerror()
+     {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[
+                cpp_wire_record_for_key(1, TEST_CPP_OP_PUT_END, "key1"),
+                cpp_wire_record_for_key(3, TEST_CPP_OP_PUT_END, "key3"),
+            ]),
+            1
+        );
+
+        let store = GapResolutionStore::new(2, GapReadResult::Error);
+        assert_eq!(applier.try_resolve_gaps_once(&store, 10), (1, 0));
+        assert_eq!(*store.reads.lock(), vec![(2, 1)]);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert!(state.objects.contains_key("default\0key1"));
+        assert!(!state.objects.contains_key("default\0key2"));
+        assert!(!state.objects.contains_key("default\0key3"));
+        assert_eq!(state.objects.len(), 1);
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_notfound()
+    {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[
+                cpp_wire_record_for_key(1, TEST_CPP_OP_PUT_END, "key1"),
+                cpp_wire_record_for_key(3, TEST_CPP_OP_PUT_END, "key3"),
+            ]),
+            1
+        );
+
+        let store = GapResolutionStore::new(2, GapReadResult::Entries(Vec::new()));
+        assert_eq!(applier.try_resolve_gaps_once(&store, 10), (1, 0));
+        assert_eq!(*store.reads.lock(), vec![(2, 1)]);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert!(state.objects.contains_key("default\0key1"));
+        assert!(!state.objects.contains_key("default\0key2"));
+        assert!(!state.objects.contains_key("default\0key3"));
         assert_eq!(state.objects.len(), 1);
     }
 
