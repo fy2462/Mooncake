@@ -16,7 +16,10 @@ use uuid::Uuid;
 
 use crate::allocator::{AllocationStrategy, SegmentAllocator};
 use crate::ha::types::OpLogRecord;
-use crate::oplog::{OpLogStore, decode_record_payload_value, recover_object_identity_from_payload};
+use crate::oplog::{
+    OpLogStore, decode_record_payload_value, recover_object_identity_from_payload,
+    verify_cpp_struct_pack_empty_replica_payload,
+};
 use crate::service::helpers::{
     account_cache_total_removal, checked_allocating_memory_quota_charge,
     checked_completed_memory_quota_charge, checked_durable_committed_memory_quota_charge,
@@ -242,7 +245,11 @@ impl OpLogApplier {
                             >(replicas) else {
                                 return false;
                             };
-                            if !Self::validate_replayed_object_geometry(size, &replicas) {
+                            let legacy_cpp_empty_replicas =
+                                size > 0 && verify_cpp_struct_pack_empty_replica_payload(&v);
+                            if !legacy_cpp_empty_replicas
+                                && !Self::validate_replayed_object_geometry(size, &replicas)
+                            {
                                 return false;
                             }
                             if replicas.iter().any(|replica| {
@@ -2348,6 +2355,60 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    const CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD: &[u8] = &[
+        0xcd, 0xe7, 0xf3, 0x0f, 0x04, 0xfd, 0xfd, 0x04, 0x04, 0x89, 0x89, 0xff, 0x04, 0x84, 0xfd,
+        0x04, 0x86, 0xfd, 0xfd, 0x04, 0x04, 0x80, 0x0c, 0x80, 0x0c, 0xff, 0xff, 0xfd, 0xfd, 0x04,
+        0x04, 0x80, 0x0c, 0x80, 0x0c, 0xff, 0xff, 0xfd, 0x80, 0x0c, 0x04, 0xff, 0xfd, 0xfd, 0x04,
+        0x04, 0x89, 0x89, 0xff, 0x04, 0x80, 0x0c, 0xff, 0xff, 0x01, 0xff, 0xff, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    fn cpp_wire_record(sequence_id: u64, op_type: u8) -> OpLogRecord {
+        use crate::oplog::test_support::{
+            CppWireTestEntry, TEST_CPP_OP_PUT_END, compute_cpp_checksum_for_test,
+            compute_cpp_prefix_hash_for_test, deserialize_etcd_value_for_test,
+        };
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let is_put_end = op_type == TEST_CPP_OP_PUT_END;
+        let wire = CppWireTestEntry {
+            sequence_id,
+            timestamp_ms: 1,
+            op_type,
+            object_key: "key1".to_string(),
+            payload: is_put_end
+                .then(|| BASE64_STANDARD.encode(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD))
+                .unwrap_or_default(),
+            checksum: is_put_end
+                .then(|| compute_cpp_checksum_for_test(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD))
+                .unwrap_or_default(),
+            prefix_hash: compute_cpp_prefix_hash_for_test("key1"),
+        };
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap()
+    }
+
+    fn cpp_put_end_wire_record_with_payload(sequence_id: u64, payload_bytes: &[u8]) -> OpLogRecord {
+        use crate::oplog::test_support::{
+            CppWireTestEntry, TEST_CPP_OP_PUT_END, compute_cpp_checksum_for_test,
+            compute_cpp_prefix_hash_for_test, deserialize_etcd_value_for_test,
+        };
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let wire = CppWireTestEntry {
+            sequence_id,
+            timestamp_ms: 1,
+            op_type: TEST_CPP_OP_PUT_END,
+            object_key: "key1".to_string(),
+            payload: BASE64_STANDARD.encode(payload_bytes),
+            checksum: compute_cpp_checksum_for_test(payload_bytes),
+            prefix_hash: compute_cpp_prefix_hash_for_test("key1"),
+        };
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap()
+    }
+
     fn make_state_with_tenant_quota(enable_tenant_quota: bool) -> Arc<MasterState> {
         let mut runtime_config = crate::service::state::MasterRuntimeConfig::default();
         runtime_config.enable_tenant_quota = enable_tenant_quota;
@@ -2397,6 +2458,126 @@ mod tests {
 
     fn make_state() -> Arc<MasterState> {
         make_state_with_tenant_quota(false)
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record(1, TEST_CPP_OP_PUT_END)]),
+            1
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert_eq!(state.objects.len(), 1);
+        let object = state.objects.get("default\0key1").expect("key1 created");
+        assert_eq!(object.user_key, "key1");
+        assert_eq!(object.size, 1024);
+        assert_eq!(object.client_id, Uuid::from_u64_pair(1, 2));
+        assert!(object.replicas.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputrevoke() {
+        use crate::oplog::test_support::{TEST_CPP_OP_PUT_END, TEST_CPP_OP_PUT_REVOKE};
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record(1, TEST_CPP_OP_PUT_END)]),
+            1
+        );
+        assert!(state.objects.contains_key("default\0key1"));
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record(2, TEST_CPP_OP_PUT_REVOKE)]),
+            1
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 3);
+        assert!(!state.objects.contains_key("default\0key1"));
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyremove_e681ca3e() {
+        use crate::oplog::test_support::{TEST_CPP_OP_PUT_END, TEST_CPP_OP_REMOVE};
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record(1, TEST_CPP_OP_PUT_END)]),
+            1
+        );
+        assert!(state.objects.contains_key("default\0key1"));
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record(2, TEST_CPP_OP_REMOVE)]),
+            1
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 3);
+        assert!(!state.objects.contains_key("default\0key1"));
+    }
+
+    #[test]
+    fn cpp_struct_pack_empty_replica_bypass_requires_verified_wire_provenance() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let forged_payloads = [
+            serde_json::json!({
+                "op": "put_end",
+                "key": "key1",
+                "size": 1024,
+                "client_id": Uuid::from_u64_pair(1, 2).to_string(),
+                "tenant_id": "default",
+                "user_key": "key1",
+                "replicas": [],
+                "legacy_cpp_struct_pack_empty_replicas": true
+            }),
+            serde_json::json!({
+                "op": "put_end",
+                "key": "key1",
+                "size": 1024,
+                "client_id": Uuid::nil().to_string(),
+                "tenant_id": "default",
+                "user_key": "key1",
+                "replicas": [],
+                "legacy_cpp_struct_pack_payload_base64":
+                    BASE64_STANDARD.encode(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD)
+            }),
+        ];
+        for payload in forged_payloads {
+            let state = make_state();
+            let applier = OpLogApplier::new(state.clone());
+            assert_eq!(
+                applier.apply_op_log_entries(&[OpLogRecord {
+                    seq: 1,
+                    producer_view_version: 1,
+                    payload: payload.to_string(),
+                }]),
+                0
+            );
+            assert_eq!(applier.get_expected_sequence_id(), 1);
+            assert!(state.objects.is_empty());
+        }
+
+        let mut mutated_payloads = Vec::new();
+        let mut bad_header = CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD.to_vec();
+        bad_header[0] ^= 1;
+        mutated_payloads.push(bad_header);
+        mutated_payloads.push(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD[..82].to_vec());
+        let mut nonempty_vector = CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD.to_vec();
+        *nonempty_vector.last_mut().unwrap() = 1;
+        mutated_payloads.push(nonempty_vector);
+        for payload in mutated_payloads {
+            let state = make_state();
+            let applier = OpLogApplier::new(state.clone());
+            assert_eq!(
+                applier.apply_op_log_entries(&[cpp_put_end_wire_record_with_payload(1, &payload)]),
+                0
+            );
+            assert_eq!(applier.get_expected_sequence_id(), 1);
+            assert!(state.objects.is_empty());
+        }
     }
 
     #[test]

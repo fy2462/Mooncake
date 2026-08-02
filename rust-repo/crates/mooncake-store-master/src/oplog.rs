@@ -555,7 +555,9 @@ pub use oplog_etcd::EtcdOpLogStore;
 pub use oplog_local::{LocalFsOpLogError, LocalFsOpLogStore};
 pub(crate) use oplog_manager::LeaseRefreshEntry;
 pub use oplog_manager::OpLogManager;
-pub(crate) use oplog_wire::decode_record_payload_value;
+pub(crate) use oplog_wire::{
+    decode_record_payload_value, verify_cpp_struct_pack_empty_replica_payload,
+};
 
 fn validate_snapshot_id(snapshot_id: &str) -> Result<(), HaError> {
     if snapshot_id.is_empty()

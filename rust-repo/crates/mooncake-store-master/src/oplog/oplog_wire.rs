@@ -350,6 +350,28 @@ pub(super) fn rust_payload_from_cpp_wire_entry(
                     BASE64_STANDARD.encode(decoded_payload)
                 ));
             }
+            if let Some((client_id_first, client_id_second, size)) =
+                decode_cpp_struct_pack_empty_replica_metadata(&decoded_payload)
+            {
+                let (tenant_id, user_key) =
+                    TenantId::parse_scoped_key(&wire.object_key).map_err(|error| {
+                        HaError::InvalidBackend(format!(
+                            "C++ struct-pack PUT_END has invalid object identity: {error}"
+                        ))
+                    })?;
+                return Ok(json!({
+                    "op": "put_end",
+                    "key": wire.object_key,
+                    "size": size,
+                    "client_id": Uuid::from_u64_pair(client_id_first, client_id_second).to_string(),
+                    "tenant_id": tenant_id.as_str(),
+                    "group_id": "",
+                    "user_key": user_key,
+                    "replicas": [],
+                    "legacy_cpp_struct_pack_payload_base64": metadata_payload_base64
+                })
+                .to_string());
+            }
             if let Ok(payload) = String::from_utf8(decoded_payload) {
                 if serde_json::from_str::<serde_json::Value>(&payload)
                     .ok()
@@ -374,6 +396,58 @@ pub(super) fn rust_payload_from_cpp_wire_entry(
             "unsupported C++ oplog op_type: {other}"
         ))),
     }
+}
+
+fn decode_cpp_struct_pack_empty_replica_metadata(bytes: &[u8]) -> Option<(u64, u64, u64)> {
+    // Golden schema header emitted by the installed yalantinglibs struct_pack
+    // for MetadataPayload { UUID, uint64_t, vector<Replica::Descriptor> }.
+    // The final byte is the zero-length replica vector; the preceding 24 bytes
+    // are the UUID pair and size in little-endian order.
+    const EMPTY_REPLICA_SCHEMA: &[u8] = &[
+        0xcd, 0xe7, 0xf3, 0x0f, 0x04, 0xfd, 0xfd, 0x04, 0x04, 0x89, 0x89, 0xff, 0x04, 0x84, 0xfd,
+        0x04, 0x86, 0xfd, 0xfd, 0x04, 0x04, 0x80, 0x0c, 0x80, 0x0c, 0xff, 0xff, 0xfd, 0xfd, 0x04,
+        0x04, 0x80, 0x0c, 0x80, 0x0c, 0xff, 0xff, 0xfd, 0x80, 0x0c, 0x04, 0xff, 0xfd, 0xfd, 0x04,
+        0x04, 0x89, 0x89, 0xff, 0x04, 0x80, 0x0c, 0xff, 0xff, 0x01, 0xff, 0xff, 0x00,
+    ];
+    if bytes.len() != EMPTY_REPLICA_SCHEMA.len() + 25
+        || !bytes.starts_with(EMPTY_REPLICA_SCHEMA)
+        || bytes.last() != Some(&0)
+    {
+        return None;
+    }
+    let fields = &bytes[EMPTY_REPLICA_SCHEMA.len()..bytes.len() - 1];
+    Some((
+        u64::from_le_bytes(fields[0..8].try_into().ok()?),
+        u64::from_le_bytes(fields[8..16].try_into().ok()?),
+        u64::from_le_bytes(fields[16..24].try_into().ok()?),
+    ))
+}
+
+pub(crate) fn verify_cpp_struct_pack_empty_replica_payload(payload: &serde_json::Value) -> bool {
+    let Some(encoded) = payload
+        .get("legacy_cpp_struct_pack_payload_base64")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Ok(bytes) = BASE64_STANDARD.decode(encoded) else {
+        return false;
+    };
+    let Some((client_id_first, client_id_second, size)) =
+        decode_cpp_struct_pack_empty_replica_metadata(&bytes)
+    else {
+        return false;
+    };
+    payload.get("size").and_then(serde_json::Value::as_u64) == Some(size)
+        && payload
+            .get("client_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            == Some(Uuid::from_u64_pair(client_id_first, client_id_second))
+        && payload
+            .get("replicas")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(Vec::is_empty)
 }
 
 fn reject_unknown_put_end_msgpack_version(bytes: &[u8]) -> Result<(), HaError> {
