@@ -1,5 +1,5 @@
 use mooncake_store_master::ha::OpLogRecord;
-use mooncake_store_master::oplog::{EtcdOpLogStore, OpLogStore};
+use mooncake_store_master::oplog::{EtcdOpLogStore, OpLogManager, OpLogStore};
 use uuid::Uuid;
 
 fn live_etcd_enabled() -> bool {
@@ -392,4 +392,44 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testre
         assert_eq!(entry.seq, sequence);
         assert_eq!(entry.payload, format!("value-{sequence}"));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testupdatelatestsequenceid()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("update-latest").await else {
+        return;
+    };
+
+    fixture.store.update_latest_sequence_id(12_345).unwrap();
+
+    assert_eq!(fixture.latest_from_etcd().await, 12_345);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testwritetoetcd_success() {
+    let Some(fixture) = LiveEtcdFixture::new("manager-write").await else {
+        return;
+    };
+    let LiveEtcdFixture {
+        client,
+        prefix,
+        view,
+        store,
+        ..
+    } = fixture;
+    let manager = OpLogManager::new(Some(Box::new(store)), view);
+
+    let sequence = manager
+        .append_and_persist("manager-live-value".to_string())
+        .unwrap();
+
+    assert_eq!(sequence, 1);
+    assert_eq!(manager.latest_sequence(), 1);
+    let reader = EtcdOpLogStore::new(client, &prefix).await.unwrap();
+    let entries = reader.read_since_async(1, 1).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, 1);
+    assert_eq!(entries[0].producer_view_version, view);
+    assert_eq!(entries[0].payload, "manager-live-value");
 }

@@ -4,7 +4,7 @@ use mooncake_store_master::ha::{HaError, OpLogRecord};
 use mooncake_store_master::oplog::test_support::*;
 use mooncake_store_master::oplog::{InMemoryOpLog, LocalFsOpLogStore, OpLogManager, OpLogStore};
 use serde_json::json;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -975,6 +975,51 @@ fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testsequenceidinc
             .collect::<Vec<_>>(),
         ["value1", "value2", ""]
     );
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testconcurrentappend() {
+    const THREADS: usize = 8;
+    const PER_THREAD: usize = 1_000;
+    const TOTAL: usize = THREADS * PER_THREAD;
+
+    let manager = Arc::new(OpLogManager::new(
+        Some(Box::new(InMemoryOpLog::new(TOTAL + 1))),
+        7,
+    ));
+    let start = Arc::new(Barrier::new(THREADS));
+    let ids = Arc::new(Mutex::new(Vec::with_capacity(TOTAL)));
+    let workers = (0..THREADS)
+        .map(|_| {
+            let manager = Arc::clone(&manager);
+            let start = Arc::clone(&start);
+            let ids = Arc::clone(&ids);
+            std::thread::spawn(move || {
+                start.wait();
+                for _ in 0..PER_THREAD {
+                    let id = manager.append_and_persist("value".to_string()).unwrap();
+                    ids.lock().unwrap().push(id);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let mut ids = Arc::try_unwrap(ids).unwrap().into_inner().unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids.len(), 8_000);
+    assert_eq!(ids.first(), Some(&1));
+    assert_eq!(ids.last(), Some(&8_000));
+    for (index, id) in ids.iter().enumerate() {
+        assert_eq!(*id, u64::try_from(index).unwrap() + 1);
+    }
+    assert_eq!(manager.latest_sequence(), 8_000);
+    let entries = manager.read_since(1, 8_001).unwrap();
+    assert_eq!(entries.len(), 8_000);
+    assert_eq!(entries.first().unwrap().seq, 1);
+    assert_eq!(entries.last().unwrap().seq, 8_000);
 }
 
 #[test]
