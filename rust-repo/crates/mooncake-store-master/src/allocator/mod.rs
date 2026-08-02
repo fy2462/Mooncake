@@ -29,6 +29,7 @@
 mod cachelib;
 mod cachelib_api;
 mod offset_layout;
+mod offset_snapshot;
 mod strategies;
 mod types;
 

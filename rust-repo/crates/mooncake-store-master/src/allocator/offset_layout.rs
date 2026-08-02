@@ -629,6 +629,61 @@ mod tests {
         }
     }
 
+    fn assert_live_descriptors_scalable(live: &[ReplicaDescriptor], capacity: u64) {
+        let ranges = live
+            .iter()
+            .map(|replica| (replica.offset, replica.size))
+            .collect::<Vec<_>>();
+        assert_live_ranges_scalable(&ranges, capacity);
+    }
+
+    fn run_small_random_allocation_phase(
+        allocator: &mut SegmentAllocator,
+        segment_id: Uuid,
+        live: &mut Vec<ReplicaDescriptor>,
+        rng: &mut DeterministicRng,
+    ) {
+        for _ in 0..100 {
+            let requested = rng.one_through(1_024);
+            live.push(allocate_facade_exact(allocator, segment_id, MIB, requested));
+            assert_live_descriptors_scalable(live, MIB);
+
+            if rng.next() & 1 == 0 {
+                let removed = live.swap_remove(rng.index(live.len()));
+                release_facade_exact(allocator, removed);
+                assert_live_descriptors_scalable(live, MIB);
+            }
+        }
+    }
+
+    fn run_random_replacement_facade_step(
+        allocator: &mut SegmentAllocator,
+        segment_id: Uuid,
+        live: &mut Vec<ReplicaDescriptor>,
+        capacity: u64,
+        rng: &mut DeterministicRng,
+    ) {
+        let requested = rng.one_through(capacity / 100);
+        if let Ok(replica) = allocator.allocate_from_segment_id(segment_id, requested) {
+            assert_eq!(replica.size, requested);
+            assert!(replica.offset.checked_add(replica.size).unwrap() <= capacity);
+            live.push(replica);
+            assert_live_descriptors_scalable(live, capacity);
+        }
+
+        assert!(!live.is_empty());
+        let removed = live.swap_remove(rng.index(live.len()));
+        let replacement_size = removed.size;
+        release_facade_exact(allocator, removed);
+        live.push(allocate_facade_exact(
+            allocator,
+            segment_id,
+            capacity,
+            replacement_size,
+        ));
+        assert_live_descriptors_scalable(live, capacity);
+    }
+
     fn random_replacement_step(
         state: &mut SegmentState,
         live: &mut Vec<(u64, u64)>,
@@ -1133,6 +1188,367 @@ mod tests {
 
         assert!(restored.restore_segment(segment, client_id, &live).is_err());
         assert!(restored.offset_allocator_report(&segment_id).is_none());
+    }
+
+    #[test]
+    fn cpp_parity_empty_allocator_snapshot_short_long_not_equal() {
+        let maximum = 10_000;
+        let (allocator, segment_id) = limited_offset_allocator_facade(MIB, maximum);
+        let encoded = allocator
+            .serialize_offset_segment(&segment_id)
+            .expect("serialize empty Offset segment");
+        let original_report = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("original Offset report");
+
+        let mut restored = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        let rebound = restored
+            .restore_offset_segment_snapshot(&encoded)
+            .expect("restore clean empty snapshot");
+        assert!(rebound.is_empty());
+        assert_eq!(
+            restored
+                .serialize_offset_segment(&segment_id)
+                .expect("reserialize restored segment"),
+            encoded
+        );
+        assert_eq!(
+            restored
+                .offset_allocator_report(&segment_id)
+                .expect("restored Offset report"),
+            original_report
+        );
+
+        let shortened = &encoded[..encoded.len() - 1];
+        let mut short_target = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        assert!(
+            short_target
+                .restore_offset_segment_snapshot(shortened)
+                .is_err()
+        );
+        assert!(short_target.offset_allocator_report(&segment_id).is_none());
+
+        let mut extended = encoded.clone();
+        extended.push(0);
+        let mut long_target = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        assert!(
+            long_target
+                .restore_offset_segment_snapshot(&extended)
+                .is_err()
+        );
+        assert!(long_target.offset_allocator_report(&segment_id).is_none());
+
+        let mut second = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        assert!(
+            second
+                .restore_offset_segment_snapshot(&encoded)
+                .expect("second clean restore")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cpp_parity_one_live_allocation_snapshot_rebinds_and_frees() {
+        let maximum = 10_000;
+        let (mut allocator, segment_id) = limited_offset_allocator_facade(MIB, maximum);
+        let live = allocate_facade_exact(&mut allocator, segment_id, MIB, 1_024);
+        assert_eq!((live.offset, live.size), (0, 1_024));
+        let encoded = allocator
+            .serialize_offset_segment(&segment_id)
+            .expect("serialize one-allocation Offset segment");
+        let original_report = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("original Offset report");
+
+        let mut restored = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        let rebound = restored
+            .restore_offset_segment_snapshot(&encoded)
+            .expect("restore clean one-allocation snapshot");
+        assert_eq!(rebound.len(), 1);
+        assert_eq!((rebound[0].offset, rebound[0].size), (0, 1_024));
+        assert_eq!(
+            restored
+                .serialize_offset_segment(&segment_id)
+                .expect("reserialize restored segment"),
+            encoded
+        );
+        assert_eq!(
+            restored
+                .offset_allocator_report(&segment_id)
+                .expect("restored Offset report"),
+            original_report
+        );
+
+        let shortened = &encoded[..encoded.len() - 1];
+        let mut short_target = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        assert!(
+            short_target
+                .restore_offset_segment_snapshot(shortened)
+                .is_err()
+        );
+        assert!(short_target.offset_allocator_report(&segment_id).is_none());
+
+        let mut extended = encoded.clone();
+        extended.push(0);
+        let mut long_target = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        assert!(
+            long_target
+                .restore_offset_segment_snapshot(&extended)
+                .is_err()
+        );
+        assert!(long_target.offset_allocator_report(&segment_id).is_none());
+
+        let mut second = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(maximum))
+            .expect("valid Offset node budget");
+        let mut rebound = second
+            .restore_offset_segment_snapshot(&encoded)
+            .expect("second clean restore");
+        assert_eq!(rebound.len(), 1);
+        release_facade_exact(&mut second, rebound.pop().expect("rebound descriptor"));
+        let report = second
+            .offset_allocator_report(&segment_id)
+            .expect("fully released Offset report");
+        assert_eq!(report.allocated_bytes, 0);
+        assert_eq!(report.allocation_count, 0);
+        assert_eq!(report.total_free_space, MIB);
+        assert_eq!(report.largest_free_region, MIB);
+    }
+
+    #[test]
+    fn cpp_parity_100_random_huge_snapshots_preserve_live_state() {
+        const MAXIMUM_NODES: u64 = 10_000;
+        let mut rng = DeterministicRng(0x5a17_5eed_cafe_f00d);
+
+        for _ in 0..100 {
+            let capacity = rng.inclusive((1_u64 << 31) + 1, 1_u64 << 40);
+            let (mut source, segment_id) = limited_offset_allocator_facade(capacity, MAXIMUM_NODES);
+            let mut live = Vec::new();
+
+            for _ in 0..200 {
+                let requested = rng.one_through(capacity / 100);
+                if let Ok(replica) = source.allocate_from_segment_id(segment_id, requested) {
+                    assert_eq!(replica.size, requested);
+                    assert!(replica.offset.checked_add(replica.size).unwrap() <= capacity);
+                    live.push(replica);
+                    assert_live_descriptors_scalable(&live, capacity);
+                }
+
+                assert!(!live.is_empty());
+                let removed = live.swap_remove(rng.index(live.len()));
+                let replacement_size = removed.size;
+                release_facade_exact(&mut source, removed);
+                live.push(allocate_facade_exact(
+                    &mut source,
+                    segment_id,
+                    capacity,
+                    replacement_size,
+                ));
+                assert_live_descriptors_scalable(&live, capacity);
+            }
+
+            let encoded = source
+                .serialize_offset_segment(&segment_id)
+                .expect("serialize random huge Offset segment");
+            let source_report = source
+                .offset_allocator_report(&segment_id)
+                .expect("source random huge Offset report");
+
+            let mut restored = SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(MAXIMUM_NODES))
+                .expect("valid Offset node budget");
+            let rebound = restored
+                .restore_offset_segment_snapshot(&encoded)
+                .expect("restore random huge Offset snapshot");
+            assert_live_descriptors_scalable(&rebound, capacity);
+            assert_eq!(rebound.len(), live.len());
+            assert_eq!(
+                restored
+                    .serialize_offset_segment(&segment_id)
+                    .expect("reserialize random huge Offset segment"),
+                encoded
+            );
+            assert_eq!(
+                restored
+                    .offset_allocator_report(&segment_id)
+                    .expect("restored random huge Offset report"),
+                source_report
+            );
+
+            let mut short_target = SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(MAXIMUM_NODES))
+                .expect("valid Offset node budget");
+            assert!(
+                short_target
+                    .restore_offset_segment_snapshot(&encoded[..encoded.len() - 1])
+                    .is_err()
+            );
+            assert!(short_target.offset_allocator_report(&segment_id).is_none());
+
+            let mut extended = encoded.clone();
+            extended.push(0);
+            let mut long_target = SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(MAXIMUM_NODES))
+                .expect("valid Offset node budget");
+            assert!(
+                long_target
+                    .restore_offset_segment_snapshot(&extended)
+                    .is_err()
+            );
+            assert!(long_target.offset_allocator_report(&segment_id).is_none());
+
+            let mut second = SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(MAXIMUM_NODES))
+                .expect("valid Offset node budget");
+            let rebound = second
+                .restore_offset_segment_snapshot(&encoded)
+                .expect("second clean random huge Offset restore");
+            assert_eq!(rebound.len(), live.len());
+            for replica in rebound {
+                release_facade_exact(&mut second, replica);
+            }
+            let report = second
+                .offset_allocator_report(&segment_id)
+                .expect("fully released random huge Offset report");
+            assert_eq!(report.allocated_bytes, 0);
+            assert_eq!(report.allocation_count, 0);
+            assert_eq!(report.capacity, capacity);
+            assert_eq!(report.total_free_space, capacity);
+            assert_eq!(report.largest_free_region, capacity);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_random_allocation_continues_after_snapshot_restore() {
+        const MAXIMUM_NODES: u64 = 10_000;
+        let (mut source, segment_id) = limited_offset_allocator_facade(MIB, MAXIMUM_NODES);
+        let mut live = Vec::new();
+        let mut first_phase_rng = DeterministicRng(0xc001_d00d_0000_0001);
+        run_small_random_allocation_phase(&mut source, segment_id, &mut live, &mut first_phase_rng);
+
+        let encoded = source
+            .serialize_offset_segment(&segment_id)
+            .expect("serialize first random allocation phase");
+        let source_report = source
+            .offset_allocator_report(&segment_id)
+            .expect("source continued-allocation Offset report");
+        let survivor_count = live.len();
+        let mut restored = SegmentAllocator::new()
+            .try_with_offset_max_allocation_nodes(Some(MAXIMUM_NODES))
+            .expect("valid Offset node budget");
+        live = restored
+            .restore_offset_segment_snapshot(&encoded)
+            .expect("restore before second random allocation phase");
+        assert_eq!(live.len(), survivor_count);
+        assert_live_descriptors_scalable(&live, MIB);
+        assert_eq!(
+            restored
+                .serialize_offset_segment(&segment_id)
+                .expect("reserialize before second random allocation phase"),
+            encoded
+        );
+        assert_eq!(
+            restored
+                .offset_allocator_report(&segment_id)
+                .expect("restored continued-allocation Offset report"),
+            source_report
+        );
+
+        let mut second_phase_rng = DeterministicRng(0xc001_d00d_0000_0002);
+        run_small_random_allocation_phase(
+            &mut restored,
+            segment_id,
+            &mut live,
+            &mut second_phase_rng,
+        );
+
+        for replica in live {
+            release_facade_exact(&mut restored, replica);
+        }
+        let report = restored
+            .offset_allocator_report(&segment_id)
+            .expect("fully released continued-allocation report");
+        assert_eq!(report.allocated_bytes, 0);
+        assert_eq!(report.allocation_count, 0);
+        assert_eq!(report.total_free_space, MIB);
+        assert_eq!(report.largest_free_region, MIB);
+    }
+
+    #[test]
+    fn cpp_parity_ten_huge_allocators_survive_1000_replacements_and_rebind() {
+        const MAXIMUM_NODES: u64 = 10_000;
+        let mut rng = DeterministicRng(0x0ff5_e7aa_110c_a7e5);
+
+        for _ in 0..10 {
+            let capacity = rng.inclusive((1_u64 << 31) + 1, 1_u64 << 40);
+            let (mut source, segment_id) = limited_offset_allocator_facade(capacity, MAXIMUM_NODES);
+            let mut live = Vec::new();
+
+            for _ in 0..10 {
+                for _ in 0..100 {
+                    run_random_replacement_facade_step(
+                        &mut source,
+                        segment_id,
+                        &mut live,
+                        capacity,
+                        &mut rng,
+                    );
+                }
+            }
+
+            let encoded = source
+                .serialize_offset_segment(&segment_id)
+                .expect("serialize chained huge Offset segment");
+            let source_report = source
+                .offset_allocator_report(&segment_id)
+                .expect("source chained huge Offset report");
+            let mut restored = SegmentAllocator::new()
+                .try_with_offset_max_allocation_nodes(Some(MAXIMUM_NODES))
+                .expect("valid Offset node budget");
+            let rebound = restored
+                .restore_offset_segment_snapshot(&encoded)
+                .expect("restore chained huge Offset snapshot");
+            assert_eq!(rebound.len(), live.len());
+            assert_live_descriptors_scalable(&rebound, capacity);
+            assert_eq!(
+                restored
+                    .serialize_offset_segment(&segment_id)
+                    .expect("reserialize chained huge Offset segment"),
+                encoded
+            );
+            assert_eq!(
+                restored
+                    .offset_allocator_report(&segment_id)
+                    .expect("restored chained huge Offset report"),
+                source_report
+            );
+
+            for replica in rebound {
+                release_facade_exact(&mut restored, replica);
+            }
+            let report = restored
+                .offset_allocator_report(&segment_id)
+                .expect("fully released chained huge Offset report");
+            assert_eq!(report.allocated_bytes, 0);
+            assert_eq!(report.allocation_count, 0);
+            assert_eq!(report.capacity, capacity);
+            assert_eq!(report.total_free_space, capacity);
+            assert_eq!(report.largest_free_region, capacity);
+        }
     }
 
     #[test]
