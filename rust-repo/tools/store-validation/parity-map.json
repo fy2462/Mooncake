@@ -1061,10 +1061,10 @@
       "behavior": "Ten pre-start LocalFS operations over eight keys—five asynchronously submitted PUT_ENDs, two synchronous removes of the first keys, then three asynchronously submitted PUT_ENDs with the final write issued through AppendAndPersist—become visible during standby catch-up and replay to exactly keys 2 through 7 with an exported snapshot size of six.",
       "boundary": ["master", "ha", "localfs", "optional-component", "oplog-replay", "data-consistency", "prepopulated-replay"],
       "reference": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestDataConsistency"},
-      "reason": "Rust has the strongest nearby LocalFS oracle—100 durable puts then 20 durable removes with exact status and per-key state—but its standby starts before writing. It does not preserve this pre-start 5-put/2-remove/3-put submission pattern over eight keys or the exported snapshot contract; C++ also does not assert exact applied/primary sequence equality or metadata payload integrity.",
+      "reason": "Rust durably completes each authoritative object image and remove instead of exposing C++'s weaker asynchronous Append API. The parity test preserves the pre-start 5-put/2-remove/3-put order over eight keys and verifies the exact six-key result plus payload sizes after production LocalFS replay.",
       "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestDataConsistency; rust-repo/crates/mooncake-store-master/src/hot_standby.rs localfs_writer_and_standby_sync_mixed_state_then_promote", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-master/src/hot_standby.rs","test":"cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testdataconsistency"}],
+      "status": "covered"
     },
     {
       "behavior": "A running LocalFS standby attempts to reach WATCHING before 100 PUT_END records are submitted, the first 99 through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then polling awaits eventual batch visibility and reports applied sequence at least the final sequence and zero lag, while write duration and maximum observed lag are logged only.",
