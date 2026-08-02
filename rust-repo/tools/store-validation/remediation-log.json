@@ -3665,5 +3665,50 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-full-bin-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.StorageReports",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_storage_report_decreases_after_thousand_bytes",
+    "first_divergence": "Rust lacked a public checked Offset report exposing total free space and largest contiguous free region across a real allocation.",
+    "repair_commit": "0b1d516b",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-storage-report-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.RepeatedLargeSizeAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_176_bins_accept_ten_near_capacity_reuses",
+    "first_divergence": "Rust lacked the exact 176-bin by ten near-capacity allocation, explicit-release, and checked-report matrix.",
+    "repair_commit": "0b1d516b",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-storage-report-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BasicLargeAllocatorSize",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_powers_30_through_40_large_capacity_boundaries",
+    "first_divergence": "Rust lacked checked largest-free reports and the exact one, capacity-minus-one, and full-capacity matrix across all eleven powers from 1 GiB through 1 TiB.",
+    "repair_commit": "0b1d516b",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-storage-report-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.MaxAllocSizeWithLargeAllocatorSize",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_100_random_huge_largest_regions_are_allocatable",
+    "first_divergence": "Rust lacked 100 seeded huge-capacity largest-free reports followed by exact allocation of every reported region.",
+    "repair_commit": "0b1d516b",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-storage-report-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.MetricsInterface",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_metrics_exact_five_snapshot_lifecycle",
+    "first_divergence": "Rust lacked a public checked Offset metrics snapshot and the exact five-stage allocation/release accounting lifecycle.",
+    "repair_commit": "0b1d516b",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-storage-report-goal-019fbe77.typescript"
   }
 ]
