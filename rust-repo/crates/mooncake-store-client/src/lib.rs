@@ -82,7 +82,9 @@ pub use local_storage_backend::{
     OffsetEvictionPolicy, OffsetPersistMode, OffsetPersistenceConfig,
     migrate_cpp_file_per_key_layout, migrate_cpp_offset_allocator_layout,
 };
-pub use memory_ffi::RegisteredBufferAllocation;
+pub use memory_ffi::{
+    RegisteredBufferAllocation, StoreArenaAllocation, StoreArenaStats, StoreSegmentArena,
+};
 pub use remote_source::{
     RemoteSource,
     config::{RemoteSourceConfig, S3Config},

@@ -12,6 +12,7 @@ use std::io;
 use std::ops::{Deref, DerefMut, Range};
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use transfer_engine_ffi::{
     RegisteredMemory, RegisteredMemoryAccess, StableMemoryOwner, TransferEngine,
 };
@@ -19,6 +20,206 @@ use transfer_engine_ffi::{
 use crate::pinned_memory::{PinnedAllocation, global_pinned_memory_manager};
 
 pub(crate) type OwnedSegmentBuffer = PinnedAllocation<OwnedBuffer>;
+
+const STORE_ARENA_MIN_ALIGNMENT: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StoreArenaStats {
+    pub capacity: usize,
+    pub default_alignment: usize,
+    pub reserved: usize,
+    pub peak: usize,
+    pub successful: usize,
+    pub failed: usize,
+}
+
+struct StoreArenaBacking {
+    buffer: OwnedBuffer,
+}
+
+/// Monotonic Store-segment allocator used in place of the C++ raw-pointer
+/// singleton. Each successful reservation returns a capability for one unique
+/// range while the shared owner keeps the complete backing alive.
+pub struct StoreSegmentArena {
+    backing: Arc<StoreArenaBacking>,
+    capacity: usize,
+    default_alignment: usize,
+    reserved: AtomicUsize,
+    peak: AtomicUsize,
+    successful: AtomicUsize,
+    failed: AtomicUsize,
+}
+
+impl StoreSegmentArena {
+    pub fn new(requested_capacity: usize, default_alignment: usize) -> io::Result<Self> {
+        if requested_capacity == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Store arena capacity must be greater than zero",
+            ));
+        }
+        if default_alignment != 0 && !default_alignment.is_power_of_two() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Store arena alignment must be a power of two",
+            ));
+        }
+        let default_alignment = default_alignment.max(STORE_ARENA_MIN_ALIGNMENT);
+        let capacity = align_up(requested_capacity, HUGEPAGE_2_MIB).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Store arena capacity alignment overflow",
+            )
+        })?;
+        let mut buffer = OwnedBuffer::allocate_aligned(capacity, HUGEPAGE_2_MIB)?;
+        prefault_system_pages(&mut buffer);
+        Ok(Self {
+            backing: Arc::new(StoreArenaBacking { buffer }),
+            capacity,
+            default_alignment,
+            reserved: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            successful: AtomicUsize::new(0),
+            failed: AtomicUsize::new(0),
+        })
+    }
+
+    pub fn allocate(
+        &self,
+        size: usize,
+        requested_alignment: usize,
+    ) -> io::Result<StoreArenaAllocation> {
+        if size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Store arena allocation size must be greater than zero",
+            ));
+        }
+        if requested_alignment != 0 && !requested_alignment.is_power_of_two() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Store arena allocation alignment must be a power of two",
+            ));
+        }
+        let alignment = self.default_alignment.max(requested_alignment);
+        if alignment > HUGEPAGE_2_MIB {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Store arena allocation alignment exceeds backing alignment",
+            ));
+        }
+        let aligned_size = match align_up(size, alignment) {
+            Some(value) => value,
+            None => return self.failed_allocation("Store arena allocation size overflow"),
+        };
+
+        let mut raw = self.reserved.load(Ordering::Relaxed);
+        let (offset, next) = loop {
+            let Some(offset) = align_up(raw, alignment) else {
+                return self.failed_allocation("Store arena allocation offset overflow");
+            };
+            let Some(next) = offset.checked_add(aligned_size) else {
+                return self.failed_allocation("Store arena allocation end overflow");
+            };
+            if next > self.capacity {
+                return self.failed_allocation("Store arena capacity exhausted");
+            }
+            match self.reserved.compare_exchange_weak(
+                raw,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break (offset, next),
+                Err(observed) => raw = observed,
+            }
+        };
+
+        self.successful.fetch_add(1, Ordering::Relaxed);
+        self.peak.fetch_max(next, Ordering::Relaxed);
+        Ok(StoreArenaAllocation {
+            backing: Arc::clone(&self.backing),
+            offset,
+            len: size,
+        })
+    }
+
+    fn failed_allocation<T>(&self, message: &'static str) -> io::Result<T> {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+        Err(io::Error::new(io::ErrorKind::OutOfMemory, message))
+    }
+
+    pub fn stats(&self) -> StoreArenaStats {
+        StoreArenaStats {
+            capacity: self.capacity,
+            default_alignment: self.default_alignment,
+            reserved: self.reserved.load(Ordering::Relaxed),
+            peak: self.peak.load(Ordering::Relaxed),
+            successful: self.successful.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub struct StoreArenaAllocation {
+    backing: Arc<StoreArenaBacking>,
+    offset: usize,
+    len: usize,
+}
+
+impl StoreArenaAllocation {
+    pub fn as_ptr(&self) -> *mut u8 {
+        // SAFETY: construction validates offset + len within the stable
+        // backing allocation, which remains alive through the retained Arc.
+        unsafe { self.backing.buffer.as_ptr().add(self.offset).cast_mut() }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl fmt::Debug for StoreArenaAllocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoreArenaAllocation")
+            .field("base", &(self.as_ptr() as usize))
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+impl Deref for StoreArenaAllocation {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: every successful CAS grants a unique in-bounds range. The
+        // private backing has no whole-buffer mutable accessor after arena
+        // publication and the Arc outlives this slice capability.
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) }
+    }
+}
+
+impl DerefMut for StoreArenaAllocation {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: StoreArenaAllocation is not Clone and distinct allocations
+        // own disjoint CAS-reserved ranges, so this mutable slice is unique.
+        unsafe { std::slice::from_raw_parts_mut(self.as_ptr(), self.len) }
+    }
+}
+
+fn prefault_system_pages(buffer: &mut OwnedBuffer) {
+    const FALLBACK_PAGE_SIZE: usize = 4096;
+    for offset in (0..buffer.len()).step_by(FALLBACK_PAGE_SIZE) {
+        // A volatile write forces a real writable page to be established
+        // before the arena is shared with allocating threads.
+        unsafe { std::ptr::write_volatile(buffer.as_ptr().add(offset).cast_mut(), 0) };
+    }
+}
 
 /// Owner-backed registration used by the peer offload read server.
 ///
@@ -99,6 +300,11 @@ impl RegisteredBufferAllocation {
             return Err(StoreError::InvalidParams(
                 "registered allocation size must be greater than zero".to_string(),
             ));
+        }
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(StoreError::InvalidParams(format!(
+                "registered allocation alignment must be a positive power of two, got {alignment}"
+            )));
         }
         let buffer = OwnedBuffer::allocate_aligned(size, alignment).map_err(|error| {
             StoreError::Internal(format!(
@@ -821,7 +1027,6 @@ unsafe fn populate_hugetlb_mapping(ptr: *mut u8, len: usize, page_size: usize) -
     unsafe { populate_hugetlb_pages(ptr, len, page_size, workers) }
 }
 
-#[cfg(target_os = "linux")]
 fn align_up(size: usize, alignment: usize) -> Option<usize> {
     if alignment == 0 {
         return Some(size);
@@ -837,9 +1042,460 @@ fn align_up(size: usize, alignment: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        HUGEPAGE_1_GIB, HUGEPAGE_2_MIB, HugepagePolicy, OwnedBuffer, page_ranges,
-        populate_hugetlb_mapping, populate_hugetlb_pages,
+        HUGEPAGE_1_GIB, HUGEPAGE_2_MIB, HugepagePolicy, OwnedBuffer, RegisteredBufferAllocation,
+        StoreSegmentArena, page_ranges, populate_hugetlb_mapping, populate_hugetlb_pages,
     };
+    use mooncake_store_core::StoreError;
+
+    #[test]
+    fn cpp_parity_one_mib_segment_budget_starts_as_two_mib_with_zero_counters() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        let stats = arena.stats();
+        assert_eq!(stats.capacity, HUGEPAGE_2_MIB);
+        assert_eq!(stats.default_alignment, 64);
+        assert_eq!(stats.reserved, 0);
+        assert_eq!(stats.peak, 0);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.failed, 0);
+    }
+
+    #[test]
+    fn cpp_parity_one_kib_allocation_updates_count_and_reservation() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        let allocation = arena.allocate(1024, 64).expect("one KiB fits");
+        assert!(!allocation.as_ptr().is_null());
+        assert_eq!(allocation.len(), 1024);
+        let stats = arena.stats();
+        assert_eq!(stats.successful, 1);
+        assert!((1024..=1088).contains(&stats.reserved));
+    }
+
+    #[test]
+    fn cpp_parity_registered_zero_size_is_rejected_without_success_count() {
+        let registered_error = RegisteredBufferAllocation::allocate(0, 64)
+            .expect_err("registered zero-size allocation must fail");
+        assert!(matches!(registered_error, StoreError::InvalidParams(_)));
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        assert!(arena.allocate(0, 64).is_err());
+        let stats = arena.stats();
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.reserved, 0);
+    }
+
+    #[test]
+    fn cpp_parity_usize_max_rejects_once_without_reservation() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        assert!(arena.allocate(usize::MAX, 64).is_err());
+        let stats = arena.stats();
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.reserved, 0);
+    }
+
+    #[test]
+    fn cpp_parity_usize_max_minus_ten_alignment_overflow_is_nonmutating() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        assert!(arena.allocate(usize::MAX - 10, 64).is_err());
+        let stats = arena.stats();
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.reserved, 0);
+    }
+
+    #[test]
+    fn cpp_parity_half_usize_max_exceeds_budget_and_counts_once() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        assert!(arena.allocate(usize::MAX / 2, 64).is_err());
+        let stats = arena.stats();
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.reserved, 0);
+    }
+
+    #[test]
+    fn cpp_parity_exact_six_size_matrix_is_64_aligned_and_fully_writable() {
+        let arena = StoreSegmentArena::new(HUGEPAGE_2_MIB, 64).expect("valid arena");
+        let mut allocations = Vec::new();
+        for size in [1, 63, 64, 65, 100, 1000] {
+            let mut allocation = arena.allocate(size, 64).expect("matrix allocation fits");
+            assert_eq!(allocation.as_ptr() as usize % 64, 0);
+            allocation.fill(0xaa);
+            assert!(allocation.iter().all(|byte| *byte == 0xaa));
+            allocations.push(allocation);
+        }
+        assert_eq!(allocations.len(), 6);
+    }
+
+    #[test]
+    fn cpp_parity_repeated_oom_never_advances_reserved_past_capacity() {
+        let arena = StoreSegmentArena::new(1024, 64).expect("valid arena");
+        let mut allocations = Vec::new();
+        while let Ok(allocation) = arena.allocate(64, 0) {
+            allocations.push(allocation);
+        }
+        let full = arena.stats();
+        assert!(full.reserved <= full.capacity);
+        assert!(full.failed > 0);
+        let reserved = full.reserved;
+        assert!(arena.allocate(1, 0).is_err());
+        assert_eq!(arena.stats().reserved, reserved);
+    }
+
+    #[test]
+    fn cpp_parity_sixteen_thread_oom_accounts_every_attempt() {
+        let arena =
+            std::sync::Arc::new(StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena"));
+        let attempts_per_thread = arena.stats().capacity / (64 * 16) + 100;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            let arena = std::sync::Arc::clone(&arena);
+            let barrier = std::sync::Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut successful = 0;
+                let mut failed = 0;
+                for _ in 0..attempts_per_thread {
+                    match arena.allocate(64, 0) {
+                        Ok(mut allocation) => {
+                            allocation.fill(0xbb);
+                            successful += 1;
+                        }
+                        Err(_) => failed += 1,
+                    }
+                }
+                (successful, failed)
+            }));
+        }
+        let (successful, failed) = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("allocator thread"))
+            .fold((0, 0), |totals, values| {
+                (totals.0 + values.0, totals.1 + values.1)
+            });
+        assert!(successful > 0);
+        assert!(failed > 0);
+        assert_eq!(successful + failed, 16 * attempts_per_thread);
+        let stats = arena.stats();
+        assert_eq!(stats.successful, successful);
+        assert_eq!(stats.failed, failed);
+        assert!(stats.reserved <= stats.capacity);
+    }
+
+    #[test]
+    fn cpp_parity_ten_concurrent_store_allocations_return_unique_addresses() {
+        let arena =
+            std::sync::Arc::new(StoreSegmentArena::new(HUGEPAGE_2_MIB, 64).expect("valid arena"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+        let threads = (0..10)
+            .map(|_| {
+                let arena = std::sync::Arc::clone(&arena);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    arena.allocate(1024, 64)
+                })
+            })
+            .collect::<Vec<_>>();
+        let allocations = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().expect("allocator thread").ok())
+            .collect::<Vec<_>>();
+        assert!(!allocations.is_empty());
+        let addresses = allocations
+            .iter()
+            .map(|allocation| allocation.as_ptr() as usize)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(addresses.len(), allocations.len());
+    }
+
+    #[test]
+    fn cpp_parity_eight_threads_attempt_8000_validate_every_success() {
+        let arena =
+            std::sync::Arc::new(StoreSegmentArena::new(64 * 1024 * 1024, 64).expect("valid arena"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8_u8)
+            .map(|thread_index| {
+                let arena = std::sync::Arc::clone(&arena);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut allocations = Vec::new();
+                    for _ in 0..1000 {
+                        if let Ok(mut allocation) = arena.allocate(1024, 64) {
+                            allocation.fill(0xcc + thread_index);
+                            allocations.push(allocation);
+                        }
+                    }
+                    allocations
+                })
+            })
+            .collect::<Vec<_>>();
+        let allocations = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().expect("allocator thread"))
+            .collect::<Vec<_>>();
+        let addresses = allocations
+            .iter()
+            .map(|allocation| allocation.as_ptr() as usize)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(addresses.len(), allocations.len());
+    }
+
+    #[test]
+    fn cpp_parity_stats_samples_remain_bounded_during_eight_thread_load() {
+        let arena =
+            std::sync::Arc::new(StoreSegmentArena::new(64 * 1024 * 1024, 64).expect("valid arena"));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(9));
+        let workers = (0..8)
+            .map(|_| {
+                let arena = std::sync::Arc::clone(&arena);
+                let stop = std::sync::Arc::clone(&stop);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let _ = arena.allocate(128, 0);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for _ in 0..100 {
+            let stats = arena.stats();
+            assert!(stats.reserved <= stats.capacity);
+            std::thread::yield_now();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for worker in workers {
+            worker.join().expect("allocator thread");
+        }
+        let stats = arena.stats();
+        assert!(stats.reserved <= stats.capacity);
+        assert!(stats.peak >= stats.reserved);
+    }
+
+    #[test]
+    fn cpp_parity_sixty_four_byte_fill_stops_with_bounded_reservation() {
+        let arena = StoreSegmentArena::new(4096, 64).expect("valid arena");
+        let mut allocations = Vec::new();
+        while let Ok(allocation) = arena.allocate(64, 0) {
+            allocations.push(allocation);
+        }
+        assert!(!allocations.is_empty());
+        let stats = arena.stats();
+        assert!(stats.reserved <= stats.capacity);
+        assert!(stats.failed > 0);
+    }
+
+    #[test]
+    fn cpp_parity_eighty_mixed_store_allocation_attempts_validate_every_success() {
+        let arena = StoreSegmentArena::new(64 * 1024 * 1024, 64).expect("valid arena");
+        let mut allocations = Vec::new();
+        for size in [1, 16, 64, 256, 1024, 4096, 16_384, 65_536] {
+            for _ in 0..10 {
+                if let Ok(mut allocation) = arena.allocate(size, 0) {
+                    let address = allocation.as_ptr();
+                    allocation.fill(0xdd);
+                    assert_eq!(allocation.as_ptr(), address);
+                    assert_eq!(allocation.len(), size);
+                    assert_eq!(address as usize % 64, 0);
+                    assert!(allocation.iter().all(|byte| *byte == 0xdd));
+                    allocations.push(allocation);
+                }
+            }
+        }
+        assert!(!allocations.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_peak_tracks_512_then_1024_reservations() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        let first = arena.allocate(512, 0).expect("first allocation");
+        let first_stats = arena.stats();
+        assert!(first_stats.peak >= 512);
+        let second = arena.allocate(1024, 0).expect("second allocation");
+        let second_stats = arena.stats();
+        assert!(second_stats.peak >= first_stats.peak);
+        assert!(second_stats.peak >= 1536);
+        assert_eq!(first.len() + second.len(), 1536);
+    }
+
+    #[test]
+    fn cpp_parity_exact_six_request_reservation_is_monotonic() {
+        let arena = StoreSegmentArena::new(1024 * 1024, 64).expect("valid arena");
+        let mut allocations = Vec::new();
+        let mut prior = 0;
+        for size in [1, 63, 64, 65, 4096, 1024] {
+            allocations.push(arena.allocate(size, 0).expect("allocation fits"));
+            let stats = arena.stats();
+            assert!(stats.reserved >= prior);
+            assert!(stats.peak >= stats.reserved);
+            prior = stats.reserved;
+        }
+    }
+
+    #[test]
+    fn cpp_parity_one_byte_then_two_mib_aligned_reservation_orders_addresses() {
+        let arena = StoreSegmentArena::new(8 * 1024 * 1024, 64).expect("valid arena");
+        let first = arena.allocate(1, 64).expect("first allocation");
+        let second = arena
+            .allocate(4 * 1024 * 1024, HUGEPAGE_2_MIB)
+            .expect("aligned allocation");
+        let first_base = first.as_ptr() as usize;
+        let second_base = second.as_ptr() as usize;
+        let first_end = first_base.checked_add(first.len()).expect("first end");
+        let second_end = second_base.checked_add(second.len()).expect("second end");
+        assert_eq!(second_base % HUGEPAGE_2_MIB, 0);
+        assert!(second_base > first_base);
+        assert!(first_end <= second_base);
+        assert!(second_end <= arena.backing.buffer.as_ptr() as usize + arena.stats().capacity);
+    }
+
+    #[test]
+    fn cpp_parity_registered_allocation_rejects_alignment_100() {
+        let error = RegisteredBufferAllocation::allocate(1024, 100)
+            .expect_err("alignment 100 must be rejected");
+        assert!(matches!(error, StoreError::InvalidParams(_)));
+    }
+
+    #[test]
+    fn cpp_parity_exact_power_of_two_alignment_matrix_is_accepted() {
+        let mut allocations = Vec::new();
+        for alignment in [64, 128, 256, 512, 4096] {
+            let allocation = RegisteredBufferAllocation::allocate(1024, alignment)
+                .expect("power-of-two alignment");
+            assert!(!allocation.as_ptr().is_null());
+            assert_eq!(allocation.as_ptr() as usize % alignment, 0);
+            // SAFETY: the owner retains a live allocation of exactly 1,024
+            // writable bytes for the duration of these bounded accesses.
+            unsafe {
+                std::ptr::write_bytes(allocation.as_ptr().cast::<u8>(), 0xa5, 1024);
+                assert_eq!(allocation.as_ptr().cast::<u8>().read(), 0xa5);
+                assert_eq!(allocation.as_ptr().cast::<u8>().add(1023).read(), 0xa5);
+            }
+            allocations.push(allocation);
+        }
+        assert_eq!(allocations.len(), 5);
+    }
+
+    #[test]
+    fn cpp_parity_exact_sixteen_mib_fit_then_one_kib_oom() {
+        let arena = StoreSegmentArena::new(16 * 1024 * 1024, 64).expect("valid arena");
+        let allocation = arena
+            .allocate(16 * 1024 * 1024, 64)
+            .expect("exact capacity fits");
+        assert_eq!(allocation.len(), 16 * 1024 * 1024);
+        assert!(arena.allocate(1024, 64).is_err());
+        assert!(arena.stats().failed >= 1);
+    }
+
+    #[test]
+    fn cpp_parity_concurrent_policy_readers_preserve_four_mib_and_128_alignment() {
+        let arena =
+            std::sync::Arc::new(StoreSegmentArena::new(4 * 1024 * 1024, 128).expect("valid arena"));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let readers = (0..16)
+            .map(|_| {
+                let arena = std::sync::Arc::clone(&arena);
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let stats = arena.stats();
+                    (stats.capacity, stats.default_alignment)
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            assert_eq!(
+                reader.join().expect("policy reader"),
+                (4 * 1024 * 1024, 128)
+            );
+        }
+        let allocation = arena.allocate(256, 0).expect("allocation fits");
+        assert_eq!(allocation.as_ptr() as usize % 128, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpp_parity_linux_four_mib_segment_is_resident_or_page_readable() {
+        let arena = StoreSegmentArena::new(4 * 1024 * 1024, 64).expect("valid arena");
+        let base = arena.backing.buffer.as_ptr();
+        let capacity = arena.stats().capacity;
+        assert!(!base.is_null());
+        assert!(capacity > 0);
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        assert!(page_size > 0);
+        let page_count = capacity.div_ceil(page_size);
+        let mut residency = vec![0_u8; page_count];
+        let result = unsafe {
+            libc::mincore(
+                base.cast_mut().cast::<libc::c_void>(),
+                capacity,
+                residency.as_mut_ptr(),
+            )
+        };
+        if result == 0 {
+            let resident = residency.iter().filter(|entry| **entry & 1 == 1).count();
+            assert!(resident * 100 > page_count * 95);
+        } else {
+            let mut checksum = 0_u8;
+            for offset in (0..capacity).step_by(page_size) {
+                checksum ^= unsafe { base.add(offset).read_volatile() };
+            }
+            std::hint::black_box(checksum);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_first_four_mib_segment_and_optional_second_are_immediately_writable() {
+        let arena = StoreSegmentArena::new(8 * 1024 * 1024, 64).expect("valid arena");
+        let mut first = arena.allocate(4 * 1024 * 1024, 0).expect("first four MiB");
+        first.fill(0xab);
+        assert!(
+            (0..first.len())
+                .step_by(4096)
+                .all(|offset| first[offset] == 0xab)
+        );
+        if let Ok(mut second) = arena.allocate(4 * 1024 * 1024, 0) {
+            second.fill(0xcd);
+            assert!(
+                (0..second.len())
+                    .step_by(4096)
+                    .all(|offset| second[offset] == 0xcd)
+            );
+            assert_eq!(first[0], 0xab);
+            let first_end = (first.as_ptr() as usize)
+                .checked_add(first.len())
+                .expect("first end");
+            assert!(first_end <= second.as_ptr() as usize);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpp_parity_injected_legacy_fallback_is_fully_writable_at_three_points() {
+        let policy = HugepagePolicy {
+            requested: true,
+            strict: false,
+            page_size: HUGEPAGE_2_MIB,
+        };
+        let mut buffer = OwnedBuffer::allocate_with_hugepage_allocator(
+            1024 * 1024,
+            64,
+            policy,
+            |_| None,
+            OwnedBuffer::allocate_regular_registration,
+        )
+        .expect("legacy regular-page fallback");
+        assert!(!buffer.as_ptr().is_null());
+        assert_eq!(buffer.len(), 1024 * 1024);
+        buffer.fill(0xef);
+        assert_eq!(buffer[0], 0xef);
+        assert_eq!(buffer[512 * 1024], 0xef);
+        assert_eq!(buffer[1024 * 1024 - 1], 0xef);
+    }
     #[test]
     fn vec_fallback_is_mutable_and_stable() {
         let mut buffer = OwnedBuffer::allocate(16);
@@ -912,6 +1568,39 @@ mod tests {
                 0, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0, 0xff, 0xff, 0xff, 0
             ]
         );
+    }
+
+    #[test]
+    fn store_arena_prefault_touches_each_four_kib_page_boundary() {
+        let mut buffer = OwnedBuffer::allocate_aligned(8193, 4096).expect("aligned buffer");
+        buffer.fill(0xff);
+
+        super::prefault_system_pages(&mut buffer);
+
+        assert_eq!(buffer[0], 0);
+        assert_eq!(buffer[4096], 0);
+        assert_eq!(buffer[8192], 0);
+        assert_eq!(buffer[1], 0xff);
+        assert_eq!(buffer[4095], 0xff);
+        assert_eq!(buffer[4097], 0xff);
+    }
+
+    #[test]
+    fn store_arena_policy_rejects_invalid_inputs_before_backing_allocation() {
+        assert!(StoreSegmentArena::new(0, 64).is_err());
+        assert!(StoreSegmentArena::new(1024, 100).is_err());
+        assert!(StoreSegmentArena::new(usize::MAX, 64).is_err());
+    }
+
+    #[test]
+    fn store_arena_range_owner_keeps_backing_alive_after_arena_drop() {
+        let mut allocation = {
+            let arena = StoreSegmentArena::new(1024, 64).expect("valid arena");
+            arena.allocate(1024, 64).expect("allocation fits")
+        };
+
+        allocation.fill(0x5a);
+        assert!(allocation.iter().all(|byte| *byte == 0x5a));
     }
 
     #[cfg(target_os = "linux")]
