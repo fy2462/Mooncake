@@ -3152,5 +3152,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-callback-invalid-input-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.Deserialize_KeyTooLarge",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_keytoolarge",
+    "first_divergence": "Rust had direct upper-bound validation but lacked a complete serialized C++ envelope proving production deserialization rejects an exact 4097-byte key.",
+    "repair_commit": "a02ec091",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_keytoolarge -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.Deserialize_PayloadTooLarge",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_payloadtoolarge",
+    "first_divergence": "Rust previously lacked exact decoded-length enforcement across base64 rounding and then lacked a serializer-named complete-envelope test for the repaired 10 MiB plus one rejection.",
+    "repair_commit": "a02ec091",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_payloadtoolarge -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-size-goal-019fbe77.typescript"
   }
 ]
