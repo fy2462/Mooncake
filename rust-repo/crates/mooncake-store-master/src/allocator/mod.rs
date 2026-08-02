@@ -42,6 +42,7 @@ use self::cachelib::{
     CachelibAllocation, CachelibSegmentState, SlabClassState, align_up, allocate_cachelib,
     cachelib_class_size, generate_cachelib_class_sizes, release_cachelib,
 };
+pub use self::offset_layout::OffsetAllocatorReport;
 use self::offset_layout::preferred_segment_names;
 use self::strategies::AllocationPlan;
 use self::types::DEFAULT_CACHELIB_POOL_NAME;
@@ -1068,6 +1069,18 @@ impl SegmentAllocator {
                 state.used
             }
         })
+    }
+
+    /// Return a checked accounting snapshot for one real Offset-backed segment.
+    /// Cachelib-backed, CXL routing aliases, and unknown segments do not have
+    /// an Offset report. An internally inconsistent state whose accounting
+    /// would overflow also fails closed with `None`.
+    pub fn offset_allocator_report(&self, segment_id: &Uuid) -> Option<OffsetAllocatorReport> {
+        let state = self.segments.get(segment_id)?;
+        if state.segment.protocol == "cxl" {
+            return None;
+        }
+        state.offset_allocator_report()
     }
 
     /// Resolve the transport endpoint associated with an allocated replica.

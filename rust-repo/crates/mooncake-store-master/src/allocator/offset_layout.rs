@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OffsetAllocatorReport {
+    pub allocated_bytes: u64,
+    pub allocation_count: u64,
+    pub capacity: u64,
+    pub total_free_space: u64,
+    pub largest_free_region: u64,
+}
+
 pub(super) fn preferred_segment_names(config: &ReplicateConfig) -> Vec<&str> {
     if !config.preferred_segment.is_empty() {
         return vec![config.preferred_segment.as_str()];
@@ -13,6 +22,34 @@ pub(super) fn preferred_segment_names(config: &ReplicateConfig) -> Vec<&str> {
 }
 
 impl SegmentState {
+    pub(super) fn offset_allocator_report(&self) -> Option<OffsetAllocatorReport> {
+        let SegmentLayout::Offset(offset) = &self.layout else {
+            return None;
+        };
+        let allocated_bytes = offset
+            .allocations
+            .values()
+            .try_fold(0_u64, |total, &size| total.checked_add(size))?;
+        let total_free_space = offset
+            .free_ranges
+            .iter()
+            .try_fold(0_u64, |total, &(_, size)| total.checked_add(size))?;
+        let largest_free_region = offset
+            .free_ranges
+            .iter()
+            .map(|&(_, size)| size)
+            .max()
+            .unwrap_or(0);
+
+        Some(OffsetAllocatorReport {
+            allocated_bytes,
+            allocation_count: u64::try_from(offset.allocations.len()).ok()?,
+            capacity: self.segment.size,
+            total_free_space,
+            largest_free_region,
+        })
+    }
+
     /// Attempt to allocate `size` bytes from this segment.
     /// 尝试从此 segment 分配 `size` 字节。
     ///
@@ -401,6 +438,85 @@ mod tests {
         }
     }
 
+    fn offset_allocator_facade(capacity: u64) -> (SegmentAllocator, Uuid) {
+        let mut allocator = SegmentAllocator::new();
+        let segment_id = Uuid::new_v4();
+        allocator.add_segment(
+            Segment {
+                id: segment_id,
+                name: "offset-report-parity".to_string(),
+                base: 16 * 1024,
+                size: capacity,
+                te_endpoint: "127.0.0.1:12345".to_string(),
+                protocol: "tcp".to_string(),
+                host_id: "offset-report-host".to_string(),
+            },
+            0,
+            Uuid::new_v4(),
+        );
+        (allocator, segment_id)
+    }
+
+    fn allocate_facade_exact(
+        allocator: &mut SegmentAllocator,
+        segment_id: Uuid,
+        capacity: u64,
+        size: u64,
+    ) -> ReplicaDescriptor {
+        let replica = allocator
+            .allocate_from_segment_id(segment_id, size)
+            .expect("offset allocation");
+        assert_eq!(replica.segment_id, segment_id);
+        assert_eq!(replica.size, size);
+        assert!(replica.offset.checked_add(size).unwrap() <= capacity);
+        replica
+    }
+
+    fn release_facade_exact(allocator: &mut SegmentAllocator, replica: ReplicaDescriptor) {
+        allocator.release(&[replica]).expect("offset release");
+    }
+
+    #[test]
+    fn offset_report_rejects_unknown_cachelib_and_cxl_aliases() {
+        let unknown = SegmentAllocator::new();
+        assert_eq!(unknown.offset_allocator_report(&Uuid::new_v4()), None);
+
+        let mut cachelib =
+            SegmentAllocator::new().with_memory_allocator(MemoryAllocatorKind::CachelibLike);
+        let cachelib_id = Uuid::new_v4();
+        cachelib.add_segment(
+            Segment {
+                id: cachelib_id,
+                name: "cachelib-report-negative".to_string(),
+                base: 0,
+                size: 4 * MIB,
+                te_endpoint: "127.0.0.1:12345".to_string(),
+                protocol: "tcp".to_string(),
+                host_id: "cachelib-report-host".to_string(),
+            },
+            0,
+            Uuid::new_v4(),
+        );
+        assert_eq!(cachelib.offset_allocator_report(&cachelib_id), None);
+
+        let mut cxl = SegmentAllocator::new().with_cxl_capacity(4 * MIB);
+        let cxl_id = Uuid::new_v4();
+        cxl.add_segment(
+            Segment {
+                id: cxl_id,
+                name: "cxl-report-negative".to_string(),
+                base: 0,
+                size: 4 * MIB,
+                te_endpoint: "127.0.0.1:12345".to_string(),
+                protocol: "cxl".to_string(),
+                host_id: "cxl-report-host".to_string(),
+            },
+            0,
+            Uuid::new_v4(),
+        );
+        assert_eq!(cxl.offset_allocator_report(&cxl_id), None);
+    }
+
     fn allocate_exact(state: &mut SegmentState, capacity: u64, size: u64) -> (u64, u64) {
         let allocation = state.allocate(size).expect("offset allocation");
         assert_eq!(allocation.1, size);
@@ -619,6 +735,177 @@ mod tests {
                 (0, capacity)
             );
         }
+    }
+
+    #[test]
+    fn cpp_parity_storage_report_decreases_after_thousand_bytes() {
+        const GIB: u64 = 1024 * MIB;
+        let (mut allocator, segment_id) = offset_allocator_facade(GIB);
+        let initial = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+
+        assert!(initial.total_free_space > 0);
+        assert!(initial.largest_free_region > 0);
+        let allocation = allocate_facade_exact(&mut allocator, segment_id, GIB, 1_000);
+        assert_eq!(allocation.size, 1_000);
+
+        let after = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert!(after.total_free_space < initial.total_free_space);
+    }
+
+    #[test]
+    fn cpp_parity_176_bins_accept_ten_near_capacity_reuses() {
+        let bins = CPP_NONZERO_BIN_SIZES
+            .into_iter()
+            .filter(|&size| size >= 1_024)
+            .collect::<Vec<_>>();
+        assert_eq!(bins.len(), 176);
+
+        for bin_size in bins {
+            let capacity = bin_size + 10;
+            let (mut allocator, segment_id) = offset_allocator_facade(capacity);
+            assert_eq!(
+                allocator
+                    .offset_allocator_report(&segment_id)
+                    .expect("offset report")
+                    .total_free_space,
+                capacity
+            );
+
+            for delta in (1..=10).rev() {
+                let allocation =
+                    allocate_facade_exact(&mut allocator, segment_id, capacity, bin_size - delta);
+                release_facade_exact(&mut allocator, allocation);
+            }
+        }
+    }
+
+    #[test]
+    fn cpp_parity_powers_30_through_40_large_capacity_boundaries() {
+        for shift in 30..=40 {
+            let capacity = 1_u64 << shift;
+            let (mut allocator, segment_id) = offset_allocator_facade(capacity);
+            assert_eq!(
+                allocator
+                    .offset_allocator_report(&segment_id)
+                    .expect("offset report")
+                    .largest_free_region,
+                capacity
+            );
+
+            let one = allocate_facade_exact(&mut allocator, segment_id, capacity, 1);
+            release_facade_exact(&mut allocator, one);
+            let capacity_minus_one =
+                allocate_facade_exact(&mut allocator, segment_id, capacity, capacity - 1);
+            release_facade_exact(&mut allocator, capacity_minus_one);
+            let full = allocate_facade_exact(&mut allocator, segment_id, capacity, capacity);
+            assert_eq!((full.offset, full.size), (0, capacity));
+        }
+    }
+
+    #[test]
+    fn cpp_parity_100_random_huge_largest_regions_are_allocatable() {
+        const MINIMUM_CAPACITY: u64 = (1_u64 << 31) + 1;
+        const MAXIMUM_CAPACITY: u64 = 1_u64 << 40;
+        let mut rng = DeterministicRng(0x61e2_4d7a_98b3_c50f);
+
+        for _ in 0..100 {
+            let capacity = rng.inclusive(MINIMUM_CAPACITY, MAXIMUM_CAPACITY);
+            let (mut allocator, segment_id) = offset_allocator_facade(capacity);
+            let largest = allocator
+                .offset_allocator_report(&segment_id)
+                .expect("offset report")
+                .largest_free_region;
+
+            assert!(largest > capacity / 2);
+            let allocation = allocate_facade_exact(&mut allocator, segment_id, capacity, largest);
+            assert_eq!((allocation.offset, allocation.size), (0, largest));
+        }
+    }
+
+    #[test]
+    fn cpp_parity_metrics_exact_five_snapshot_lifecycle() {
+        let (mut allocator, segment_id) = offset_allocator_facade(MIB);
+        let initial = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(
+            (
+                initial.allocated_bytes,
+                initial.allocation_count,
+                initial.capacity,
+                initial.total_free_space,
+            ),
+            (0, 0, MIB, MIB)
+        );
+        assert!(initial.largest_free_region > 0);
+
+        let first = allocate_facade_exact(&mut allocator, segment_id, MIB, 1_024);
+        let after_first = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(
+            (
+                after_first.allocated_bytes,
+                after_first.allocation_count,
+                after_first.capacity,
+                after_first.total_free_space,
+            ),
+            (1_024, 1, MIB, MIB - 1_024)
+        );
+        assert!(after_first.total_free_space < initial.total_free_space);
+
+        let second = allocate_facade_exact(&mut allocator, segment_id, MIB, 2_048);
+        assert_live_ranges(
+            &[(first.offset, first.size), (second.offset, second.size)],
+            MIB,
+        );
+        let after_second = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(
+            (
+                after_second.allocated_bytes,
+                after_second.allocation_count,
+                after_second.capacity,
+                after_second.total_free_space,
+            ),
+            (3_072, 2, MIB, MIB - 3_072)
+        );
+        assert!(after_second.total_free_space < after_first.total_free_space);
+
+        release_facade_exact(&mut allocator, first);
+        let after_first_release = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(
+            (
+                after_first_release.allocated_bytes,
+                after_first_release.allocation_count,
+                after_first_release.capacity,
+                after_first_release.total_free_space,
+            ),
+            (2_048, 1, MIB, MIB - 2_048)
+        );
+        assert!(after_first_release.total_free_space > after_second.total_free_space);
+
+        release_facade_exact(&mut allocator, second);
+        let after_all_release = allocator
+            .offset_allocator_report(&segment_id)
+            .expect("offset report");
+        assert_eq!(
+            (
+                after_all_release.allocated_bytes,
+                after_all_release.allocation_count,
+                after_all_release.capacity,
+                after_all_release.total_free_space,
+                after_all_release.largest_free_region,
+            ),
+            (0, 0, MIB, MIB, MIB)
+        );
     }
 
     #[test]
