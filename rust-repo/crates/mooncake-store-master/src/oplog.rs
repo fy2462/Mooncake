@@ -552,7 +552,7 @@ mod oplog_worker;
 pub mod test_support;
 
 pub use oplog_etcd::EtcdOpLogStore;
-pub use oplog_local::LocalFsOpLogStore;
+pub use oplog_local::{LocalFsOpLogError, LocalFsOpLogStore};
 pub(crate) use oplog_manager::LeaseRefreshEntry;
 pub use oplog_manager::OpLogManager;
 pub(crate) use oplog_wire::decode_record_payload_value;

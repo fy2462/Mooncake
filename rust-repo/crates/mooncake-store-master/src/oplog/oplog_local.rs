@@ -5,6 +5,14 @@ const LOCAL_OPLOG_V2_MAGIC: &[u8; 8] = b"MCOPLG02";
 const LOCAL_OPLOG_V2_FRAME_HEADER_LEN: usize = 24;
 const LOCAL_OPLOG_V1_FRAME_HEADER_LEN: usize = 8;
 
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum LocalFsOpLogError {
+    #[error("oplog entry not found: sequence_id={0}")]
+    EntryNotFound(u64),
+    #[error(transparent)]
+    Backend(#[from] HaError),
+}
+
 pub struct LocalFsOpLogStore {
     /// Root directory for segment files.
     /// 分段文件的根目录。
@@ -66,6 +74,38 @@ impl LocalFsOpLogStore {
             store.write_latest(store.last_seq)?;
         }
         Ok(store)
+    }
+
+    /// Read one exact sequence using the C++ LocalFS single-entry contract.
+    pub fn read_entry(&self, sequence_id: u64) -> Result<OpLogRecord, LocalFsOpLogError> {
+        self.read_since(sequence_id, 1)?
+            .into_iter()
+            .find(|entry| entry.seq == sequence_id)
+            .ok_or(LocalFsOpLogError::EntryNotFound(sequence_id))
+    }
+
+    /// Read entries strictly after an offset while the replication-facing
+    /// [`OpLogStore::read_since`] contract remains inclusive.
+    pub fn read_after(
+        &self,
+        sequence_id: u64,
+        max_count: usize,
+    ) -> Result<Vec<OpLogRecord>, LocalFsOpLogError> {
+        let Some(first_sequence) = sequence_id.checked_add(1) else {
+            return Ok(Vec::new());
+        };
+        Ok(self.read_since(first_sequence, max_count)?)
+    }
+
+    /// Return the maximum sequence that is present, mapping an empty LocalFS
+    /// store to the C++ entry-not-found error category.
+    pub fn max_present_sequence_id(&self) -> Result<u64, LocalFsOpLogError> {
+        let max_sequence = self.max_sequence_id()?;
+        if max_sequence == 0 {
+            Err(LocalFsOpLogError::EntryNotFound(0))
+        } else {
+            Ok(max_sequence)
+        }
     }
 
     fn cleanup_stale_temp_files(dir: &Path) {
@@ -652,5 +692,58 @@ impl OpLogStore for LocalFsOpLogStore {
             next_seq,
             timed_out: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(payload: &str) -> OpLogRecord {
+        OpLogRecord {
+            seq: 0,
+            producer_view_version: 0,
+            payload: payload.to_string(),
+        }
+    }
+
+    #[test]
+    fn cpp_parity_localfs_oplog_store_test_localfsoplogstoretest_readoplognotfound() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+
+        assert_eq!(
+            store.read_entry(999),
+            Err(LocalFsOpLogError::EntryNotFound(999))
+        );
+    }
+
+    #[test]
+    fn cpp_parity_localfs_oplog_store_test_localfsoplogstoretest_readoplogsincewithoffset() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+        for sequence in 1..=10 {
+            assert_eq!(
+                store.append(&record(&format!("payload_{sequence}"))),
+                Ok(sequence)
+            );
+        }
+        store.flush_durable().unwrap();
+
+        let entries = store.read_after(5, 100).unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries.first().unwrap().seq, 6);
+        assert_eq!(entries.last().unwrap().seq, 10);
+    }
+
+    #[test]
+    fn cpp_parity_localfs_oplog_store_test_localfsoplogstoretest_getmaxsequenceidempty() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+
+        assert_eq!(
+            store.max_present_sequence_id(),
+            Err(LocalFsOpLogError::EntryNotFound(0))
+        );
     }
 }
