@@ -2738,5 +2738,23 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests::cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_explicithugepagerequestdoesnotsilentlyfallbacktoregularpages_16ac58db -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-hugetlb-strict-failure-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/leadership/backends/redis/high_availability_redis_test.cpp:HighAvailabilityTest.RedisBasicMasterViewOperations",
+    "rust": "mooncake-store-master/tests/test_redis_ha_live.rs:cpp_parity_high_availability_redis_test_highavailabilitytest_redisbasicmasterviewoperations",
+    "first_divergence": "Rust had Redis coordinator primitives but no discoverable test running two coordinators against a live Redis service through the complete empty-view, acquire, read, renew, contention, release, and absent-view lifecycle.",
+    "repair_commit": "bcace758",
+    "focused_command": "MOONCAKE_REDIS_E2E=1 MOONCAKE_REDIS_E2E_URL=redis://127.0.0.1:32768 cargo test -p mooncake-store-master --test test_redis_ha_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-redis-coordinator-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/leadership/backends/redis/high_availability_redis_test.cpp:HighAvailabilityTest.RedisCanRestartRenewAfterExplicitRelease",
+    "rust": "mooncake-store-master/tests/test_redis_ha_live.rs:cpp_parity_high_availability_redis_test_highavailabilitytest_rediscanrestartrenewafterexplicitrelease",
+    "first_divergence": "Rust cleared and replaced the active Redis owner token in production but lacked live evidence that one coordinator can release its first session, reacquire with a higher view and new token, renew, and release again.",
+    "repair_commit": "bcace758",
+    "focused_command": "MOONCAKE_REDIS_E2E=1 MOONCAKE_REDIS_E2E_URL=redis://127.0.0.1:32768 cargo test -p mooncake-store-master --test test_redis_ha_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-redis-coordinator-lifecycle-goal-019fbe77.typescript"
   }
 ]
