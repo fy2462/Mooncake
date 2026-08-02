@@ -800,6 +800,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testprimarystandbysync()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let writer = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+        let reader = LocalFsOpLogStore::new(directory.path(), 256).unwrap();
+        let writer = OpLogManager::new(Some(Box::new(writer)), 1);
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "localfs-prepopulated-segment".into(),
+            base: 0,
+            size: 10 * 1024,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        };
+        state.segments.insert(
+            segment.id,
+            SegmentEntry {
+                segment: segment.clone(),
+                used: 0,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            },
+        );
+        state
+            .allocator
+            .write()
+            .add_segment(segment.clone(), 0, client_id);
+
+        for index in 0..10 {
+            let key = format!("test_key_{index}");
+            let mut object = snapshot_object(&key, &segment, index * 1024, 1024);
+            object.client_id = client_id;
+            writer
+                .record_object_image_durable(&TenantId::default().make_scoped_key(&key), &object)
+                .unwrap();
+        }
+        let target_sequence = writer.latest_sequence();
+        assert_eq!(target_sequence, 10);
+
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "localfs-prepopulated".into(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(reader));
+        service.start().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while service.sync_status().applied_seq_id < target_sequence {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("pre-populated LocalFS standby did not catch up");
+
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, target_sequence);
+        assert_eq!(status.primary_seq_id, target_sequence);
+        assert_eq!(status.lag_entries, 0);
+        assert_eq!(service.latest_applied_sequence_id(), target_sequence);
+        assert_eq!(state.objects.len(), 10);
+        for index in 0..10 {
+            let key = format!("test_key_{index}");
+            let scoped_key = TenantId::default().make_scoped_key(&key);
+            let object = state.objects.get(&scoped_key).expect("replayed object");
+            assert_eq!(object.user_key, key);
+            assert_eq!(object.size, 1024);
+        }
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn test_oplog_polling_recovers_within_bounded_reconnect_budget() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(

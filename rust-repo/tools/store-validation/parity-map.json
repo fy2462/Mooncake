@@ -1034,10 +1034,10 @@
       "behavior": "Ten PUT_END records are submitted before LocalFS standby startup, the first nine through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then standby catch-up awaits eventual batch visibility and reaches WATCHING with zero lag and applied sequence at least the final sequence, while the exported snapshot contains all ten keys with size at least ten.",
       "boundary": ["master", "ha", "localfs", "optional-component", "hot-standby", "prepopulated-replay"],
       "reference": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestPrimaryStandbySync"},
-      "reason": "The retained Rust LocalFS HotStandby test starts the standby before 100 durable puts and 20 durable removes, then checks exact status and object state. It does not cover this pre-populated ten-put asynchronous submission followed by eventual batch visibility, the exported metadata snapshot API, or the C++ weak >= sequence and snapshot-size oracle.",
+      "reason": "Rust's authoritative OpLogManager mutation path durably completes every submitted object image rather than exposing C++'s weaker non-durable Append API. The parity test pre-populates all ten exact 1024-byte object images before standby startup, then proves exact sequence convergence, WATCHING with zero lag, and all ten replayed metadata entries.",
       "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestPrimaryStandbySync; rust-repo/crates/mooncake-store-master/src/hot_standby.rs localfs_writer_and_standby_sync_mixed_state_then_promote", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-master/src/hot_standby.rs","test":"cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testprimarystandbysync"}],
+      "status": "covered"
     },
     {
       "behavior": "Five PUT_END records are submitted before LocalFS standby startup, the first four through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then standby catch-up awaits eventual batch visibility before readiness, Promote returns OK, latest applied sequence is at least the final sequence, and the exported snapshot retains all five keys.",
