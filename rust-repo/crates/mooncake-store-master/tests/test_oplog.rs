@@ -901,6 +901,54 @@ fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testvalidateentry
 }
 
 #[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testlargepayload() {
+    let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(2))), 7);
+    let payload = "x".repeat(TEST_MAX_PAYLOAD_SIZE - 1);
+
+    let sequence = manager.append_and_persist(payload.clone()).unwrap();
+
+    assert_eq!(sequence, 1);
+    assert_eq!(manager.latest_sequence(), 1);
+    let entries = manager.read_since(1, 2).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, 1);
+    assert_eq!(entries[0].payload, payload);
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendmultipletypes() {
+    let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(4))), 7);
+
+    let put_end = manager
+        .append_and_persist(json!({"op": "put_end", "key": "k1", "size": 7}).to_string())
+        .unwrap();
+    let put_revoke = manager.record_put_revoke_durable("k2").unwrap();
+    let remove = manager.record_remove_durable("k3").unwrap();
+
+    assert_eq!(put_end + 1, put_revoke);
+    assert_eq!(put_revoke + 1, remove);
+    assert_eq!(manager.latest_sequence(), 3);
+    let entries = manager.read_since(1, 4).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(
+                |entry| decode_record_payload_value_for_test(&entry.payload).unwrap()["op"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            )
+            .collect::<Vec<_>>(),
+        ["put_end", "put_revoke", "remove"]
+    );
+}
+
+#[test]
 fn test_etcd_oplog_entry_key_matches_cpp_format() {
     let key = format_etcd_entry_key_for_test("/oplog/cluster-a", 42);
     assert_eq!(key, "/oplog/cluster-a/00000000000000000042");
