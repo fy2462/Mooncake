@@ -2873,5 +2873,41 @@
     "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-oplog-applier-basic-structpack-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntry_InvalidOpType",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend",
+    "first_divergence": "The purported C++ invalid-operation test actually submits a valid PUT_END and never supplies an unknown enum; Rust lacked an honest mapping to that sole observed success oracle.",
+    "repair_commit": "cbcdcd05",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-ordering-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyInOrder",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyinorder",
+    "first_divergence": "Rust had contiguous replay logic but no deterministic three-entry C++ wire test proving every application, sequence transition, and exact final key set.",
+    "repair_commit": "cbcdcd05",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-ordering-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOutOfOrder",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoutoforder",
+    "first_divergence": "Rust had pending-entry drain logic but no direct C++ wire oracle proving sequence three stays invisible until sequence two arrives and drains both entries.",
+    "repair_commit": "cbcdcd05",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-ordering-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyDuplicateSequenceId",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyduplicatesequenceid",
+    "first_divergence": "Rust skipped records older than the expected sequence but had no exact duplicate/no-extra-object test distinguishing its zero-applied count from the C++ successful no-op boolean.",
+    "repair_commit": "cbcdcd05",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-ordering-goal-019fbe77.typescript"
   }
 ]
