@@ -2365,6 +2365,10 @@ mod tests {
     ];
 
     fn cpp_wire_record(sequence_id: u64, op_type: u8) -> OpLogRecord {
+        cpp_wire_record_for_key(sequence_id, op_type, "key1")
+    }
+
+    fn cpp_wire_record_for_key(sequence_id: u64, op_type: u8, key: &str) -> OpLogRecord {
         use crate::oplog::test_support::{
             CppWireTestEntry, TEST_CPP_OP_PUT_END, compute_cpp_checksum_for_test,
             compute_cpp_prefix_hash_for_test, deserialize_etcd_value_for_test,
@@ -2377,14 +2381,14 @@ mod tests {
             sequence_id,
             timestamp_ms: 1,
             op_type,
-            object_key: "key1".to_string(),
+            object_key: key.to_string(),
             payload: is_put_end
                 .then(|| BASE64_STANDARD.encode(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD))
                 .unwrap_or_default(),
             checksum: is_put_end
                 .then(|| compute_cpp_checksum_for_test(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD))
                 .unwrap_or_default(),
-            prefix_hash: compute_cpp_prefix_hash_for_test("key1"),
+            prefix_hash: compute_cpp_prefix_hash_for_test(key),
         };
         deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap()
     }
@@ -2515,6 +2519,97 @@ mod tests {
         );
         assert_eq!(applier.get_expected_sequence_id(), 3);
         assert!(!state.objects.contains_key("default\0key1"));
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyinorder() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        for sequence in 1..=3 {
+            let key = format!("key{sequence}");
+            assert_eq!(
+                applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                    sequence,
+                    TEST_CPP_OP_PUT_END,
+                    &key,
+                )]),
+                1
+            );
+            assert_eq!(applier.get_expected_sequence_id(), sequence + 1);
+        }
+        assert_eq!(state.objects.len(), 3);
+        for key in ["key1", "key2", "key3"] {
+            assert!(state.objects.contains_key(&format!("default\0{key}")));
+        }
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoutoforder() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                1,
+                TEST_CPP_OP_PUT_END,
+                "key1",
+            )]),
+            1
+        );
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                3,
+                TEST_CPP_OP_PUT_END,
+                "key3",
+            )]),
+            0
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert!(!state.objects.contains_key("default\0key3"));
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                2,
+                TEST_CPP_OP_PUT_END,
+                "key2",
+            )]),
+            2
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 4);
+        assert_eq!(state.objects.len(), 3);
+        for key in ["key1", "key2", "key3"] {
+            assert!(state.objects.contains_key(&format!("default\0{key}")));
+        }
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyduplicatesequenceid() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                1,
+                TEST_CPP_OP_PUT_END,
+                "key1",
+            )]),
+            1
+        );
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                1,
+                TEST_CPP_OP_PUT_END,
+                "key1_dup",
+            )]),
+            0
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert!(state.objects.contains_key("default\0key1"));
+        assert!(!state.objects.contains_key("default\0key1_dup"));
+        assert_eq!(state.objects.len(), 1);
     }
 
     #[test]
