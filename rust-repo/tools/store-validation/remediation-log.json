@@ -2909,5 +2909,32 @@
     "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-oplog-applier-ordering-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierGapTest.RequestMissingOpLog_Success",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_success",
+    "first_divergence": "Rust's promotion-driven one-shot gap resolver had no deterministic store test proving the exact missing-sequence read, pending drain, counts, and final three-key state corresponding to the C++ periodic resolver's success oracle.",
+    "repair_commit": "34409053",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliergaptest_requestmissingoplog -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-gap-resolution-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierGapTest.RequestMissingOpLog_StoreError",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_storeerror",
+    "first_divergence": "Rust returned attempted and fetched counts on a failed gap-store read but had no direct test proving the exact request and unchanged sequence and visible state.",
+    "repair_commit": "34409053",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliergaptest_requestmissingoplog -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-gap-resolution-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierGapTest.RequestMissingOpLog_NotFound",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliergaptest_requestmissingoplog_notfound",
+    "first_divergence": "Rust made no progress on an empty gap-store result but lacked a deterministic test proving the exact missing-sequence lookup and unchanged sequence and visible state.",
+    "repair_commit": "34409053",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliergaptest_requestmissingoplog -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-gap-resolution-goal-019fbe77.typescript"
   }
 ]
