@@ -3242,5 +3242,59 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testsequenceidincrement -- --exact",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-manager-append-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestWriteOpLog",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testwriteoplog",
+    "first_divergence": "Rust had only source-level atomic entry/latest transaction intent and no live-etcd proof that one durable append publishes /latest=1.",
+    "repair_commit": "f745f74b",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestReadOpLog",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplog",
+    "first_divergence": "Rust codec tests did not prove a sequence-2 PUT_END key2/value2 record survives a real revision-fenced etcd write and read.",
+    "repair_commit": "f745f74b",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestReadOpLogSince_Empty",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_empty",
+    "first_divergence": "Rust had production empty-range support but no live-etcd execution proving a read after sequence 1000 succeeds with no entries.",
+    "repair_commit": "f745f74b",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestReadOpLogSince_Limit",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_limit",
+    "first_divergence": "Rust had only source-level range truncation and no live-etcd proof that five durable entries read with limit three return exact ordered sequences 1,2,3.",
+    "repair_commit": "f745f74b",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestDeserializeInvalidJson",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testdeserializeinvalidjson",
+    "first_divergence": "Rust corruption helpers had not planted literal malformed JSON at durable sequence 77 in etcd and exercised the production range decoder's error contract.",
+    "repair_commit": "f745f74b",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestCleanupOpLogBeforeAndBoundary",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcleanupoplogbeforeandboundary",
+    "first_divergence": "Rust had a fenced cleanup transaction but no live-etcd proof that cleanup_before(3) removes only 1 and 2 while retaining 3 through 5 and latest 5.",
+    "repair_commit": "f745f74b",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
   }
 ]
