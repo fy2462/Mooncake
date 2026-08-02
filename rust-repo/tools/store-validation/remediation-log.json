@@ -2792,5 +2792,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testfailoverscenario -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-prepopulated-failover-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_hot_standby_integration_test.cpp:LocalFsHotStandbyIntegrationTest.TestDataConsistency",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testdataconsistency",
+    "first_divergence": "The existing live-write test did not preserve the exact pre-start five-put, two-remove, three-put sequence or prove the final six-key snapshot and payload sizes.",
+    "repair_commit": "1a35f5aa",
+    "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testdataconsistency -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-prepopulated-consistency-goal-019fbe77.typescript"
   }
 ]
