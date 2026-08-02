@@ -967,6 +967,48 @@ fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize
 }
 
 #[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_keytoolarge() {
+    let oversized_key = "k".repeat(TEST_MAX_OBJECT_KEY_SIZE + 1);
+    let wire = CppWireTestEntry {
+        sequence_id: 1,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: oversized_key.clone(),
+        payload: BASE64_STANDARD.encode(b"v"),
+        checksum: compute_cpp_checksum_for_test(b"v"),
+        prefix_hash: compute_cpp_prefix_hash_for_test(&oversized_key),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+    assert!(error.to_string().contains(&format!(
+        "oplog object key too large: {}",
+        oversized_key.len()
+    )));
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_payloadtoolarge() {
+    let oversized_payload = vec![b'p'; TEST_MAX_PAYLOAD_SIZE + 1];
+    let wire = CppWireTestEntry {
+        sequence_id: 1,
+        timestamp_ms: 1,
+        op_type: TEST_CPP_OP_PUT_END,
+        object_key: "k".to_string(),
+        payload: BASE64_STANDARD.encode(&oversized_payload),
+        checksum: compute_cpp_checksum_for_test(&oversized_payload),
+        prefix_hash: compute_cpp_prefix_hash_for_test("k"),
+    };
+
+    let error =
+        deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap_err();
+    assert!(error.to_string().contains(&format!(
+        "oplog payload too large: {}",
+        oversized_payload.len()
+    )));
+}
+
+#[test]
 fn test_etcd_oplog_entry_key_matches_cpp_format() {
     let key = format_etcd_entry_key_for_test("/oplog/cluster-a", 42);
     assert_eq!(key, "/oplog/cluster-a/00000000000000000042");
