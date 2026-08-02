@@ -3710,5 +3710,23 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-storage-report-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.MaxNumAllocations",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_max_1000_allows_exactly_999_live_handles",
+    "first_divergence": "Rust lacked a configurable C++-compatible active partition-node budget, including free-region nodes, and durable restoration of that allocator choice.",
+    "repair_commit": "4a860ed9",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocation-limit-final.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.MaxAllocationCountEdgeCase",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_handle_limit_nine_fail_tenth_reuse_one_slot",
+    "first_divergence": "Rust lacked the exact nine-success/tenth-failure/release-and-reuse lifecycle under a C++-compatible node budget, including fragmentation-aware coalescing semantics.",
+    "repair_commit": "4a860ed9",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocation-limit-final.typescript"
   }
 ]
