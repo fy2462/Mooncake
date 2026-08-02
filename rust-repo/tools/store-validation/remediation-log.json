@@ -3017,5 +3017,32 @@
     "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoutoforder -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-oplog-applier-recovery-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyPutEnd_VersionedMsgpackPayload",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend_versionedmsgpackpayload",
+    "first_divergence": "Rust's typed MCOPMETA1 decoder expected UUID byte arrays and could not decode the string UUID representation emitted by the C++ msgpack packer, so the payload never reached the applier.",
+    "repair_commit": "50fee29f",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyputend_versionedmsgpackpayload -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-msgpack-batch-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntries_Batch",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_batch",
+    "first_divergence": "Rust iterated record slices but lacked one direct golden-wire batch test proving exact count three, expected sequence four, and exact three-key state.",
+    "repair_commit": "50fee29f",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentries_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-msgpack-batch-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyOpLogEntries_WithGaps",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_withgaps",
+    "first_divergence": "Rust had slice iteration and pending drain logic but no direct 1,3,2 golden-wire batch oracle for the applied count, sequence, and exact final state.",
+    "repair_commit": "50fee29f",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapplyoplogentries_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-msgpack-batch-goal-019fbe77.typescript"
   }
 ]
