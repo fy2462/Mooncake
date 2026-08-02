@@ -3773,5 +3773,221 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-semantic-snapshot-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.BasicInitialization",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_one_mib_segment_budget_starts_as_two_mib_with_zero_counters",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Initializing a fresh arena for 1 MiB succeeds and publishes initialized state; effective capacity is exactly 2 MiB and reserved-byte, successful-allocation, and failed-allocation counters are zero.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.BasicAllocation",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_one_kib_allocation_updates_count_and_reservation",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: After fresh 1-MiB arena initialization, a 1,024-byte allocation is non-null; successful-allocation count is exactly one and reserved bytes are between 1,024 and 1,088 inclusive.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.AllocationAlignment",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_exact_six_size_matrix_is_64_aligned_and_fully_writable",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: From a 64-byte-aligned arena, requests of exactly 1, 63, 64, 65, 100, and 1,000 bytes all return non-null 64-byte-aligned addresses and every requested byte accepts a write.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.ZeroSizeAllocation",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_registered_zero_size_is_rejected_without_success_count",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: A zero-byte allocation against an initialized positive-capacity arena returns null and leaves successful-allocation count at zero.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.OOMDoesNotCorruptCursor",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_repeated_oom_never_advances_reserved_past_capacity",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: After repeated 64-byte allocations fill the rounded arena, reserved bytes never exceed effective capacity and failed count is positive; a later one-byte request also returns null and leaves reservation within capacity.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.ConcurrentOOMStressTest",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_sixteen_thread_oom_accounts_every_attempt",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Sixteen threads each issue enough 64-byte requests to cross arena OOM; every success writes 0xbb across its 64 bytes, successes and failures both occur, total outcomes equal attempts, and final reserved bytes do not exceed capacity.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.IntegerOverflowInBoundsCheck",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_usize_max_rejects_once_without_reservation",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Requesting exactly usize::MAX bytes returns null, increments failed-allocation count exactly once, and leaves reserved bytes at zero.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.AlignmentOverflow",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_usize_max_minus_ten_alignment_overflow_is_nonmutating",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Requesting exactly usize::MAX minus 10 bytes with effective 64-byte alignment fails during checked alignment, increments failed count once, and leaves reserved bytes zero.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.NearMaxSizeAllocation",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_half_usize_max_exceeds_budget_and_counts_once",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Requesting exactly usize::MAX divided by two bytes from a 1-MiB arena fails gracefully and increments failed-allocation count exactly once.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.AllocateAfterRacyInit",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_ten_concurrent_store_allocations_return_unique_addresses",
+    "first_divergence": "Rust lacked exact post-publication evidence that ten synchronized Store arena allocations retain owners and return unique successful addresses; the removed C++ initialization race is not claimed.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.ConcurrentAllocations",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_eight_threads_attempt_8000_validate_every_success",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Eight threads each attempt 1,000 allocations of 1,024 bytes; every success is filled with byte 0xCC plus its thread index, and every successful raw address across all threads is unique.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.StatsConsistencyUnderLoad",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_stats_samples_remain_bounded_during_eight_thread_load",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: While eight threads allocate 128-byte blocks and a ninth samples statistics 100 times, no sample has reserved above capacity; final reserved remains within capacity and peak is at least final reserved.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.NearOOMAllocation",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_sixty_four_byte_fill_stops_with_bounded_reservation",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Repeated 64-byte allocations reach failure; afterward reserved bytes are no greater than capacity and failed-allocation count is positive.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.MixedSizeAllocations",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_eighty_mixed_store_allocation_attempts_validate_every_success",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Across ten attempts for each exact size 1, 16, 64, 256, 1,024, 4,096, 16,384, and 65,536, every allocation that succeeds is fully writable, has a 64-byte-aligned address, and is recognized as owned by its allocator.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.PeakAllocationTracking",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_peak_tracks_512_then_1024_reservations",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: After 512-byte and then 1,024-byte allocations, peak reserved is at least 512 after the first, never decreases, and is at least 1,536 after the second.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.ReservedBytesRemainMonotonic",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_exact_six_request_reservation_is_monotonic",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Across successful requests 1, 63, 64, 65, 4,096, and 1,024 bytes, reserved bytes never decrease and every snapshot has peak at least reserved.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.MixedAlignmentSequence",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_one_byte_then_two_mib_aligned_reservation_orders_addresses",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: After a successful one-byte 64-aligned allocation, a successful 4-MiB allocation requesting 2-MiB alignment has a 2-MiB-aligned address strictly above and non-overlapping with the first.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.NonPowerOfTwoAlignment",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_registered_allocation_rejects_alignment_100",
+    "first_divergence": "Rust lacked a direct public StoreSegmentArena constructor result for the exact invalid default alignment 100.",
+    "repair_commit": "da26d329",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.PowerOfTwoAlignmentsAccepted",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_exact_power_of_two_alignment_matrix_is_accepted",
+    "first_divergence": "Rust lacked the exact five-value public StoreSegmentArena constructor/aligned-allocation matrix with writable owner-backed ranges.",
+    "repair_commit": "da26d329",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.ArenaSizingRegression",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_exact_sixteen_mib_fit_then_one_kib_oom",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: A 16-MiB arena accepts one exact 16-MiB allocation, rejects a simultaneous 1,024-byte request, and records at least one failed allocation.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.ConcurrentInitMetadataConsistency",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_concurrent_policy_readers_preserve_four_mib_and_128_alignment",
+    "first_divergence": "Rust lacked exact post-publication evidence that sixteen concurrent readers observe one immutable 4-MiB/128-alignment arena policy before aligned allocation; the removed C++ initialization race is not claimed.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.PagesArePhysicallyBackedAfterInit",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_linux_four_mib_segment_is_resident_or_page_readable",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: Immediately after initializing a 4-MiB mapped pool, base is non-null and capacity positive; if mincore succeeds more than 95 percent of system pages are resident, otherwise reading one byte per system page completes.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.AllocatedMemoryIsImmediatelyReadableWritable",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_first_four_mib_segment_and_optional_second_are_immediately_writable",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: A required first 4-MiB allocation from an 8-MiB pool accepts a full 0xab write and reads 0xab at every 4-KiB offset; if a second 4-MiB allocation succeeds, it accepts 0xcd at every 4-KiB offset and leaves the first buffer's first byte unchanged.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "mmap_arena_test.cpp:MmapArenaTest.FallbackMmapRetainsPopulate",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_injected_legacy_fallback_is_fully_writable_at_three_points",
+    "first_divergence": "Rust lacked exact safe owner-capability replacement evidence for: When hugepage mapping may fall back to regular mapping, initialization succeeds, a 1-MiB allocation is non-null, a full-buffer 0xef write completes, and first, middle, and last bytes read back as 0xef.",
+    "repair_commit": "7f68da55",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
   }
 ]
