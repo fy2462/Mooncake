@@ -293,4 +293,72 @@ mod tests {
             release_exact(&mut state, allocation);
         }
     }
+
+    #[test]
+    fn cpp_parity_full_capacity_release_and_reuse() {
+        const GIB: u64 = 1024 * MIB;
+        let mut state = offset_state(GIB);
+
+        let first = allocate_exact(&mut state, GIB, GIB);
+        assert_eq!(first, (0, GIB));
+        assert_ne!(state.segment.base + first.0, u64::MAX);
+        assert_eq!(state.allocate(GIB), None);
+
+        release_exact(&mut state, first);
+        let reused = allocate_exact(&mut state, GIB, GIB);
+        assert_eq!(reused, (0, GIB));
+        assert_ne!(state.segment.base + reused.0, u64::MAX);
+    }
+
+    #[test]
+    fn cpp_parity_1023_reallocates_beside_live_16() {
+        let mut state = offset_state(2_048);
+        let first = allocate_exact(&mut state, 2_048, 1_023);
+        let retained = allocate_exact(&mut state, 2_048, 16);
+        assert_live_ranges(&[first, retained], 2_048);
+
+        release_exact(&mut state, first);
+        let replacement = allocate_exact(&mut state, 2_048, 1_023);
+        assert_live_ranges(&[retained, replacement], 2_048);
+    }
+
+    #[test]
+    fn cpp_parity_one_mib_exact_fit_starts_zero_and_exhausts() {
+        let mut state = offset_state(MIB);
+
+        assert_eq!(allocate_exact(&mut state, MIB, MIB), (0, MIB));
+        assert_eq!(state.allocate(1), None);
+    }
+
+    #[test]
+    fn cpp_parity_middle_first_third_release_coalesces_full_mib() {
+        let mut state = offset_state(MIB);
+        let ranges = [
+            allocate_exact(&mut state, MIB, 1_024),
+            allocate_exact(&mut state, MIB, 1_024),
+            allocate_exact(&mut state, MIB, 1_024),
+        ];
+        assert_live_ranges(&ranges, MIB);
+
+        release_exact(&mut state, ranges[1]);
+        release_exact(&mut state, ranges[0]);
+        release_exact(&mut state, ranges[2]);
+        assert_eq!(allocate_exact(&mut state, MIB, MIB), (0, MIB));
+    }
+
+    #[test]
+    fn cpp_parity_ten_mixed_cycles_restore_full_mib() {
+        let mut state = offset_state(MIB);
+
+        for _ in 0..10 {
+            let ranges = [64, 128, 256, 512, 1_024, 2_048, 4_096]
+                .map(|size| allocate_exact(&mut state, MIB, size));
+            assert_live_ranges(&ranges, MIB);
+            for allocation in ranges {
+                release_exact(&mut state, allocation);
+            }
+        }
+
+        assert_eq!(allocate_exact(&mut state, MIB, MIB), (0, MIB));
+    }
 }
