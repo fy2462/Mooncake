@@ -2774,5 +2774,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testprimarystandbysync -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-prepopulated-sync-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_hot_standby_integration_test.cpp:LocalFsHotStandbyIntegrationTest.TestStandbyPromotion",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_teststandbypromotion",
+    "first_divergence": "The existing Rust LocalFS test promoted after a live mixed workload rather than replaying five pre-start objects and proving their exact retention after promotion.",
+    "repair_commit": "5e496e77",
+    "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_teststandbypromotion -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-prepopulated-promotion-goal-019fbe77.typescript"
   }
 ]
