@@ -200,6 +200,64 @@ mod tests {
         }
     }
 
+    struct DeterministicRng(u64);
+
+    impl DeterministicRng {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 ^ (self.0 >> 29)
+        }
+
+        fn one_through(&mut self, maximum: u64) -> u64 {
+            1 + self.next() % maximum
+        }
+
+        fn inclusive(&mut self, minimum: u64, maximum: u64) -> u64 {
+            minimum + self.next() % (maximum - minimum + 1)
+        }
+
+        fn index(&mut self, length: usize) -> usize {
+            self.next() as usize % length
+        }
+    }
+
+    fn assert_live_ranges_scalable(ranges: &[(u64, u64)], capacity: u64) {
+        let mut ordered = ranges.to_vec();
+        for &(offset, size) in &ordered {
+            assert!(size > 0);
+            assert!(offset.checked_add(size).unwrap() <= capacity);
+        }
+        ordered.sort_unstable_by_key(|&(offset, _)| offset);
+        for adjacent in ordered.windows(2) {
+            assert!(adjacent[0].0 + adjacent[0].1 <= adjacent[1].0);
+        }
+    }
+
+    fn random_replacement_step(
+        state: &mut SegmentState,
+        live: &mut Vec<(u64, u64)>,
+        capacity: u64,
+        maximum_size: u64,
+        rng: &mut DeterministicRng,
+    ) {
+        let requested = rng.one_through(maximum_size);
+        if let Some(allocation) = state.allocate(requested) {
+            assert_eq!(allocation.1, requested);
+            live.push(allocation);
+            assert_live_ranges_scalable(live, capacity);
+        }
+
+        assert!(!live.is_empty());
+        let removed = live.swap_remove(rng.index(live.len()));
+        release_exact(state, removed);
+        let replacement = allocate_exact(state, capacity, removed.1);
+        live.push(replacement);
+        assert_live_ranges_scalable(live, capacity);
+    }
+
     #[test]
     fn cpp_parity_1023_and_1024_pack_into_2048() {
         let mut state = offset_state(2_048);
@@ -458,6 +516,88 @@ mod tests {
         ] {
             let allocation = allocate_exact(&mut state, MIB, size);
             release_exact(&mut state, allocation);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_twenty_thousand_random_release_cycles_restore_gib() {
+        const GIB: u64 = 1024 * MIB;
+        let mut state = offset_state(GIB);
+        let mut rng = DeterministicRng(0x8f3d_709c_625a_11e7);
+
+        for _ in 0..20_000 {
+            let requested = rng.one_through(64 * 1024);
+            let allocation = allocate_exact(&mut state, GIB, requested);
+            release_exact(&mut state, allocation);
+        }
+
+        assert_eq!(allocate_exact(&mut state, GIB, GIB), (0, GIB));
+    }
+
+    #[test]
+    fn cpp_parity_thousand_random_live_ranges_clear_restores_4026531840() {
+        const CAPACITY: u64 = 4_026_531_840;
+        let mut state = offset_state(CAPACITY);
+        let mut rng = DeterministicRng(0x32f1_895b_a46c_07d3);
+        let mut live = Vec::with_capacity(1_000);
+
+        for _ in 0..1_000 {
+            let requested = rng.one_through(4_026_531);
+            if let Some(allocation) = state.allocate(requested) {
+                assert_eq!(allocation.1, requested);
+                live.push(allocation);
+                assert_live_ranges_scalable(&live, CAPACITY);
+            }
+        }
+
+        for allocation in live {
+            release_exact(&mut state, allocation);
+        }
+        assert_eq!(
+            allocate_exact(&mut state, CAPACITY, CAPACITY),
+            (0, CAPACITY)
+        );
+    }
+
+    #[test]
+    fn cpp_parity_two_thousand_random_same_size_replacements() {
+        const CAPACITY: u64 = 4_026_531_840;
+        let mut state = offset_state(CAPACITY);
+        let mut rng = DeterministicRng(0xb120_9e6d_34ca_f857);
+        let mut live = Vec::new();
+
+        for _ in 0..2_000 {
+            random_replacement_step(&mut state, &mut live, CAPACITY, 40_265_318, &mut rng);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_eleven_large_power_capacities_random_replacements() {
+        let mut rng = DeterministicRng(0xd51a_27c4_908e_b63f);
+
+        for shift in 30..=40 {
+            let capacity = 1_u64 << shift;
+            let mut state = offset_state(capacity);
+            let mut live = Vec::new();
+            for _ in 0..200 {
+                random_replacement_step(&mut state, &mut live, capacity, capacity / 100, &mut rng);
+            }
+        }
+    }
+
+    #[test]
+    fn cpp_parity_hundred_random_huge_capacities_same_size_replacements() {
+        const MINIMUM_CAPACITY: u64 = (1_u64 << 31) + 1;
+        const MAXIMUM_CAPACITY: u64 = 1_u64 << 40;
+        let mut rng = DeterministicRng(0x09b7_ec42_6d15_a830);
+
+        for _ in 0..100 {
+            let capacity = rng.inclusive(MINIMUM_CAPACITY, MAXIMUM_CAPACITY);
+            let mut state = offset_state(capacity);
+            let mut live = Vec::new();
+            for _ in 0..200 {
+                random_replacement_step(&mut state, &mut live, capacity, capacity / 100, &mut rng);
+            }
         }
     }
 }
