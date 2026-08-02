@@ -1512,10 +1512,10 @@
       "behavior": "An unwarmed key fetched through DummyClient get_buffer returns a non-null owned buffer whose size and bytes exactly equal the stored payload.",
       "boundary": ["client", "dummy-client", "get-buffer", "allocator-fallback", "data-integrity"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.GetBuffer_AllocatorFallback"},
-      "reason": "Rust MooncakeClient::get_buffer implements an owned BufferHandle, but no discoverable Rust test performs a cold store fetch through that public API and asserts its key, size, and exact payload bytes; the Python dummy does not expose get_buffer.",
+      "reason": "Rust enables LocalHotCache but proves the key is initially absent, then fetches a real remote Store object through public MooncakeClient::get_buffer and asserts the literal owned key, size, and bytes plus one transfer_engine strategy event. This is the Rust allocator-fallback replacement boundary; C++ dummy pool pointer identity is not claimed.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp GetBuffer_AllocatorFallback, mooncake-store/src/dummy_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_get_buffer_cold_allocator_fallback_returns_exact_handle"}],
+      "status": "covered"
     },
     {
       "behavior": "A warmed key fetched through DummyClient get_buffer has the stored size and exact bytes on the hot-cache path.",

@@ -716,6 +716,46 @@ async fn cpp_parity_dummy_inflight_get_buffer_fill_cannot_resurrect_removed_key(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_dummy_get_buffer_cold_allocator_fallback_returns_exact_handle() {
+    let (master, shutdown) = start_master().await;
+    let mut writer = create_tcp_client(&master).await;
+    let cache = Arc::new(LocalHotCache::new(1024 * 1024, 16));
+    let mut reader = create_tcp_client(&master)
+        .await
+        .with_hot_cache(Arc::clone(&cache));
+    writer
+        .put(
+            "cold-allocator-buffer",
+            b"cold-allocator-owned-data",
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: writer.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cache.get("cold-allocator-buffer"), None);
+
+    let handle = reader
+        .get_buffer("cold-allocator-buffer")
+        .await
+        .unwrap();
+    assert_eq!(handle.key, "cold-allocator-buffer");
+    assert_eq!(handle.size, 25);
+    assert_eq!(handle.data, b"cold-allocator-owned-data");
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"transfer_engine\"}",
+        1,
+    );
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cpp_parity_dummy_get_buffer_warmed_hot_cache_returns_exact_handle() {
     let (master, shutdown) = start_master().await;
     let mut writer = create_tcp_client(&master).await;
