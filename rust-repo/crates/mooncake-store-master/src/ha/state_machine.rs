@@ -414,6 +414,23 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_time_in_connecting_is_between_100_and_200_milliseconds() {
+        let sm = StandbyStateMachine::new();
+
+        assert_transition(
+            &sm,
+            StandbyEvent::Start,
+            StandbyState::Stopped,
+            StandbyState::Connecting,
+        );
+        std::thread::sleep(Duration::from_millis(100));
+
+        let elapsed = sm.get_time_in_current_state();
+        assert!(elapsed >= Duration::from_millis(100));
+        assert!(elapsed <= Duration::from_millis(200));
+    }
+
+    #[test]
     fn cpp_parity_ha_standby_standby_state_machine_test_cpp_standbystatemachinetest_testwatchbrokentransition_54fee57f()
      {
         let sm = StandbyStateMachine::new();
@@ -821,6 +838,25 @@ mod tests {
             StandbyEvent::MaxErrorsReached,
             StandbyState::Watching,
             StandbyState::Recovering,
+        );
+    }
+
+    #[test]
+    fn cpp_parity_complete_recovery_flow_watching_recovering_watching() {
+        let sm = StandbyStateMachine::new();
+        reach_watching(&sm);
+
+        assert_transition(
+            &sm,
+            StandbyEvent::MaxErrorsReached,
+            StandbyState::Watching,
+            StandbyState::Recovering,
+        );
+        assert_transition(
+            &sm,
+            StandbyEvent::RecoverySuccess,
+            StandbyState::Recovering,
+            StandbyState::Watching,
         );
     }
 
