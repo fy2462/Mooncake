@@ -361,4 +361,103 @@ mod tests {
 
         assert_eq!(allocate_exact(&mut state, MIB, MIB), (0, MIB));
     }
+
+    #[test]
+    fn cpp_parity_ten_live_thousand_byte_ranges() {
+        const GIB: u64 = 1024 * MIB;
+        let mut state = offset_state(GIB);
+        let ranges = (0..10)
+            .map(|_| allocate_exact(&mut state, GIB, 1_000))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ranges.len(), 10);
+        assert_live_ranges(&ranges, GIB);
+    }
+
+    #[test]
+    fn cpp_parity_exact_eight_size_live_set() {
+        const GIB: u64 = 1024 * MIB;
+        let mut state = offset_state(GIB);
+        let ranges = [100, 500, 1_000, 2_000, 50, 1_500, 800, 300]
+            .map(|size| allocate_exact(&mut state, GIB, size));
+
+        assert_live_ranges(&ranges, GIB);
+    }
+
+    #[test]
+    fn cpp_parity_one_byte_exact_in_one_mib() {
+        let mut state = offset_state(MIB);
+        let allocation = allocate_exact(&mut state, MIB, 1);
+
+        assert_eq!(allocation, (0, 1));
+        assert_ne!(state.segment.base + allocation.0, u64::MAX);
+    }
+
+    #[test]
+    fn cpp_parity_large_powers_one_mib_through_512_mib() {
+        const GIB: u64 = 1024 * MIB;
+        let mut state = offset_state(GIB);
+
+        for size in [
+            MIB,
+            2 * MIB,
+            4 * MIB,
+            8 * MIB,
+            16 * MIB,
+            32 * MIB,
+            64 * MIB,
+            128 * MIB,
+            256 * MIB,
+            512 * MIB,
+        ] {
+            let allocation = allocate_exact(&mut state, GIB, size);
+            release_exact(&mut state, allocation);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_exact_prime_sizes_two_through_1013() {
+        let mut state = offset_state(MIB);
+
+        for size in [
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83,
+            89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179,
+            181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271,
+            277, 281, 283, 293, 307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379,
+            383, 389, 397, 401, 409, 419, 421, 431, 433, 439, 443, 449, 457, 461, 463, 467, 479,
+            487, 491, 499, 503, 509, 521, 523, 541, 547, 557, 563, 569, 571, 577, 587, 593, 599,
+            601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659, 661, 673, 677, 683, 691, 701,
+            709, 719, 727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797, 809, 811, 821, 823,
+            827, 829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919, 929, 937, 941,
+            947, 953, 967, 971, 977, 983, 991, 997, 1_009, 1_013,
+        ] {
+            let allocation = allocate_exact(&mut state, MIB, size);
+            release_exact(&mut state, allocation);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_exact_fibonacci_sequence_through_317811() {
+        let mut state = offset_state(MIB);
+
+        for size in [
+            1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610, 987, 1_597, 2_584, 4_181,
+            6_765, 10_946, 17_711, 28_657, 46_368, 75_025, 121_393, 196_418, 317_811,
+        ] {
+            let allocation = allocate_exact(&mut state, MIB, size);
+            release_exact(&mut state, allocation);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_exact_page_multiples_four_kib_through_one_mib() {
+        let mut state = offset_state(MIB);
+
+        for size in [
+            4_096, 8_192, 16_384, 32_768, 65_536, 131_072, 262_144, 524_288, 1_048_576,
+        ] {
+            let allocation = allocate_exact(&mut state, MIB, size);
+            release_exact(&mut state, allocation);
+        }
+    }
 }
