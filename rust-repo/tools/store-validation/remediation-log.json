@@ -3728,5 +3728,50 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-allocation-limit-final.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.SerializationEmptyAllocator",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_empty_allocator_snapshot_short_long_not_equal",
+    "first_divergence": "Rust lacked a deterministic versioned per-segment Offset semantic snapshot preserving empty layout identity, configuration, free ranges, and accounting.",
+    "repair_commit": "bb611c0f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-semantic-snapshot-final.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.SerializationOneElementAllocator",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_one_live_allocation_snapshot_rebinds_and_frees",
+    "first_divergence": "Rust lacked one-allocation semantic snapshot restore with a validated rebound descriptor that can safely release the restored live range.",
+    "repair_commit": "bb611c0f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-semantic-snapshot-final.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.SerializationRandomAllocatedAllocator",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_100_random_huge_snapshots_preserve_live_state",
+    "first_divergence": "Rust lacked 100 huge-capacity semantic snapshot round trips after 200 randomized replacements, including complete live-handle rebinding and corruption handling.",
+    "repair_commit": "bb611c0f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-semantic-snapshot-final.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.AllocateAfterDeserialization",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_random_allocation_continues_after_snapshot_restore",
+    "first_divergence": "Rust lacked semantic snapshot restore that preserves a bound Offset runtime and all live handles so exact random allocation can continue safely.",
+    "repair_commit": "bb611c0f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-semantic-snapshot-final.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.ChainedAllocationAndDeserialization",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_ten_huge_allocators_survive_1000_replacements_and_rebind",
+    "first_divergence": "Rust lacked the ten-capacity, ten-by-100 chained replacement lifecycle around one deterministic semantic restore with complete survivor rebinding.",
+    "repair_commit": "bb611c0f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests:: --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-semantic-snapshot-final.typescript"
   }
 ]
