@@ -3994,17 +3994,17 @@
     "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestTimeInState",
     "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_time_in_connecting_is_between_100_and_200_milliseconds",
     "first_divergence": "Rust had no discoverable direct witness for the C++ 100-through-200-millisecond CONNECTING elapsed-time contract.",
-    "repair_commit": "be6ef901",
+    "repair_commit": "1aae5e1c",
     "focused_command": "cargo test -p mooncake-store-master --lib ha::state_machine::tests::cpp_parity_time_in_connecting_is_between_100_and_200_milliseconds -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-standby-final-parity.typescript"
   },
   {
     "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestCompleteRecoveryFlow",
-    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_complete_recovery_flow_watching_recovering_watching; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_success_transitions_actual_state_machine",
-    "first_divergence": "Rust had no discoverable direct witness for the complete WATCHING to RECOVERING to WATCHING flow, despite the existing production HotStandby recovery-success state-machine integration coverage.",
-    "repair_commit": "be6ef901",
-    "focused_command": "cargo test -p mooncake-store-master --lib ha::state_machine::tests::cpp_parity_complete_recovery_flow_watching_recovering_watching -- --exact --nocapture && cargo test -p mooncake-store-master --lib hot_standby::tests::test_etcd_recovery_success_transitions_actual_state_machine -- --exact --nocapture",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:test_cpp_parity_recovering_success; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_success_transitions_actual_state_machine",
+    "first_divergence": "The parity row remained unmapped even though commit e840795b had already added both the direct state-machine recovery-success witness and the production HotStandby recovery-success integration witness needed to cover it.",
+    "repair_commit": "e840795b",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::state_machine::tests::test_cpp_parity_recovering_success -- --exact --nocapture && cargo test -p mooncake-store-master --lib hot_standby::tests::test_etcd_recovery_success_transitions_actual_state_machine -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-standby-final-parity.typescript"
   }
