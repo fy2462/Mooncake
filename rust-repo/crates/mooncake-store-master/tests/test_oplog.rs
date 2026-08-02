@@ -937,6 +937,47 @@ fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testlargepayload(
 }
 
 #[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendentry() {
+    let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(2))), 7);
+
+    let sequence = manager.append_and_persist("value1".to_string()).unwrap();
+
+    assert_eq!(sequence, 1);
+    assert_eq!(manager.latest_sequence(), sequence);
+    let entries = manager.read_since(1, 2).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].seq, sequence);
+    assert_eq!(entries[0].payload, "value1");
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testsequenceidincrement() {
+    let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(4))), 7);
+
+    let id1 = manager.append_and_persist("value1".to_string()).unwrap();
+    let id2 = manager.append_and_persist("value2".to_string()).unwrap();
+    let id3 = manager.append_and_persist(String::new()).unwrap();
+
+    assert_eq!(id1, 1);
+    assert_eq!(id2, id1 + 1);
+    assert_eq!(id3, id2 + 1);
+    assert_eq!(manager.latest_sequence(), id3);
+    let entries = manager.read_since(1, 4).unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(
+        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        [id1, id2, id3]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.payload.as_str())
+            .collect::<Vec<_>>(),
+        ["value1", "value2", ""]
+    );
+}
+
+#[test]
 fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendmultipletypes() {
     let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(4))), 7);
 
