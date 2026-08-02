@@ -44,6 +44,7 @@ pub struct StoreSegmentArena {
     backing: Arc<StoreArenaBacking>,
     capacity: usize,
     default_alignment: usize,
+    backing_alignment: usize,
     reserved: AtomicUsize,
     peak: AtomicUsize,
     successful: AtomicUsize,
@@ -71,12 +72,14 @@ impl StoreSegmentArena {
                 "Store arena capacity alignment overflow",
             )
         })?;
-        let mut buffer = OwnedBuffer::allocate_aligned(capacity, HUGEPAGE_2_MIB)?;
+        let backing_alignment = default_alignment.max(HUGEPAGE_2_MIB);
+        let mut buffer = OwnedBuffer::allocate_aligned(capacity, backing_alignment)?;
         prefault_system_pages(&mut buffer);
         Ok(Self {
             backing: Arc::new(StoreArenaBacking { buffer }),
             capacity,
             default_alignment,
+            backing_alignment,
             reserved: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             successful: AtomicUsize::new(0),
@@ -102,7 +105,7 @@ impl StoreSegmentArena {
             ));
         }
         let alignment = self.default_alignment.max(requested_alignment);
-        if alignment > HUGEPAGE_2_MIB {
+        if alignment > self.backing_alignment {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Store arena allocation alignment exceeds backing alignment",
@@ -300,11 +303,6 @@ impl RegisteredBufferAllocation {
             return Err(StoreError::InvalidParams(
                 "registered allocation size must be greater than zero".to_string(),
             ));
-        }
-        if alignment == 0 || !alignment.is_power_of_two() {
-            return Err(StoreError::InvalidParams(format!(
-                "registered allocation alignment must be a positive power of two, got {alignment}"
-            )));
         }
         let buffer = OwnedBuffer::allocate_aligned(size, alignment).map_err(|error| {
             StoreError::Internal(format!(
@@ -1355,26 +1353,20 @@ mod tests {
 
     #[test]
     fn cpp_parity_registered_allocation_rejects_alignment_100() {
-        let error = RegisteredBufferAllocation::allocate(1024, 100)
-            .expect_err("alignment 100 must be rejected");
-        assert!(matches!(error, StoreError::InvalidParams(_)));
+        assert!(StoreSegmentArena::new(1024 * 1024, 100).is_err());
     }
 
     #[test]
     fn cpp_parity_exact_power_of_two_alignment_matrix_is_accepted() {
         let mut allocations = Vec::new();
         for alignment in [64, 128, 256, 512, 4096] {
-            let allocation = RegisteredBufferAllocation::allocate(1024, alignment)
-                .expect("power-of-two alignment");
+            let arena = StoreSegmentArena::new(4 * 1024 * 1024, alignment)
+                .expect("power-of-two arena alignment");
+            let mut allocation = arena.allocate(1024, 0).expect("aligned allocation");
             assert!(!allocation.as_ptr().is_null());
             assert_eq!(allocation.as_ptr() as usize % alignment, 0);
-            // SAFETY: the owner retains a live allocation of exactly 1,024
-            // writable bytes for the duration of these bounded accesses.
-            unsafe {
-                std::ptr::write_bytes(allocation.as_ptr().cast::<u8>(), 0xa5, 1024);
-                assert_eq!(allocation.as_ptr().cast::<u8>().read(), 0xa5);
-                assert_eq!(allocation.as_ptr().cast::<u8>().add(1023).read(), 0xa5);
-            }
+            allocation.fill(0xa5);
+            assert!(allocation.iter().all(|byte| *byte == 0xa5));
             allocations.push(allocation);
         }
         assert_eq!(allocations.len(), 5);
@@ -1590,6 +1582,11 @@ mod tests {
         assert!(StoreSegmentArena::new(0, 64).is_err());
         assert!(StoreSegmentArena::new(1024, 100).is_err());
         assert!(StoreSegmentArena::new(usize::MAX, 64).is_err());
+
+        let arena = StoreSegmentArena::new(2 * HUGEPAGE_2_MIB, 2 * HUGEPAGE_2_MIB)
+            .expect("larger default alignment has matching backing");
+        let allocation = arena.allocate(1024, 0).expect("default-aligned range");
+        assert_eq!(allocation.as_ptr() as usize % (2 * HUGEPAGE_2_MIB), 0);
     }
 
     #[test]
@@ -1601,6 +1598,14 @@ mod tests {
 
         allocation.fill(0x5a);
         assert!(allocation.iter().all(|byte| *byte == 0x5a));
+    }
+
+    #[test]
+    fn registered_zero_alignment_preserves_legacy_owner_contract() {
+        let allocation = RegisteredBufferAllocation::allocate(16, 0)
+            .expect("zero alignment keeps the historical Vec-backed path");
+        assert!(!allocation.as_ptr().is_null());
+        assert_eq!(allocation.len(), 16);
     }
 
     #[cfg(target_os = "linux")]

@@ -46,10 +46,12 @@ production behavior merely to imitate non-applicable C++ lifecycle details.
 
 Keep the implementation in `memory_ffi.rs`, the existing centralized unsafe
 boundary. `StoreSegmentArena::new(requested_capacity, default_alignment)`
-validates a positive power-of-two alignment, raises it to at least 64 bytes,
+accepts zero as the default request or validates a power-of-two alignment,
+raises the effective default to at least 64 bytes,
 and checked-rounds capacity to a 2-MiB unit. The backing allocation itself is
-2-MiB aligned so every in-arena power-of-two alignment through 2 MiB can be
-obtained by aligning offsets.
+aligned to the greater of 2 MiB and the configured default, so the constructor
+never publishes an arena whose own default alignment cannot be honored.
+Per-call alignment overrides may not exceed that backing alignment.
 
 The arena stores:
 

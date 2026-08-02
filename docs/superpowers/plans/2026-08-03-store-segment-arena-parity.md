@@ -38,7 +38,7 @@
 - Modify: `rust-repo/crates/mooncake-store-client/src/memory_ffi.rs`
 
 - [ ] Add RED tests `cpp_parity_exact_six_size_matrix_is_64_aligned_and_fully_writable`, `cpp_parity_eighty_mixed_store_allocation_attempts_validate_every_success`, `cpp_parity_one_byte_then_two_mib_aligned_reservation_orders_addresses`, `cpp_parity_registered_allocation_rejects_alignment_100`, and `cpp_parity_exact_power_of_two_alignment_matrix_is_accepted`.
-- [ ] Implement requested-alignment offset planning against a 2-MiB-aligned base and complete `Deref`/`DerefMut` range access.
+- [ ] Implement requested-alignment offset planning against a backing aligned to at least 2 MiB and at least the configured default, and complete `Deref`/`DerefMut` range access.
 - [ ] Retain all owners while checking literal size/alignment matrices, full writes, base/length/content identity, checked range ends, ordering, and non-overlap.
 - [ ] Mutation probe: ignore the requested alignment and require the 2-MiB mixed-alignment test to fail, then restore it.
 - [ ] Run the five exact tests and the full module GREEN.
