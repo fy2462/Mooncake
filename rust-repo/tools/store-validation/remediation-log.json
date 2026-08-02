@@ -3296,5 +3296,59 @@
     "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32769 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-etcd-oplog-core-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestSerializeDeserializeRoundTrip",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testserializedeserializeroundtrip",
+    "first_divergence": "Rust had direct codec evidence but no live-etcd sequence-42 PUT_END round trip preserving roundtrip-key and roundtrip-value through durable serialization.",
+    "repair_commit": "af188ad9",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestGetLatestSequenceId",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testgetlatestsequenceid",
+    "first_divergence": "Rust parsed injected latest values but lacked a live-etcd lifecycle proving two durable entries publish the literal /latest value 2.",
+    "repair_commit": "af188ad9",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestCleanupOpLogBefore_Empty",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcleanupoplogbefore_empty",
+    "first_divergence": "Rust had no live-etcd execution proving a revision-fenced cleanup_before(100) succeeds on an empty namespace.",
+    "repair_commit": "af188ad9",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestClusterIdNormalization",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testclusteridnormalization",
+    "first_divergence": "Rust trimmed trailing slashes in source but lacked a live cross-instance sequence-999 PUT_END norm-key/norm-val proof for the normalized namespace.",
+    "repair_commit": "af188ad9",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestReadOpLogSince_Pagination",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_pagination",
+    "first_divergence": "Rust had source-only range ordering and lacked live-etcd evidence for exact ordered sequences 1 through 20 under limit 20.",
+    "repair_commit": "af188ad9",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestReadOpLogSince_LargeDataset",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_largedataset",
+    "first_divergence": "Rust lacked live-etcd evidence that 200 durable entries queried with limit 150 return exact ordered sequences 1 through 150.",
+    "repair_commit": "af188ad9",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
   }
 ]
