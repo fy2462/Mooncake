@@ -2810,5 +2810,32 @@
     "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testhighthroughputsync -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-live-throughput-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadOpLogNotFound",
+    "rust": "mooncake-store-master/src/oplog/oplog_local.rs:cpp_parity_localfs_oplog_store_test_localfsoplogstoretest_readoplognotfound",
+    "first_divergence": "Rust exposed only an inclusive range read that returned an empty vector and had no exact LocalFS entry-read boundary with a dedicated not-found result.",
+    "repair_commit": "08a88901",
+    "focused_command": "cargo test -p mooncake-store-master --lib localfsoplogstoretest -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-oplog-read-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.ReadOpLogSinceWithOffset",
+    "rust": "mooncake-store-master/src/oplog/oplog_local.rs:cpp_parity_localfs_oplog_store_test_localfsoplogstoretest_readoplogsincewithoffset",
+    "first_divergence": "Rust's replication-facing read_since contract is intentionally inclusive and lacked a separate LocalFS compatibility boundary for the C++ exclusive offset.",
+    "repair_commit": "08a88901",
+    "focused_command": "cargo test -p mooncake-store-master --lib localfsoplogstoretest -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-oplog-read-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_oplog_store_test.cpp:LocalFsOpLogStoreTest.GetMaxSequenceIdEmpty",
+    "rust": "mooncake-store-master/src/oplog/oplog_local.rs:cpp_parity_localfs_oplog_store_test_localfsoplogstoretest_getmaxsequenceidempty",
+    "first_divergence": "Rust preserved zero as the replication bootstrap maximum for an empty store and lacked a separate max-present query mapping empty state to entry-not-found.",
+    "repair_commit": "08a88901",
+    "focused_command": "cargo test -p mooncake-store-master --lib localfsoplogstoretest -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-oplog-read-boundaries-goal-019fbe77.typescript"
   }
 ]
