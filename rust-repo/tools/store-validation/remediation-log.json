@@ -3377,5 +3377,86 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testconcurrentappend -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-manager-concurrent8000-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.JustBelowBinSizeAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_1023_and_1024_pack_into_2048",
+    "first_divergence": "Rust lacked exact-capacity proof that simultaneous 1,023- and 1,024-byte requests fit in 2,048 bytes with exact logical sizes and disjoint ranges.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.VerySmallAllocatorSize",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_sixteen_byte_exact_fit_then_exhaustion",
+    "first_divergence": "Rust lacked the 16-byte minimum-capacity boundary proving exact fit followed by exhaustion for a simultaneous one-byte request.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.AllocatorSizeMinusOne",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_1023_succeeds_in_1024_capacity",
+    "first_divergence": "Rust lacked the capacity-minus-one boundary proving an exact 1,023-byte request succeeds within a 1,024-byte allocator.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.PowerOfTwoAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_power_of_two_sizes_1_through_1024_in_2048",
+    "first_divergence": "Rust lacked the exact eleven-value power-of-two allocation and release matrix from 1 through 1,024 bytes.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSizeCalculation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_100_200_500_live_ranges_are_valid",
+    "first_divergence": "Rust lacked a retained simultaneous 100-, 200-, and 500-byte live set with exact-size, bounds, and non-overlap assertions.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinOverflowScenarios",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_up_to_100_live_64_byte_bin_allocations",
+    "first_divergence": "Rust lacked the repeated up-to-100 64-byte allocation scenario with every successful range retained and checked for exact size, bounds, and non-overlap.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSelectionEdgeCases",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_nineteen_bin_edge_sizes",
+    "first_divergence": "Rust lacked the exact ordered nineteen-size bin-edge allocation and release matrix from 1 through 1,024 bytes.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemMixedPatterns",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_seven_scale_mixed_live_set",
+    "first_divergence": "Rust lacked the exact seven-scale simultaneous live set from 16 through 65,536 bytes with pairwise non-overlap proof.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemNonAlignedSizes",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_nine_nonaligned_sizes",
+    "first_divergence": "Rust lacked the exact nine-value nonaligned-size allocation and release matrix from 17 through 4,097 bytes.",
+    "repair_commit": "ad37c8a2",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
   }
 ]
