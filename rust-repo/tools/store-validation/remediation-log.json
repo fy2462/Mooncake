@@ -4007,5 +4007,32 @@
     "focused_command": "cargo test -p mooncake-store-master --lib ha::state_machine::tests::test_cpp_parity_recovering_success -- --exact --nocapture && cargo test -p mooncake-store-master --lib hot_standby::tests::test_etcd_recovery_success_transitions_actual_state_machine -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-standby-final-parity.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.TenantQuotaAdminLifecycleEndpoints",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_tenant_quota_lifecycle",
+    "first_divergence": "Rust admin HTTP returned lowercase tenant-not-empty text and retained a lazy-empty quota-table entry after policy deletion, so the final single-tenant GET returned 200 instead of the C++ 404.",
+    "repair_commit": "23454c25",
+    "focused_command": "cargo test -p mooncake-store-master --lib admin_http::tests::test_admin_http_tenant_quota_lifecycle -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-tenant-quota-admin-parity.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.TenantQuotaAdminValidationErrors",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_tenant_quota_validation_errors",
+    "first_divergence": "The Rust handlers implemented the validation statuses, but no discoverable request-level test issued the exact missing, empty, zero, reserved, and unknown tenant matrix through the Axum router.",
+    "repair_commit": "23454c25",
+    "focused_command": "cargo test -p mooncake-store-master --lib admin_http::tests::test_admin_http_tenant_quota_validation_errors -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-tenant-quota-admin-parity.typescript"
+  },
+  {
+    "cpp": "master_admin_server_test.cpp:MasterAdminServerTest.TenantQuotaAdminDisabledModeReturns409",
+    "rust": "mooncake-store-master/src/admin_http.rs:test_admin_http_tenant_quota_disabled_conflict",
+    "first_divergence": "Rust already returned HTTP 409 when tenant quotas were disabled, but the response exposed lowercase service wording instead of the exact C++ UNAVAILABLE_IN_CURRENT_MODE token and lacked a request-level witness.",
+    "repair_commit": "23454c25",
+    "focused_command": "cargo test -p mooncake-store-master --lib admin_http::tests::test_admin_http_tenant_quota_disabled_conflict -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-tenant-quota-admin-parity.typescript"
   }
 ]
