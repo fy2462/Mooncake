@@ -3611,5 +3611,50 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.ContinuousRandomAllocationDeallocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_twenty_thousand_random_release_cycles_restore_gib",
+    "first_divergence": "Rust lacked the exact 20,000-cycle randomized allocate/release workload followed by one full-capacity reuse oracle.",
+    "repair_commit": "5754b844",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-random-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.FullAllocationAfterRandomAllocationAndFree",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_thousand_random_live_ranges_clear_restores_4026531840",
+    "first_divergence": "Rust lacked 1,000 randomized retained allocation attempts at exact capacity 4,026,531,840 followed by full release and exact full-capacity reuse.",
+    "repair_commit": "5754b844",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-random-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.RandomRepeatAllocationSameSizeAfterFree",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_two_thousand_random_same_size_replacements",
+    "first_divergence": "Rust lacked the exact 2,000-step randomized optional-add/remove/mandatory-same-size-replacement lifecycle with complete live-range validation.",
+    "repair_commit": "5754b844",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-random-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.PowerOfTwoLargeAllocatorSize",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_eleven_large_power_capacities_random_replacements",
+    "first_divergence": "Rust lacked all eleven power-of-two capacities from 1 GiB through 1 TiB with 200 randomized same-size replacement iterations each.",
+    "repair_commit": "5754b844",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-random-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.RandomSmallAllocWithLargeAllocatorSize",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_hundred_random_huge_capacities_same_size_replacements",
+    "first_divergence": "Rust lacked exactly 100 huge randomized capacities and all 200 optional-add/remove/mandatory-same-size-replacement iterations per capacity.",
+    "repair_commit": "5754b844",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-random-lifecycle-goal-019fbe77.typescript"
   }
 ]
