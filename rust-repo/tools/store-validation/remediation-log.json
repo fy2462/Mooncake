@@ -2837,5 +2837,41 @@
     "focused_command": "cargo test -p mooncake-store-master --lib localfsoplogstoretest -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-oplog-read-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyPutEnd",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend",
+    "first_divergence": "Rust treated legacy C++ struct-pack MetadataPayload bytes as opaque and could not create fresh standby metadata with the C++ empty-replica shape.",
+    "repair_commit": "f7089bf6",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-basic-structpack-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyPutRevoke",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputrevoke",
+    "first_divergence": "Rust separately decoded C++ PUT_REVOKE wire records but had no full struct-pack PUT_END then revoke state and sequence oracle.",
+    "repair_commit": "f7089bf6",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-basic-structpack-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyRemove",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyremove_e681ca3e",
+    "first_divergence": "Rust preloaded metadata before isolated REMOVE tests instead of replaying the C++ struct-pack PUT_END at sequence one followed by REMOVE at sequence two.",
+    "repair_commit": "f7089bf6",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-basic-structpack-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_applier_test.cpp:OpLogApplierTest.TestApplyPutEnd_ValidPayload",
+    "rust": "mooncake-store-master/src/ha/oplog_applier.rs:cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend",
+    "first_divergence": "Rust typed v1/v3 tests did not decode the C++ struct-pack UUID pair and size into freshly stored standby metadata.",
+    "repair_commit": "f7089bf6",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogappliertest_testapply -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-applier-basic-structpack-goal-019fbe77.typescript"
   }
 ]
