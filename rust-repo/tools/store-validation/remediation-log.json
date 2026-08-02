@@ -2720,5 +2720,14 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --test test_file_util cpp_parity_posix_file_test_cpp_posixfiletest_filelocking -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-posix-file-locking-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "mmap_arena_fallback_test.cpp:MmapArenaFallbackTest.PopulateHugetlbMappingUsesConfiguredPageStride",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_populatehugetlbmappingusesconfiguredpagestride_906d02d3",
+    "first_divergence": "The existing population test injected a four-byte stride directly and did not drive MC_STORE_HUGEPAGE_SIZE=2MB through the production population entry or prove three-page mapping cleanup.",
+    "repair_commit": "9cc930ae",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests::cpp_parity_mmap_arena_fallback_test_cpp_mmaparenafallbacktest_populatehugetlbmappingusesconfiguredpagestride_906d02d3 -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "/tmp/mooncake-hugetlb-configured-stride-goal-019fbe77.typescript"
   }
 ]
