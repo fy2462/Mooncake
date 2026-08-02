@@ -682,6 +682,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_replicator_test_cpp_oplogreplicatortest_injectmultipleentries_sequencetracking()
+     {
+        let applier = Arc::new(OpLogApplier::new(Arc::new(MasterState::empty())));
+        let sync_status = Arc::new(parking_lot::RwLock::new(StandbySyncStatus::default()));
+        let state_machine = Arc::new(StandbyStateMachine::new());
+        let mut on_entry = make_notifier_entry_callback(
+            applier.clone(),
+            Arc::downgrade(&sync_status),
+            state_machine,
+        );
+
+        for (sequence, key) in [(1, "k1"), (2, "k2"), (3, "k3")] {
+            on_entry(OpLogRecord {
+                seq: sequence,
+                producer_view_version: 9,
+                payload: format!(r#"{{"op":"remove","key":"default\u0000{key}"}}"#),
+            });
+        }
+
+        assert_eq!(applier.get_expected_sequence_id(), 4);
+        let status = sync_status.read();
+        assert_eq!(status.applied_seq_id, 3);
+        assert_eq!(status.primary_seq_id, 3);
+        assert_eq!(status.lag_entries, 0);
+    }
+
     #[tokio::test]
     async fn test_oplog_following_applies_entries() {
         let state = Arc::new(MasterState::empty());

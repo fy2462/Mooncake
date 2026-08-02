@@ -949,6 +949,24 @@ fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendmultipl
 }
 
 #[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_invalidjson() {
+    assert!(deserialize_etcd_value_for_test("{not-json").is_err());
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_emptystring() {
+    assert!(deserialize_etcd_value_for_test("").is_err());
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_missingfields() {
+    let outcome =
+        std::panic::catch_unwind(|| deserialize_etcd_value_for_test(r#"{"sequence_id":1}"#));
+
+    assert!(outcome.is_ok());
+}
+
+#[test]
 fn test_etcd_oplog_entry_key_matches_cpp_format() {
     let key = format_etcd_entry_key_for_test("/oplog/cluster-a", 42);
     assert_eq!(key, "/oplog/cluster-a/00000000000000000042");
