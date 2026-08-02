@@ -1070,10 +1070,10 @@
       "behavior": "A running LocalFS standby attempts to reach WATCHING before 100 PUT_END records are submitted, the first 99 through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then polling awaits eventual batch visibility and reports applied sequence at least the final sequence and zero lag, while write duration and maximum observed lag are logged only.",
       "boundary": ["master", "ha", "localfs", "optional-component", "oplog-replay", "throughput"],
       "reference": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestHighThroughputSync"},
-      "reason": "Rust also starts first and catches up 100 puts, but adds 20 removes, durably records every operation, requires catch-up within three seconds, and asserts exact status/object results. It does not preserve the pure 100-put asynchronous submission pattern with a final AppendAndPersist call or this C++ observation contract; C++ has no asserted WATCHING, throughput, latency, or maximum-lag bound (its 10/30-second waits are only polling deadlines).",
+      "reason": "Rust starts the production LocalFS standby first and durably completes 100 pure object images instead of exposing C++'s weaker asynchronous Append API, then proves exact catch-up and zero lag. The test does not claim a throughput, latency, or maximum-lag bound because C++ only logs those observations.",
       "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestHighThroughputSync; rust-repo/crates/mooncake-store-master/src/hot_standby.rs localfs_writer_and_standby_sync_mixed_state_then_promote", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-master/src/hot_standby.rs","test":"cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testhighthroughputsync"}],
+      "status": "covered"
     },
     {
       "behavior": "The root-level LocalFS primary/standby sync source is an exact duplicate of the canonical HA oplog test source.",
