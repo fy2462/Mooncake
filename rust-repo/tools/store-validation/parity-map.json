@@ -935,9 +935,9 @@
       "behavior": "A Redis coordinator initially reads no view, acquires 127.0.0.1:8899, reads its address and version, renews, reports a contending coordinator with that version, releases, and is subsequently absent.",
       "boundary": ["master", "ha", "redis", "coordinator-only", "leadership"],
       "reference": {"file": "ha/leadership/backends/redis/high_availability_redis_test.cpp", "test": "HighAvailabilityTest.RedisBasicMasterViewOperations"},
-      "reason": "Rust has atomic complete-expiring-view reads plus owner-token acquire, renew, release, and contended-view primitives, but no discoverable Rust test runs two Redis coordinators through this complete lifecycle. This is coordinator-only behavior and does not establish Redis serving.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisBasicMasterViewOperations; rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_redis.rs and coordinator.rs", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_redis_ha_live.rs","test":"cpp_parity_high_availability_redis_test_highavailabilitytest_redisbasicmasterviewoperations"}], "status": "covered"
     },
     {
       "behavior": "After acquire and renew, externally deleting the Redis master-view key makes StartLeadershipMonitor invoke its LeadershipLossReason::kLostLeadership callback within ten seconds.",
@@ -959,9 +959,9 @@
       "behavior": "One Redis coordinator acquires and renews a first session, explicitly releases it, then acquires 127.0.0.1:9944, renews the new session, and releases it.",
       "boundary": ["master", "ha", "redis", "coordinator-only", "leadership", "reacquire"],
       "reference": {"file": "ha/leadership/backends/redis/high_availability_redis_test.cpp", "test": "HighAvailabilityTest.RedisCanRestartRenewAfterExplicitRelease"},
-      "reason": "Rust clears the active owner token on release and records a new token on acquisition, while Redis acquire increments the view version and renewal fences by owner token; no discoverable Rust Redis test proves same-coordinator release, reacquisition, renewal, and final release against a live service. This is coordinator-only behavior and does not establish Redis serving.",
+      "reason": "",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/redis/high_availability_redis_test.cpp RedisCanRestartRenewAfterExplicitRelease; rust-repo/crates/mooncake-store-master/src/ha/coordinator.rs and coordinator/coordinator_redis.rs", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_redis_ha_live.rs","test":"cpp_parity_high_availability_redis_test_highavailabilitytest_rediscanrestartrenewafterexplicitrelease"}], "status": "covered"
     },
     {
       "behavior": "A Kubernetes Lease coordinator acquires 127.0.0.1:8899, reads that leader back, renews, times out after 200 ms with no view change, releases, and then observes a changed view.",
