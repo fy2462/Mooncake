@@ -132,3 +132,165 @@ fn insert_free_range(free_ranges: &mut Vec<(u64, u64)>, offset: u64, len: u64) {
     }
     *free_ranges = merged;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+
+    fn offset_state(capacity: u64) -> SegmentState {
+        SegmentState {
+            segment: Segment {
+                id: Uuid::new_v4(),
+                name: "offset-parity".to_string(),
+                base: 16 * 1024,
+                size: capacity,
+                te_endpoint: "127.0.0.1:12345".to_string(),
+                protocol: "tcp".to_string(),
+                host_id: "offset-parity-host".to_string(),
+            },
+            used: 0,
+            layout: SegmentLayout::Offset(OffsetSegmentState {
+                free_ranges: vec![(0, capacity)],
+                allocations: HashMap::new(),
+            }),
+            client_id: Uuid::new_v4(),
+            runtime_bound: true,
+        }
+    }
+
+    fn allocate_exact(state: &mut SegmentState, capacity: u64, size: u64) -> (u64, u64) {
+        let allocation = state.allocate(size).expect("offset allocation");
+        assert_eq!(allocation.1, size);
+        assert!(allocation.0.checked_add(size).unwrap() <= capacity);
+        allocation
+    }
+
+    fn release_exact(state: &mut SegmentState, allocation: (u64, u64)) {
+        let replica = ReplicaDescriptor {
+            segment_id: state.segment.id,
+            segment_name: state.segment.name.clone(),
+            offset: allocation.0,
+            size: allocation.1,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: Some(state.client_id),
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: state.segment.base + allocation.0,
+            protocol: state.segment.protocol.clone(),
+        };
+        assert_eq!(state.release(&replica), Some(allocation.1));
+    }
+
+    fn assert_live_ranges(ranges: &[(u64, u64)], capacity: u64) {
+        for &(offset, size) in ranges {
+            assert!(size > 0);
+            assert!(offset.checked_add(size).unwrap() <= capacity);
+        }
+        for (index, &(left_offset, left_size)) in ranges.iter().enumerate() {
+            let left_end = left_offset + left_size;
+            for &(right_offset, right_size) in &ranges[index + 1..] {
+                let right_end = right_offset + right_size;
+                assert!(left_end <= right_offset || right_end <= left_offset);
+            }
+        }
+    }
+
+    #[test]
+    fn cpp_parity_1023_and_1024_pack_into_2048() {
+        let mut state = offset_state(2_048);
+        let first = allocate_exact(&mut state, 2_048, 1_023);
+        let second = allocate_exact(&mut state, 2_048, 1_024);
+
+        assert_live_ranges(&[first, second], 2_048);
+    }
+
+    #[test]
+    fn cpp_parity_sixteen_byte_exact_fit_then_exhaustion() {
+        let mut state = offset_state(16);
+
+        assert_eq!(allocate_exact(&mut state, 16, 16), (0, 16));
+        assert_eq!(state.allocate(1), None);
+    }
+
+    #[test]
+    fn cpp_parity_1023_succeeds_in_1024_capacity() {
+        let mut state = offset_state(1_024);
+
+        assert_eq!(allocate_exact(&mut state, 1_024, 1_023), (0, 1_023));
+    }
+
+    #[test]
+    fn cpp_parity_power_of_two_sizes_1_through_1024_in_2048() {
+        let mut state = offset_state(2_048);
+
+        for size in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024] {
+            let allocation = allocate_exact(&mut state, 2_048, size);
+            release_exact(&mut state, allocation);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_100_200_500_live_ranges_are_valid() {
+        let mut state = offset_state(MIB);
+        let ranges = [
+            allocate_exact(&mut state, MIB, 100),
+            allocate_exact(&mut state, MIB, 200),
+            allocate_exact(&mut state, MIB, 500),
+        ];
+
+        assert_live_ranges(&ranges, MIB);
+    }
+
+    #[test]
+    fn cpp_parity_up_to_100_live_64_byte_bin_allocations() {
+        let mut state = offset_state(MIB);
+        let mut ranges = Vec::with_capacity(100);
+
+        for _ in 0..100 {
+            let Some(allocation) = state.allocate(64) else {
+                break;
+            };
+            assert_eq!(allocation.1, 64);
+            ranges.push(allocation);
+            assert_live_ranges(&ranges, MIB);
+        }
+
+        assert!(!ranges.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_exact_nineteen_bin_edge_sizes() {
+        let mut state = offset_state(MIB);
+
+        for size in [
+            1, 2, 3, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 511, 512, 1_023, 1_024,
+        ] {
+            let allocation = allocate_exact(&mut state, MIB, size);
+            release_exact(&mut state, allocation);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_exact_seven_scale_mixed_live_set() {
+        let mut state = offset_state(MIB);
+        let ranges = [16, 64, 256, 1_024, 4_096, 16_384, 65_536]
+            .map(|size| allocate_exact(&mut state, MIB, size));
+
+        assert_live_ranges(&ranges, MIB);
+    }
+
+    #[test]
+    fn cpp_parity_exact_nine_nonaligned_sizes() {
+        let mut state = offset_state(MIB);
+
+        for size in [17, 33, 65, 129, 257, 513, 1_025, 2_049, 4_097] {
+            let allocation = allocate_exact(&mut state, MIB, size);
+            release_exact(&mut state, allocation);
+        }
+    }
+}
