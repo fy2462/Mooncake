@@ -111,6 +111,27 @@ fn make_entry(seq: u64) -> OpLogRecord {
     }
 }
 
+fn cpp_wire_json(
+    sequence_id: u64,
+    timestamp_ms: u64,
+    op_type: u8,
+    object_key: &str,
+    payload: &[u8],
+    checksum: u32,
+    prefix_hash: u32,
+) -> String {
+    serde_json::to_string(&CppWireTestEntry {
+        sequence_id,
+        timestamp_ms,
+        op_type,
+        object_key: object_key.to_string(),
+        payload: BASE64_STANDARD.encode(payload),
+        checksum,
+        prefix_hash,
+    })
+    .unwrap()
+}
+
 fn write_legacy_segment(dir: &std::path::Path, start_seq: u64, entries: &[(u32, &str)]) {
     let mut data = Vec::new();
     for (seq, payload) in entries {
@@ -1006,6 +1027,114 @@ fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize
         "oplog payload too large: {}",
         oversized_payload.len()
     )));
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_putend() {
+    let decoded = inspect_cpp_wire_entry_for_test(&cpp_wire_json(
+        1,
+        1_234_567_890,
+        TEST_CPP_OP_PUT_END,
+        "key1",
+        b"value1",
+        2_631_246_273,
+        133_378_825,
+    ))
+    .unwrap();
+
+    assert_eq!(decoded.sequence_id, 1);
+    assert_eq!(decoded.timestamp_ms, 1_234_567_890);
+    assert_eq!(decoded.op_type, TEST_CPP_OP_PUT_END);
+    assert_eq!(decoded.object_key, "key1");
+    assert_eq!(decoded.payload, b"value1");
+    assert_eq!(decoded.checksum, 2_631_246_273);
+    assert_eq!(decoded.prefix_hash, 133_378_825);
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_remove() {
+    let decoded = inspect_cpp_wire_entry_for_test(&cpp_wire_json(
+        42,
+        1_234_567_890,
+        TEST_CPP_OP_REMOVE,
+        "obj/to/remove",
+        b"",
+        46_947_589,
+        4_262_510_626,
+    ))
+    .unwrap();
+
+    assert_eq!(decoded.sequence_id, 42);
+    assert_eq!(decoded.op_type, TEST_CPP_OP_REMOVE);
+    assert_eq!(decoded.object_key, "obj/to/remove");
+    assert!(decoded.payload.is_empty());
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_putrevoke() {
+    let decoded = inspect_cpp_wire_entry_for_test(&cpp_wire_json(
+        99,
+        1_234_567_890,
+        TEST_CPP_OP_PUT_REVOKE,
+        "revoked_key",
+        b"meta",
+        3_739_924_676,
+        1_578_467_929,
+    ))
+    .unwrap();
+
+    assert_eq!(decoded.op_type, TEST_CPP_OP_PUT_REVOKE);
+    assert_eq!(decoded.payload, b"meta");
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_binarypayload() {
+    let binary_payload = (0_u8..=255).collect::<Vec<_>>();
+    let decoded = inspect_cpp_wire_entry_for_test(&cpp_wire_json(
+        7,
+        1_234_567_890,
+        TEST_CPP_OP_PUT_END,
+        "bin_key",
+        &binary_payload,
+        1_497_633_363,
+        3_982_346_134,
+    ))
+    .unwrap();
+
+    assert_eq!(decoded.payload, binary_payload);
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_emptypayload() {
+    let decoded = inspect_cpp_wire_entry_for_test(&cpp_wire_json(
+        10,
+        1_234_567_890,
+        TEST_CPP_OP_REMOVE,
+        "key",
+        b"",
+        46_947_589,
+        3_017_358_048,
+    ))
+    .unwrap();
+
+    assert!(decoded.payload.is_empty());
+}
+
+#[test]
+fn cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_emptykey() {
+    let wire_value = cpp_wire_json(
+        11,
+        1_234_567_890,
+        TEST_CPP_OP_PUT_END,
+        "",
+        b"payload",
+        1_219_833_882,
+        0,
+    );
+    let decoded = inspect_cpp_wire_entry_for_test(&wire_value).unwrap();
+
+    assert!(decoded.object_key.is_empty());
+    assert_eq!(decoded.prefix_hash, 0);
 }
 
 #[test]

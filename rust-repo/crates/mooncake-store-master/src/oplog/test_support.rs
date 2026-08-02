@@ -1,7 +1,7 @@
 use super::oplog_wire::{
-    compute_cpp_checksum, compute_cpp_prefix_hash, decode_record_payload_value,
-    deserialize_etcd_oplog_value, encode_put_end_msgpack_from_json, serialize_etcd_oplog_value,
-    validate_record_size, validate_wire_entry_size,
+    compute_cpp_checksum, compute_cpp_prefix_hash, decode_cpp_wire_entry,
+    decode_record_payload_value, deserialize_etcd_oplog_value, encode_put_end_msgpack_from_json,
+    serialize_etcd_oplog_value, validate_record_size, validate_wire_entry_size,
 };
 use super::*;
 
@@ -19,6 +19,17 @@ pub struct CppWireTestEntry {
     pub op_type: u8,
     pub object_key: String,
     pub payload: String,
+    pub checksum: u32,
+    pub prefix_hash: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedCppWireTestEntry {
+    pub sequence_id: u64,
+    pub timestamp_ms: u64,
+    pub op_type: u8,
+    pub object_key: String,
+    pub payload: Vec<u8>,
     pub checksum: u32,
     pub prefix_hash: u32,
 }
@@ -57,6 +68,19 @@ pub fn serialize_etcd_value_for_test(entry: &OpLogRecord) -> Result<String, HaEr
 
 pub fn deserialize_etcd_value_for_test(value: &str) -> Result<OpLogRecord, HaError> {
     deserialize_etcd_oplog_value(value)
+}
+
+pub fn inspect_cpp_wire_entry_for_test(value: &str) -> Result<DecodedCppWireTestEntry, HaError> {
+    let (wire, payload) = decode_cpp_wire_entry(value)?;
+    Ok(DecodedCppWireTestEntry {
+        sequence_id: wire.sequence_id,
+        timestamp_ms: wire.timestamp_ms,
+        op_type: wire.op_type,
+        object_key: wire.object_key,
+        payload,
+        checksum: wire.checksum,
+        prefix_hash: wire.prefix_hash,
+    })
 }
 
 pub fn decode_record_payload_value_for_test(payload: &str) -> Result<serde_json::Value, HaError> {

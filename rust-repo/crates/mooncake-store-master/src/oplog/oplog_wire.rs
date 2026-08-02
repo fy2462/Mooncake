@@ -17,10 +17,8 @@ pub(super) fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, H
         return Ok(entry);
     }
 
-    let wire: CppOpLogWireEntry = serde_json::from_str(value)
-        .map_err(|e| HaError::InvalidBackend(format!("oplog wire deserialize: {e}")))?;
-    validate_wire_entry_size(&wire)?;
-    let payload = rust_payload_from_cpp_wire_entry(&wire)?;
+    let (wire, decoded_payload) = decode_cpp_wire_entry(value)?;
+    let payload = rust_payload_from_cpp_wire_entry(&wire, decoded_payload)?;
     let entry = OpLogRecord {
         seq: wire.sequence_id,
         producer_view_version: 0,
@@ -28,6 +26,26 @@ pub(super) fn deserialize_etcd_oplog_value(value: &str) -> Result<OpLogRecord, H
     };
     validate_recovered_record_identity(&entry)?;
     Ok(entry)
+}
+
+pub(super) fn decode_cpp_wire_entry(value: &str) -> Result<(CppOpLogWireEntry, Vec<u8>), HaError> {
+    let wire: CppOpLogWireEntry = serde_json::from_str(value)
+        .map_err(|e| HaError::InvalidBackend(format!("oplog wire deserialize: {e}")))?;
+    validate_wire_entry_size(&wire)?;
+    let decoded_payload = if wire.payload.is_empty() {
+        Vec::new()
+    } else {
+        BASE64_STANDARD
+            .decode(&wire.payload)
+            .map_err(|e| HaError::InvalidBackend(format!("oplog payload base64 decode: {e}")))?
+    };
+    if decoded_payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(HaError::InvalidBackend(format!(
+            "oplog payload too large: {}",
+            decoded_payload.len()
+        )));
+    }
+    Ok((wire, decoded_payload))
 }
 
 fn validate_recovered_record_identity(entry: &OpLogRecord) -> Result<(), HaError> {
@@ -339,20 +357,8 @@ pub(crate) fn decode_record_payload_value(payload: &str) -> Result<serde_json::V
 
 pub(super) fn rust_payload_from_cpp_wire_entry(
     wire: &CppOpLogWireEntry,
+    decoded_payload: Vec<u8>,
 ) -> Result<String, HaError> {
-    let decoded_payload = if wire.payload.is_empty() {
-        Vec::new()
-    } else {
-        BASE64_STANDARD
-            .decode(&wire.payload)
-            .map_err(|e| HaError::InvalidBackend(format!("oplog payload base64 decode: {e}")))?
-    };
-    if decoded_payload.len() > MAX_PAYLOAD_SIZE {
-        return Err(HaError::InvalidBackend(format!(
-            "oplog payload too large: {}",
-            decoded_payload.len()
-        )));
-    }
     if wire.checksum != 0 && compute_cpp_checksum(&decoded_payload) != wire.checksum {
         return Err(HaError::InvalidBackend(format!(
             "oplog checksum mismatch for seq={}",
