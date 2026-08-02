@@ -2783,5 +2783,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_teststandbypromotion -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-localfs-prepopulated-promotion-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/localfs_hot_standby_integration_test.cpp:LocalFsHotStandbyIntegrationTest.TestFailoverScenario",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testfailoverscenario",
+    "first_divergence": "The existing live-write test did not prepopulate ten objects before standby startup or independently validate the exact ten-key state after destroying the sole in-process writer.",
+    "repair_commit": "f2ed19ca",
+    "focused_command": "cargo test -p mooncake-store-master --lib hot_standby::tests::cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_testfailoverscenario -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-localfs-prepopulated-failover-goal-019fbe77.typescript"
   }
 ]
