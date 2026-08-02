@@ -3350,5 +3350,32 @@
     "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32770 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-etcd-oplog-range-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/etcd_oplog_store_test.cpp:EtcdOpLogStoreTest.TestUpdateLatestSequenceId",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testupdatelatestsequenceid",
+    "first_divergence": "Rust implemented a fenced forward latest-pointer update but lacked live-etcd proof that update_latest_sequence_id(12345) persists literal /latest=12345.",
+    "repair_commit": "cb62e7a8",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32771 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-manager-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestWriteToEtcd_Success",
+    "rust": "mooncake-store-master/tests/test_etcd_oplog_live.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testwritetoetcd_success",
+    "first_divergence": "The C++ placeholder reserved a running-etcd manager scenario, while Rust lacked a live test composing OpLogManager, its sequenced worker, the fenced etcd backend, and fresh-instance durable readback.",
+    "repair_commit": "cb62e7a8",
+    "focused_command": "MOONCAKE_ETCD_OPLOG_E2E=1 MOONCAKE_ETCD_OPLOG_E2E_ENDPOINT=http://127.0.0.1:32771 cargo test -p mooncake-store-master --test test_etcd_oplog_live -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-etcd-oplog-manager-live-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestConcurrentAppend",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testconcurrentappend",
+    "first_divergence": "Rust covered only eight concurrent durable submissions and lacked the exact eight-thread by one-thousand scale and 8,000-ID uniqueness oracle.",
+    "repair_commit": "cb62e7a8",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testconcurrentappend -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-concurrent8000-goal-019fbe77.typescript"
   }
 ]
