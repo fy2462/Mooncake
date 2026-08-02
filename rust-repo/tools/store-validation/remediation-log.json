@@ -3539,5 +3539,14 @@
     "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_ -- --nocapture",
     "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
     "evidence": "/tmp/mooncake-hot-cache-get-buffer-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "dummy_client_get_buffer_test.cpp:DummyClientGetBufferTest.GetBuffer_AllocatorFallback",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_dummy_get_buffer_cold_allocator_fallback_returns_exact_handle",
+    "first_divergence": "Rust exposed owned get_buffer but lacked a public cold-cache Store fetch proving literal handle identity and the remote transfer_engine fallback strategy.",
+    "repair_commit": "39fdd42d",
+    "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_get_buffer_cold_allocator_fallback_returns_exact_handle -- --exact --nocapture",
+    "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
+    "evidence": "/tmp/mooncake-cold-get-buffer-goal-019fbe77.typescript"
   }
 ]
