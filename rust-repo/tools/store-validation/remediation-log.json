@@ -3656,5 +3656,14 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-random-lifecycle-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.FullSizeAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_all_239_bin_sizes_exact_fit",
+    "first_divergence": "Rust lacked the complete literal 239-value nonzero C++ bin-size matrix proving exact-capacity allocation from 1 byte through 4,026,531,840 bytes.",
+    "repair_commit": "52575e94",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-full-bin-goal-019fbe77.typescript"
   }
 ]
