@@ -488,6 +488,19 @@ fn status_error(status: tonic::Status) -> (StatusCode, Json<Value>) {
     )
 }
 
+fn tenant_quota_status_error(status: tonic::Status) -> (StatusCode, Json<Value>) {
+    let compatibility_message = match status.message() {
+        "tenant not empty" => Some("TENANT_NOT_EMPTY"),
+        "tenant quota is disabled" => Some("UNAVAILABLE_IN_CURRENT_MODE"),
+        _ => None,
+    };
+    let (http_status, Json(mut body)) = status_error(status);
+    if let Some(message) = compatibility_message {
+        body["error_message"] = Value::String(message.to_string());
+    }
+    (http_status, Json(body))
+}
+
 async fn get_tenant_quotas_handler(
     State(state): State<AdminRuntimeState>,
     Query(query): Query<HashMap<String, String>>,
@@ -497,13 +510,13 @@ async fn get_tenant_quotas_handler(
         let tenant_id = parse_admin_tenant_id(tenant_id)?;
         let snapshot = service
             .get_tenant_quota_snapshot_for_tenant(&tenant_id)
-            .map_err(status_error)?
+            .map_err(tenant_quota_status_error)?
             .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "tenant quota not found"))?;
         Ok(Json(json!({ "success": true, "data": snapshot })))
     } else {
         let snapshots = service
             .list_tenant_quota_snapshots()
-            .map_err(status_error)?;
+            .map_err(tenant_quota_status_error)?;
         Ok(Json(json!({ "success": true, "data": snapshots })))
     }
 }
@@ -523,7 +536,7 @@ async fn upsert_tenant_quota_handler(
     }
     let snapshot = service
         .upsert_tenant_quota_policy_for_tenant(&tenant_id, body.requested_quota_bytes)
-        .map_err(status_error)?;
+        .map_err(tenant_quota_status_error)?;
     Ok(Json(json!({ "success": true, "data": snapshot })))
 }
 
@@ -535,7 +548,7 @@ async fn delete_tenant_quota_handler(
     let tenant_id = tenant_id_from_query(&query)?;
     let snapshot = service
         .delete_tenant_quota_policy_for_tenant(&tenant_id)
-        .map_err(status_error)?;
+        .map_err(tenant_quota_status_error)?;
     Ok(Json(json!({ "success": true, "data": snapshot })))
 }
 
@@ -840,6 +853,46 @@ mod tests {
         (service, router, client_id)
     }
 
+    async fn tenant_quota_admin_fixture(
+        enabled: bool,
+    ) -> (
+        tempfile::NamedTempFile,
+        Arc<MasterServiceImpl>,
+        Router,
+        Uuid,
+    ) {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let service = Arc::new(MasterServiceImpl::with_runtime_config(
+            crate::MasterRuntimeConfig {
+                enable_tenant_quota: enabled,
+                tenant_quota_connector_uri: policy_file.path().display().to_string(),
+                tenant_quota_pool_capacity_bytes: 2_000,
+                ..Default::default()
+            },
+        ));
+        let client_id = Uuid::from_u128(0x400);
+        if enabled {
+            let (high, low) = client_id.as_u64_pair();
+            service
+                .mount_segment(TonicRequest::new(proto::MountSegmentRequest {
+                    client_id: Some(proto::Uuid { high, low }),
+                    segment_name: "admin_quota_segment".to_string(),
+                    size: 8 * 1024 * 1024,
+                    base_addr: 0x7000_0000_0,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                    host_id: String::new(),
+                }))
+                .await
+                .unwrap();
+        }
+        let router = admin_router(AdminRuntimeState::serving_with_service(
+            None,
+            service.clone(),
+        ));
+        (policy_file, service, router, client_id)
+    }
+
     async fn put_complete_memory_key(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
         put_complete_memory_key_in_segment(service, client_id, key, "admin_test_segment", 1024)
             .await;
@@ -876,6 +929,142 @@ mod tests {
             }))
             .await
             .unwrap();
+    }
+
+    async fn put_complete_tenant_memory_key(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        tenant_id: &str,
+    ) {
+        let (high, low) = client_id.as_u64_pair();
+        service
+            .put_start(TonicRequest::new(proto::PutStartRequest {
+                client_id: Some(proto::Uuid { high, low }),
+                key: key.to_owned(),
+                slice_length: 100,
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "admin_quota_segment".to_string(),
+                    ..Default::default()
+                }),
+                tenant_id: tenant_id.to_owned(),
+            }))
+            .await
+            .unwrap();
+        service
+            .put_end(TonicRequest::new(proto::PutEndRequest {
+                client_id: Some(proto::Uuid { high, low }),
+                key: key.to_owned(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: tenant_id.to_owned(),
+            }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_tenant_quota_lifecycle() {
+        let (_policy_file, service, router, client_id) = tenant_quota_admin_fixture(true).await;
+        let path = "/api/v1/tenant_quotas?tenant_id=tenant-a";
+        let (upsert_status, upsert_body) = request_router(
+            &router,
+            Method::PUT,
+            path,
+            r#"{"requested_quota_bytes":800}"#,
+        )
+        .await;
+        let upsert_body: Value = serde_json::from_str(&upsert_body).unwrap();
+        assert_eq!(upsert_status, StatusCode::OK);
+        assert_eq!(upsert_body["data"]["tenant_id"], "tenant-a");
+        assert_eq!(upsert_body["data"]["requested_quota_bytes"], 800);
+        assert_eq!(upsert_body["data"]["effective_quota_bytes"], 800);
+        assert_eq!(upsert_body["data"]["has_explicit_policy"], true);
+
+        let (list_status, list_body) = get_router(&router, "/api/v1/tenant_quotas").await;
+        let list_body: Value = serde_json::from_str(&list_body).unwrap();
+        assert_eq!(list_status, StatusCode::OK);
+        assert!(
+            list_body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|quota| { quota["tenant_id"] == "tenant-a" })
+        );
+
+        let (one_status, one_body) = get_router(&router, path).await;
+        let one_body: Value = serde_json::from_str(&one_body).unwrap();
+        assert_eq!(one_status, StatusCode::OK);
+        assert_eq!(one_body["data"]["committed_count"], 0);
+        assert_eq!(one_body["data"]["over_quota"], false);
+
+        put_complete_tenant_memory_key(&service, client_id, "quota_admin_key", "tenant-a").await;
+        let (nonempty_status, nonempty_body) =
+            request_router(&router, Method::DELETE, path, "").await;
+        assert_eq!(nonempty_status, StatusCode::CONFLICT);
+        assert!(nonempty_body.contains("TENANT_NOT_EMPTY"));
+
+        service
+            .remove(TonicRequest::new(proto::RemoveRequest {
+                key: "quota_admin_key".to_string(),
+                force: true,
+                tenant_id: "tenant-a".to_string(),
+            }))
+            .await
+            .unwrap();
+        let (deleted_status, _) = request_router(&router, Method::DELETE, path, "").await;
+        assert_eq!(deleted_status, StatusCode::OK);
+        let (missing_status, _) = get_router(&router, path).await;
+        assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_tenant_quota_validation_errors() {
+        let (_policy_file, _service, router, _client_id) = tenant_quota_admin_fixture(true).await;
+        for (method, path, body, expected) in [
+            (
+                Method::PUT,
+                "/api/v1/tenant_quotas",
+                r#"{"requested_quota_bytes":100}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::PUT,
+                "/api/v1/tenant_quotas?tenant_id=",
+                r#"{"requested_quota_bytes":100}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::PUT,
+                "/api/v1/tenant_quotas?tenant_id=tenant-a",
+                r#"{"requested_quota_bytes":0}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::GET,
+                "/api/v1/tenant_quotas?tenant_id=_system",
+                "",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                Method::GET,
+                "/api/v1/tenant_quotas?tenant_id=missing",
+                "",
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let (status, _) = request_router(&router, method, path, body).await;
+            assert_eq!(status, expected, "path={path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_tenant_quota_disabled_conflict() {
+        let (_policy_file, _service, router, _client_id) = tenant_quota_admin_fixture(false).await;
+        let (status, body) = get_router(&router, "/api/v1/tenant_quotas").await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("UNAVAILABLE_IN_CURRENT_MODE"));
     }
 
     #[test]

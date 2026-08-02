@@ -83,11 +83,12 @@ impl TenantQuotaTable {
         state.effective_quota_bytes = 0;
         state.has_explicit_policy = false;
         self.recompute_effective_quotas(capacity);
-        Ok(self
-            .tenants
-            .get(tenant_id)
-            .filter(|state| !is_lazy_empty(state))
-            .map(|_| self.snapshot_for_existing(tenant_id)))
+        if self.tenants.get(tenant_id).is_some_and(is_lazy_empty) {
+            self.tenants.remove(tenant_id);
+            Ok(None)
+        } else {
+            Ok(Some(self.snapshot_for_existing(tenant_id)))
+        }
     }
 
     /// Replace only the explicit policy layer while retaining all runtime
