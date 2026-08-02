@@ -3098,5 +3098,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_test -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-manager-hash-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestLargePayload",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testlargepayload",
+    "first_divergence": "Rust enforced the payload upper bound but lacked a near-limit accepted manager submission that proved positive sequencing and exact persisted readback.",
+    "repair_commit": "88717382",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog testlargepayload -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-payload-types-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestAppendMultipleTypes",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendmultipletypes",
+    "first_divergence": "Rust covered PUT_END, PUT_REVOKE, and REMOVE independently but lacked one production-manager test proving their exact ordered consecutive sequence and three-record composite oracle.",
+    "repair_commit": "88717382",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog testappendmultipletypes -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-payload-types-goal-019fbe77.typescript"
   }
 ]
