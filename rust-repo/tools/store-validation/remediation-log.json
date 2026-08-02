@@ -3548,5 +3548,68 @@
     "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_get_buffer_cold_allocator_fallback_returns_exact_handle -- --exact --nocapture",
     "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
     "evidence": "/tmp/mooncake-cold-get-buffer-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.MultipleAllocations",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_ten_live_thousand_byte_ranges",
+    "first_divergence": "Rust lacked the exact ten simultaneous 1,000-byte live ranges at 1-GiB logical capacity with all bounds and pairwise-disjoint relations asserted.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.DifferentSizesNoOverlap",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_eight_size_live_set",
+    "first_divergence": "Rust lacked the exact ordered eight-size simultaneous live set with literal logical sizes, bounds, and pairwise non-overlap proof.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.OneByteAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_one_byte_exact_in_one_mib",
+    "first_divergence": "Rust lacked a dedicated one-byte production Offset allocation oracle asserting exact offset zero, size one, bounds, and non-sentinel address.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemLargeAllocations",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_large_powers_one_mib_through_512_mib",
+    "first_divergence": "Rust lacked the exact ten-value large power-of-two allocate/release sweep from 1 MiB through 512 MiB at 1-GiB capacity.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemPrimeSizes",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_prime_sizes_two_through_1013",
+    "first_divergence": "Rust lacked the exact 170-value C++ prime-size allocate/release vector from 2 through 1,013.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemFibonacciSizes",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_fibonacci_sequence_through_317811",
+    "first_divergence": "Rust lacked the exact 28-value C++ Fibonacci allocate/release vector through 317,811 including its repeated initial one.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemPageSizeMultiples",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_exact_page_multiples_four_kib_through_one_mib",
+    "first_divergence": "Rust lacked the exact nine page-size-multiple allocate/release values from 4 KiB through the 1-MiB exact-fit endpoint.",
+    "repair_commit": "1de27e4f",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-matrix-sweeps-goal-019fbe77.typescript"
   }
 ]
