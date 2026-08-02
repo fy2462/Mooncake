@@ -3116,5 +3116,41 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog testappendmultipletypes -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-manager-payload-types-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_replicator_test.cpp:OpLogReplicatorTest.InjectMultipleEntries_SequenceTracking",
+    "rust": "mooncake-store-master/src/hot_standby.rs:cpp_parity_ha_oplog_oplog_replicator_test_cpp_oplogreplicatortest_injectmultipleentries_sequencetracking",
+    "first_divergence": "Rust had single-entry and polling coverage but no direct production notifier-callback test for literal sequences 1, 2, and 3 with exact applier and sync-status sequence results.",
+    "repair_commit": "2cdadec1",
+    "focused_command": "cargo test -p mooncake-store-master --lib oplogreplicatortest_injectmultipleentries_sequencetracking -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-oplog-callback-invalid-input-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.Deserialize_InvalidJson",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_invalidjson",
+    "first_divergence": "Rust's production parser rejected malformed outer JSON but lacked a discoverable direct malformed-input error oracle.",
+    "repair_commit": "2cdadec1",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-callback-invalid-input-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.Deserialize_EmptyString",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_emptystring",
+    "first_divergence": "Rust's production parser rejected empty input but lacked a discoverable direct empty-string error oracle.",
+    "repair_commit": "2cdadec1",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-callback-invalid-input-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.Deserialize_MissingFields",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_missingfields",
+    "first_divergence": "Rust lacked the C++ test's intentionally weak no-panic oracle for an outer JSON object containing only sequence_id.",
+    "repair_commit": "2cdadec1",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-callback-invalid-input-goal-019fbe77.typescript"
   }
 ]
