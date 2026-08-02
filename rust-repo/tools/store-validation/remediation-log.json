@@ -3503,5 +3503,41 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-reuse-coalescing-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "dummy_client_get_buffer_test.cpp:DummyClientGetBufferTest.StableHotCacheEntryShouldBeInvalidatedByRemove",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_dummy_stable_hot_cache_get_buffer_invalidated_by_remove",
+    "first_divergence": "Rust invalidated LocalHotCache after successful remove but lacked public get_buffer proof that two exact owned reads are followed by KeyNotFound rather than stale cached bytes.",
+    "repair_commit": "652601a7",
+    "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_ -- --nocapture",
+    "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
+    "evidence": "/tmp/mooncake-hot-cache-get-buffer-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "dummy_client_get_buffer_test.cpp:DummyClientGetBufferTest.RemoveShouldNotBeResurrectedByAsyncHotCacheFill",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_dummy_inflight_get_buffer_fill_cannot_resurrect_removed_key",
+    "first_divergence": "Rust had direct generation-token coverage but lacked a public get_buffer race against a successful shared-cache remove with both immediate and delayed absence oracles.",
+    "repair_commit": "652601a7",
+    "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_ -- --nocapture",
+    "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
+    "evidence": "/tmp/mooncake-hot-cache-get-buffer-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "dummy_client_get_buffer_test.cpp:DummyClientGetBufferTest.GetBuffer_HotCachePath",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_dummy_get_buffer_warmed_hot_cache_returns_exact_handle",
+    "first_divergence": "Rust proved cached Vec bytes but lacked a public warmed get_buffer test asserting literal BufferHandle key, size, bytes, and the local_memcpy strategy boundary.",
+    "repair_commit": "652601a7",
+    "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_ -- --nocapture",
+    "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
+    "evidence": "/tmp/mooncake-hot-cache-get-buffer-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "dummy_client_get_buffer_test.cpp:DummyClientGetBufferTest.BatchGetBuffer",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_dummy_batch_get_buffer_mixed_hot_cold_preserves_order",
+    "first_divergence": "Rust exposed batch_get_buffer but lacked a mixed warmed/cold public test proving exactly one owned handle per stored input with literal key, size, bytes, and order.",
+    "repair_commit": "652601a7",
+    "focused_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_dummy_ -- --nocapture",
+    "crate_command": "<classic-native-link-env> cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --test-threads=1 --skip cpp_parity_cxl_",
+    "evidence": "/tmp/mooncake-hot-cache-get-buffer-goal-019fbe77.typescript"
   }
 ]
