@@ -3989,5 +3989,23 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "/tmp/mooncake-mmap-arena-parity-final.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestTimeInState",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_time_in_connecting_is_between_100_and_200_milliseconds",
+    "first_divergence": "Rust had no discoverable direct witness for the C++ 100-through-200-millisecond CONNECTING elapsed-time contract.",
+    "repair_commit": "be6ef901",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::state_machine::tests::cpp_parity_time_in_connecting_is_between_100_and_200_milliseconds -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-final-parity.typescript"
+  },
+  {
+    "cpp": "ha/standby/standby_state_machine_test.cpp:StandbyStateMachineTest.TestCompleteRecoveryFlow",
+    "rust": "mooncake-store-master/src/ha/state_machine.rs:cpp_parity_complete_recovery_flow_watching_recovering_watching; mooncake-store-master/src/hot_standby.rs:test_etcd_recovery_success_transitions_actual_state_machine",
+    "first_divergence": "Rust had no discoverable direct witness for the complete WATCHING to RECOVERING to WATCHING flow, despite the existing production HotStandby recovery-success state-machine integration coverage.",
+    "repair_commit": "be6ef901",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::state_machine::tests::cpp_parity_complete_recovery_flow_watching_recovering_watching -- --exact --nocapture && cargo test -p mooncake-store-master --lib hot_standby::tests::test_etcd_recovery_success_transitions_actual_state_machine -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-standby-final-parity.typescript"
   }
 ]
