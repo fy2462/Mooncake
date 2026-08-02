@@ -3458,5 +3458,50 @@
     "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-offset-allocator-boundaries-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BasicAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_full_capacity_release_and_reuse",
+    "first_divergence": "Rust lacked exact 1-GiB logical-capacity exhaustion and full-capacity reuse proof through its explicit production descriptor-release replacement boundary.",
+    "repair_commit": "b4157523",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-reuse-coalescing-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.AllocationSameSizeAfterFree",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_1023_reallocates_beside_live_16",
+    "first_divergence": "Rust lacked the exact 1,023-byte release and same-size replacement while a neighboring 16-byte allocation remains live.",
+    "repair_commit": "b4157523",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-reuse-coalescing-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.ExactCapacityAllocation",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_one_mib_exact_fit_starts_zero_and_exhausts",
+    "first_divergence": "Rust lacked one exact 1-MiB allocation at offset zero retained through a simultaneous one-byte exhaustion probe.",
+    "repair_commit": "b4157523",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-reuse-coalescing-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinMergingBehavior",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_middle_first_third_release_coalesces_full_mib",
+    "first_divergence": "Rust lacked the exact three-handle middle-first-third release order followed by proof that all ranges coalesce into one full-MiB allocation.",
+    "repair_commit": "b4157523",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-reuse-coalescing-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "offset_allocator_test.cpp:OffsetAllocatorTest.BinSystemRepeatedCycles",
+    "rust": "mooncake-store-master/src/allocator/offset_layout.rs:cpp_parity_ten_mixed_cycles_restore_full_mib",
+    "first_divergence": "Rust lacked ten exact seven-size mixed allocation/release cycles followed by a full-capacity coalescing oracle.",
+    "repair_commit": "b4157523",
+    "focused_command": "cargo test -p mooncake-store-master allocator::offset_layout::tests::cpp_parity_ --lib -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-offset-reuse-coalescing-goal-019fbe77.typescript"
   }
 ]
