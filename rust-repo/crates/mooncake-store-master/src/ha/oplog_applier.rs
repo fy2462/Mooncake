@@ -2413,6 +2413,16 @@ mod tests {
         deserialize_etcd_value_for_test(&serde_json::to_string(&wire).unwrap()).unwrap()
     }
 
+    fn apply_cpp_wire_json(
+        applier: &OpLogApplier,
+        wire_json: &str,
+    ) -> Result<usize, crate::ha::HaError> {
+        use crate::oplog::test_support::deserialize_etcd_value_for_test;
+
+        let record = deserialize_etcd_value_for_test(wire_json)?;
+        Ok(applier.apply_op_log_entries(&[record]))
+    }
+
     enum GapReadResult {
         Entries(Vec<OpLogRecord>),
         Error,
@@ -2790,6 +2800,89 @@ mod tests {
         assert!(!state.objects.contains_key("default\0key2"));
         assert!(!state.objects.contains_key("default\0key3"));
         assert_eq!(state.objects.len(), 1);
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentry_invalidchecksum()
+     {
+        use crate::oplog::test_support::{
+            CppWireTestEntry, TEST_CPP_OP_PUT_END, compute_cpp_checksum_for_test,
+            compute_cpp_prefix_hash_for_test,
+        };
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let wire = CppWireTestEntry {
+            sequence_id: 1,
+            timestamp_ms: 1,
+            op_type: TEST_CPP_OP_PUT_END,
+            object_key: "key1".to_string(),
+            payload: BASE64_STANDARD.encode(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD),
+            checksum: compute_cpp_checksum_for_test(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD) + 1,
+            prefix_hash: compute_cpp_prefix_hash_for_test("key1"),
+        };
+
+        assert!(apply_cpp_wire_json(&applier, &serde_json::to_string(&wire).unwrap()).is_err());
+        assert_eq!(applier.get_expected_sequence_id(), 1);
+        assert!(!state.objects.contains_key("default\0key1"));
+        assert!(state.objects.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentry_invalidsize()
+    {
+        use crate::oplog::test_support::{
+            CppWireTestEntry, TEST_CPP_OP_PUT_END, TEST_MAX_OBJECT_KEY_SIZE,
+            compute_cpp_checksum_for_test, compute_cpp_prefix_hash_for_test,
+        };
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let oversized_key = "k".repeat(TEST_MAX_OBJECT_KEY_SIZE + 1);
+        let wire = CppWireTestEntry {
+            sequence_id: 1,
+            timestamp_ms: 1,
+            op_type: TEST_CPP_OP_PUT_END,
+            object_key: oversized_key.clone(),
+            payload: String::new(),
+            checksum: compute_cpp_checksum_for_test(b""),
+            prefix_hash: compute_cpp_prefix_hash_for_test(&oversized_key),
+        };
+
+        assert!(apply_cpp_wire_json(&applier, &serde_json::to_string(&wire).unwrap()).is_err());
+        assert_eq!(applier.get_expected_sequence_id(), 1);
+        assert!(state.objects.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentry_payloadtoolarge()
+     {
+        use crate::oplog::test_support::{
+            CppWireTestEntry, TEST_CPP_OP_PUT_END, TEST_MAX_PAYLOAD_SIZE,
+            compute_cpp_checksum_for_test, compute_cpp_prefix_hash_for_test,
+        };
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let oversized_payload = vec![b'p'; TEST_MAX_PAYLOAD_SIZE + 1];
+        let wire = CppWireTestEntry {
+            sequence_id: 1,
+            timestamp_ms: 1,
+            op_type: TEST_CPP_OP_PUT_END,
+            object_key: "key1".to_string(),
+            payload: BASE64_STANDARD.encode(&oversized_payload),
+            checksum: compute_cpp_checksum_for_test(&oversized_payload),
+            prefix_hash: compute_cpp_prefix_hash_for_test("key1"),
+        };
+
+        assert!(apply_cpp_wire_json(&applier, &serde_json::to_string(&wire).unwrap()).is_err());
+        assert_eq!(applier.get_expected_sequence_id(), 1);
+        assert!(!state.objects.contains_key("default\0key1"));
+        assert!(state.objects.is_empty());
     }
 
     #[test]

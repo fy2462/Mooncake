@@ -329,6 +329,12 @@ pub(super) fn rust_payload_from_cpp_wire_entry(
             .decode(&wire.payload)
             .map_err(|e| HaError::InvalidBackend(format!("oplog payload base64 decode: {e}")))?
     };
+    if decoded_payload.len() > MAX_PAYLOAD_SIZE {
+        return Err(HaError::InvalidBackend(format!(
+            "oplog payload too large: {}",
+            decoded_payload.len()
+        )));
+    }
     if wire.checksum != 0 && compute_cpp_checksum(&decoded_payload) != wire.checksum {
         return Err(HaError::InvalidBackend(format!(
             "oplog checksum mismatch for seq={}",
