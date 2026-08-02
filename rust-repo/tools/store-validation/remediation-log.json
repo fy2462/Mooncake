@@ -3224,5 +3224,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestAppendEntry",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendentry",
+    "first_divergence": "Rust had a durable manager readback test but no single-submission oracle tying the returned positive sequence to latest and exactly one retained record.",
+    "repair_commit": "b25b9aaf",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testappendentry -- --exact",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-append-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_manager_test.cpp:OpLogManagerTest.TestSequenceIdIncrement",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testsequenceidincrement",
+    "first_divergence": "Rust backend tests established sequence growth but lacked a manager-level three-submission oracle for consecutive returned IDs, latest, and exact retained cardinality.",
+    "repair_commit": "b25b9aaf",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testsequenceidincrement -- --exact",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-manager-append-goal-019fbe77-rerun.typescript"
   }
 ]
