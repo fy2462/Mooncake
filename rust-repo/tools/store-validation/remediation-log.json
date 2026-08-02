@@ -3170,5 +3170,59 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_deserialize_payloadtoolarge -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
     "evidence": "/tmp/mooncake-oplog-serializer-size-goal-019fbe77.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.RoundTrip_PutEnd",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_putend",
+    "first_divergence": "Rust normalized the C++ PUT_END envelope into an OpLogRecord, losing direct observation of its timestamp and raw payload bytes.",
+    "repair_commit": "8a9fa2d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.RoundTrip_Remove",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_remove",
+    "first_divergence": "Rust normalized the REMOVE envelope into operation JSON, hiding the raw empty C++ payload from a direct round-trip assertion.",
+    "repair_commit": "8a9fa2d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.RoundTrip_PutRevoke",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_putrevoke",
+    "first_divergence": "Rust normalized the PUT_REVOKE envelope into operation JSON, hiding the raw meta payload from a direct round-trip assertion.",
+    "repair_commit": "8a9fa2d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.RoundTrip_BinaryPayload",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_binarypayload",
+    "first_divergence": "Rust retained binary PUT_END provenance as base64 but lacked an exact decoded assertion for every byte from 0x00 through 0xff.",
+    "repair_commit": "8a9fa2d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.RoundTrip_EmptyPayload",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_emptypayload",
+    "first_divergence": "Rust accepted the empty-payload envelope but lacked a direct assertion that production base64 decoding preserved an empty byte vector.",
+    "repair_commit": "8a9fa2d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
+  },
+  {
+    "cpp": "ha/oplog/oplog_serializer_test.cpp:OpLogSerializerTest.RoundTrip_EmptyKey",
+    "rust": "mooncake-store-master/tests/test_oplog.rs:cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_emptykey",
+    "first_divergence": "Rust size validation allowed an empty key but lacked a complete wire-parse oracle proving that the key and its zero prefix hash survive parsing.",
+    "repair_commit": "8a9fa2d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_oplog cpp_parity_ha_oplog_oplog_serializer_test_cpp_oplogserializertest_roundtrip_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_oplog",
+    "evidence": "/tmp/mooncake-oplog-serializer-roundtrip-goal-019fbe77-rerun.typescript"
   }
 ]
