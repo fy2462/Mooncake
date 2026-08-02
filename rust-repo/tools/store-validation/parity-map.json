@@ -1494,7 +1494,7 @@
       "behavior": "After a warmed key is read twice through DummyClient, each buffer has the stored size and bytes, and a successful remove makes the next get_buffer return no buffer.",
       "boundary": ["client", "dummy-client", "hot-cache", "get-buffer", "remove", "data-integrity"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.StableHotCacheEntryShouldBeInvalidatedByRemove"},
-      "reason": "Rust's public MooncakeClient replacement boundary reads the exact owned get_buffer twice (including a warmed local-cache hit), removes the key successfully through that cache-owning client, and proves the next get_buffer returns KeyNotFound. C++ SHM pointer identity is not claimed.",
+      "reason": "Rust's public MooncakeClient replacement boundary reads the exact owned get_buffer twice, proves the first read populated LocalHotCache and the second incremented the local_memcpy strategy counter, removes the key successfully through that cache-owning client, and proves the next get_buffer returns KeyNotFound. C++ SHM pointer identity is not claimed.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp StableHotCacheEntryShouldBeInvalidatedByRemove, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/remove.rs", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_stable_hot_cache_get_buffer_invalidated_by_remove"}],
       "status": "covered"
@@ -1530,7 +1530,7 @@
       "behavior": "A mixed warmed and cold batch returns one non-null buffer per input key in input order, with each buffer's size and bytes matching its key's stored payload.",
       "boundary": ["client", "dummy-client", "hot-cache", "batch-get-buffer", "ordering", "data-integrity"],
       "reference": {"file": "dummy_client_get_buffer_test.cpp", "test": "DummyClientGetBufferTest.BatchGetBuffer"},
-      "reason": "Rust warms one real Store key into LocalHotCache, leaves two real Store keys cold, calls public batch_get_buffer in a deliberately mixed order, and asserts exactly one non-null owned handle per input with literal key, size, and byte identity in input order.",
+      "reason": "Rust warms one real Store key into LocalHotCache, proves two real Store keys remain cold, calls public batch_get_buffer in a deliberately mixed order, and asserts exactly one non-null owned handle per input with literal key, size, and byte identity in input order. The transfer_engine strategy counter is one after warming and three after the batch, proving exactly the two cold entries used fallback while the warmed entry avoided a remote transfer.",
       "review": {"oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp BatchGetBuffer, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/client/read_meta.rs", "reviewed": true},
       "rust": [{"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_dummy_batch_get_buffer_mixed_hot_cold_preserves_order"}],
       "status": "covered"

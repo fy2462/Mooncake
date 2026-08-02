@@ -607,10 +607,19 @@ async fn cpp_parity_dummy_stable_hot_cache_get_buffer_invalidated_by_remove() {
     assert_eq!(first.key, "stable-hot-buffer");
     assert_eq!(first.size, 29);
     assert_eq!(first.data, b"stable-hot-cache-owned-buffer");
+    assert_eq!(
+        cache.get("stable-hot-buffer"),
+        Some(b"stable-hot-cache-owned-buffer".to_vec())
+    );
     let second = reader.get_buffer("stable-hot-buffer").await.unwrap();
     assert_eq!(second.key, "stable-hot-buffer");
     assert_eq!(second.size, 29);
     assert_eq!(second.data, b"stable-hot-cache-owned-buffer");
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"local_memcpy\"}",
+        1,
+    );
 
     reader.remove("stable-hot-buffer", true).await.unwrap();
     assert_eq!(cache.get("stable-hot-buffer"), None);
@@ -737,10 +746,7 @@ async fn cpp_parity_dummy_get_buffer_cold_allocator_fallback_returns_exact_handl
         .unwrap();
     assert_eq!(cache.get("cold-allocator-buffer"), None);
 
-    let handle = reader
-        .get_buffer("cold-allocator-buffer")
-        .await
-        .unwrap();
+    let handle = reader.get_buffer("cold-allocator-buffer").await.unwrap();
     assert_eq!(handle.key, "cold-allocator-buffer");
     assert_eq!(handle.size, 25);
     assert_eq!(handle.data, b"cold-allocator-owned-data");
@@ -824,6 +830,13 @@ async fn cpp_parity_dummy_batch_get_buffer_mixed_hot_cold_preserves_order() {
         b"hot-five"
     );
     assert_eq!(cache.get("batch-hot-owned"), Some(b"hot-five".to_vec()));
+    assert_eq!(cache.get("batch-cold-owned-a"), None);
+    assert_eq!(cache.get("batch-cold-owned-b"), None);
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"transfer_engine\"}",
+        1,
+    );
 
     let keys = vec![
         "batch-cold-owned-b".to_string(),
@@ -857,6 +870,11 @@ async fn cpp_parity_dummy_batch_get_buffer_mixed_hot_cold_preserves_order() {
         assert_eq!(handle.size, expected_size);
         assert_eq!(handle.data, expected_data);
     }
+    assert_prometheus_counter(
+        &reader.serialize_metrics().unwrap(),
+        "mooncake_transfer_read_strategy_total{strategy=\"transfer_engine\"}",
+        3,
+    );
 
     drop(reader);
     drop(writer);
