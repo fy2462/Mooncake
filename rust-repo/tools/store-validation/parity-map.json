@@ -1043,10 +1043,10 @@
       "behavior": "Five PUT_END records are submitted before LocalFS standby startup, the first four through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then standby catch-up awaits eventual batch visibility before readiness, Promote returns OK, latest applied sequence is at least the final sequence, and the exported snapshot retains all five keys.",
       "boundary": ["master", "ha", "localfs", "optional-component", "promotion", "prepopulated-replay"],
       "reference": {"file": "ha/oplog/localfs_hot_standby_integration_test.cpp", "test": "LocalFsHotStandbyIntegrationTest.TestStandbyPromotion"},
-      "reason": "Rust covers live-write mixed state followed by readiness, exact target-sequence promotion, and Stopped status, but not this five-entry pre-start asynchronous-submission/eventual-visibility workload or the exported metadata snapshot after promotion. The C++ oracle is weaker: it asserts neither final standby state nor exact sequence equality.",
+      "reason": "Rust durably completes each authoritative object image instead of exposing C++'s weaker non-durable Append API. The parity test pre-populates five exact object images before startup, waits for readiness, promotes at the exact target sequence, proves Stopped with zero lag, and verifies all five metadata entries remain intact after promotion.",
       "review": {"oracle": "mooncake-store/tests/ha/oplog/localfs_hot_standby_integration_test.cpp TestStandbyPromotion; rust-repo/crates/mooncake-store-master/src/hot_standby.rs localfs_writer_and_standby_sync_mixed_state_then_promote", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-master/src/hot_standby.rs","test":"cpp_parity_localfs_hot_standby_integration_test_localfshotstandbyintegrationtest_teststandbypromotion"}],
+      "status": "covered"
     },
     {
       "behavior": "Ten PUT_END records are submitted before LocalFS standby startup, the first nine through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then standby catch-up awaits eventual batch visibility before the in-process OpLogManager is destroyed, the exported snapshot retains all keys, the standby is promotion-ready, Promote returns OK, and latest applied sequence is at least the final sequence.",
