@@ -4034,5 +4034,32 @@
     "focused_command": "cargo test -p mooncake-store-master --lib admin_http::tests::test_admin_http_tenant_quota_disabled_conflict -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-tenant-quota-admin-parity.typescript"
+  },
+  {
+    "cpp": "allocation_strategy_test.cpp:AllocationStrategyTest.PerformanceComparison",
+    "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads",
+    "first_divergence": "Rust implemented both production allocation strategies but lacked the exact separate 512-segment, 5,000-by-4-MiB retained workloads and observational timing witness.",
+    "repair_commit": "2a0a0636",
+    "focused_command": "cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_allocator",
+    "evidence": "/tmp/mooncake-allocation-strategy-performance-workloads.typescript"
+  },
+  {
+    "cpp": "allocation_strategy_test.cpp:AllocationStrategyTest.PerformanceTest",
+    "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads",
+    "first_divergence": "Rust lacked a production Random strategy witness completing the exact 512-segment and 5,000 retained 4-MiB allocation timing workload.",
+    "repair_commit": "2a0a0636",
+    "focused_command": "cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_allocator",
+    "evidence": "/tmp/mooncake-allocation-strategy-performance-workloads.typescript"
+  },
+  {
+    "cpp": "allocation_strategy_test.cpp:AllocationStrategyTest.SsdFreeRatioFirstVsRandomStrategyPerformance",
+    "rust": "mooncake-store-master/tests/test_allocator.rs:cpp_parity_allocation_strategy_ssd_and_random_complete_exact_warmup_and_measured_workloads",
+    "first_divergence": "Rust implemented SSD-aware selection but lacked the exact 64-segment, 200-warmup, and 2,000-measured Random-versus-SsdFreeRatioFirst production workload witness.",
+    "repair_commit": "2a0a0636",
+    "focused_command": "cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_ssd_and_random_complete_exact_warmup_and_measured_workloads -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_allocator",
+    "evidence": "/tmp/mooncake-allocation-strategy-performance-workloads.typescript"
   }
 ]

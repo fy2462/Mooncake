@@ -499,19 +499,19 @@
       "behavior": "Random and FreeRatioFirst allocation over 512 segments and 5000 allocations complete successfully and report comparable elapsed time.",
       "boundary": ["master", "allocator", "performance", "benchmark"],
       "reference": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.PerformanceComparison"},
-      "reason": "Rust has no reproducible allocator strategy benchmark or equivalent 512-segment comparison workload.",
-      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PerformanceComparison and the absence of Rust benchmark targets", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Rust's production SegmentAllocator executes separate Random and FreeRatioFirst workloads over exactly 512 logical 64-MiB Offset segments, retaining exactly 5,000 successful 4-MiB one-replica allocations per strategy and reporting each elapsed duration. No timing threshold or cross-language performance comparison is claimed.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PerformanceComparison and Rust production SegmentAllocator strategy paths", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads"}],
+      "status": "covered"
     },
     {
       "behavior": "Each configured allocation strategy completes a 512-segment, 5000-allocation timing workload without allocation failure.",
       "boundary": ["master", "allocator", "performance", "benchmark"],
       "reference": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.PerformanceTest"},
-      "reason": "Rust has no equivalent parameterized allocator timing workload or benchmark result artifact.",
-      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PerformanceTest and the absence of Rust benchmark targets", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "The shared Rust production workload includes the complete Random strategy case from this C++ test: exactly 512 logical 64-MiB Offset segments and 5,000 retained successful 4-MiB one-replica allocations with elapsed duration reported. It also exercises FreeRatioFirst for the adjacent comparison row, without imposing a timing threshold.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp PerformanceTest and Rust production SegmentAllocator Random path", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads"}],
+      "status": "covered"
     },
     {"behavior":"SsdFreeRatioFirst returns a memory replica on the segment owned by the client with the highest SSD free ratio.","boundary":["master","allocator","ssd-metrics","free-ratio"],"reason":"The direct Rust SSD-metrics test is stronger than the one-result C++ selection oracle: it requests two replicas and asserts the highest-free-ratio owner is first and the next-highest owner is second. The freshly executed Store batch allocation test independently observes Memory replica type at the real service boundary.","reference":{"file":"allocation_strategy_test.cpp","test":"AllocationStrategyTest.SsdFreeRatioFirstChoosesHighestFreeRatio"},"review":{"oracle":"mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstChoosesHighestFreeRatio and Rust owner SSD metrics plus service replica-type behavior","reviewed":true},"rust":[{"file":"mooncake-store-master/tests/test_allocator.rs","test":"test_ssd_free_ratio_first_uses_owner_ssd_metrics"},{"file":"mooncake-store-master/tests/test_batch.rs","test":"test_batch_put_start_supports_nof_replicas"}],"status":"covered"},
     {"behavior":"SsdFreeRatioFirst remains usable without an SSD metrics provider by falling back to ordinary allocator availability.","boundary":["master","allocator","ssd-metrics","fallback"],"reason":"Rust directly invokes SsdFreeRatioFirst without metrics and verifies fallback allocation succeeds.","reference":{"file":"allocation_strategy_test.cpp","test":"AllocationStrategyTest.SsdFreeRatioFirstWithoutMetricsProviderAllocates"},"review":{"oracle":"mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstWithoutMetricsProviderAllocates and Rust ssd_free_ratio_for_name","reviewed":true},"rust":[{"file":"mooncake-store-master/tests/test_allocator.rs","test":"ssd_strategy_falls_back_filters_and_clamps_cpp_metrics_cases"}],"status":"covered"},
@@ -521,10 +521,10 @@
       "behavior": "Random and SsdFreeRatioFirst strategies complete the fixed warmup and measured workloads and emit their comparative timing.",
       "boundary": ["master", "allocator", "ssd-metrics", "performance", "benchmark"],
       "reference": {"file": "allocation_strategy_test.cpp", "test": "AllocationStrategyTest.SsdFreeRatioFirstVsRandomStrategyPerformance"},
-      "reason": "Rust has no reproducible SSD-aware allocator strategy benchmark or baseline artifact.",
-      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstVsRandomStrategyPerformance and the absence of Rust benchmark targets", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Rust's production SegmentAllocator runs Random and SsdFreeRatioFirst independently over exactly 64 logical 8-MiB Offset segments with the C++ SSD-usage gradient. Each strategy completes and immediately releases 200 successful 128-KiB warmup allocations, then retains exactly 2,000 successful 128-KiB measured allocations and reports elapsed and per-operation timing without a performance-ratio assertion.",
+      "review": {"oracle": "mooncake-store/tests/allocation_strategy_test.cpp SsdFreeRatioFirstVsRandomStrategyPerformance and Rust production SSD-metric strategy path", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/tests/test_allocator.rs", "test": "cpp_parity_allocation_strategy_ssd_and_random_complete_exact_warmup_and_measured_workloads"}],
+      "status": "covered"
     },
     {"behavior":"Both offset and Cachelib-style segment allocators release an allocation and make its capacity reusable.","boundary":["master","allocator","memory-lifecycle"],"reason":"The Offset and Cachelib-style Rust tests jointly prove both C++ allocator variants. Fresh formal native gate /tmp/mooncake-native-stale-blocked-gate.5UlPgr/parity.result.json records both mapped Rust tests as PASS with zero FAIL and zero zero-test executions.","reference":{"file":"buffer_allocator_test.cpp","test":"BufferAllocatorTest.AllocateAndDeallocate"},"review":{"oracle":"mooncake-store/tests/buffer_allocator_test.cpp AllocateAndDeallocate and Rust offset/Cachelib-like release tests","reviewed":true},"rust":[{"file":"mooncake-store-master/tests/test_master_allocator_eviction.rs","test":"test_allocator_advances_offsets_and_reuses_freed_space"},{"file":"mooncake-store-master/tests/test_allocator/cachelib.rs","test":"test_cachelib_like_allocator_reuses_freed_slot"}],"status":"covered"},
     {"behavior":"Multiple live allocations receive distinct extents and their total usage is tracked until release.","boundary":["master","allocator","multiple-allocation"],"reason":"The Offset and Cachelib-style Rust tests jointly prove distinct live extents and reuse for both C++ allocator variants. Fresh formal native gate /tmp/mooncake-native-stale-blocked-gate.5UlPgr/parity.result.json records both mapped Rust tests as PASS with zero FAIL and zero zero-test executions.","reference":{"file":"buffer_allocator_test.cpp","test":"BufferAllocatorTest.AllocateMultiple"},"review":{"oracle":"mooncake-store/tests/buffer_allocator_test.cpp AllocateMultiple and Rust offset/Cachelib-like multiple allocation tests","reviewed":true},"rust":[{"file":"mooncake-store-master/tests/test_master_allocator_eviction.rs","test":"test_allocator_advances_offsets_and_reuses_freed_space"},{"file":"mooncake-store-master/tests/test_allocator/cachelib.rs","test":"test_cachelib_like_allocator_reuses_freed_slot"}],"status":"covered"},
