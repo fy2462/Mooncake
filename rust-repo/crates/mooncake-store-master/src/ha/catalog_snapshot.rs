@@ -19,6 +19,7 @@ use rmpv::Value;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -466,6 +467,27 @@ fn apply_local_disk_replica_identities_extension(
     }
     Ok(())
 }
+fn resolve_local_snapshot_root(
+    local_root: Option<PathBuf>,
+    environment_root: Option<OsString>,
+) -> Result<PathBuf, HaError> {
+    let root = local_root
+        .or_else(|| environment_root.map(PathBuf::from))
+        .ok_or_else(|| {
+            HaError::InvalidParams(
+                "local snapshot object store requires --snapshot-backup-dir or \
+                 MOONCAKE_SNAPSHOT_LOCAL_PATH"
+                    .into(),
+            )
+        })?;
+    if root.as_os_str().is_empty() {
+        return Err(HaError::InvalidParams(
+            "local snapshot object store path must not be empty".into(),
+        ));
+    }
+    Ok(root)
+}
+
 pub fn create_catalog_backed_snapshot_provider(
     cluster_id: impl Into<String>,
     object_store_type: SnapshotObjectStoreType,
@@ -476,19 +498,10 @@ pub fn create_catalog_backed_snapshot_provider(
     let cluster_id = cluster_id.into();
     let object_store: Arc<dyn SnapshotObjectStore> = match object_store_type {
         SnapshotObjectStoreType::Local => {
-            let root = local_root
-                .or_else(|| {
-                    std::env::var("MOONCAKE_SNAPSHOT_LOCAL_PATH")
-                        .ok()
-                        .map(Into::into)
-                })
-                .ok_or_else(|| {
-                    HaError::InvalidParams(
-                        "local snapshot object store requires --snapshot-backup-dir or \
-                         MOONCAKE_SNAPSHOT_LOCAL_PATH"
-                            .into(),
-                    )
-                })?;
+            let root = resolve_local_snapshot_root(
+                local_root,
+                std::env::var_os("MOONCAKE_SNAPSHOT_LOCAL_PATH"),
+            )?;
             Arc::new(LocalFileSnapshotObjectStore::new(root))
         }
         SnapshotObjectStoreType::S3 => Arc::new(S3SnapshotObjectStore::from_environment()?),
@@ -1633,14 +1646,19 @@ fn snapshot_error(error: impl Into<String>) -> HaError {
 #[cfg(test)]
 mod tests {
     use super::{
-        LoadedSnapshot, decode_cpp_discarded_replicas, decode_local_disk_segments, decode_metadata,
+        HaError, LoadedSnapshot, create_catalog_backed_snapshot_provider,
+        decode_cpp_discarded_replicas, decode_local_disk_segments, decode_metadata,
         decode_segments, decode_value, encode_compressed_value, encode_segments, encode_value,
+        resolve_local_snapshot_root,
     };
+    use crate::ha::{SnapshotCatalogStoreType, SnapshotObjectStoreType};
     use crate::proto::SegmentStatus;
     use crate::service::SegmentEntry;
     use mooncake_store_core::{ReplicaStatus, ReplicaType, Segment};
     use rmpv::Value;
     use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
     use uuid::Uuid;
 
@@ -1650,6 +1668,29 @@ mod tests {
             .unwrap()
             .as_millis() as u64
             + 60_000
+    }
+
+    #[test]
+    fn local_snapshot_provider_factory_rejects_empty_explicit_root_without_unwind() {
+        let result = std::panic::catch_unwind(|| {
+            create_catalog_backed_snapshot_provider(
+                "cluster-a",
+                SnapshotObjectStoreType::Local,
+                SnapshotCatalogStoreType::Embedded,
+                Some(PathBuf::new()),
+                None,
+            )
+        });
+
+        assert!(matches!(result, Ok(Err(HaError::InvalidParams(_)))));
+    }
+
+    #[test]
+    fn local_snapshot_root_resolution_rejects_empty_environment_value_without_unwind() {
+        let result =
+            std::panic::catch_unwind(|| resolve_local_snapshot_root(None, Some(OsString::new())));
+
+        assert!(matches!(result, Ok(Err(HaError::InvalidParams(_)))));
     }
 
     fn disk_metadata_with_status(status: i64, extra_fields: Vec<Value>) -> Value {
