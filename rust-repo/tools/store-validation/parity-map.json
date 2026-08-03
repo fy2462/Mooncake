@@ -1165,28 +1165,28 @@
       "behavior": "Encoding and decoding an empty Master state produces non-empty metadata, segment, and task payloads and restores successfully.",
       "boundary": ["master", "ha", "snapshot", "codec", "round-trip"],
       "reference": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.EncodeDecodeRoundTrip"},
-      "reason": "The Rust catalog provider test uses a richer nonempty LoadedSnapshot fixture; it does not assert encoding an empty Master fixture, does not inspect and assert that each raw metadata, segments, and task_manager buffer is nonempty, and loads into a LoadedSnapshot rather than decoding into a fresh MasterService.",
+      "reason": "Rust service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_empty_round_trip captures a real empty MasterServiceImpl, publishes the production C++ catalog layout, downloads and proves all three exact metadata/segments/task_manager objects nonempty, loads them through CatalogBackedSnapshotProvider, atomically restores a fresh service, and proves its captured public snapshot surface and FetchTasks result remain empty.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeDecodeRoundTrip, src/ha/snapshot/master_snapshot_codec.cpp Encode/Decode, and Rust catalog provider publish/load test", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_snapshot_codec_empty_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "After encoding a mounted Memory segment and one completed Memory replica, decoding into a fresh Master restores the segment before metadata and GetReplicaList returns exactly one replica for the key and default tenant.",
       "boundary": ["master", "ha", "snapshot", "memory-replica", "restore-order"],
       "reference": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.EncodeDecodeRoundTripWithMemoryReplica"},
-      "reason": "Rust catalog tests decode Memory segment and replica fields and separately install snapshot state, but no discoverable Rust test publishes the C++ three-object snapshot, bootstraps a fresh serving Master, calls the public replica-list query for the default tenant, and asserts exactly one restored Memory replica.",
+      "reason": "Rust service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_memory_replica_round_trip uses public RPCs for the exact 16-MiB segment at 0x300000000 and the completed 1024-byte default-tenant Memory replica, establishes its ordinary production read lease, publishes/loads the C++ three-object catalog layout, atomically restores a fresh Master, performs the required safe public remount instead of reviving old-term coordinates, and proves GetReplicaList returns exactly one Memory replica with the exact segment, endpoint, and size.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp EncodeDecodeRoundTripWithMemoryReplica, src/ha/snapshot/master_snapshot_codec.cpp Decode, and Rust catalog/bootstrap tests", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_snapshot_codec_memory_replica_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "Invalid bytes in every metadata, segments, and task-manager payload make decode fail with the deserialize-failure error category.",
       "boundary": ["master", "ha", "snapshot", "codec", "corruption"],
       "reference": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.DecodeWithCorruptPayloadFails"},
-      "reason": "Discoverable Rust tests reject trailing MessagePack bytes and an invalid task zstd stream, but none corrupts each of the three legacy catalog payload objects in one snapshot and asserts the equivalent snapshot decode error category when no healthy candidate remains.",
+      "reason": "Rust service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_corrupt_payloads_fail publishes one valid empty production catalog snapshot, overwrites its exact metadata/segments/task_manager objects with the C++ byte triples 1-3, 4-6, and 7-9, and proves the no-fallback load returns HaError::Snapshot.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp DecodeWithCorruptPayloadFails, src/ha/snapshot/master_snapshot_codec.cpp Decode, and Rust catalog/task decoders", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_snapshot_codec_corrupt_payloads_fail"}],
+      "status": "covered"
     },
     {
       "behavior": "The C++ snapshot codec rejects a null target MasterService pointer before decoding payloads.",
@@ -1200,10 +1200,10 @@
       "behavior": "With valid segment and metadata payloads, a zstd MessagePack task-manager payload containing one eight-field task whose id is an integer instead of a string returns the deserialize-failure error category without unwinding, preserving snapshot-candidate fallback.",
       "boundary": ["master", "ha", "snapshot", "task-codec", "type-error"],
       "reference": {"file": "ha/snapshot/master_snapshot_codec_test.cpp", "test": "MasterSnapshotCodecTest.DecodeWithInvalidTaskFieldTypeReturnsError"},
-      "reason": "Rust's task decoder maps a non-string id to HaError::Snapshot and tests malformed short tasks plus duplicate UUIDs, but no discoverable test builds the C++ eight-field integer-id payload with valid segment/metadata, asserts no unwind and the error category, or verifies older-snapshot fallback.",
+      "reason": "Rust service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_invalid_task_field_type_returns_error_without_unwind replaces only task_manager in an otherwise valid production snapshot with the exact zstd MessagePack eight-field integer-id shape, proves catch_unwind observes no unwind, proves the production loader selects the exact older healthy candidate, and separately proves an isolated malformed candidate returns HaError::Snapshot.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_snapshot_codec_test.cpp DecodeWithInvalidTaskFieldTypeReturnsError, src/ha/snapshot/master_snapshot_codec.cpp Decode exception boundary, and Rust catalog_task decoder", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_snapshot_codec_invalid_task_field_type_returns_error_without_unwind"}],
+      "status": "covered"
     },
     {
       "behavior": "A live LocalDisk/SSD master PutStart returns exactly Memory and Disk replicas; the single lookup before either PutEnd returns REPLICA_IS_NOT_READY, and after sequential Memory and Disk PutEnd calls the final lookup lists two Complete replicas. Snapshot restore into a fresh service must preserve the final descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",

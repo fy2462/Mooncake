@@ -4154,5 +4154,45 @@
     "crate_command": "cargo test -p mooncake-store-master",
     "evidence": "/tmp/mooncake-task-manager-clock-parity.typescript",
     "mutation_evidence": "/tmp/mooncake-task-manager-clock-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/master_snapshot_codec_test.cpp:MasterSnapshotCodecTest.EncodeDecodeRoundTrip",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_snapshot_codec_empty_round_trip",
+    "first_divergence": "Rust catalog coverage used nonempty DTO fixtures and did not prove three nonempty raw payloads plus a successful fresh-service empty restore.",
+    "repair_commit": "0d135493",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_empty_round_trip -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-master-snapshot-codec-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-master-snapshot-codec-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/master_snapshot_codec_test.cpp:MasterSnapshotCodecTest.EncodeDecodeRoundTripWithMemoryReplica",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_snapshot_codec_memory_replica_round_trip",
+    "first_divergence": "Rust lacked one production pipeline witness from public Memory object creation through catalog load, fresh-service atomic restore, safe public segment rebind, and exact public replica query.",
+    "repair_commit": "0d135493",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_memory_replica_round_trip -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-master-snapshot-codec-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-master-snapshot-codec-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/master_snapshot_codec_test.cpp:MasterSnapshotCodecTest.DecodeWithCorruptPayloadFails",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_snapshot_codec_corrupt_payloads_fail",
+    "first_divergence": "Rust decoder tests covered isolated malformed shapes but not one published snapshot whose three exact legacy payload objects all contain the C++ corrupt byte triples.",
+    "repair_commit": "0d135493",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_corrupt_payloads_fail -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-master-snapshot-codec-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-master-snapshot-codec-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/master_snapshot_codec_test.cpp:MasterSnapshotCodecTest.DecodeWithInvalidTaskFieldTypeReturnsError",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_snapshot_codec_invalid_task_field_type_returns_error_without_unwind",
+    "first_divergence": "Rust mapped invalid task IDs to snapshot errors but lacked the exact eight-field integer-id payload, unwind boundary, isolated error category, and older healthy candidate fallback in one discoverable witness.",
+    "repair_commit": "0d135493",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_master_snapshot_codec_invalid_task_field_type_returns_error_without_unwind -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-master-snapshot-codec-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-master-snapshot-codec-mutation-red.typescript"
   }
 ]
