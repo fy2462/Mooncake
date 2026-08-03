@@ -673,12 +673,13 @@ pub(crate) fn restore_loaded_snapshot_state(
         .collect::<HashSet<_>>();
     let mut orphaned_staged_releases = Vec::new();
     for (key, object) in &mut objects {
-        let has_put_start = object.put_start_time.is_some();
+        let preserves_committed_generation =
+            object.put_start_time.is_some() && object.quota_committed;
         let mut retained = Vec::with_capacity(object.replicas.len());
         let mut orphaned = Vec::new();
         for replica in std::mem::take(&mut object.replicas) {
             let keep = replica.status == ReplicaStatus::Complete
-                || has_put_start
+                || preserves_committed_generation
                 || covered_targets.contains(&(
                     key.clone(),
                     replica.segment_id,
@@ -704,10 +705,10 @@ pub(crate) fn restore_loaded_snapshot_state(
             );
             orphaned_staged_releases.push((key.clone(), orphaned));
             object.reserved_quota_charge_bytes = 0;
-            // Only malformed legacy allocating targets without either a
-            // Put/Upsert deadline or a native replication task reach here.
-            // Durable delayed old buffers live in their separate reservation
-            // table and therefore remain represented in allocator recovery.
+            // Uncommitted Put/Upsert allocations and malformed legacy targets
+            // reach here. Durable replication-task targets were retained
+            // above, while delayed old buffers live in their separate
+            // reservation table and remain represented in allocator recovery.
             object.pending_replaced_quota_charge_bytes = 0;
             if object
                 .replicas
@@ -3142,6 +3143,39 @@ mod snapshot_restore_tests {
         assert_eq!(snapshot_child_replicas(&restored, OLD_KEY).await.len(), 1);
         assert_eq!(snapshot_child_keys(&restored).await, vec![OLD_KEY]);
         assert!(!snapshot_child_exists(&restored, NEW_KEY).await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_child_restore_cleans_non_complete_replica() {
+        const CLEAN_KEY: &str = "clean_object";
+        const DIRTY_KEY: &str = "dirty_incomplete";
+        const SEGMENT_NAME: &str = "noncomplete_restore_segment";
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, SEGMENT_NAME).await;
+        put_snapshot_child_object(&source, client_id, CLEAN_KEY, None, true).await;
+        assert_eq!(snapshot_child_replicas(&source, CLEAN_KEY).await.len(), 1);
+        put_snapshot_child_object(&source, client_id, DIRTY_KEY, None, false).await;
+        assert_eq!(
+            snapshot_child_keys(&source).await,
+            vec![CLEAN_KEY, DIRTY_KEY]
+        );
+
+        publish_service_snapshot(&provider, &source, "20240701_120000_000", 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        mount_snapshot_child_segment(&restored, client_id, SEGMENT_NAME).await;
+
+        assert_eq!(snapshot_child_replicas(&restored, CLEAN_KEY).await.len(), 1);
+        assert_eq!(snapshot_child_keys(&restored).await, vec![CLEAN_KEY]);
+        assert!(!snapshot_child_exists(&restored, DIRTY_KEY).await);
     }
 
     #[tokio::test]
