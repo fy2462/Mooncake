@@ -53,6 +53,94 @@ fn empty_loaded_snapshot(snapshot_id: &str, snapshot_sequence_id: u64) -> Loaded
 }
 
 #[test]
+fn cpp_parity_snapshot_child_generated_timestamp_matches_expected_format() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(
+        object_store.clone(),
+        "cluster-a",
+    );
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+
+    let descriptor = provider
+        .publish_loaded_snapshot(&empty_loaded_snapshot("", 0), 0)
+        .unwrap();
+    let bytes = descriptor.snapshot_id.as_bytes();
+
+    assert_eq!(bytes.len(), 19);
+    assert_eq!(bytes[8], b'_');
+    assert_eq!(bytes[15], b'_');
+    assert!(
+        bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
+    );
+}
+
+#[test]
+fn cpp_parity_snapshot_child_persist_state_publishes_descriptor() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(
+        object_store.clone(),
+        "cluster-a",
+    );
+    let provider =
+        CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store.clone());
+    let snapshot_id = "20240601_120000_123";
+    let before_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    let descriptor = provider
+        .publish_loaded_snapshot(&empty_loaded_snapshot(snapshot_id, 0), 37)
+        .unwrap();
+    let after_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    assert_eq!(descriptor.snapshot_id, snapshot_id);
+    assert_eq!(
+        descriptor.manifest_key,
+        format!("mooncake_master_snapshot/cluster-a/{snapshot_id}/manifest.txt")
+    );
+    assert_eq!(
+        descriptor.object_prefix,
+        format!("mooncake_master_snapshot/cluster-a/{snapshot_id}/")
+    );
+    assert_eq!(descriptor.last_included_seq, 0);
+    assert_eq!(descriptor.producer_view_version, 37);
+    assert!(descriptor.created_at_ms >= before_ms);
+    assert!(descriptor.created_at_ms <= after_ms);
+
+    let catalog_reader =
+        EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(object_store, "cluster-a");
+    assert_eq!(catalog_reader.get_latest().unwrap(), Some(descriptor));
+}
+
+#[test]
+fn cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog =
+        EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(object_store, "cluster-a");
+    let mut descriptor = SnapshotDescriptor::new_with_snapshot_root(
+        catalog.get_snapshot_root(),
+        "20240601_120000_124",
+    );
+    descriptor.last_included_seq = 123;
+    descriptor.producer_view_version = 41;
+    descriptor.created_at_ms = 1_717_243_200_123;
+
+    catalog.publish(&descriptor).unwrap();
+
+    assert_eq!(catalog.get_latest().unwrap(), Some(descriptor));
+}
+
+#[test]
 fn cpp_parity_task_snapshot_round_trip_preserves_four_states() {
     let root = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
