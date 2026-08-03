@@ -62,6 +62,22 @@ segment name, endpoint, and size. This makes the segments-before-metadata
 dependency observable: metadata restore cannot bind the replica if the segment
 was not restored first.
 
+Rust's production catalog loader intentionally rejects completed objects whose
+read lease and soft pin have both expired. Like C++, `PutEnd` grants a
+zero-duration initial lease, while the C++ codec fixture does not run the
+catalog loader's expiry policy. The Rust witness therefore performs one public
+source `GetReplicaList` after `PutEnd` and before capture. This both proves the
+source object is readable and establishes the ordinary configured read lease;
+it does not mutate private state, add pinning, or bypass the production loader.
+
+Rust also intentionally invalidates process-local Memory addresses and
+transport endpoints on fresh-service restore. After atomic restore, the
+witness remounts the exact durable segment identity through public
+`MountSegment` with the original client id and runtime coordinates before the
+final query. This is the safe Rust replacement for C++ reusing snapshot-time
+coordinates, and it proves the restored segment/metadata relationship without
+flipping private handle flags.
+
 ### Corrupt all three payloads
 
 Publish one valid empty snapshot, then overwrite its exact `metadata`,

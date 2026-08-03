@@ -2891,8 +2891,315 @@ impl Default for MasterServiceImpl {
 #[cfg(test)]
 mod snapshot_restore_tests {
     use super::*;
+    use crate::ha::{
+        CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, LocalFileSnapshotObjectStore,
+        SnapshotDescriptor, SnapshotObjectStore, SnapshotProvider,
+    };
     use crate::service::background_ops::reap_expired_background_tasks;
+    use rmpv::Value;
+    use std::io::Cursor;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::time::Instant;
+    use tempfile::TempDir;
+
+    const SNAPSHOT_CODEC_CLUSTER: &str = "snapshot-codec-cluster";
+
+    fn snapshot_codec_provider(
+        root: &TempDir,
+    ) -> (
+        CatalogBackedSnapshotProvider,
+        Arc<LocalFileSnapshotObjectStore>,
+    ) {
+        let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+        let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+        (
+            CatalogBackedSnapshotProvider::new(
+                SNAPSHOT_CODEC_CLUSTER,
+                Box::new(catalog),
+                object_store.clone(),
+            ),
+            object_store,
+        )
+    }
+
+    fn publish_service_snapshot(
+        provider: &CatalogBackedSnapshotProvider,
+        service: &MasterServiceImpl,
+        snapshot_id: &str,
+        producer_view_version: u64,
+    ) -> SnapshotDescriptor {
+        let snapshot = service.capture_loaded_snapshot(snapshot_id);
+        provider
+            .publish_loaded_snapshot(&snapshot, producer_view_version)
+            .unwrap()
+    }
+
+    fn restore_loaded_snapshot(
+        service: &MasterServiceImpl,
+        snapshot: LoadedSnapshot,
+    ) -> Result<(), String> {
+        restore_loaded_snapshot_state(
+            &service.state,
+            snapshot.segments,
+            snapshot.nof_segments,
+            snapshot.objects,
+            snapshot.tasks,
+            snapshot.replication_tasks,
+            snapshot.local_disk_segments,
+            snapshot.graceful_unmounts,
+            snapshot.delayed_replica_releases,
+            snapshot.allocator_config,
+        )
+    }
+
+    fn invalid_integer_task_id_payload() -> Vec<u8> {
+        let task = Value::Array(vec![
+            Value::from(12345_i32),
+            Value::from(0_i32),
+            Value::from(0_i32),
+            Value::from("payload"),
+            Value::from(0_i64),
+            Value::from(0_i64),
+            Value::from("message"),
+            Value::from("assigned"),
+        ]);
+        let mut encoded = Vec::new();
+        rmpv::encode::write_value(&mut encoded, &Value::Array(vec![task])).unwrap();
+        zstd::stream::encode_all(Cursor::new(encoded), 3).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_master_snapshot_codec_empty_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let descriptor = publish_service_snapshot(&provider, &source, "20260803_030001_001", 1);
+
+        for object_name in ["metadata", "segments", "task_manager"] {
+            let payload = object_store
+                .download_buffer(&format!("{}{object_name}", descriptor.object_prefix))
+                .unwrap();
+            assert!(
+                !payload.is_empty(),
+                "{object_name} payload must be nonempty"
+            );
+        }
+
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+
+        let restored_view = restored.capture_loaded_snapshot("restored-empty");
+        assert!(restored_view.objects.is_empty());
+        assert!(restored_view.segments.is_empty());
+        assert!(restored_view.tasks.is_empty());
+        let fetched = MasterService::fetch_tasks(
+            &restored,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(Uuid::new_v4())),
+                batch_size: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(fetched.tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_master_snapshot_codec_memory_replica_round_trip() {
+        const SEGMENT_BASE: u64 = 0x300000000;
+        const SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+        const KEY: &str = "memory_replica_key";
+        const SEGMENT_NAME: &str = "codec_test_segment";
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        MasterService::mount_segment(
+            &source,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: SEGMENT_NAME.into(),
+                size: SEGMENT_SIZE,
+                base_addr: SEGMENT_BASE,
+                te_endpoint: SEGMENT_NAME.into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: KEY.into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: KEY.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Rust's production catalog loader intentionally drops completed
+        // objects whose read lease and soft pin have both expired. PutEnd,
+        // like C++, grants a zero-duration lease. Establish the ordinary
+        // public read lease before capture so this exact replica is a valid
+        // recovery candidate rather than bypassing expiry through private
+        // state or a test-only codec path.
+        let source_replicas = MasterService::get_replica_list(
+            &source,
+            Request::new(proto::GetReplicaListRequest {
+                key: KEY.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas;
+        assert_eq!(source_replicas.len(), 1);
+
+        publish_service_snapshot(&provider, &source, "20260803_030002_002", 2);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+
+        // Snapshot addresses and endpoints belong to the old process term and
+        // are deliberately restored fail-closed. Rebind the durable segment
+        // identity through the public remount path before serving the replica.
+        MasterService::mount_segment(
+            &restored,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: SEGMENT_NAME.into(),
+                size: SEGMENT_SIZE,
+                base_addr: SEGMENT_BASE,
+                te_endpoint: SEGMENT_NAME.into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let replicas = MasterService::get_replica_list(
+            &restored,
+            Request::new(proto::GetReplicaListRequest {
+                key: KEY.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas;
+        assert_eq!(replicas.len(), 1);
+        assert_eq!(
+            replicas[0].replica_type,
+            proto::replica_descriptor::ReplicaType::Memory as i32
+        );
+        assert_eq!(replicas[0].segment_name, SEGMENT_NAME);
+        assert_eq!(replicas[0].transport_endpoint, SEGMENT_NAME);
+        assert_eq!(replicas[0].size, 1024);
+    }
+
+    #[test]
+    fn cpp_parity_master_snapshot_codec_corrupt_payloads_fail() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let descriptor = publish_service_snapshot(&provider, &source, "20260803_030003_003", 3);
+        for (object_name, payload) in [
+            ("metadata", [1_u8, 2, 3]),
+            ("segments", [4_u8, 5, 6]),
+            ("task_manager", [7_u8, 8, 9]),
+        ] {
+            object_store
+                .upload_buffer(
+                    &format!("{}{object_name}", descriptor.object_prefix),
+                    &payload,
+                )
+                .unwrap();
+        }
+
+        let error = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap_err();
+        assert!(
+            matches!(error, HaError::Snapshot(_)),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn cpp_parity_master_snapshot_codec_invalid_task_field_type_returns_error_without_unwind() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let older_id = "20260803_030004_004";
+        publish_service_snapshot(&provider, &source, older_id, 4);
+        let malformed = publish_service_snapshot(&provider, &source, "20260803_030005_005", 5);
+        object_store
+            .upload_buffer(
+                &format!("{}task_manager", malformed.object_prefix),
+                &invalid_integer_task_id_payload(),
+            )
+            .unwrap();
+
+        let fallback = catch_unwind(AssertUnwindSafe(|| {
+            provider.load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+        }));
+        let fallback = fallback
+            .expect("integer task id must not unwind")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback.snapshot_id, older_id);
+
+        let isolated_root = tempfile::tempdir().unwrap();
+        let (isolated_provider, isolated_store) = snapshot_codec_provider(&isolated_root);
+        let isolated =
+            publish_service_snapshot(&isolated_provider, &source, "20260803_030006_006", 6);
+        isolated_store
+            .upload_buffer(
+                &format!("{}task_manager", isolated.object_prefix),
+                &invalid_integer_task_id_payload(),
+            )
+            .unwrap();
+        let isolated_result = catch_unwind(AssertUnwindSafe(|| {
+            isolated_provider.load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+        }));
+        let error = isolated_result
+            .expect("integer task id must not unwind")
+            .unwrap_err();
+        assert!(
+            matches!(error, HaError::Snapshot(_)),
+            "unexpected error: {error}"
+        );
+    }
 
     fn pending_move_task(key: &str, payload: &str) -> TaskEntry {
         let now = chrono::Utc::now();

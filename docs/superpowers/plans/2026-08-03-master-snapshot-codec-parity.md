@@ -41,6 +41,8 @@
 - [ ] Load and restore a fresh service; prove empty objects/segments/tasks and empty public FetchTasks.
 - [ ] Add `cpp_parity_master_snapshot_codec_memory_replica_round_trip`.
 - [ ] Mount the exact 16-MiB Memory segment at `0x300000000` and commit the exact 1024-byte default-tenant key through public RPCs.
+- [ ] Establish its ordinary production read lease through one public source GetReplicaList before capture, because the Rust catalog loader intentionally filters fully expired objects.
+- [ ] After restore, rebind the old-term Memory segment through public MountSegment with the same durable identity before querying; never revive a private handle directly.
 - [ ] Publish/load/restore and assert public GetReplicaList returns exactly one Memory replica with exact name, endpoint, and size.
 - [ ] Retain one primary assertion mutation RED for each test, then restore and prove both GREEN.
 
