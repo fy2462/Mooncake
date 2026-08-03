@@ -5,6 +5,292 @@ use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
+fn proto_uuid(id: Uuid) -> proto::Uuid {
+    let (high, low) = id.as_u64_pair();
+    proto::Uuid { high, low }
+}
+
+async fn mount_task_segment(service: &MasterServiceImpl, client_id: Uuid, segment_name: &str) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn commit_task_source_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    source_segment: &str,
+) {
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 0,
+                with_soft_pin: false,
+                with_hard_pin: false,
+                preferred_segment: source_segment.into(),
+                prefer_alloc_in_same_node: false,
+                preferred_segments: vec![],
+                preferred_nof_segments: vec![],
+                data_type: proto::ObjectDataType::Unknown as i32,
+                group_ids: vec![],
+                host_id: String::new(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn create_task_copy(
+    service: &MasterServiceImpl,
+    key: &str,
+    target_segment: &str,
+) -> proto::Uuid {
+    MasterService::create_copy_task(
+        service,
+        Request::new(proto::CreateCopyTaskRequest {
+            key: key.into(),
+            targets: vec![target_segment.into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .task_id
+    .unwrap()
+}
+
+#[tokio::test]
+async fn cpp_parity_submit_and_pop_task() {
+    let service = MasterServiceImpl::default();
+    let source_client = Uuid::new_v4();
+    let target_client = Uuid::new_v4();
+    mount_task_segment(&service, source_client, "seg1").await;
+    mount_task_segment(&service, target_client, "seg2").await;
+    commit_task_source_object(&service, source_client, "test_key", "seg1").await;
+
+    let task_id = create_task_copy(&service, "test_key", "seg2").await;
+    let fetched = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto_uuid(source_client)),
+            batch_size: 10,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(fetched.tasks.len(), 1);
+    assert_eq!(fetched.tasks[0].id.as_ref(), Some(&task_id));
+
+    let task = MasterService::query_task(
+        &service,
+        Request::new(proto::QueryTaskRequest {
+            task_id: Some(task_id),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(task.status, proto::TaskStatus::TaskProcessing as i32);
+}
+
+#[tokio::test]
+async fn cpp_parity_mark_task_complete_lifecycle() {
+    let service = MasterServiceImpl::default();
+    let source_client = Uuid::new_v4();
+    let target_client = Uuid::new_v4();
+    mount_task_segment(&service, source_client, "seg1").await;
+    mount_task_segment(&service, target_client, "seg2").await;
+    commit_task_source_object(&service, source_client, "key1", "seg1").await;
+
+    let task_id = create_task_copy(&service, "key1", "seg2").await;
+    let pending = MasterService::query_task(
+        &service,
+        Request::new(proto::QueryTaskRequest {
+            task_id: Some(task_id.clone()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(pending.status, proto::TaskStatus::TaskPending as i32);
+
+    let fetched = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto_uuid(source_client)),
+            batch_size: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(fetched.tasks.len(), 1);
+    assert_eq!(fetched.tasks[0].id.as_ref(), Some(&task_id));
+
+    let processing = MasterService::query_task(
+        &service,
+        Request::new(proto::QueryTaskRequest {
+            task_id: Some(task_id.clone()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(processing.status, proto::TaskStatus::TaskProcessing as i32);
+
+    MasterService::mark_task_to_complete(
+        &service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto_uuid(source_client)),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(task_id.clone()),
+                status: proto::TaskStatus::TaskSuccess as i32,
+                message: "Completed successfully".into(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let completed = MasterService::query_task(
+        &service,
+        Request::new(proto::QueryTaskRequest {
+            task_id: Some(task_id),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(completed.status, proto::TaskStatus::TaskSuccess as i32);
+}
+
+#[tokio::test]
+async fn cpp_parity_multiple_clients_fetch_only_own_tasks() {
+    let service = MasterServiceImpl::default();
+    let client1 = Uuid::new_v4();
+    let client2 = Uuid::new_v4();
+    let target1 = Uuid::new_v4();
+    let target2 = Uuid::new_v4();
+    mount_task_segment(&service, client1, "seg1").await;
+    mount_task_segment(&service, target1, "seg2").await;
+    mount_task_segment(&service, client2, "seg3").await;
+    mount_task_segment(&service, target2, "seg4").await;
+    commit_task_source_object(&service, client1, "key1", "seg1").await;
+    commit_task_source_object(&service, client2, "key2", "seg3").await;
+
+    let id1 = create_task_copy(&service, "key1", "seg2").await;
+    let id2 = create_task_copy(&service, "key2", "seg4").await;
+
+    let tasks1 = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto_uuid(client1)),
+            batch_size: 10,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(tasks1.tasks.len(), 1);
+    assert_eq!(tasks1.tasks[0].id.as_ref(), Some(&id1));
+
+    let tasks2 = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto_uuid(client2)),
+            batch_size: 10,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(tasks2.tasks.len(), 1);
+    assert_eq!(tasks2.tasks[0].id.as_ref(), Some(&id2));
+
+    let tasks1_again = MasterService::fetch_tasks(
+        &service,
+        Request::new(proto::FetchTasksRequest {
+            client_id: Some(proto_uuid(client1)),
+            batch_size: 10,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(tasks1_again.tasks.is_empty());
+
+    assert_ne!(id1, id2);
+}
+
+#[tokio::test]
+async fn cpp_parity_pending_limit_exceeded() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        max_total_pending_tasks: 1,
+        ..Default::default()
+    });
+    let source_client = Uuid::new_v4();
+    let target_client = Uuid::new_v4();
+    mount_task_segment(&service, source_client, "seg1").await;
+    mount_task_segment(&service, target_client, "seg2").await;
+    commit_task_source_object(&service, source_client, "k1", "seg1").await;
+    commit_task_source_object(&service, source_client, "k2", "seg1").await;
+
+    let first = MasterService::create_copy_task(
+        &service,
+        Request::new(proto::CreateCopyTaskRequest {
+            key: "k1".into(),
+            targets: vec!["seg2".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await;
+    assert!(first.is_ok());
+
+    let second = MasterService::create_copy_task(
+        &service,
+        Request::new(proto::CreateCopyTaskRequest {
+            key: "k2".into(),
+            targets: vec!["seg2".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(second.code(), tonic::Code::ResourceExhausted);
+}
+
 #[tokio::test]
 async fn test_create_and_query_task_returns_real_state() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
