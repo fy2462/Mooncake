@@ -2616,91 +2616,91 @@
       "behavior": "Uploading the non-text bytes {0, 1, 2, 128, 254, 255} to a nested key then downloading that key succeeds and returns the exact same byte vector.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "buffer", "round-trip", "bytes"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.UploadDownloadBuffer_Roundtrip"},
-      "reason": "No discoverable Rust test writes and reads an arbitrary non-text byte buffer through LocalFileSnapshotObjectStore and asserts exact byte equality. test_snapshot_catalog_uses_object_store_abstraction only round-trips serialized UTF-8 descriptor text, while catalog fixtures assert decoded snapshot semantics rather than downloaded raw bytes.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_buffer_round_trip directly uploads the exact non-text byte vector through the production local store and asserts the downloaded bytes are identical.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadDownloadBuffer_Roundtrip and local_file_snapshot_object_store.cpp UploadBuffer/DownloadBuffer; Rust test_ha.rs test_snapshot_catalog_uses_object_store_abstraction and test_catalog_snapshot.rs fixtures", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_buffer_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "Uploading a string to a nested key then downloading that key succeeds and returns exactly the original string.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "string", "round-trip"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.UploadDownloadString_Roundtrip"},
-      "reason": "test_snapshot_catalog_uses_object_store_abstraction publishes a catalog descriptor and only then directly downloads the resulting descriptor key. The test does not directly call upload_string with a chosen value and download_string for the same key to assert that value unchanged; inferring the upload call and its input from catalog source is not test evidence for the C++ direct round trip.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_string_round_trip directly uploads a chosen string through the production local store and asserts exact download equality.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadDownloadString_Roundtrip and local_file_snapshot_object_store.cpp UploadString/DownloadString; Rust test_ha.rs test_snapshot_catalog_uses_object_store_abstraction", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_string_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "After uploading two strings below snap/20240101/ and one below snap/20240102/, recursively listing the narrow prefix succeeds with exactly two keys and listing snap/ succeeds with exactly three keys.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "listing", "prefix", "recursive", "cardinality"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.ListObjectsWithPrefix"},
-      "reason": "test_snapshot_catalog_uses_object_store_abstraction asserts only that one expected descriptor key is present and no temporary key remains. No discoverable Rust test asserts complete recursive result cardinality for both a narrow nested prefix and its broader parent prefix; source sorting is not test coverage.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_lists_exact_prefix_cardinality uploads the three oracle objects and asserts the exact sorted two-key narrow and three-key broad recursive listings.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp ListObjectsWithPrefix and local_file_snapshot_object_store.cpp ListObjectsWithPrefix; Rust snapshot.rs LocalFileSnapshotObjectStore::list_objects_with_prefix and test_ha.rs test_snapshot_catalog_uses_object_store_abstraction", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_lists_exact_prefix_cardinality"}],
+      "status": "covered"
     },
     {
       "behavior": "After uploading two strings below a directory prefix, deleting that prefix succeeds and a direct download of a previously stored key returns an error.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "delete", "prefix", "cleanup", "not-found"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.DeleteObjectsWithPrefix"},
-      "reason": "test_embedded_snapshot_catalog_round_trip observes catalog get_latest() == None after catalog deletion, not a direct LocalFileSnapshotObjectStore prefix delete followed by a direct download error for the deleted object. No discoverable Rust test asserts this object-store cleanup/error sequence.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_delete_prefix_removes_objects directly deletes the populated prefix and proves a deleted key returns a classified not-found snapshot error.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp DeleteObjectsWithPrefix and local_file_snapshot_object_store.cpp DeleteObjectsWithPrefix/DownloadString; Rust snapshot.rs LocalFileSnapshotObjectStore::delete_objects_with_prefix and test_ha.rs test_embedded_snapshot_catalog_round_trip", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_delete_prefix_removes_objects"}],
+      "status": "covered"
     },
     {
       "behavior": "The local object-store connection-information string contains the configured base directory path.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "connection-info", "base-path"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.GetConnectionInfo"},
-      "reason": "Rust LocalFileSnapshotObjectStore::connection_info formats the base path, but no discoverable Rust test calls connection_info() and asserts that the configured root occurs in the result.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_connection_info_contains_base_path calls the production connection_info API and asserts the configured temporary root is present.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp GetConnectionInfo and local_file_snapshot_object_store.cpp GetConnectionInfo; Rust snapshot.rs LocalFileSnapshotObjectStore::connection_info", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_connection_info_contains_base_path"}],
+      "status": "covered"
     },
     {
       "behavior": "Uploading a one-byte buffer to a/b/c/deep_file creates missing parent directories, succeeds, and a direct download returns that exact byte.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "buffer", "nested-path", "directory-creation"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.UploadBuffer_CreatesSubdirectories"},
-      "reason": "No discoverable Rust test directly uploads the byte buffer {42} with upload_buffer to a/b/c/deep_file and directly downloads that buffer to assert exact equality. Catalog publication uses a different descriptor path and payload through an indirect source call chain, which is not test evidence for this direct buffer/path oracle.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_deep_upload_creates_subdirectories uploads byte 42 to the exact deep key, proves its parent hierarchy exists, and asserts exact direct download equality.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadBuffer_CreatesSubdirectories and local_file_snapshot_object_store.cpp UploadBuffer/EnsureDirectoryExists; Rust snapshot.rs LocalFileSnapshotObjectStore::upload_buffer and test_ha.rs test_snapshot_catalog_uses_object_store_abstraction", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_deep_upload_creates_subdirectories"}],
+      "status": "covered"
     },
     {
       "behavior": "Constructing a local object store with an empty base path throws a runtime error.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "constructor", "empty-root", "validation", "error"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.Constructor_EmptyPath_Throws"},
-      "reason": "Rust LocalFileSnapshotObjectStore::new accepts an empty PathBuf and returns Self without validation, and no discoverable Rust test asserts rejection. This is an observable behavior divergence, not a C++-only detail.",
+      "reason": "Rust LocalFileSnapshotObjectStore::new now rejects an empty OS path immediately, and cpp_parity_local_file_snapshot_object_store_empty_path_panics proves construction cannot succeed.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp Constructor_EmptyPath_Throws and local_file_snapshot_object_store.cpp LocalFileSnapshotObjectStore constructor; Rust snapshot.rs LocalFileSnapshotObjectStore::new", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_empty_path_panics"}],
+      "status": "covered"
     },
     {
       "behavior": "Downloading a buffer from a nonexistent nested key returns an error.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "buffer", "not-found", "error"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.DownloadBuffer_NonExistentKey"},
-      "reason": "Rust delegates the missing-file path to std::fs::read, but no discoverable Rust test directly calls LocalFileSnapshotObjectStore::download_buffer for a nonexistent key and asserts an error. Catalog get_latest() translates a missing marker into None, which is a different observable result.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_missing_buffer_download_errors directly downloads a nonexistent nested buffer key and asserts a classified not-found snapshot error.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp DownloadBuffer_NonExistentKey and local_file_snapshot_object_store.cpp DownloadBuffer; Rust snapshot.rs LocalFileSnapshotObjectStore::download_buffer", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_missing_buffer_download_errors"}],
+      "status": "covered"
     },
     {
       "behavior": "Downloading a string from a nonexistent nested key returns an error.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "string", "not-found", "error"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.DownloadString_NonExistentKey"},
-      "reason": "Rust's default download_string propagates download_buffer errors, but no discoverable Rust test directly calls the string API for a nonexistent key and asserts the error outcome.",
+      "reason": "Rust cpp_parity_local_file_snapshot_object_store_missing_string_download_errors directly downloads a nonexistent nested string key and asserts a classified not-found snapshot error.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp DownloadString_NonExistentKey and local_file_snapshot_object_store.cpp DownloadString; Rust snapshot.rs SnapshotObjectStore::download_string", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_missing_string_download_errors"}],
+      "status": "covered"
     },
     {
       "behavior": "Uploading an empty byte buffer returns an error.",
       "boundary": ["master", "ha", "snapshot", "object-store", "local-filesystem", "buffer", "empty-input", "validation", "error"],
       "reference": {"file": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp", "test": "LocalFileSnapshotObjectStoreTest.UploadBuffer_EmptyBuffer"},
-      "reason": "Rust LocalFileSnapshotObjectStore::upload_buffer writes an empty slice without an empty-input guard, and no discoverable Rust test asserts rejection. This is an observable behavior divergence, not a C++-only detail.",
+      "reason": "Rust upload_buffer now rejects an empty slice with InvalidParams before file creation, while upload_string retains independent empty-string semantics; cpp_parity_local_file_snapshot_object_store_empty_buffer_upload_errors proves both rejection and key absence.",
       "review": {"oracle": "local_file_snapshot_object_store_test.cpp UploadBuffer_EmptyBuffer and local_file_snapshot_object_store.cpp UploadBuffer; Rust snapshot.rs LocalFileSnapshotObjectStore::upload_buffer", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/ha/snapshot.rs", "test": "cpp_parity_local_file_snapshot_object_store_empty_buffer_upload_errors"}],
+      "status": "covered"
     },
     {
       "behavior": "A generated snapshot timestamp matches the YYYYMMDD_HHMMSS_mmm format.",

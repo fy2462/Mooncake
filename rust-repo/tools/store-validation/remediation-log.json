@@ -4194,5 +4194,105 @@
     "crate_command": "cargo test -p mooncake-store-master",
     "evidence": "/tmp/mooncake-master-snapshot-codec-parity.typescript",
     "mutation_evidence": "/tmp/mooncake-master-snapshot-codec-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.UploadDownloadBuffer_Roundtrip",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_buffer_round_trip",
+    "first_divergence": "Rust lacked a direct exact non-text buffer round-trip witness through the production local object store.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_buffer_round_trip -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.UploadDownloadString_Roundtrip",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_string_round_trip",
+    "first_divergence": "Rust lacked a direct chosen-string upload and exact download witness through the production local object store.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_string_round_trip -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.ListObjectsWithPrefix",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_lists_exact_prefix_cardinality",
+    "first_divergence": "Rust listing coverage did not assert the complete narrow two-key and broad three-key recursive result sets.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_lists_exact_prefix_cardinality -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.DeleteObjectsWithPrefix",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_delete_prefix_removes_objects",
+    "first_divergence": "Rust lacked a direct populated-prefix deletion followed by classified missing-object download evidence.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_delete_prefix_removes_objects -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.GetConnectionInfo",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_connection_info_contains_base_path",
+    "first_divergence": "Rust formatted local connection information but had no test proving it contains the configured base path.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_connection_info_contains_base_path -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.UploadBuffer_CreatesSubdirectories",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_deep_upload_creates_subdirectories",
+    "first_divergence": "Rust lacked an exact byte-42 deep-key witness that also proves creation of the missing directory hierarchy.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_deep_upload_creates_subdirectories -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.Constructor_EmptyPath_Throws",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_empty_path_panics",
+    "first_divergence": "Rust construction accepted an empty OS path instead of rejecting the invalid local-store root immediately.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_empty_path_panics -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "implementation_red_evidence": "/tmp/mooncake-local-snapshot-object-implementation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.DownloadBuffer_NonExistentKey",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_missing_buffer_download_errors",
+    "first_divergence": "Rust delegated missing buffer reads to the filesystem but lacked a direct classified error witness.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_missing_buffer_download_errors -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.DownloadString_NonExistentKey",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_missing_string_download_errors",
+    "first_divergence": "Rust propagated missing string reads but lacked a direct classified error witness through the string API.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_missing_string_download_errors -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-local-snapshot-object-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/object/backends/local/local_file_snapshot_object_store_test.cpp:LocalFileSnapshotObjectStoreTest.UploadBuffer_EmptyBuffer",
+    "rust": "mooncake-store-master/src/ha/snapshot.rs:cpp_parity_local_file_snapshot_object_store_empty_buffer_upload_errors",
+    "first_divergence": "Rust upload_buffer accepted an empty slice; production now rejects it before publication while the independent string path preserves empty-string behavior.",
+    "repair_commit": "fd7deb8a",
+    "focused_command": "cargo test -p mooncake-store-master --lib ha::snapshot::tests::cpp_parity_local_file_snapshot_object_store_empty_buffer_upload_errors -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
+    "implementation_red_evidence": "/tmp/mooncake-local-snapshot-object-implementation-red.typescript"
   }
 ]
