@@ -2706,10 +2706,10 @@
       "behavior": "A generated snapshot timestamp matches the YYYYMMDD_HHMMSS_mmm format.",
       "boundary": ["master", "ha", "snapshot", "timestamp", "identifier"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.FormatTimestamp_MatchesExpectedFormat"},
-      "reason": "Rust generate_snapshot_id has analogous formatting, but no discoverable Rust test asserts the required timestamp-format regular expression.",
+      "reason": "Rust cpp_parity_snapshot_child_generated_timestamp_matches_expected_format drives production empty-ID publication and asserts the generated 19-byte ID has digits everywhere except the exact YYYYMMDD_HHMMSS_mmm underscore positions.",
       "review": {"oracle": "snapshot_child_process_test.cpp FormatTimestamp_MatchesExpectedFormat and master_snapshot_manager.cpp FormatTimestamp; Rust catalog_snapshot.rs generate_snapshot_id", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "cpp_parity_snapshot_child_generated_timestamp_matches_expected_format"}],
+      "status": "covered"
     },
     {
       "behavior": "A forked snapshot child that exits with code 0 is reaped and recorded as a successful persistence outcome without a fatal failure.",
@@ -2771,19 +2771,19 @@
       "behavior": "Persisting state publishes a descriptor with the requested ID, derived manifest key and object prefix, sequence 0, configured producer view, and creation time bounded by the call.",
       "boundary": ["master", "ha", "snapshot", "catalog", "descriptor", "publication", "metadata"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.PersistState_PublishesSnapshotDescriptor"},
-      "reason": "The Rust catalog test asserts ID, sequence, producer view, and a manifest payload, but not the descriptor object-prefix/path fields or creation time bounded by publication.",
+      "reason": "Rust cpp_parity_snapshot_child_persist_state_publishes_descriptor publishes through the production provider and asserts the requested ID, exact derived paths, sequence zero, view 37, call-bounded creation time, and identical latest catalog descriptor.",
       "review": {"oracle": "snapshot_child_process_test.cpp PersistState_PublishesSnapshotDescriptor and master_snapshot_manager.cpp BuildSnapshotDescriptor/PersistState; Rust test_catalog_snapshot.rs test_catalog_provider_publishes_cpp_compatible_snapshot_payloads", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "cpp_parity_snapshot_child_persist_state_publishes_descriptor"}],
+      "status": "covered"
     },
     {
       "behavior": "Persisting a caller-supplied frozen descriptor publishes every supplied ID, paths, sequence, view, and creation time unchanged.",
       "boundary": ["master", "ha", "snapshot", "catalog", "descriptor", "immutability", "publication"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.PersistState_UsesFrozenSnapshotDescriptor"},
-      "reason": "No discoverable Rust test publishes a caller-supplied frozen descriptor and reloads every fixed field unchanged.",
+      "reason": "Rust cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor publishes a caller-supplied descriptor with fixed sequence, view, and creation time through the production catalog trait and asserts complete equality after reload.",
       "review": {"oracle": "snapshot_child_process_test.cpp PersistState_UsesFrozenSnapshotDescriptor and master_snapshot_manager.cpp PersistState(descriptor); Rust catalog_snapshot.rs publisher", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor"}],
+      "status": "covered"
     },
     {
       "behavior": "A persisted grouped object whose group hashes to a different shard remains reachable by key after restart and can be removed.",

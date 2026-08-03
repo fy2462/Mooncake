@@ -4294,5 +4294,35 @@
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-local-snapshot-object-parity-10x.typescript",
     "implementation_red_evidence": "/tmp/mooncake-local-snapshot-object-implementation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.FormatTimestamp_MatchesExpectedFormat",
+    "rust": "mooncake-store-master/tests/test_catalog_snapshot.rs:cpp_parity_snapshot_child_generated_timestamp_matches_expected_format",
+    "first_divergence": "Rust generated the same timestamp-shaped catalog ID but lacked an exact discoverable format witness at the production publication boundary.",
+    "repair_commit": "f2069f70",
+    "focused_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot cpp_parity_snapshot_child_generated_timestamp_matches_expected_format -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
+    "evidence": "/tmp/mooncake-snapshot-child-descriptor-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-snapshot-child-descriptor-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.PersistState_PublishesSnapshotDescriptor",
+    "rust": "mooncake-store-master/tests/test_catalog_snapshot.rs:cpp_parity_snapshot_child_persist_state_publishes_descriptor",
+    "first_divergence": "Existing Rust publication coverage omitted exact descriptor paths and the call-bounded creation timestamp.",
+    "repair_commit": "f2069f70",
+    "focused_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot cpp_parity_snapshot_child_persist_state_publishes_descriptor -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
+    "evidence": "/tmp/mooncake-snapshot-child-descriptor-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-snapshot-child-descriptor-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.PersistState_UsesFrozenSnapshotDescriptor",
+    "rust": "mooncake-store-master/tests/test_catalog_snapshot.rs:cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor",
+    "first_divergence": "Rust lacked a direct catalog witness proving every caller-frozen descriptor field survives publication and reload unchanged.",
+    "repair_commit": "f2069f70",
+    "focused_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
+    "evidence": "/tmp/mooncake-snapshot-child-descriptor-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-snapshot-child-descriptor-mutation-red.typescript"
   }
 ]
