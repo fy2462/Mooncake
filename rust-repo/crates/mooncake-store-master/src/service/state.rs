@@ -40,6 +40,7 @@ use crate::count_min_sketch::CountMinSketch;
 use crate::kv_event::KvEventPublisher;
 use crate::storage_backend::StorageBackend;
 use crate::tenant_quota::TenantQuotaTable;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use mooncake_store_core::{NoFSegment, ObjectDataType, ReplicaDescriptor, TaskInfo};
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -91,6 +92,37 @@ pub(crate) struct ForegroundRequestGate {
 
 pub(crate) struct ForegroundRequestGuard {
     gate: Arc<ForegroundRequestGate>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TaskLifecycleClock {
+    #[cfg(test)]
+    fixed_now: RwLock<Option<DateTime<Utc>>>,
+}
+
+impl TaskLifecycleClock {
+    pub(crate) fn now(&self) -> DateTime<Utc> {
+        #[cfg(test)]
+        if let Some(now) = *self.fixed_now.read() {
+            return now;
+        }
+        Utc::now()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_for_test(&self, now: DateTime<Utc>) {
+        *self.fixed_now.write() = Some(now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn advance_for_test(&self, delta: chrono::Duration) {
+        let mut fixed_now = self.fixed_now.write();
+        let current = fixed_now
+            .as_ref()
+            .cloned()
+            .expect("test clock must be fixed before advance");
+        *fixed_now = Some(current + delta);
+    }
 }
 
 impl ForegroundRequestGate {
@@ -248,6 +280,8 @@ pub(crate) struct MasterState {
     pub(crate) local_disk_client_sessions: DashMap<Uuid, Uuid>,
     /// 任务队列 / Task queue: task_id → TaskEntry (copy/move tasks).
     pub(crate) tasks: DashMap<Uuid, TaskEntry>,
+    /// Shared wall-clock source for every client-task lifecycle transition.
+    pub(crate) task_clock: TaskLifecycleClock,
     /// 进行中的复制任务 / In-flight replication tasks: key → ReplicationTaskEntry.
     pub(crate) replication_tasks: DashMap<String, ReplicationTaskEntry>,
     /// 进行中的下沉任务 / In-flight offloading tasks: key → OffloadingTaskEntry.
@@ -628,6 +662,7 @@ impl MasterState {
             local_disk_segments: DashMap::new(),
             local_disk_client_sessions: DashMap::new(),
             tasks: DashMap::new(),
+            task_clock: TaskLifecycleClock::default(),
             replication_tasks: DashMap::new(),
             offloading_tasks: DashMap::new(),
             promotion_tasks: DashMap::new(),
@@ -1039,10 +1074,27 @@ pub(crate) struct PromotionTaskEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyMutationCoordinator, MasterState};
+    use super::{KeyMutationCoordinator, MasterState, TaskLifecycleClock};
+    use chrono::{DateTime, Utc};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+
+    #[test]
+    fn task_lifecycle_clock_can_advance_deterministically() {
+        let clock = TaskLifecycleClock::default();
+        let start = DateTime::parse_from_rfc3339("2026-08-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        clock.set_for_test(start);
+        clock.advance_for_test(chrono::Duration::seconds(2));
+        assert_eq!(
+            clock.now(),
+            DateTime::parse_from_rfc3339("2026-08-03T00:00:02Z")
+                .unwrap()
+                .with_timezone(&Utc)
+        );
+    }
 
     #[test]
     fn foreground_request_gate_rejects_new_work_and_drains_inflight_work() {

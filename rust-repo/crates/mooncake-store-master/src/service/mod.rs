@@ -2018,6 +2018,7 @@ impl MasterServiceImpl {
             // ── 任务队列 / task queues ──
             // task_id → TaskEntry：Copy/Move 异步任务（创建 → 分配 worker → 完成）
             tasks: DashMap::new(),
+            task_clock: state::TaskLifecycleClock::default(),
             // key → ReplicationTaskEntry：进行中的副本复制/迁移任务
             replication_tasks: DashMap::new(),
 

@@ -2550,6 +2550,7 @@ mod tests {
             local_disk_segments: DashMap::new(),
             local_disk_client_sessions: DashMap::new(),
             tasks: DashMap::new(),
+            task_clock: crate::service::state::TaskLifecycleClock::default(),
             replication_tasks: DashMap::new(),
             offloading_tasks: DashMap::new(),
             promotion_tasks: DashMap::new(),
