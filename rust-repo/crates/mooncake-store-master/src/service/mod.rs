@@ -2952,6 +2952,227 @@ mod snapshot_restore_tests {
         )
     }
 
+    const SNAPSHOT_CHILD_SEGMENT_BASE: u64 = 0x310000000;
+    const SNAPSHOT_CHILD_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+
+    async fn mount_snapshot_child_segment(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        segment_name: &str,
+    ) {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.into(),
+                size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE,
+                te_endpoint: segment_name.into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn put_snapshot_child_object(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        group_id: Option<&str>,
+        complete: bool,
+    ) {
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    group_ids: group_id.into_iter().map(str::to_owned).collect(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        if complete {
+            MasterService::put_end(
+                service,
+                Request::new(proto::PutEndRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: key.into(),
+                    replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn snapshot_child_replicas(
+        service: &MasterServiceImpl,
+        key: &str,
+    ) -> Vec<proto::ReplicaDescriptor> {
+        MasterService::get_replica_list(
+            service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas
+    }
+
+    async fn snapshot_child_exists(service: &MasterServiceImpl, key: &str) -> bool {
+        MasterService::exist_key(
+            service,
+            Request::new(proto::ExistKeyRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .exists
+    }
+
+    async fn snapshot_child_keys(service: &MasterServiceImpl) -> Vec<String> {
+        let mut keys = MasterService::get_all_keys(
+            service,
+            Request::new(proto::GetAllKeysRequest {
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .keys;
+        keys.sort();
+        keys
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_child_restore_rebuilds_grouped_object_routing() {
+        const KEY: &str = "snapshot_grouped_route_key";
+        const GROUP_ID: &str = "snapshot-group-on-distinct-route";
+        const SEGMENT_NAME: &str = "grouped_snapshot_segment";
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, SEGMENT_NAME).await;
+        put_snapshot_child_object(&source, client_id, KEY, Some(GROUP_ID), true).await;
+        assert_eq!(snapshot_child_replicas(&source, KEY).await.len(), 1);
+
+        publish_service_snapshot(&provider, &source, "20240701_130000_000", 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let grouped = loaded
+            .objects
+            .iter()
+            .find(|(_, object)| object.user_key == KEY)
+            .expect("grouped object must survive production catalog decoding");
+        assert_eq!(grouped.1.group_id, GROUP_ID);
+
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        mount_snapshot_child_segment(&restored, client_id, SEGMENT_NAME).await;
+        assert_eq!(snapshot_child_replicas(&restored, KEY).await.len(), 1);
+
+        MasterService::remove(
+            &restored,
+            Request::new(proto::RemoveRequest {
+                key: KEY.into(),
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!snapshot_child_exists(&restored, KEY).await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_child_restore_falls_back_when_latest_metadata_is_corrupt() {
+        const OLD_KEY: &str = "restore_fallback_key_1";
+        const NEW_KEY: &str = "restore_fallback_key_2";
+        const SEGMENT_NAME: &str = "restore_fallback_segment";
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, SEGMENT_NAME).await;
+
+        put_snapshot_child_object(&source, client_id, OLD_KEY, None, true).await;
+        assert_eq!(snapshot_child_replicas(&source, OLD_KEY).await.len(), 1);
+        let older = publish_service_snapshot(&provider, &source, "20240702_120000_000", 1);
+
+        put_snapshot_child_object(&source, client_id, NEW_KEY, None, true).await;
+        assert_eq!(snapshot_child_replicas(&source, NEW_KEY).await.len(), 1);
+        let newest = publish_service_snapshot(&provider, &source, "20240702_120500_000", 2);
+        object_store
+            .upload_buffer(
+                &format!("{}metadata", newest.object_prefix),
+                b"corrupted-snapshot-payload",
+            )
+            .unwrap();
+
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.snapshot_id, older.snapshot_id);
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        mount_snapshot_child_segment(&restored, client_id, SEGMENT_NAME).await;
+
+        assert_eq!(snapshot_child_replicas(&restored, OLD_KEY).await.len(), 1);
+        assert_eq!(snapshot_child_keys(&restored).await, vec![OLD_KEY]);
+        assert!(!snapshot_child_exists(&restored, NEW_KEY).await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_child_restore_cleans_expired_lease() {
+        const EXPIRED_KEY: &str = "expired_lease_object";
+        const VALID_KEY: &str = "normal_lease_object";
+        const SEGMENT_NAME: &str = "expired_lease_restore_segment";
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, SEGMENT_NAME).await;
+        put_snapshot_child_object(&source, client_id, EXPIRED_KEY, None, true).await;
+        put_snapshot_child_object(&source, client_id, VALID_KEY, None, true).await;
+        assert_eq!(snapshot_child_replicas(&source, VALID_KEY).await.len(), 1);
+
+        publish_service_snapshot(&provider, &source, "20240701_120000_001", 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        mount_snapshot_child_segment(&restored, client_id, SEGMENT_NAME).await;
+
+        assert_eq!(snapshot_child_replicas(&restored, VALID_KEY).await.len(), 1);
+        assert_eq!(snapshot_child_keys(&restored).await, vec![VALID_KEY]);
+        assert!(!snapshot_child_exists(&restored, EXPIRED_KEY).await);
+    }
+
     fn invalid_integer_task_id_payload() -> Vec<u8> {
         let task = Value::Array(vec![
             Value::from(12345_i32),
