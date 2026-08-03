@@ -849,6 +849,164 @@ fn test_ssd_free_ratio_first_uses_owner_ssd_metrics() {
     assert_eq!(repls[1].segment_name, "some_free_ssd:1");
 }
 
+fn allocation_workload_allocator(
+    strategy: AllocationStrategy,
+    prefix: &str,
+    segment_count: usize,
+    segment_size: u64,
+) -> (SegmentAllocator, Vec<Uuid>) {
+    let mut allocator = SegmentAllocator::new().with_strategy(strategy);
+    let mut owners = Vec::with_capacity(segment_count);
+    for index in 0..segment_count {
+        let owner = Uuid::from_u128(index as u128 + 1);
+        allocator.add_segment(
+            make_seg(&format!("{prefix}-{index}:1"), segment_size),
+            0,
+            owner,
+        );
+        owners.push(owner);
+    }
+    (allocator, owners)
+}
+
+#[test]
+fn cpp_parity_allocation_strategy_random_and_free_ratio_complete_512_by_5000_workloads() {
+    const MIB: u64 = 1024 * 1024;
+    const SEGMENT_COUNT: usize = 512;
+    const SEGMENT_SIZE: u64 = 64 * MIB;
+    const ALLOCATION_COUNT: usize = 5_000;
+    const ALLOCATION_SIZE: u64 = 4 * MIB;
+    assert_eq!(SEGMENT_COUNT, 512);
+    assert_eq!(SEGMENT_SIZE, 64 * MIB);
+    assert_eq!(ALLOCATION_COUNT, 5_000);
+    assert_eq!(ALLOCATION_SIZE, 4 * MIB);
+
+    for strategy in [
+        AllocationStrategy::Random,
+        AllocationStrategy::FreeRatioFirst,
+    ] {
+        let (mut allocator, owners) = allocation_workload_allocator(
+            strategy,
+            "allocation-performance",
+            SEGMENT_COUNT,
+            SEGMENT_SIZE,
+        );
+        assert_eq!(owners.len(), 512);
+        let mut retained = Vec::with_capacity(ALLOCATION_COUNT);
+        let mut completed = 0;
+        let started_at = std::time::Instant::now();
+        for index in 0..ALLOCATION_COUNT {
+            let replicas = allocator
+                .allocate_checked(
+                    &format!("allocation-performance-{index}"),
+                    ALLOCATION_SIZE,
+                    1,
+                    &ReplicateConfig::default(),
+                )
+                .unwrap();
+            assert_eq!(replicas.len(), 1);
+            assert_eq!(replicas[0].size, 4 * MIB);
+            assert_eq!(replicas[0].replica_type, ReplicaType::Memory);
+            retained.push(replicas);
+            completed += 1;
+        }
+        let elapsed = started_at.elapsed();
+        assert_eq!(completed, 5_000);
+        assert_eq!(retained.len(), 5_000);
+        eprintln!(
+            "allocation strategy {strategy:?}: {completed} allocations across {SEGMENT_COUNT} segments in {} us",
+            elapsed.as_micros()
+        );
+    }
+}
+
+#[test]
+fn cpp_parity_allocation_strategy_ssd_and_random_complete_exact_warmup_and_measured_workloads() {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const SEGMENT_COUNT: usize = 64;
+    const SEGMENT_SIZE: u64 = 8 * MIB;
+    const ALLOCATION_SIZE: u64 = 128 * KIB;
+    const WARMUP_COUNT: usize = 200;
+    const MEASURED_COUNT: usize = 2_000;
+    assert_eq!(SEGMENT_COUNT, 64);
+    assert_eq!(SEGMENT_SIZE, 8 * MIB);
+    assert_eq!(ALLOCATION_SIZE, 128 * KIB);
+    assert_eq!(WARMUP_COUNT, 200);
+    assert_eq!(MEASURED_COUNT, 2_000);
+
+    for strategy in [
+        AllocationStrategy::Random,
+        AllocationStrategy::SsdFreeRatioFirst,
+    ] {
+        let (mut allocator, owners) = allocation_workload_allocator(
+            strategy,
+            "allocation-ssd-performance",
+            SEGMENT_COUNT,
+            SEGMENT_SIZE,
+        );
+        assert_eq!(owners.len(), 64);
+        let metrics = owners
+            .into_iter()
+            .enumerate()
+            .map(|(index, owner)| {
+                (
+                    owner,
+                    SsdUsageMetrics {
+                        total_capacity_bytes: 1_000 * MIB,
+                        used_bytes: (100 + index as u64 * 800 / SEGMENT_COUNT as u64) * MIB,
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let caller = Some(Uuid::from_u128(u128::MAX));
+        let mut warmup_completed = 0;
+        for index in 0..WARMUP_COUNT {
+            let replicas = allocator.allocate_for_client_with_ssd_metrics(
+                &format!("allocation-ssd-warmup-{index}"),
+                caller,
+                ALLOCATION_SIZE,
+                1,
+                &ReplicateConfig::default(),
+                &metrics,
+            );
+            assert_eq!(replicas.len(), 1);
+            assert_eq!(replicas[0].size, 128 * KIB);
+            assert_eq!(replicas[0].replica_type, ReplicaType::Memory);
+            allocator.release(&replicas).unwrap();
+            warmup_completed += 1;
+        }
+        assert_eq!(warmup_completed, 200);
+
+        let mut retained = Vec::with_capacity(MEASURED_COUNT);
+        let mut measured_completed = 0;
+        let started_at = std::time::Instant::now();
+        for index in 0..MEASURED_COUNT {
+            let replicas = allocator.allocate_for_client_with_ssd_metrics(
+                &format!("allocation-ssd-measured-{index}"),
+                caller,
+                ALLOCATION_SIZE,
+                1,
+                &ReplicateConfig::default(),
+                &metrics,
+            );
+            assert_eq!(replicas.len(), 1);
+            assert_eq!(replicas[0].size, 128 * KIB);
+            assert_eq!(replicas[0].replica_type, ReplicaType::Memory);
+            retained.push(replicas);
+            measured_completed += 1;
+        }
+        let elapsed = started_at.elapsed();
+        assert_eq!(measured_completed, 2_000);
+        assert_eq!(retained.len(), 2_000);
+        eprintln!(
+            "allocation strategy {strategy:?}: {warmup_completed} warmup and {measured_completed} measured allocations in {} us ({:.3} us/op)",
+            elapsed.as_micros(),
+            elapsed.as_secs_f64() * 1_000_000.0 / MEASURED_COUNT as f64
+        );
+    }
+}
+
 #[test]
 fn test_replicas_on_different_segments() {
     let mut a = SegmentAllocator::new();
