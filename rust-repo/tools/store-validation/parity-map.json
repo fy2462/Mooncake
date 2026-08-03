@@ -4143,10 +4143,12 @@
       "behavior": "With max_finished=5, seven sequentially submitted, popped, and successfully completed ReplicaCopy tasks are pruned so the first two IDs are absent and the last five remain.",
       "boundary": ["master", "task-lifecycle", "finished-retention", "reaper"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.PruningLogic"},
-      "reason": "test_drain_job.rs only covers a protected Drain task at max_finished=0; it does not prove generic oldest-first retention of exactly five completed tasks. Production prerequisite: provide one controllable production task-lifecycle clock shared by create, fetch, complete, and reaper so completion timestamps are deterministic. Add cpp_parity_finished_task_pruning_retains_last_five to mooncake-store-master/tests/test_master_tasks.rs; configure max_total_finished_tasks=5, mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd to establish exactly seven distinct source keys on seg1, create and fetch exactly seven corresponding copy tasks to seg2, advance the shared clock before each SUCCESS completion to establish strict completion order, invoke the existing single-pass reaper seam once, QueryTask the first two and assert NotFound, then QueryTask each final five and assert present. Do not use sleep, assert task messages or payloads, inspect private maps, or add cleanup.",
+      "reason": "cpp_parity_pruning_retains_latest_five_finished_tasks drives seven real Copy tasks through public mount, PutStart/PutEnd, CreateCopyTask, FetchTasks, and successful completion RPCs. A crate-private test clock advances between terminal transitions; the production reaper then makes QueryTask return NotFound for exactly the first two IDs while the last five remain SUCCESS. It uses no sleeps, private-map assertions, payload claims, or cleanup substitutions.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:74-109 PruningLogic; Rust test_drain_job.rs finished-task reaper coverage and service/background_ops/background_reaper.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/src/service/grpc_tasks.rs", "test": "cpp_parity_pruning_retains_latest_five_finished_tasks"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "One ReplicaCopy assigned to each of two clients is popped only by its own client; each pop(10) returns exactly its own ID and a later client1 pop is empty.",
@@ -4185,19 +4187,23 @@
       "behavior": "With max_pending=1 and a one-second pending timeout, expired t1 remains queryable as FAILED with pending timeout, is not popped, and frees admission so a new t2 submission succeeds.",
       "boundary": ["master", "task-timeout", "pending-limit", "task-query", "reaper"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.PruneExpiredTasksPendingTimeout"},
-      "reason": "test_create_and_query_task_returns_real_state observes the expired FAILED status and exact message, but never verifies FetchTasks exclusion or reuse of a saturated pending slot. Production prerequisite: inject a deterministic clock into the production task reaper. Add cpp_parity_pending_timeout_frees_pending_slot to mooncake-store-master/tests/test_master_tasks.rs; configure max_total_pending_tasks=1 and pending_task_timeout=1 second, mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd for distinct t1 and t2 source keys, submit t1 to seg2, advance the deterministic clock beyond expiry and run the reaper, QueryTask(t1) and assert FAILED with pending timeout, FetchTasks for that source-owner client and assert empty, then submit t2 to seg2 and assert success. Do not use sleep, assert payload text or retries, inspect private maps, perform transfer I/O, or add cleanup.",
+      "reason": "cpp_parity_pending_timeout_frees_pending_slot saturates the one-task pending limit through real task RPCs, advances the shared task clock beyond the strict timeout, and invokes the production reaper. Public QueryTask observes FAILED with the exact pending timeout message, FetchTasks is empty, and a second CreateCopyTask succeeds, proving the pending slot was released without deleting the failed record.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:191-225 PruneExpiredTasksPendingTimeout; Rust test_master_tasks.rs test_create_and_query_task_returns_real_state and service/background_ops/background_reaper.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/src/service/grpc_tasks.rs", "test": "cpp_parity_pending_timeout_frees_pending_slot"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With max_processing=1 and a one-second processing timeout, t1 is first popped as PROCESSING, later remains queryable as FAILED with processing timeout, and the next pop returns exactly t2 as PROCESSING.",
       "boundary": ["master", "task-timeout", "processing-limit", "task-claim", "reaper"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.PruneExpiredTasksProcessingTimeoutFreesSlot"},
-      "reason": "No discoverable Rust test configures processing_task_timeout or proves its terminal result and slot handoff; the reaper and claim implementations are source-only evidence. Production prerequisite: inject a deterministic clock into the production task reaper. Add cpp_parity_processing_timeout_frees_processing_slot to mooncake-store-master/tests/test_master_tasks.rs; configure max_total_processing_tasks=1 and processing_task_timeout=1 second, mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd for distinct t1 and t2 source keys, submit t1 then t2 to seg2 for that source-owner client, FetchTasks(batch_size=10) and assert only t1, QueryTask(t1) and assert PROCESSING, advance deterministic time and run the reaper, QueryTask(t1) and assert FAILED with processing timeout, then FetchTasks(batch_size=10) and assert only t2 and QueryTask(t2) PROCESSING. Do not use sleep, assert payloads or retries, inspect private maps, perform transfer I/O, or add cleanup.",
+      "reason": "cpp_parity_processing_timeout_frees_processing_slot creates two strictly ordered real Copy tasks under a one-task processing cap, proves the first fetch returns only t1, advances the shared clock, and invokes the production reaper. Public QueryTask observes t1 FAILED with processing timeout, then the next FetchTasks returns exactly t2 and QueryTask observes it PROCESSING, proving exact slot handoff without sleeps or private-map assertions.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:227-269 PruneExpiredTasksProcessingTimeoutFreesSlot; Rust test_master_tasks.rs and service/background_ops/background_reaper.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/src/service/grpc_tasks.rs", "test": "cpp_parity_processing_timeout_frees_processing_slot"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Four task snapshots in Copy/Copy/Move/Move order across SUCCESS/FAILED/PENDING/PROCESSING preserve exact IDs, types, statuses, nonempty payloads, assigned clients, and created/update timestamps within one second after a production catalog snapshot round trip.",

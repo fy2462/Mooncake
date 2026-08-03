@@ -4124,5 +4124,35 @@
     "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_empty_snapshot_replaces_live_task_state -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.PruningLogic",
+    "rust": "mooncake-store-master/src/service/grpc_tasks.rs:cpp_parity_pruning_retains_latest_five_finished_tasks",
+    "first_divergence": "Rust's production reaper implemented finished-task retention, but independent wall-clock reads left completion ordering unsuitable for an exact no-sleep oldest-first witness.",
+    "repair_commit": "c291526b",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::grpc_tasks::task_lifecycle_parity_tests::cpp_parity_pruning_retains_latest_five_finished_tasks -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-task-manager-clock-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-task-manager-clock-mutation-red.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.PruneExpiredTasksPendingTimeout",
+    "rust": "mooncake-store-master/src/service/grpc_tasks.rs:cpp_parity_pending_timeout_frees_pending_slot",
+    "first_divergence": "Adjacent Rust timeout coverage observed FAILED but did not prove FetchTasks exclusion and reuse of a saturated one-task pending slot, and the reaper could not be advanced deterministically.",
+    "repair_commit": "c291526b",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::grpc_tasks::task_lifecycle_parity_tests::cpp_parity_pending_timeout_frees_pending_slot -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-task-manager-clock-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-task-manager-clock-mutation-red.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.PruneExpiredTasksProcessingTimeoutFreesSlot",
+    "rust": "mooncake-store-master/src/service/grpc_tasks.rs:cpp_parity_processing_timeout_frees_processing_slot",
+    "first_divergence": "Rust had no discoverable production-boundary witness for a processing timeout preserving t1 as FAILED while releasing the sole processing slot to exact task t2.",
+    "repair_commit": "c291526b",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::grpc_tasks::task_lifecycle_parity_tests::cpp_parity_processing_timeout_frees_processing_slot -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master",
+    "evidence": "/tmp/mooncake-task-manager-clock-parity.typescript",
+    "mutation_evidence": "/tmp/mooncake-task-manager-clock-mutation-red.typescript"
   }
 ]
