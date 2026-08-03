@@ -163,6 +163,10 @@ pub struct LocalFileSnapshotObjectStore {
 
 impl LocalFileSnapshotObjectStore {
     pub fn new(base_path: PathBuf) -> Self {
+        assert!(
+            !base_path.as_os_str().is_empty(),
+            "LocalFileSnapshotObjectStore base path must not be empty"
+        );
         Self { base_path }
     }
 
@@ -189,10 +193,8 @@ impl LocalFileSnapshotObjectStore {
         }
         Ok(())
     }
-}
 
-impl SnapshotObjectStore for LocalFileSnapshotObjectStore {
-    fn upload_buffer(&self, key: &str, buffer: &[u8]) -> Result<(), HaError> {
+    fn upload_bytes(&self, key: &str, bytes: &[u8]) -> Result<(), HaError> {
         let path = self.key_path(key)?;
         let parent = path.parent().ok_or_else(|| {
             HaError::Snapshot(format!("snapshot object has no parent directory: {key}"))
@@ -209,7 +211,7 @@ impl SnapshotObjectStore for LocalFileSnapshotObjectStore {
         let result = (|| {
             let mut file = std::fs::File::create(&tmp_path)
                 .map_err(|e| HaError::Snapshot(format!("create snapshot object: {e}")))?;
-            file.write_all(buffer)
+            file.write_all(bytes)
                 .map_err(|e| HaError::Snapshot(format!("write snapshot object: {e}")))?;
             file.sync_all()
                 .map_err(|e| HaError::Snapshot(format!("sync snapshot object: {e}")))?;
@@ -222,6 +224,21 @@ impl SnapshotObjectStore for LocalFileSnapshotObjectStore {
             let _ = std::fs::remove_file(&tmp_path);
         }
         result
+    }
+}
+
+impl SnapshotObjectStore for LocalFileSnapshotObjectStore {
+    fn upload_buffer(&self, key: &str, buffer: &[u8]) -> Result<(), HaError> {
+        if buffer.is_empty() {
+            return Err(HaError::InvalidParams(
+                "snapshot object buffer must not be empty".to_string(),
+            ));
+        }
+        self.upload_bytes(key, buffer)
+    }
+
+    fn upload_string(&self, key: &str, data: &str) -> Result<(), HaError> {
+        self.upload_bytes(key, data.as_bytes())
     }
 
     fn download_buffer(&self, key: &str) -> Result<Vec<u8>, HaError> {
@@ -860,6 +877,130 @@ fn parse_response_checksum_validation(value: Option<&str>) -> Option<ResponseChe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_buffer_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+        let expected = vec![0, 1, 2, 128, 254, 255];
+
+        store.upload_buffer("test/buf", &expected).unwrap();
+
+        assert_eq!(store.download_buffer("test/buf").unwrap(), expected);
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_string_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+        let expected = "hello mooncake snapshot";
+
+        store.upload_string("test/str", expected).unwrap();
+
+        assert_eq!(store.download_string("test/str").unwrap(), expected);
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_lists_exact_prefix_cardinality() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+        store.upload_string("snap/20240101/metadata", "m").unwrap();
+        store.upload_string("snap/20240101/segments", "s").unwrap();
+        store.upload_string("snap/20240102/metadata", "m2").unwrap();
+
+        assert_eq!(
+            store.list_objects_with_prefix("snap/20240101/").unwrap(),
+            vec![
+                "snap/20240101/metadata".to_string(),
+                "snap/20240101/segments".to_string(),
+            ]
+        );
+        assert_eq!(
+            store.list_objects_with_prefix("snap/").unwrap(),
+            vec![
+                "snap/20240101/metadata".to_string(),
+                "snap/20240101/segments".to_string(),
+                "snap/20240102/metadata".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_delete_prefix_removes_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+        store.upload_string("snap/20240101/metadata", "m").unwrap();
+        store.upload_string("snap/20240101/segments", "s").unwrap();
+
+        store.delete_objects_with_prefix("snap/20240101/").unwrap();
+
+        let error = store.download_string("snap/20240101/metadata").unwrap_err();
+        assert!(matches!(error, HaError::Snapshot(_)));
+        assert!(store.is_not_found_error(&error.to_string()));
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_connection_info_contains_base_path() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+
+        assert!(
+            store
+                .connection_info()
+                .contains(&root.path().display().to_string())
+        );
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_deep_upload_creates_subdirectories() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+
+        store.upload_buffer("a/b/c/deep_file", &[42]).unwrap();
+
+        assert!(root.path().join("a/b/c").is_dir());
+        assert_eq!(store.download_buffer("a/b/c/deep_file").unwrap(), vec![42]);
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_empty_path_panics() {
+        let result = std::panic::catch_unwind(|| LocalFileSnapshotObjectStore::new(PathBuf::new()));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_missing_buffer_download_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+
+        let error = store.download_buffer("no/such/key").unwrap_err();
+
+        assert!(matches!(error, HaError::Snapshot(_)));
+        assert!(store.is_not_found_error(&error.to_string()));
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_missing_string_download_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+
+        let error = store.download_string("no/such/key").unwrap_err();
+
+        assert!(matches!(error, HaError::Snapshot(_)));
+        assert!(store.is_not_found_error(&error.to_string()));
+    }
+
+    #[test]
+    fn cpp_parity_local_file_snapshot_object_store_empty_buffer_upload_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let store = LocalFileSnapshotObjectStore::new(root.path().to_path_buf());
+
+        let error = store.upload_buffer("test/empty", &[]).unwrap_err();
+
+        assert!(matches!(error, HaError::InvalidParams(_)));
+        assert!(store.download_buffer("test/empty").is_err());
+    }
 
     struct PayloadDeleteFailureStore {
         inner: LocalFileSnapshotObjectStore,
