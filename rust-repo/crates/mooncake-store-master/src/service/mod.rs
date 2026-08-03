@@ -2949,6 +2949,123 @@ mod snapshot_restore_tests {
         }
     }
 
+    #[tokio::test]
+    async fn cpp_parity_empty_snapshot_replaces_live_task_state() {
+        let service = MasterServiceImpl::default();
+        let source_client = Uuid::new_v4();
+        let target_client = Uuid::new_v4();
+        for (client_id, segment_name) in [(source_client, "seg1"), (target_client, "seg2")] {
+            MasterService::mount_segment(
+                &service,
+                Request::new(proto::MountSegmentRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    segment_name: segment_name.into(),
+                    size: 4096,
+                    base_addr: 0x100000000,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                    host_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(source_client)),
+                key: "reset-key".into(),
+                slice_length: 128,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    nof_replica_num: 0,
+                    with_soft_pin: false,
+                    with_hard_pin: false,
+                    preferred_segment: "seg1".into(),
+                    prefer_alloc_in_same_node: false,
+                    preferred_segments: Vec::new(),
+                    preferred_nof_segments: Vec::new(),
+                    data_type: proto::ObjectDataType::Unknown as i32,
+                    group_ids: Vec::new(),
+                    host_id: String::new(),
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(source_client)),
+                key: "reset-key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let task_id = MasterService::create_copy_task(
+            &service,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "reset-key".into(),
+                targets: vec!["seg2".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        let pending = MasterService::query_task(
+            &service,
+            Request::new(proto::QueryTaskRequest {
+                task_id: Some(task_id.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(pending.status, proto::TaskStatus::TaskPending as i32);
+
+        restore_loaded_snapshot_state(
+            &service.state,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+        let query_error = MasterService::query_task(
+            &service,
+            Request::new(proto::QueryTaskRequest {
+                task_id: Some(task_id.clone()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(query_error.code(), tonic::Code::NotFound);
+
+        let fetched = MasterService::fetch_tasks(
+            &service,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(source_client)),
+                batch_size: 10,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(fetched.tasks.is_empty());
+    }
+
     #[test]
     fn invalid_snapshot_task_does_not_replace_live_state() {
         let state = MasterState::empty();

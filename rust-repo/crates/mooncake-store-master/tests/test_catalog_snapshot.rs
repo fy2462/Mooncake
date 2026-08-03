@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use mooncake_store_core::{
     ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, Segment, TaskInfo, TaskStatus,
     TaskType,
@@ -50,6 +50,107 @@ fn empty_loaded_snapshot(snapshot_id: &str, snapshot_sequence_id: u64) -> Loaded
         delayed_replica_releases: Vec::new(),
         local_disk_segments: Vec::new(),
     }
+}
+
+#[test]
+fn cpp_parity_task_snapshot_round_trip_preserves_four_states() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    let client1 = Uuid::new_v4();
+    let client2 = Uuid::new_v4();
+    let created_at = Utc.with_ymd_and_hms(2026, 8, 3, 2, 0, 0).unwrap();
+    let updated_at = Utc.with_ymd_and_hms(2026, 8, 3, 2, 0, 1).unwrap();
+    let definitions = [
+        (
+            TaskType::ReplicaCopy,
+            TaskStatus::Success,
+            client1,
+            "copy-success",
+            r#"{"tenant_id":"default","key":"copy-success","source":"seg1","targets":["seg2"]}"#,
+        ),
+        (
+            TaskType::ReplicaCopy,
+            TaskStatus::Failed,
+            client2,
+            "copy-failed",
+            r#"{"tenant_id":"default","key":"copy-failed","source":"seg1","targets":["seg2"]}"#,
+        ),
+        (
+            TaskType::ReplicaMove,
+            TaskStatus::Pending,
+            client1,
+            "move-pending",
+            r#"{"tenant_id":"default","key":"move-pending","source":"seg1","target":"seg2"}"#,
+        ),
+        (
+            TaskType::ReplicaMove,
+            TaskStatus::Processing,
+            client2,
+            "move-processing",
+            r#"{"tenant_id":"default","key":"move-processing","source":"seg1","target":"seg2"}"#,
+        ),
+    ];
+    let tasks = definitions
+        .into_iter()
+        .map(
+            |(task_type, status, assigned_client, key, payload)| TaskEntry {
+                info: TaskInfo {
+                    id: Uuid::new_v4(),
+                    task_type,
+                    status,
+                    created_at,
+                    last_updated_at: updated_at,
+                    assigned_client: Some(assigned_client),
+                    message: String::new(),
+                },
+                key: TenantId::default().make_scoped_key(key),
+                payload: payload.into(),
+                max_retry_attempts: 3,
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut snapshot = empty_loaded_snapshot("20260803_020001_001", 81);
+    snapshot.tasks = tasks.clone();
+
+    provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(loaded.tasks.len(), 4);
+    for (original, restored) in tasks.iter().zip(&loaded.tasks) {
+        assert_eq!(restored.info.id, original.info.id);
+        assert_eq!(restored.info.task_type, original.info.task_type);
+        assert_eq!(restored.info.status, original.info.status);
+        assert_eq!(restored.info.assigned_client, original.info.assigned_client);
+        assert!(!restored.payload.is_empty());
+        assert!(
+            (restored.info.created_at - original.info.created_at)
+                .num_seconds()
+                .abs()
+                <= 1
+        );
+        assert!(
+            (restored.info.last_updated_at - original.info.last_updated_at)
+                .num_seconds()
+                .abs()
+                <= 1
+        );
+    }
+}
+
+#[test]
+fn cpp_parity_empty_task_catalog_round_trip() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    let snapshot = empty_loaded_snapshot("20260803_020002_002", 82);
+
+    provider.publish_loaded_snapshot(&snapshot, 9).unwrap();
+    let loaded = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(loaded.tasks.len(), 0);
 }
 
 // These helpers synthesize audited C++ wire shapes with Rust encoders. They
