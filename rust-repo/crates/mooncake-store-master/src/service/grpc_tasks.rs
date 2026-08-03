@@ -159,7 +159,7 @@ impl MasterServiceImpl {
         // Create and store the task entry.
         // 创建并存储任务条目。
         let task_id = unique_task_id(&self.state);
-        let now = Utc::now();
+        let now = self.state.task_clock.now();
         self.state.tasks.insert(
             task_id,
             TaskEntry {
@@ -300,7 +300,7 @@ impl MasterServiceImpl {
 
         // Create and store the move task. / 创建并存储移动任务。
         let task_id = unique_task_id(&self.state);
-        let now = Utc::now();
+        let now = self.state.task_clock.now();
         self.state.tasks.insert(
             task_id,
             TaskEntry {
@@ -418,7 +418,7 @@ impl MasterServiceImpl {
         for (task_id, _) in pending.into_iter().take(batch_size) {
             if let Some(mut task) = self.state.tasks.get_mut(&task_id) {
                 task.info.status = TaskStatus::Processing;
-                task.info.last_updated_at = Utc::now();
+                task.info.last_updated_at = self.state.task_clock.now();
                 claimed_ids.push(task_id);
                 tasks.push(proto::TaskAssignment {
                     id: Some(uuid_to_proto(task.info.id)),
@@ -515,7 +515,7 @@ impl MasterServiceImpl {
         }
         task.info.status = status;
         task.info.message = task_req.message.clone();
-        task.info.last_updated_at = Utc::now();
+        task.info.last_updated_at = self.state.task_clock.now();
         drop(task);
         self.state
             .persist_task_state_batch_or_fence(&[task_id], &[], "complete_task")
@@ -523,5 +523,288 @@ impl MasterServiceImpl {
                 Status::unavailable(format!("failed to persist task completion: {error}"))
             })?;
         Ok(Response::new(proto::MarkTaskToCompleteResponse {}))
+    }
+}
+
+#[cfg(test)]
+mod task_lifecycle_parity_tests {
+    use super::*;
+    use chrono::DateTime;
+
+    fn fixed_task_time() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-08-03T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    async fn mount_task_segment(service: &MasterServiceImpl, client_id: Uuid, segment_name: &str) {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.into(),
+                size: 4096,
+                base_addr: 0x100000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn commit_task_source_object(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        source_segment: &str,
+    ) {
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: 128,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    nof_replica_num: 0,
+                    with_soft_pin: false,
+                    with_hard_pin: false,
+                    preferred_segment: source_segment.into(),
+                    prefer_alloc_in_same_node: false,
+                    preferred_segments: Vec::new(),
+                    preferred_nof_segments: Vec::new(),
+                    data_type: proto::ObjectDataType::Unknown as i32,
+                    group_ids: Vec::new(),
+                    host_id: String::new(),
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn create_task_copy(
+        service: &MasterServiceImpl,
+        key: &str,
+        target_segment: &str,
+    ) -> proto::Uuid {
+        MasterService::create_copy_task(
+            service,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: key.into(),
+                targets: vec![target_segment.into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap()
+    }
+
+    async fn query_task(
+        service: &MasterServiceImpl,
+        task_id: proto::Uuid,
+    ) -> proto::QueryTaskResponse {
+        MasterService::query_task(
+            service,
+            Request::new(proto::QueryTaskRequest {
+                task_id: Some(task_id),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    async fn fetch_tasks(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        batch_size: u32,
+    ) -> proto::FetchTasksResponse {
+        MasterService::fetch_tasks(
+            service,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+    }
+
+    async fn complete_task(service: &MasterServiceImpl, client_id: Uuid, task_id: proto::Uuid) {
+        MasterService::mark_task_to_complete(
+            service,
+            Request::new(proto::MarkTaskToCompleteRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                request: Some(proto::TaskCompleteRequest {
+                    id: Some(task_id),
+                    status: proto::TaskStatus::TaskSuccess as i32,
+                    message: "Done".into(),
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_pruning_retains_latest_five_finished_tasks() {
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            max_total_finished_tasks: 5,
+            reaper_interval: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        service.state.task_clock.set_for_test(fixed_task_time());
+        let source_client = Uuid::new_v4();
+        let target_client = Uuid::new_v4();
+        mount_task_segment(&service, source_client, "prune-source").await;
+        mount_task_segment(&service, target_client, "prune-target").await;
+
+        let mut task_ids = Vec::new();
+        for index in 0..7 {
+            let key = format!("prune-key-{index}");
+            commit_task_source_object(&service, source_client, &key, "prune-source").await;
+            let task_id = create_task_copy(&service, &key, "prune-target").await;
+            let fetched = fetch_tasks(&service, source_client, 1).await;
+            assert_eq!(fetched.tasks.len(), 1);
+            assert_eq!(fetched.tasks[0].id.as_ref(), Some(&task_id));
+            complete_task(&service, source_client, task_id.clone()).await;
+            task_ids.push(task_id);
+            service
+                .state
+                .task_clock
+                .advance_for_test(chrono::Duration::seconds(1));
+        }
+
+        service.reap_expired_background_tasks_for_test();
+
+        for task_id in &task_ids[..2] {
+            let error = MasterService::query_task(
+                &service,
+                Request::new(proto::QueryTaskRequest {
+                    task_id: Some(task_id.clone()),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::NotFound);
+        }
+        for task_id in &task_ids[2..] {
+            let retained = query_task(&service, task_id.clone()).await;
+            assert_eq!(retained.status, proto::TaskStatus::TaskSuccess as i32);
+        }
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_pending_timeout_frees_pending_slot() {
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            max_total_finished_tasks: 10_000,
+            max_total_pending_tasks: 1,
+            pending_task_timeout: Duration::from_secs(1),
+            reaper_interval: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        service.state.task_clock.set_for_test(fixed_task_time());
+        let source_client = Uuid::new_v4();
+        let target_client = Uuid::new_v4();
+        mount_task_segment(&service, source_client, "pending-source").await;
+        mount_task_segment(&service, target_client, "pending-target").await;
+        commit_task_source_object(&service, source_client, "pending-key-1", "pending-source").await;
+        commit_task_source_object(&service, source_client, "pending-key-2", "pending-source").await;
+
+        let first = create_task_copy(&service, "pending-key-1", "pending-target").await;
+        service
+            .state
+            .task_clock
+            .advance_for_test(chrono::Duration::seconds(2));
+        service.reap_expired_background_tasks_for_test();
+
+        let failed = query_task(&service, first).await;
+        assert_eq!(failed.status, proto::TaskStatus::TaskFailed as i32);
+        assert_eq!(failed.message, "pending timeout");
+        assert!(
+            fetch_tasks(&service, source_client, 10)
+                .await
+                .tasks
+                .is_empty()
+        );
+
+        let second = create_task_copy(&service, "pending-key-2", "pending-target").await;
+        assert_ne!(failed.id, Some(second));
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_processing_timeout_frees_processing_slot() {
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            max_total_finished_tasks: 10_000,
+            max_total_pending_tasks: 10_000,
+            max_total_processing_tasks: 1,
+            processing_task_timeout: Duration::from_secs(1),
+            reaper_interval: Duration::from_secs(3600),
+            ..Default::default()
+        });
+        service.state.task_clock.set_for_test(fixed_task_time());
+        let source_client = Uuid::new_v4();
+        let target_client = Uuid::new_v4();
+        mount_task_segment(&service, source_client, "processing-source").await;
+        mount_task_segment(&service, target_client, "processing-target").await;
+        commit_task_source_object(
+            &service,
+            source_client,
+            "processing-key-1",
+            "processing-source",
+        )
+        .await;
+        commit_task_source_object(
+            &service,
+            source_client,
+            "processing-key-2",
+            "processing-source",
+        )
+        .await;
+
+        let first = create_task_copy(&service, "processing-key-1", "processing-target").await;
+        service
+            .state
+            .task_clock
+            .advance_for_test(chrono::Duration::seconds(1));
+        let second = create_task_copy(&service, "processing-key-2", "processing-target").await;
+
+        let first_fetch = fetch_tasks(&service, source_client, 10).await;
+        assert_eq!(first_fetch.tasks.len(), 1);
+        assert_eq!(first_fetch.tasks[0].id.as_ref(), Some(&first));
+        service
+            .state
+            .task_clock
+            .advance_for_test(chrono::Duration::seconds(2));
+        service.reap_expired_background_tasks_for_test();
+
+        let failed = query_task(&service, first.clone()).await;
+        assert_eq!(failed.status, proto::TaskStatus::TaskFailed as i32);
+        assert_eq!(failed.message, "processing timeout");
+
+        let second_fetch = fetch_tasks(&service, source_client, 10).await;
+        assert_eq!(second_fetch.tasks.len(), 1);
+        assert_eq!(second_fetch.tasks[0].id.as_ref(), Some(&second));
+        let processing = query_task(&service, second).await;
+        assert_eq!(processing.status, proto::TaskStatus::TaskProcessing as i32);
     }
 }

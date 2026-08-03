@@ -457,7 +457,7 @@ fn schedule_drain_job_tasks_free(state: &MasterState, job_id: Uuid) {
             }
         };
         let task_id = unique_task_id(state);
-        let now = chrono::Utc::now();
+        let now = state.task_clock.now();
         state.tasks.insert(
             task_id,
             crate::service::state::TaskEntry {

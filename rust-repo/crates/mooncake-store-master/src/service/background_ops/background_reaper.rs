@@ -566,7 +566,7 @@ fn reap_client_tasks(state: &MasterState) {
     // exclusive barrier to prevent snapshots from observing a half-applied
     // timeout/reaping pass.
     let _global_mutation_guard = state.key_mutations.lock_snapshot();
-    let now = chrono::Utc::now();
+    let now = state.task_clock.now();
     let pending_timeout = state.runtime_config.pending_task_timeout;
     let processing_timeout = state.runtime_config.processing_task_timeout;
     let mut timed_out_ids = Vec::new();

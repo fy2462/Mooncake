@@ -473,7 +473,7 @@ impl MasterServiceImpl {
                     unit_key: unit_key.clone(),
                 },
             );
-            let now = Utc::now();
+            let now = self.state.task_clock.now();
             self.state.tasks.insert(
                 task_id,
                 TaskEntry {
