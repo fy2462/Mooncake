@@ -2789,10 +2789,10 @@
       "behavior": "A persisted grouped object whose group hashes to a different shard remains reachable by key after restart and can be removed.",
       "boundary": ["master", "ha", "snapshot", "restore", "group-routing", "cross-shard", "remove"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreRebuildsGroupedObjectRouting"},
-      "reason": "Rust tests decode a C++ group_id but do not restore, find, and remove a grouped key whose routing group maps to a different shard.",
+      "reason": "Rust has no C++ fixed metadata-shard table; cpp_parity_snapshot_child_restore_rebuilds_grouped_object_routing instead proves the portable contract by preserving an exact nonempty group ID through production catalog decoding, atomically restoring and remounting the object, then finding and force-removing it by key through public RPCs.",
       "review": {"oracle": "snapshot_child_process_test.cpp RestoreRebuildsGroupedObjectRouting and MasterService snapshot restore/routing paths; Rust test_catalog_snapshot.rs C++ metadata fixtures", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_snapshot_child_restore_rebuilds_grouped_object_routing"}],
+      "status": "covered"
     },
     {"behavior":"Legacy metadata that omits group_id deserializes successfully and restores the object as ungrouped.","boundary":["master","ha","snapshot","restore","metadata","legacy-compatibility","group-routing"],"reason":"","reference":{"file":"ha/snapshot/snapshot_child_process_test.cpp","test":"SnapshotChildProcessTest.DeserializeLegacyMetadataWithoutGroupIdRestoresUngroupedObject"},"review":{"oracle":"snapshot_child_process_test.cpp DeserializeLegacyMetadataWithoutGroupIdRestoresUngroupedObject and MetadataSerializer::Deserialize; Rust test_catalog_snapshot.rs test_catalog_provider_decodes_all_cxx_metadata_shapes","reviewed":true},"rust":[{"file":"mooncake-store-master/tests/test_catalog_snapshot.rs","test":"test_catalog_provider_decodes_all_cxx_metadata_shapes"}],"status":"covered"},
     {
@@ -2836,10 +2836,10 @@
       "behavior": "When the newest snapshot metadata is corrupted, restore chooses the previous healthy snapshot, retains its key, and does not partially restore the newer key.",
       "boundary": ["master", "ha", "snapshot", "restore", "corruption", "fallback", "recovery"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted"},
-      "reason": "Rust corrupts the newest manifest and asserts only the older descriptor ID and sequence. It does not corrupt newest metadata, construct a restored service, or assert that the older object is restored while newer object state is absent.",
+      "reason": "Rust cpp_parity_snapshot_child_restore_falls_back_when_latest_metadata_is_corrupt publishes cumulative older/newer object snapshots, corrupts only the newest production metadata object, restores the selected older candidate into a fresh service, and proves the old key is readable while the new key is absent through public RPCs.",
       "review": {"oracle": "snapshot_child_process_test.cpp RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted and snapshot restore candidate fallback; Rust test_catalog_snapshot.rs test_catalog_provider_falls_back_when_latest_manifest_is_corrupt", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_snapshot_child_restore_falls_back_when_latest_metadata_is_corrupt"}],
+      "status": "covered"
     },
     {
       "behavior": "Enabling local snapshots without MOONCAKE_SNAPSHOT_LOCAL_PATH makes service construction throw a runtime error.",
@@ -2863,19 +2863,19 @@
       "behavior": "After restart, a complete object remains restored while a PutStart-only non-complete replica is removed from metadata.",
       "boundary": ["master", "ha", "snapshot", "restore", "replica-status", "cleanup", "recovery"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreCleansNonCompleteReplica"},
-      "reason": "No discoverable Rust test persists a complete object plus a PutStart-only pending replica, restarts, and asserts that only the pending record is removed.",
+      "reason": "Rust cpp_parity_snapshot_child_restore_cleans_non_complete_replica creates a complete leased object and an uncommitted PutStart-only object through public RPCs, runs the production catalog and atomic restore path, and proves only the complete key remains publicly visible. Restore now quarantines uncommitted non-complete allocations while preserving durable replication targets and committed in-place upsert generations.",
       "review": {"oracle": "snapshot_child_process_test.cpp RestoreCleansNonCompleteReplica and MasterService restore cleanup path; Rust service/mod.rs replica filtering", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_snapshot_child_restore_cleans_non_complete_replica"}],
+      "status": "covered"
     },
     {
       "behavior": "On restore, an expired complete object is removed while a complete object with a refreshed valid lease remains available.",
       "boundary": ["master", "ha", "snapshot", "restore", "lease", "expiry", "cleanup"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.RestoreCleansExpiredLease"},
-      "reason": "Rust tests an expired unpinned object in one synthetic fixture and a future CurrentV4 hard-pinned object in another fixture. No discoverable Rust test persists both an expired normal object and a refreshed-valid complete normal object, restarts the service, and asserts both cleanup and retention in the same recovery scenario.",
+      "reason": "Rust cpp_parity_snapshot_child_restore_cleans_expired_lease completes two ordinary objects in one live service, leaves one at PutEnd's zero lease, refreshes the other through a public read, then proves production catalog load and atomic restore remove only the expired key while retaining the refreshed key.",
       "review": {"oracle": "snapshot_child_process_test.cpp RestoreCleansExpiredLease and MasterService restore lease cleanup; Rust test_catalog_snapshot.rs test_catalog_provider_skips_expired_unpinned_objects/test_catalog_provider_loads_synthetic_cpp_wire_shapes", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_snapshot_child_restore_cleans_expired_lease"}],
+      "status": "covered"
     },
     {
       "behavior": "Without a snapshot backup directory, the first failed metadata upload stops persistence and the error excludes segments, task_manager, and manifest failures.",

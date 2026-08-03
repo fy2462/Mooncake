@@ -4324,5 +4324,45 @@
     "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
     "evidence": "/tmp/mooncake-snapshot-child-descriptor-parity-10x.typescript",
     "mutation_evidence": "/tmp/mooncake-snapshot-child-descriptor-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.RestoreRebuildsGroupedObjectRouting",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_snapshot_child_restore_rebuilds_grouped_object_routing",
+    "first_divergence": "Rust decoded group_id fields but lacked a production catalog-to-atomic-restore witness proving a grouped object remains reachable and removable by key after remount.",
+    "repair_commit": "ba167c91",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_snapshot_child_restore_rebuilds_grouped_object_routing -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-snapshot-child-restore-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-snapshot-child-restore-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.RestoreFallsBackToPreviousHealthySnapshotWhenLatestIsCorrupted",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_snapshot_child_restore_falls_back_when_latest_metadata_is_corrupt",
+    "first_divergence": "Existing Rust fallback coverage corrupted a manifest and stopped at descriptor selection; it did not corrupt newest metadata, restore a service, or prove older object retention and newer object absence.",
+    "repair_commit": "ba167c91",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_snapshot_child_restore_falls_back_when_latest_metadata_is_corrupt -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-snapshot-child-restore-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-snapshot-child-restore-mutation-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.RestoreCleansNonCompleteReplica",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_snapshot_child_restore_cleans_non_complete_replica",
+    "first_divergence": "Rust restore retained every non-complete replica whenever put_start_time was present, so an uncommitted initial PutStart remained in the public key inventory after catalog restore.",
+    "repair_commit": "715d174b",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_snapshot_child_restore_cleans_non_complete_replica -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-snapshot-child-restore-parity-10x.typescript",
+    "implementation_red_evidence": "/tmp/mooncake-snapshot-child-restore-noncomplete-red.typescript"
+  },
+  {
+    "cpp": "ha/snapshot/snapshot_child_process_test.cpp:SnapshotChildProcessTest.RestoreCleansExpiredLease",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_snapshot_child_restore_cleans_expired_lease",
+    "first_divergence": "Rust had separate synthetic expiry fixtures but no same-recovery scenario proving an expired ordinary object is removed while a publicly refreshed ordinary object remains available.",
+    "repair_commit": "ba167c91",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_snapshot_child_restore_cleans_expired_lease -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-snapshot-child-restore-parity-10x.typescript",
+    "mutation_evidence": "/tmp/mooncake-snapshot-child-restore-mutation-red.typescript"
   }
 ]
