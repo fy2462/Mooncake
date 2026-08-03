@@ -728,6 +728,80 @@ fn test_catalog_provider_rejects_invalid_explicit_tenant_metadata() {
 }
 
 #[test]
+fn test_catalog_provider_skips_invalid_client_id_metadata_record() {
+    let future_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let (root, provider, segment_id, client_id, _) =
+        publish_fixture_with_identity(Some("tenant-a"), "seed-key", future_ms);
+
+    let replica = Value::Array(vec![
+        7_u64.into(),
+        3.into(),
+        0.into(),
+        Value::Array(vec![
+            128_u64.into(),
+            0x1100_u64.into(),
+            segment_id.to_string().into(),
+            false.into(),
+            Value::Nil,
+        ]),
+    ]);
+    let invalid_item = Value::Array(vec![
+        "tenant-a".into(),
+        "invalid-client-id".into(),
+        Value::Array(vec![
+            "not-a-valid-client-uuid".into(),
+            1000_u64.into(),
+            128_u64.into(),
+            future_ms.into(),
+            false.into(),
+            0_u64.into(),
+            1_u64.into(),
+            (ObjectDataType::Kvcache as u64).into(),
+            replica.clone(),
+        ]),
+    ]);
+    let valid_item = Value::Array(vec![
+        "tenant-a".into(),
+        "valid-object-key".into(),
+        Value::Array(vec![
+            client_id.to_string().into(),
+            1000_u64.into(),
+            128_u64.into(),
+            future_ms.into(),
+            false.into(),
+            0_u64.into(),
+            1_u64.into(),
+            (ObjectDataType::Kvcache as u64).into(),
+            replica,
+        ]),
+    ]);
+    let shard = Value::Map(vec![(
+        "metadata".into(),
+        Value::Array(vec![invalid_item, valid_item]),
+    )]);
+    let metadata_path = root
+        .path()
+        .join("mooncake_master_snapshot/20260610_120000_001/metadata");
+    std::fs::write(
+        metadata_path,
+        encode(&Value::Map(vec![(
+            "shards".into(),
+            Value::Map(vec![(0.into(), Value::Binary(compress(&shard)))]),
+        )])),
+    )
+    .unwrap();
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.objects.len(), 1);
+    assert_eq!(snapshot.objects[0].0, "tenant-a\0valid-object-key");
+}
+
+#[test]
 fn test_catalog_provider_parses_legacy_scoped_key_identity() {
     let (_root, provider, _, _, _) =
         publish_fixture_with_identity(None, "tenant-a\0key-a", u64::MAX / 2);

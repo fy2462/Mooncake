@@ -1307,7 +1307,10 @@ fn decode_object(
     if fields.len() < 7 {
         return Err(snapshot_error("object metadata is too short"));
     }
-    let client_id = parse_uuid(value_str(&fields[0], "object client UUID")?)?;
+    let client_id = match parse_uuid(value_str(&fields[0], "object client UUID")?) {
+        Ok(client_id) => client_id,
+        Err(_) => return Ok(None),
+    };
     let put_start_ms = value_u64(&fields[1], "put start time")?;
     let size = value_u64(&fields[2], "object size")?;
     let lease_ms = value_u64(&fields[3], "lease timeout")?;

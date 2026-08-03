@@ -2799,10 +2799,10 @@
       "behavior": "Metadata containing an invalid client UUID deserializes successfully while skipping the bad object's record.",
       "boundary": ["master", "ha", "snapshot", "restore", "metadata", "invalid-input", "recovery", "record-skipping"],
       "reference": {"file": "ha/snapshot/snapshot_child_process_test.cpp", "test": "SnapshotChildProcessTest.DeserializeMetadataSkipsInvalidClientId"},
-      "reason": "No discoverable Rust test asserts successful snapshot load while skipping only a record with an invalid client UUID; rejecting corrupt snapshot data is a different outcome.",
+      "reason": "Rust now skips a malformed C++ metadata object when its client UUID cannot parse, while preserving valid sibling objects in the same snapshot shard.",
       "review": {"oracle": "snapshot_child_process_test.cpp DeserializeMetadataSkipsInvalidClientId and MasterService::MetadataSerializer::Deserialize; Rust snapshot restore malformed-data tests", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_catalog_snapshot.rs","test":"test_catalog_provider_skips_invalid_client_id_metadata_record"}],
+      "status": "covered"
     },
     {"behavior":"An empty explicit etcd HA connstring falls back to legacy etcd_endpoints in the effective HA backend configuration.","boundary":["master","ha","etcd","configuration","legacy-fallback"],"reference":{"file":"ha/snapshot/snapshot_child_process_test.cpp","test":"SnapshotChildProcessTest.LegacyEtcdConnstringFallbackIsPreserved"},"reason":"","review":{"oracle":"C++ LegacyEtcdConnstringFallbackIsPreserved asserts that the endpoint value survives WrappedMasterServiceConfig and MasterServiceConfig construction; Rust has no equivalent pair of copy layers, and test_build_ha_spec_etcd_falls_back_to_etcd_endpoints directly asserts the connstring in the effective HABackendSpec consumed by coordinator and standby-controller construction.","reviewed":true},"rust":[{"file":"mooncake-store-master/tests/test_main_config.rs","test":"test_build_ha_spec_etcd_falls_back_to_etcd_endpoints"}],"status":"covered"},
     {
