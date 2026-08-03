@@ -4121,19 +4121,23 @@
       "behavior": "With 10000 finished, pending, and processing slots, a ReplicaCopy submitted for one client with key test_key, source seg1, and target seg2 returns an ID; that client's pop with batch size 10 returns exactly that ID in PROCESSING.",
       "boundary": ["master", "task-lifecycle", "task-claim", "processing-status"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.SubmitAndPopTask"},
-      "reason": "test_fetch_tasks_marks_processing_and_respects_batch_size claims work but TaskAssignment has no status and the test only queries after terminal completion, so it does not observe this row's explicit post-pop PROCESSING result. Production prerequisite: none; query_task already exposes claimed task state. Add cpp_parity_submit_and_pop_task to mooncake-store-master/tests/test_master_tasks.rs; mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd to establish test_key on seg1, create exactly one ReplicaCopy to seg2, FetchTasks for that source-owner client with batch_size=10, assert the sole assignment ID is the returned ID, then QueryTask that ID and assert PROCESSING. Do not require a sleep, payload text, retry value, transfer I/O, or cleanup.",
+      "reason": "cpp_parity_submit_and_pop_task mounts real seg1/seg2 production segments, commits test_key to seg1 through PutStart/PutEnd, creates exactly one ReplicaCopy to seg2, fetches with batch size 10 for the assigned source client, asserts the sole returned ID is exact, and queries that same task as PROCESSING. It does not claim payload, retry, transfer-I/O, timing, or cleanup semantics.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:26-42 SubmitAndPopTask; Rust test_master_tasks.rs test_fetch_tasks_marks_processing_and_respects_batch_size", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_tasks.rs", "test": "cpp_parity_submit_and_pop_task"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "A submitted ReplicaCopy key1 from seg1 to seg2 is directly observable as PENDING, becomes PROCESSING after pop(1), accepts SUCCESS completion with Completed successfully, and is then directly observable as SUCCESS.",
       "boundary": ["master", "task-lifecycle", "task-query", "task-completion"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.MarkTaskComplete"},
-      "reason": "test_create_and_query_task_returns_real_state observes PENDING and the completion test observes terminal SUCCESS, but neither combined existing test directly queries the same task after claim; source-only transition logic cannot fill that gap. Production prerequisite: none; create/fetch/query/mark-complete are public master RPCs. Add cpp_parity_mark_task_complete_lifecycle to mooncake-store-master/tests/test_master_tasks.rs; mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd to establish key1 on seg1, create one ReplicaCopy to seg2, QueryTask and assert PENDING, FetchTasks for that source-owner client with batch_size=1, QueryTask and assert PROCESSING, MarkTaskToComplete SUCCESS with Completed successfully and assert the RPC succeeds, then QueryTask and assert SUCCESS. Do not assert stored message, retries, transfer I/O, or cleanup.",
+      "reason": "cpp_parity_mark_task_complete_lifecycle drives one real key1 ReplicaCopy through public CreateCopyTask, QueryTask, FetchTasks, MarkTaskToComplete, and QueryTask RPCs and directly observes PENDING, PROCESSING, then SUCCESS on the same exact ID. Completion supplies the C++ literal Completed successfully without claiming message persistence, retry, transfer-I/O, or cleanup behavior.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:44-72 MarkTaskComplete; Rust test_master_tasks.rs test_create_and_query_task_returns_real_state and test_mark_task_to_complete_updates_state_and_rejects_wrong_client", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_tasks.rs", "test": "cpp_parity_mark_task_complete_lifecycle"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With max_finished=5, seven sequentially submitted, popped, and successfully completed ReplicaCopy tasks are pruned so the first two IDs are absent and the last five remain.",
@@ -4148,19 +4152,23 @@
       "behavior": "One ReplicaCopy assigned to each of two clients is popped only by its own client; each pop(10) returns exactly its own ID and a later client1 pop is empty.",
       "boundary": ["master", "task-assignment", "client-isolation", "task-claim"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.MultipleClients"},
-      "reason": "test_mark_task_to_complete_updates_state_and_rejects_wrong_client checks completion authorization, not fetch isolation; no discoverable Rust test claims one task from each of two assigned clients. Production prerequisite: none; FetchTasks already selects by assigned client. Add cpp_parity_multiple_clients_fetch_only_own_tasks to mooncake-store-master/tests/test_master_tasks.rs; mount named source seg1 owned by client1 with distinct target seg2 and named source seg3 owned by client2 with distinct target seg4, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd for client1's exact source key and the same replica_num/preferred_segment=seg3 sequence for client2's exact source key, create one copy task to each corresponding target, FetchTasks(client1,10) and assert only id1, FetchTasks(client2,10) and assert only id2, then FetchTasks(client1,10) and assert empty. Do not require status, payload text, transfer I/O, timing, or cleanup.",
+      "reason": "cpp_parity_multiple_clients_fetch_only_own_tasks mounts independent real seg1-to-seg2 and seg3-to-seg4 source/target pairs, commits key1 and key2, creates one ReplicaCopy for each assigned source client, proves FetchTasks(client1,10) returns only id1 and FetchTasks(client2,10) returns only id2, then proves a later client1 fetch is empty. It makes no payload, transfer-I/O, timing, or cleanup claim.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:111-140 MultipleClients; Rust test_master_tasks.rs test_mark_task_to_complete_updates_state_and_rejects_wrong_client", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_tasks.rs", "test": "cpp_parity_multiple_clients_fetch_only_own_tasks"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With max_pending=1, the first ReplicaCopy submission succeeds and the second fails with TASK_PENDING_LIMIT_EXCEEDED.",
       "boundary": ["master", "task-admission", "pending-limit", "error-mapping"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.PendingLimitExceeded"},
-      "reason": "test_main_config.rs checks configuration mapping only; no discoverable runtime test fills the pending slot and observes the second admission failure. Production prerequisite: none; create_copy_task maps the portable limit error to ResourceExhausted. Add cpp_parity_pending_limit_exceeded to mooncake-store-master/tests/test_master_tasks.rs; configure max_total_pending_tasks=1, mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd for exactly two distinct source keys, submit the first copy to seg2 and assert success, submit the second copy to seg2 without fetching the first, and assert tonic Code::ResourceExhausted. Do not assert an error message, payload text, timing, private state, or cleanup.",
+      "reason": "cpp_parity_pending_limit_exceeded configures the production pending-task limit to exactly one, commits distinct k1 and k2 source objects on real seg1, successfully creates the first copy to seg2 without fetching it, and proves the second CreateCopyTask fails with tonic ResourceExhausted. It does not inspect private state or claim error text, payload, timing, or cleanup behavior.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:142-164 PendingLimitExceeded; Rust test_main_config.rs limit mapping and service/grpc_tasks.rs create_copy_task_impl", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_master_tasks.rs", "test": "cpp_parity_pending_limit_exceeded"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With max_processing=1 and two pending ReplicaCopy tasks for one client, pop(10) returns exactly one task.",
@@ -4195,28 +4203,34 @@
       "behavior": "Four task snapshots in Copy/Copy/Move/Move order across SUCCESS/FAILED/PENDING/PROCESSING preserve exact IDs, types, statuses, nonempty payloads, assigned clients, and created/update timestamps within one second after a production catalog snapshot round trip.",
       "boundary": ["master", "task-snapshot", "catalog", "serialization", "task-state"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.SerializerRoundTrip"},
-      "reason": "test_catalog_snapshot.rs decodes one synthetic Pending Move and publishes one Failed Move while asserting only its ID and status; native_snapshot_roundtrips_zero_and_one_task_type_codecs covers two Pending types and retry values. Neither test round-trips all four portable states with clients and timestamps. Production prerequisite: none; CatalogBackedSnapshotProvider already encodes and decodes the production task catalog. Add cpp_parity_task_snapshot_round_trip_preserves_four_states to mooncake-store-master/tests/test_catalog_snapshot.rs; construct a catalog snapshot with exactly four TaskEntry values in Copy/Copy/Move/Move order, statuses SUCCESS/FAILED/PENDING/PROCESSING, two exact valid assigned-client UUIDs, and fixed created/update timestamps; use four nonempty valid catalog_task schemas with nonempty key and source, Copy payloads with nonempty targets, and Move payloads with nonempty target, then publish and load it. Assert every ID, type, status, assigned client, nonempty payload, and each timestamp differs from its original by at most one second. Do not assert messages, exact payload strings, C++ bytes, retry values, private maps, or cleanup.",
+      "reason": "cpp_parity_task_snapshot_round_trip_preserves_four_states publishes and reloads exactly four production TaskEntry values through CatalogBackedSnapshotProvider in Copy/Copy/Move/Move order and SUCCESS/FAILED/PENDING/PROCESSING states. It proves every exact ID, type, status, assigned client, nonempty payload, and fixed created/update timestamp within one second, without claiming C++ bytes, messages, retries, or private state.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:271-379 SerializerRoundTrip; Rust test_catalog_snapshot.rs test_catalog_provider_publishes_cpp_compatible_snapshot_payloads and storage_backend_snapshot.rs native_snapshot_roundtrips_zero_and_one_task_type_codecs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "cpp_parity_task_snapshot_round_trip_preserves_four_states"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "An empty task catalog serializes and deserializes successfully through the production snapshot boundary and yields zero tasks.",
       "boundary": ["master", "task-snapshot", "catalog", "serialization", "empty-state"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.SerializerEmptyManager"},
-      "reason": "test_catalog_provider_accepts_legacy_snapshot_without_tasks accepts an absent legacy task object, which is compatibility fallback rather than an empty task-manager encode/decode round trip. Production prerequisite: none; CatalogBackedSnapshotProvider supports empty LoadedSnapshot.tasks. Add cpp_parity_empty_task_catalog_round_trip to mooncake-store-master/tests/test_catalog_snapshot.rs; construct a production LoadedSnapshot with tasks=[], publish it through CatalogBackedSnapshotProvider, load it into a fresh snapshot value, and assert loading succeeds and tasks.len()==0. Do not require C++ bytes, missing-file fallback, timestamps, private maps, or cleanup.",
+      "reason": "cpp_parity_empty_task_catalog_round_trip explicitly publishes a production LoadedSnapshot with an empty task vector through CatalogBackedSnapshotProvider, reloads the created task-manager object, and proves the result contains exactly zero tasks. This is an encode/decode round trip rather than legacy missing-file fallback and makes no C++ byte-format claim.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:381-396 SerializerEmptyManager; Rust test_catalog_snapshot.rs test_catalog_provider_accepts_legacy_snapshot_without_tasks", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/tests/test_catalog_snapshot.rs", "test": "cpp_parity_empty_task_catalog_round_trip"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Replacing live task state with an empty production snapshot removes a previously submitted copy-task ID and leaves no task fetchable for its assigned client.",
       "boundary": ["master", "task-snapshot", "snapshot-installation", "reset", "task-state"],
       "reference": {"file": "task_manager_test.cpp", "test": "ClientTaskManagerTest.SerializerReset"},
-      "reason": "Rust has no TaskManagerSerializer class, but production snapshot installation clears and replaces task state, so the portable reset/clear semantic boundary is not N/A. No discoverable test starts with a task and proves that installing an empty task snapshot removes it. Production prerequisite: none; the production snapshot installation path already clears state before restoring snapshot tasks. Add cpp_parity_empty_snapshot_replaces_live_task_state to mooncake-store-master/src/service/mod.rs; mount named source seg1 owned by one client and distinct target seg2, use PutStart with replica_num=1 and preferred_segment=seg1 then PutEnd to establish one source key, create one copy task to seg2 through the public service RPC, install a LoadedSnapshot whose tasks are empty through the production snapshot-installation path, then QueryTask the original ID and assert NotFound and FetchTasks for that source-owner client and assert empty. Do not require serializer class shape, bytes, private map inspection, timing, transfer I/O, or cleanup.",
+      "reason": "cpp_parity_empty_snapshot_replaces_live_task_state mounts real seg1/seg2 segments, commits reset-key through PutStart/PutEnd, creates a real ReplicaCopy through the public RPC, and first queries that exact ID as PENDING. It then invokes the atomic production snapshot restore boundary with an empty task vector and proves public QueryTask returns NotFound and FetchTasks for the assigned source client is empty, without claiming serializer class shape or C++ bytes.",
       "review": {"oracle": "mooncake-store/tests/task_manager_test.cpp:398-417 SerializerReset; Rust service/mod.rs production snapshot-installation clear-and-replace path", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_empty_snapshot_replaces_live_task_state"}
+      ],
+      "status": "covered"
     }
   ],
   "schema_version": 2,

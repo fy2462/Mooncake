@@ -4061,5 +4061,68 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_allocator cpp_parity_allocation_strategy_ssd_and_random_complete_exact_warmup_and_measured_workloads -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_allocator",
     "evidence": "/tmp/mooncake-allocation-strategy-performance-workloads.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.SubmitAndPopTask",
+    "rust": "mooncake-store-master/tests/test_master_tasks.rs:cpp_parity_submit_and_pop_task",
+    "first_divergence": "Rust task fetch coverage did not directly query the claimed task and therefore lacked an exact post-pop PROCESSING witness for the returned ID.",
+    "repair_commit": "11bc2bba",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_tasks cpp_parity_submit_and_pop_task -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_tasks",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.MarkTaskComplete",
+    "rust": "mooncake-store-master/tests/test_master_tasks.rs:cpp_parity_mark_task_complete_lifecycle",
+    "first_divergence": "Adjacent Rust tests observed pending and terminal states separately but did not directly prove the same task's PENDING to PROCESSING to SUCCESS lifecycle.",
+    "repair_commit": "11bc2bba",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_tasks cpp_parity_mark_task_complete_lifecycle -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_tasks",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.MultipleClients",
+    "rust": "mooncake-store-master/tests/test_master_tasks.rs:cpp_parity_multiple_clients_fetch_only_own_tasks",
+    "first_divergence": "Rust tested completion authorization but lacked a production fetch witness proving that two assigned clients each claim only their own exact task ID.",
+    "repair_commit": "11bc2bba",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_tasks cpp_parity_multiple_clients_fetch_only_own_tasks -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_tasks",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.PendingLimitExceeded",
+    "rust": "mooncake-store-master/tests/test_master_tasks.rs:cpp_parity_pending_limit_exceeded",
+    "first_divergence": "Rust configuration mapping existed without a runtime admission test that filled the one-task pending slot and observed the second submission failure.",
+    "repair_commit": "11bc2bba",
+    "focused_command": "cargo test -p mooncake-store-master --test test_master_tasks cpp_parity_pending_limit_exceeded -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_master_tasks",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.SerializerRoundTrip",
+    "rust": "mooncake-store-master/tests/test_catalog_snapshot.rs:cpp_parity_task_snapshot_round_trip_preserves_four_states",
+    "first_divergence": "Rust snapshot tests lacked one production catalog round trip covering both task types, all four portable states, exact clients, nonempty payloads, and timestamps together.",
+    "repair_commit": "8564f9bc",
+    "focused_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot cpp_parity_task_snapshot_round_trip_preserves_four_states -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.SerializerEmptyManager",
+    "rust": "mooncake-store-master/tests/test_catalog_snapshot.rs:cpp_parity_empty_task_catalog_round_trip",
+    "first_divergence": "Rust accepted a legacy missing task object but lacked an explicit empty task-manager encode/decode round trip through the production catalog provider.",
+    "repair_commit": "8564f9bc",
+    "focused_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot cpp_parity_empty_task_catalog_round_trip -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
+  },
+  {
+    "cpp": "task_manager_test.cpp:ClientTaskManagerTest.SerializerReset",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_empty_snapshot_replaces_live_task_state",
+    "first_divergence": "Rust's atomic snapshot restore cleared task state in production but lacked an exact witness starting from a public-RPC-created Copy task and observing public query/fetch absence after empty restore.",
+    "repair_commit": "8564f9bc",
+    "focused_command": "cargo test -p mooncake-store-master --lib service::snapshot_restore_tests::cpp_parity_empty_snapshot_replaces_live_task_state -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "/tmp/mooncake-task-manager-seven-row-parity.typescript"
   }
 ]
