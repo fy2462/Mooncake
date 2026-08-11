@@ -158,10 +158,7 @@ impl BucketStorageConfig {
         }
         let max_total_size =
             parse_positive_u64(&mut lookup, "MOONCAKE_OFFLOAD_BUCKET_MAX_TOTAL_SIZE")
-                .or_else(|| parse_positive_u64(&mut lookup, "MOONCAKE_BUCKET_MAX_TOTAL_SIZE"))
-                .or_else(|| {
-                    parse_positive_u64(&mut lookup, "MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES")
-                });
+                .or_else(|| parse_positive_u64(&mut lookup, "MOONCAKE_BUCKET_MAX_TOTAL_SIZE"));
         if let Some(value) = max_total_size {
             config.quota_bytes = value;
         }
@@ -416,6 +413,18 @@ mod tests {
         assert_eq!(config.quota_bytes, 32768);
         assert_eq!(config.total_keys_limit, 64);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn cpp_parity_bucket_global_size_limit_does_not_set_eviction_quota() {
+        let config = BucketStorageConfig::from_lookup(|name| match name {
+            "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES" => Some("969".to_string()),
+            "MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES" => Some("100".to_string()),
+            _ => None,
+        });
+
+        assert_eq!(config.bucket_size_limit, 969);
+        assert_eq!(config.quota_bytes, 0);
     }
 
     #[test]

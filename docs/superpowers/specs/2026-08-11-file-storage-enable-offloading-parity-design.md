@@ -31,9 +31,10 @@ total_size_limit)`. Passing the two global limits explicitly preserves their
 quota.
 
 The method reads the backend metadata under its existing state mutex. It
-returns true immediately when eviction is enabled and either an explicit quota
-is configured or an initialized backend has resolved an automatic physical
-capacity. Otherwise it uses checked additions for current keys plus
+returns true immediately only when eviction is enabled and an explicit bucket
+eviction quota is configured. An automatically resolved filesystem capacity is
+not that C++ `max_total_size` opt-in. Otherwise it uses checked additions for
+current keys plus
 `bucket_keys_limit` and current logical bytes plus `bucket_size_limit`; overflow
 is a closed admission result rather than a panic.
 
@@ -48,9 +49,11 @@ Add one exact unit witness:
 
 `cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket`
 
-It creates three fresh backends matching the C++ cases and asserts `true`,
-`false`, `false`. The tight-limit cases keep automatic quota unresolved so the
-whole-bucket global preflight is exercised rather than the eviction fast path.
+It initializes and writes the C++ 100-object positive fixture, then initializes
+the two tight-limit backends and asserts `true`, `false`, `false`. A companion
+configuration witness proves the global size-limit environment variable does
+not populate the independent bucket eviction quota. An explicit-quota case
+also verifies the eviction fast path.
 
 ## Manifest, Ledger, and Counts
 

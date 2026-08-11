@@ -247,8 +247,7 @@ impl BucketStorageBackend {
         total_size_limit: u64,
     ) -> bool {
         let state = self.state.lock();
-        if self.config.eviction_policy != BucketEvictionPolicy::None
-            && (self.config.quota_bytes > 0 || (state.initialized && state.capacity_bytes > 0))
+        if self.config.eviction_policy != BucketEvictionPolicy::None && self.config.quota_bytes > 0
         {
             return true;
         }
@@ -1304,24 +1303,36 @@ mod tests {
 
     #[test]
     fn cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket() {
-        let root = TempDir::new().unwrap();
-
-        let mut default_config = config(&root);
+        let default_root = TempDir::new().unwrap();
+        let mut default_config = config(&default_root);
         default_config.quota_bytes = 0;
         let default_backend = BucketStorageBackend::new(default_config);
+        for i in 0..100 {
+            write(&default_backend, &format!("test-{i}"), b"x", Uuid::new_v4());
+        }
         assert!(default_backend.is_enable_offloading(10_000_000, 2 * 1024 * 1024 * 1024 * 1024));
 
-        let mut key_limited_config = config(&root);
+        let key_limited_root = TempDir::new().unwrap();
+        let mut key_limited_config = config(&key_limited_root);
         key_limited_config.quota_bytes = 0;
         key_limited_config.bucket_keys_limit = 10;
         let key_limited_backend = BucketStorageBackend::new(key_limited_config);
+        key_limited_backend.storage_id().unwrap();
         assert!(!key_limited_backend.is_enable_offloading(9, 2 * 1024 * 1024 * 1024 * 1024));
 
-        let mut size_limited_config = config(&root);
+        let size_limited_root = TempDir::new().unwrap();
+        let mut size_limited_config = config(&size_limited_root);
         size_limited_config.quota_bytes = 0;
         size_limited_config.bucket_size_limit = 969;
         let size_limited_backend = BucketStorageBackend::new(size_limited_config);
+        size_limited_backend.storage_id().unwrap();
         assert!(!size_limited_backend.is_enable_offloading(10_000_000, 100));
+
+        let explicit_quota_root = TempDir::new().unwrap();
+        let mut explicit_quota_config = config(&explicit_quota_root);
+        explicit_quota_config.quota_bytes = 4096;
+        let explicit_quota_backend = BucketStorageBackend::new(explicit_quota_config);
+        assert!(explicit_quota_backend.is_enable_offloading(0, 0));
     }
 
     #[test]

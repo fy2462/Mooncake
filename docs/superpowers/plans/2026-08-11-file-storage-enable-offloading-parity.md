@@ -11,7 +11,10 @@ backend metadata and backend-owned bucket/eviction limits.
 
 ## Task 1: Establish the failing witness
 
-**File:** `rust-repo/crates/mooncake-store-client/src/local_storage_backend/bucket.rs`
+**Files:**
+
+- `rust-repo/crates/mooncake-store-client/src/local_storage_backend/bucket.rs`
+- `rust-repo/crates/mooncake-store-client/src/local_storage_backend/config.rs`
 
 - [ ] Add
   `cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket` with
@@ -25,6 +28,8 @@ backend metadata and backend-owned bucket/eviction limits.
 **File:** `rust-repo/crates/mooncake-store-client/src/local_storage_backend/bucket.rs`
 
 - [ ] Add the eviction-capacity fast path.
+- [ ] Keep the global total-size environment variable separate from the
+  explicit bucket eviction quota.
 - [ ] Add checked whole-bucket key and byte projections against explicit global
   limits.
 - [ ] Run the exact witness, all `local_storage_backend::bucket::tests`, and:
@@ -34,7 +39,7 @@ LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/f
   cargo test -p mooncake-store-client --features link-native --lib
 ```
 
-Expected complete result: 373 passing tests, unless additional pre-existing
+Expected complete result: 374 passing tests, unless additional pre-existing
 working-tree tests are discovered.
 
 - [ ] Run scoped rustfmt, stage only this wave's hunk, and commit:
