@@ -88,8 +88,12 @@ Change exactly the two selected rows in
 Each row names its exact Rust witness and describes the production batch helper
 boundary. Append exactly two entries to
 `rust-repo/tools/store-validation/remediation-log.json` after the tests pass.
-The Store manifest missing count moves from 197 to 195; the wheel manifest is
-unchanged at 52 missing rows.
+Against the committed parent before this wave, the Store manifest moves from
+`covered=745, missing=539, not-applicable=115` to
+`covered=747, missing=537, not-applicable=115`; the committed wheel manifest is
+unchanged at `covered=5, missing=95, not-applicable=252`. In the active
+accumulated checkout, which also contains earlier uncommitted parity work, the
+same two rows move Store missing from 197 to 195 and leave wheel missing at 52.
 
 ## Verification
 

@@ -217,7 +217,7 @@ Record the resulting SHA for both remediation entries.
 
 **Interfaces:**
 - Consumes: both exact test names, fresh passing output, and the Task 2 implementation SHA.
-- Produces: exactly two newly covered Store rows, exactly two remediation entries, Store missing count 195, and unchanged wheel missing count 52.
+- Produces: exactly two newly covered Store rows and exactly two remediation entries. In the independently reviewable committed wave, Store becomes `covered=747, missing=537, not-applicable=115` and wheel remains `covered=5, missing=95, not-applicable=252`. In the active accumulated checkout, Store missing becomes 195 and wheel missing remains 52.
 
 - [ ] **Step 1: Update exactly two Store manifest rows**
 
@@ -274,7 +274,7 @@ Expected: every command exits zero. If a broader hook rewrites unrelated files, 
 
 - [ ] **Step 5: Audit counts, diff scope, and commit ledger**
 
-Use `jq` to assert Store statuses are `covered=1089`, `missing=195`, `not-applicable=115`, and wheel statuses remain `covered=48`, `missing=52`, `not-applicable=252`. Confirm exactly the two selected references changed status and no C/C++ path changed in this wave. Run `git diff --check`, then stage only the two JSON files and commit:
+Use `jq` to assert both reproducible views. The independently reviewable committed wave has Store `covered=747`, `missing=537`, `not-applicable=115`, while wheel remains `covered=5`, `missing=95`, `not-applicable=252`. The active accumulated checkout, including earlier uncommitted parity work, has Store `covered=1089`, `missing=195`, `not-applicable=115`, while wheel has `covered=48`, `missing=52`, `not-applicable=252`. Confirm exactly the two selected references changed status in this wave and no C/C++ path changed. Run `git diff --check`, then stage only the two JSON files and commit:
 
 ```bash
 git add rust-repo/tools/store-validation/parity-map.json \
@@ -284,4 +284,4 @@ git commit -m '[Store] record FileStorage batch metrics parity'
 
 - [ ] **Step 6: Continue the active global parity goal**
 
-Do not mark the global goal complete: 195 Store and 52 wheel rows still remain. Select the next bounded behavior cluster from the authoritative manifests and repeat design, TDD, direct evidence, validator, and ledger steps until every applicable `missing` row is resolved.
+Do not mark the global goal complete. The independently reviewable committed wave still has 537 Store and 95 wheel missing rows; the active accumulated checkout still has 195 Store and 52 wheel missing rows. Select the next bounded behavior cluster from the authoritative manifests and repeat design, TDD, direct evidence, validator, and ledger steps until every applicable `missing` row is resolved.
