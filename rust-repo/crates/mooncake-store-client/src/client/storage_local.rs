@@ -413,6 +413,7 @@ struct PromotionTestCallCounts {
     transfer_write: std::sync::atomic::AtomicUsize,
     notify_success: std::sync::atomic::AtomicUsize,
     notify_failure: std::sync::atomic::AtomicUsize,
+    notify_failure_keys: std::sync::Mutex<Vec<(String, String)>>,
 }
 
 #[cfg(test)]
@@ -452,6 +453,20 @@ fn record_promotion_test_call(
 ) {
     if let Some(counts) = PROMOTION_TEST_CALL_COUNTS.lock().unwrap().get(&client_id) {
         field(counts).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+fn record_promotion_test_failure(client_id: Uuid, tenant_id: &str, key: &str) {
+    if let Some(counts) = PROMOTION_TEST_CALL_COUNTS.lock().unwrap().get(&client_id) {
+        counts
+            .notify_failure
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        counts
+            .notify_failure_keys
+            .lock()
+            .unwrap()
+            .push((tenant_id.to_string(), key.to_string()));
     }
 }
 
@@ -1074,7 +1089,7 @@ impl MooncakeClient {
                     Err(e) => {
                         tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "promotion: alloc failed");
                         #[cfg(test)]
-                        record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
+                        record_promotion_test_failure(self.client_id, tenant_id, key);
                         let _ = self
                             .notify_promotion_failure_for_tenant(key, tenant_id)
                             .await;
@@ -1101,7 +1116,7 @@ impl MooncakeClient {
                 Err(error) => {
                     tracing::warn!(target: "storage_debug", %tenant_id, %key, %error, "promotion: local disk read failed");
                     #[cfg(test)]
-                    record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
+                    record_promotion_test_failure(self.client_id, tenant_id, key);
                     let _ = self
                         .notify_promotion_failure_for_tenant(key, tenant_id)
                         .await;
@@ -1145,9 +1160,7 @@ impl MooncakeClient {
                         Err(error) => {
                             tracing::warn!(target: "storage_debug", %tenant_id, %key, %error, "promotion: success notification failed");
                             #[cfg(test)]
-                            record_promotion_test_call(self.client_id, |counts| {
-                                &counts.notify_failure
-                            });
+                            record_promotion_test_failure(self.client_id, tenant_id, key);
                             let _ = self
                                 .notify_promotion_failure_for_tenant(key, tenant_id)
                                 .await;
@@ -1158,7 +1171,7 @@ impl MooncakeClient {
                 Err(e) => {
                     tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "promotion: write_to_replica failed");
                     #[cfg(test)]
-                    record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
+                    record_promotion_test_failure(self.client_id, tenant_id, key);
                     let _ = self
                         .notify_promotion_failure_for_tenant(key, tenant_id)
                         .await;
@@ -2482,6 +2495,196 @@ mod tests {
 
         drop(client);
         server.abort();
+    }
+
+    #[cfg(feature = "link-native")]
+    async fn run_promotion_failure_matrix() -> (usize, Arc<PromotionTestCallCounts>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "promotion-failure-matrix".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        disk.write_object(
+            &local_storage_key("tenant-a", "transfer-fails"),
+            &vec![0x7c; 1024],
+        )
+        .unwrap();
+        disk.write_object(
+            &local_storage_key("tenant-a", "notify-fails"),
+            &vec![0x8d; 1024],
+        )
+        .unwrap();
+
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(disk);
+
+        let _load_alloc = inject_promotion_test_alloc_success(client.client_id, "load-fails", 1024);
+        let _transfer_alloc =
+            inject_promotion_test_alloc_success(client.client_id, "transfer-fails", 1024);
+        let _notify_alloc =
+            inject_promotion_test_alloc_success(client.client_id, "notify-fails", 1024);
+        let _transfer_failure =
+            inject_promotion_test_transfer_failure(client.client_id, "tenant-a", "transfer-fails");
+        let _transfer_success =
+            inject_promotion_test_transfer_success(client.client_id, "tenant-a", "notify-fails");
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
+        let promoted = client
+            .process_promotion_tasks(
+                [
+                    "alloc-fails",
+                    "load-fails",
+                    "transfer-fails",
+                    "notify-fails",
+                    "after-failures",
+                ]
+                .into_iter()
+                .map(|key| PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: key.to_string(),
+                    size: 1024,
+                })
+                .collect(),
+            )
+            .await
+            .unwrap();
+
+        drop(client);
+        server.abort();
+        (promoted, counts)
+    }
+
+    #[cfg(feature = "link-native")]
+    async fn run_single_promotion_alloc_failure() -> (usize, Arc<PromotionTestCallCounts>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "promotion-single-alloc-failure".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(disk);
+
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
+        let promoted = client
+            .process_promotion_tasks(vec![PromotionTaskItem {
+                tenant_id: "tenant-a".to_string(),
+                key: "alloc-fails".to_string(),
+                size: 1024,
+            }])
+            .await
+            .unwrap();
+
+        drop(client);
+        server.abort();
+        (promoted, counts)
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_per_key_failures_are_independent() {
+        let (promoted, counts) = run_promotion_failure_matrix().await;
+
+        assert_eq!(promoted, 0);
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 5);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 3);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 2);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            counts.notify_failure_keys.lock().unwrap().last(),
+            Some(&("tenant-a".to_string(), "after-failures".to_string()))
+        );
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_alloc_failure_notifies_master() {
+        let (promoted, counts) = run_single_promotion_alloc_failure().await;
+
+        assert_eq!(promoted, 0);
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *counts.notify_failure_keys.lock().unwrap(),
+            vec![("tenant-a".to_string(), "alloc-fails".to_string())]
+        );
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_post_alloc_failures_all_notify_master() {
+        let (promoted, counts) = run_promotion_failure_matrix().await;
+
+        assert_eq!(promoted, 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            *counts.notify_failure_keys.lock().unwrap(),
+            vec![
+                ("tenant-a".to_string(), "alloc-fails".to_string()),
+                ("tenant-a".to_string(), "load-fails".to_string()),
+                ("tenant-a".to_string(), "transfer-fails".to_string()),
+                ("tenant-a".to_string(), "notify-fails".to_string()),
+                ("tenant-a".to_string(), "after-failures".to_string()),
+            ]
+        );
     }
 
     #[derive(Default)]
