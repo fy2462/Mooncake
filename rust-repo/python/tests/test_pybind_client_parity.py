@@ -270,6 +270,51 @@ async def test_cpp_parity_put_batch_with_config_parameter(cachelib_master):
         await client1.close()
 
 
+@pytest.mark.parametrize(
+    "cachelib_master",
+    [{"lease_ttl_ms": 200, "memory_allocator": "offset"}],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_cpp_parity_replication_failure_tolerance(cachelib_master):
+    main_hostname = "localhost:12345"
+    replica_hostname = "localhost:12346"
+    client1 = await _client(
+        cachelib_master,
+        global_segment_size=SLAB_SIZE,
+        local_hostname=main_hostname,
+    )
+    client2 = await _client(
+        cachelib_master,
+        global_segment_size=SLAB_SIZE,
+        local_hostname=replica_hostname,
+    )
+    value = b"Replicated failure tolerance test data!"
+    key = "test_replication_failure_key"
+    try:
+        config = ReplicateConfig(replica_num=2)
+        assert await client1.put(key=key, value=value, config=config) == 0
+        assert await client1.get(key) == value
+
+        assert await client1.close() == 0
+        client1 = None
+        await asyncio.sleep(1)
+        assert await client2.get(key) == value
+
+        client1 = await _client(
+            cachelib_master,
+            global_segment_size=SLAB_SIZE,
+            local_hostname=main_hostname,
+        )
+        assert await client1.get(key) == value
+        await asyncio.sleep(0.25)
+        assert await client1.remove(key) == 0
+    finally:
+        await client2.close()
+        if client1 is not None:
+            await client1.close()
+
+
 @pytest.mark.asyncio
 async def test_get_into_accepts_interior_registered_buffer_range(cachelib_master):
     client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)

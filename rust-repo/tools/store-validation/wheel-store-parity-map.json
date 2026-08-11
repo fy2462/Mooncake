@@ -4543,12 +4543,12 @@
    "status": "covered"
   },
   {
-   "behavior": "Replica-two put/get succeeds; closing the main Store returns zero; the second Store still reads exact bytes; reinitializing the main Store also reads exact bytes, then remove succeeds. No Rust test proves this failover/rejoin data continuity.",
+   "behavior": "Replica-two put/get succeeds; closing the main Store returns zero; the second Store still reads exact bytes; reinitializing the main Store also reads exact bytes, then remove succeeds.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Replica-two put/get succeeds; closing the main Store returns zero; the second Store still reads exact bytes; reinitializing the main Store also reads exact bytes, then remove succeeds. No Rust test proves this failover/rejoin data continuity.",
+   "reason": "Rust parity test test_cpp_parity_replication_failure_tolerance creates two real clients, writes replica-two data, asserts primary close returns zero, reads exact bytes from the surviving replica, recreates the primary with the same hostname, reads exact bytes again, then removes after TTL. Verified PASS without skip.",
    "reference": {
     "file": "test_replicated_distributed_object_store.py",
     "test": "TestDistributedObjectStoreReplication.test_replication_failure_tolerance"
@@ -4557,8 +4557,13 @@
     "oracle": "mooncake-wheel/tests/test_replicated_distributed_object_store.py::TestDistributedObjectStoreReplication.test_replication_failure_tolerance test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_pybind_client_parity.py",
+     "test": "test_cpp_parity_replication_failure_tolerance"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Loading a nonexistent file returns `None`.",
