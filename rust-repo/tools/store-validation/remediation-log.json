@@ -4472,5 +4472,14 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_tenant_quota cpp_parity_etcd_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_tenant_quota",
     "evidence": "default opt-in path PASS 2/2 with explicit missing-endpoint skip messages; tenant quota binary PASS 29/29; live etcd unavailable locally because port 2379 had no listener"
+  },
+  {
+    "cpp": "ha/leadership/ha_backend_availability_test.cpp:HABackendAvailabilityTest.ClientSpecParsingMatchesK8sBuildFlag",
+    "rust": "mooncake-store-master/tests/test_main_config.rs:cpp_parity_k8s_client_spec_preserves_connstring_then_rejects_serving",
+    "first_divergence": "Rust separately covered K8s spec construction and election-only backend serving rejection, but had no single discoverable witness for the C++ exact default/master client-spec input and its Rust unavailable-mode outcome.",
+    "repair_commit": "50f0e7d2",
+    "focused_command": "cargo test -p mooncake-store-master --test test_main_config cpp_parity_k8s_client_spec_preserves_connstring_then_rejects_serving -- --exact",
+    "crate_command": "cargo test -p mooncake-store-master --test test_main_config",
+    "evidence": "exact K8s client-spec witness PASS 1/1; main config binary PASS 28/28"
   }
 ]
