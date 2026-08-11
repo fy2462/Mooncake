@@ -5,7 +5,22 @@ enum OffloadReportKind {
     Failed,
     AdmittedCompletion,
     RecoveryReattach,
+    /// C++-compatible unsolicited completion from a client that mounted an
+    /// ordinary DRAM segment but no Rust-only LocalDisk recovery session.
+    ClassicUnsolicited,
     IgnoredRecovery,
+}
+
+/// Stable synthetic LocalDisk storage identity for the classic unsolicited
+/// completion path, derived from the reporting client UUID. The C++ classic
+/// master keys disk ownership by client; Rust keeps the same observable owner
+/// while using a deterministic per-client namespace id.
+fn classic_local_disk_storage_id(client_id: Uuid) -> Uuid {
+    let (high, low) = client_id.as_u64_pair();
+    Uuid::from_u64_pair(
+        high ^ 0x4c_444b_53_54_4f_52_45,
+        low ^ 0x43_4c_41_53_53_49_43,
+    )
 }
 
 impl MasterServiceImpl {
@@ -158,36 +173,6 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
-        let storage_id = self
-            .state
-            .local_disk_client_sessions
-            .get(&client_id)
-            .map(|entry| *entry)
-            .ok_or(Status::failed_precondition(
-                "local disk segment must be mounted before reporting offload results",
-            ))?;
-        let (recovery_complete, active_recovery_session_id) = self
-            .state
-            .local_disk_segments
-            .get(&storage_id)
-            .filter(|entry| entry.active_client_id == Some(client_id))
-            .map(|entry| (entry.recovery_complete, entry.recovery_session_id))
-            .ok_or(Status::failed_precondition(
-                "local disk session is not active",
-            ))?;
-        if !recovery_complete {
-            let reported_recovery_session_id =
-                uuid_from_proto(req.recovery_session_id.as_ref().ok_or(
-                    Status::failed_precondition("missing LocalDisk recovery_session_id"),
-                )?);
-            if reported_recovery_session_id.is_nil()
-                || active_recovery_session_id != Some(reported_recovery_session_id)
-            {
-                return Err(Status::failed_precondition(
-                    "LocalDisk recovery session is stale",
-                ));
-            }
-        }
         let task_count = if req.tasks.is_empty() {
             req.keys.len()
         } else {
@@ -220,12 +205,6 @@ impl MasterServiceImpl {
                     self.state.runtime_config.enable_tenant_quota,
                 )?;
                 let scoped_key = tenant_id.make_scoped_key(&task.key);
-                if recovery_complete
-                    && !self.state.offloading_tasks.contains_key(&scoped_key)
-                    && self.resolve_write_tenant(&task.tenant_id).is_err()
-                {
-                    return Err(Status::resource_exhausted("tenant not registered"));
-                }
                 if !seen_keys.insert(scoped_key.clone()) {
                     return Err(Status::invalid_argument(format!(
                         "duplicate offload result for key {}",
@@ -235,6 +214,60 @@ impl MasterServiceImpl {
                 Ok::<_, Status>((tenant_id, scoped_key))
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // C++ allows a client with only an ordinary mounted DRAM segment to
+        // report an unsolicited LocalDisk completion for a registered tenant.
+        // Rust keeps the recovery-session protocol for admitted/recovery work,
+        // and falls back to a classic per-client namespace when that session
+        // is absent.
+        enum OffloadSession {
+            Rust {
+                storage_id: Uuid,
+                recovery_complete: bool,
+                active_recovery_session_id: Option<Uuid>,
+            },
+            Classic {
+                storage_id: Uuid,
+            },
+        }
+        let session = if let Some(storage_id) = self
+            .state
+            .local_disk_client_sessions
+            .get(&client_id)
+            .map(|entry| *entry)
+        {
+            let (recovery_complete, active_recovery_session_id) = self
+                .state
+                .local_disk_segments
+                .get(&storage_id)
+                .filter(|entry| entry.active_client_id == Some(client_id))
+                .map(|entry| (entry.recovery_complete, entry.recovery_session_id))
+                .ok_or(Status::failed_precondition(
+                    "local disk session is not active",
+                ))?;
+            if !recovery_complete {
+                let reported_recovery_session_id =
+                    uuid_from_proto(req.recovery_session_id.as_ref().ok_or(
+                        Status::failed_precondition("missing LocalDisk recovery_session_id"),
+                    )?);
+                if reported_recovery_session_id.is_nil()
+                    || active_recovery_session_id != Some(reported_recovery_session_id)
+                {
+                    return Err(Status::failed_precondition(
+                        "LocalDisk recovery session is stale",
+                    ));
+                }
+            }
+            OffloadSession::Rust {
+                storage_id,
+                recovery_complete,
+                active_recovery_session_id,
+            }
+        } else {
+            OffloadSession::Classic {
+                storage_id: classic_local_disk_storage_id(client_id),
+            }
+        };
 
         // Lock the complete batch before authorizing any item. This prevents a
         // Remove/Upsert from changing an object's generation between validation
@@ -247,12 +280,52 @@ impl MasterServiceImpl {
 
         let mut report_kinds = Vec::with_capacity(tasks.len());
         for ((task, (_, key)), metadata) in tasks.iter().zip(&preflight).zip(&req.metadatas) {
+            let OffloadSession::Rust {
+                recovery_complete,
+                storage_id,
+                ..
+            } = &session
+            else {
+                // Classic unsolicited completion: no Rust LocalDisk session and
+                // no admitted task. Validate the metadata shape and let the
+                // mutation phase create/update the LocalDisk replica.
+                if metadata.data_size < 0 {
+                    report_kinds.push(OffloadReportKind::Failed);
+                    continue;
+                }
+                if metadata.transport_endpoint.is_empty() {
+                    return Err(Status::invalid_argument(format!(
+                        "missing transport endpoint for key {}",
+                        task.key
+                    )));
+                }
+                // Unsolicited classic completions require a registered tenant
+                // (C++ TENANT_NOT_REGISTERED); admitted-task completions are
+                // validated by the task branch and may outlive registration.
+                if self.resolve_write_tenant(&task.tenant_id).is_err() {
+                    return Err(Status::resource_exhausted("tenant not registered"));
+                }
+                if task.size > 0
+                    && u64::try_from(task.size).map_err(|_| {
+                        Status::invalid_argument(format!("invalid task size for key {}", task.key))
+                    })? != u64::try_from(metadata.data_size).map_err(|_| {
+                        Status::invalid_argument(format!("invalid data size for key {}", task.key))
+                    })?
+                {
+                    return Err(Status::failed_precondition(format!(
+                        "offload task size does not match reported size for key {}",
+                        task.key
+                    )));
+                }
+                report_kinds.push(OffloadReportKind::ClassicUnsolicited);
+                continue;
+            };
             let reported_generation_id = task
                 .generation_id
                 .as_ref()
                 .map(uuid_from_proto)
                 .filter(|generation_id| !generation_id.is_nil());
-            if recovery_complete {
+            if *recovery_complete {
                 if let Some(offloading_task) = self.state.offloading_tasks.get(key)
                     && reported_generation_id != Some(offloading_task.generation_id)
                 {
@@ -261,13 +334,13 @@ impl MasterServiceImpl {
                         task.key
                     )));
                 }
-            } else if !recovery_complete && reported_generation_id.is_none() {
+            } else if !*recovery_complete && reported_generation_id.is_none() {
                 report_kinds.push(OffloadReportKind::IgnoredRecovery);
                 continue;
             }
 
             if metadata.data_size < 0 {
-                if !recovery_complete {
+                if !*recovery_complete {
                     report_kinds.push(OffloadReportKind::IgnoredRecovery);
                     continue;
                 }
@@ -278,7 +351,7 @@ impl MasterServiceImpl {
                             task.key
                         )));
                     }
-                    if offloading_task.storage_id != storage_id {
+                    if offloading_task.storage_id != *storage_id {
                         return Err(Status::permission_denied(format!(
                             "offload task for key {} belongs to another LocalDisk namespace",
                             task.key
@@ -290,7 +363,7 @@ impl MasterServiceImpl {
             }
 
             if metadata.transport_endpoint.is_empty() {
-                if !recovery_complete {
+                if !*recovery_complete {
                     report_kinds.push(OffloadReportKind::IgnoredRecovery);
                     continue;
                 }
@@ -307,7 +380,7 @@ impl MasterServiceImpl {
                     Status::invalid_argument(format!("invalid task size for key {}", task.key))
                 })? != reported_size
             {
-                if !recovery_complete {
+                if !*recovery_complete {
                     report_kinds.push(OffloadReportKind::IgnoredRecovery);
                     continue;
                 }
@@ -317,7 +390,8 @@ impl MasterServiceImpl {
                 )));
             }
 
-            if recovery_complete && let Some(offloading_task) = self.state.offloading_tasks.get(key)
+            if *recovery_complete
+                && let Some(offloading_task) = self.state.offloading_tasks.get(key)
             {
                 if offloading_task.client_id != client_id {
                     return Err(Status::permission_denied(format!(
@@ -325,7 +399,7 @@ impl MasterServiceImpl {
                         task.key
                     )));
                 }
-                if offloading_task.storage_id != storage_id {
+                if offloading_task.storage_id != *storage_id {
                     return Err(Status::permission_denied(format!(
                         "offload task for key {} belongs to another LocalDisk namespace",
                         task.key
@@ -364,11 +438,15 @@ impl MasterServiceImpl {
 
             // A recovery report is a new control-plane mutation rather than
             // completion of a task already admitted by the Master.
-            if recovery_complete {
-                return Err(Status::failed_precondition(format!(
-                    "no admitted offload task for key {}",
-                    task.key
-                )));
+            if *recovery_complete {
+                // C++ accepts a registered tenant's unsolicited LocalDisk
+                // completion even without an admitted task (classic path); an
+                // unregistered tenant fails exactly like TENANT_NOT_REGISTERED.
+                if self.resolve_write_tenant(&task.tenant_id).is_err() {
+                    return Err(Status::resource_exhausted("tenant not registered"));
+                }
+                report_kinds.push(OffloadReportKind::ClassicUnsolicited);
+                continue;
             }
             if self.resolve_write_tenant(&task.tenant_id).is_err() {
                 report_kinds.push(OffloadReportKind::IgnoredRecovery);
@@ -385,7 +463,7 @@ impl MasterServiceImpl {
             let can_reattach = !self.state.processing_keys.contains_key(key)
                 && object.replicas.iter().any(|replica| {
                     replica.replica_type == ReplicaType::LocalDisk
-                        && replica.local_disk_storage_id == Some(storage_id)
+                        && replica.local_disk_storage_id == Some(*storage_id)
                         && replica.local_disk_generation_id == reported_generation_id
                         && replica.status == ReplicaStatus::Complete
                         && replica.size == reported_size
@@ -404,7 +482,16 @@ impl MasterServiceImpl {
             .map(|(task, _)| task.clone())
             .collect();
 
-        for (((task, (_, key)), metadata), report_kind) in tasks
+        let (storage_id, recovery_complete) = match &session {
+            OffloadSession::Rust {
+                storage_id,
+                recovery_complete,
+                ..
+            } => (*storage_id, *recovery_complete),
+            OffloadSession::Classic { storage_id } => (*storage_id, true),
+        };
+
+        for (((task, (tenant_id, key)), metadata), report_kind) in tasks
             .iter()
             .zip(&preflight)
             .zip(&req.metadatas)
@@ -416,6 +503,96 @@ impl MasterServiceImpl {
             if report_kind == OffloadReportKind::Failed {
                 clear_offloading_task(&self.state, key);
                 self.persist_object_image_or_remove(key, "offload_failure")?;
+                continue;
+            }
+            if report_kind == OffloadReportKind::ClassicUnsolicited {
+                let size = metadata.data_size.max(0) as u64;
+                // Classic replicas carry a synthetic byte generation and a
+                // lazily registered per-client LocalDisk session so they are
+                // routable through the same ownership validation as any other
+                // LocalDisk replica.
+                let generation_id = Uuid::new_v4();
+                self.state
+                    .local_disk_client_sessions
+                    .insert(client_id, storage_id);
+                self.state
+                    .local_disk_segments
+                    .entry(storage_id)
+                    .or_insert_with(|| LocalDiskSegmentEntry {
+                        active_client_id: Some(client_id),
+                        persisted_client_id: Some(client_id),
+                        recovery_complete: true,
+                        recovery_session_id: None,
+                        recovered_objects: HashSet::new(),
+                        enable_offloading: false,
+                        offloading_objects: HashMap::new(),
+                        promotion_objects: HashMap::new(),
+                        ssd_total_capacity_bytes: 0,
+                    });
+                if let Some(mut entry) = self.state.local_disk_segments.get_mut(&storage_id) {
+                    entry.active_client_id = Some(client_id);
+                    entry.persisted_client_id = Some(client_id);
+                    entry.recovery_complete = true;
+                }
+                let mut object = match self.state.objects.get_mut(key) {
+                    Some(object) => object,
+                    None => {
+                        let user_key = TenantId::parse_scoped_key(key)
+                            .map(|(_, user_key)| user_key)
+                            .unwrap_or_else(|_| key.clone());
+                        self.state.objects.insert(
+                            key.clone(),
+                            ObjectEntry {
+                                replicas: Vec::new(),
+                                size,
+                                last_access: std::time::SystemTime::now(),
+                                hard_pinned: false,
+                                data_type: Default::default(),
+                                client_id: Uuid::nil(),
+                                put_start_time: None,
+                                lease_timeout: None,
+                                soft_pin_timeout: None,
+                                tenant_id: tenant_id.clone(),
+                                group_id: String::new(),
+                                quota_committed: true,
+                                reserved_quota_charge_bytes: 0,
+                                committed_quota_charge_bytes: 0,
+                                pending_replaced_quota_charge_bytes: 0,
+                                memory_cache_total_accounted: false,
+                                disk_cache_total_accounted: false,
+                                user_key,
+                            },
+                        );
+                        self.state
+                            .objects
+                            .get_mut(key)
+                            .expect("inserted classic LocalDisk object")
+                    }
+                };
+                let has_disk_owner = object.replicas.iter().any(|replica| {
+                    replica.replica_type == ReplicaType::LocalDisk
+                        && replica.status == ReplicaStatus::Complete
+                });
+                if !has_disk_owner {
+                    object.replicas.push(ReplicaDescriptor {
+                        refcnt: 0,
+                        handle_valid: true,
+                        segment_id: Uuid::nil(),
+                        segment_name: metadata.transport_endpoint.clone(),
+                        offset: 0,
+                        size,
+                        status: ReplicaStatus::Complete,
+                        replica_type: ReplicaType::LocalDisk,
+                        holder_client_id: Some(client_id),
+                        local_disk_storage_id: Some(storage_id),
+                        local_disk_generation_id: Some(generation_id),
+                        base_addr: 0,
+                        protocol: String::new(),
+                    });
+                    sync_cache_total_accounting(&mut object);
+                }
+                drop(object);
+                self.persist_object_image_or_remove(key, "classic_unsolicited_offload")?;
                 continue;
             }
             let generation_id = task

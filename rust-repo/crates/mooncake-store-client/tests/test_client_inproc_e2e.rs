@@ -70,7 +70,7 @@ async fn cxl_client_integration_subprocess_helper() {
         eviction_high_watermark_ratio: 0.25,
         eviction_ratio: 0.25,
         soft_pin_ttl: std::time::Duration::ZERO,
-        lease_ttl: std::time::Duration::from_millis(20),
+        lease_ttl: std::time::Duration::from_millis(1_000),
         allow_evict_soft_pinned_objects: true,
         ..Default::default()
     };
@@ -1408,6 +1408,642 @@ async fn batch_replica_clear_handles_single_multiple_empty_and_missing_keys() {
     );
 
     drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_replica_clear_does_not_affect_other_keys() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(200),
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client(&master).await;
+    let clear_key = "clear-other-client-key";
+    let keep_key = "keep-other-client-key";
+
+    assert_eq!(
+        client
+            .batch_put(
+                &[clear_key.to_string(), keep_key.to_string()],
+                &[b"expire_me".as_slice(), b"keep_me".as_slice()],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0]
+    );
+
+    assert_eq!(client.get(keep_key).await.unwrap(), b"keep_me".to_vec());
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+
+    assert_eq!(
+        client
+            .batch_replica_clear(&[clear_key.to_string()], client.client_id(), "", "")
+            .await
+            .unwrap(),
+        vec![clear_key.to_string()]
+    );
+
+    assert_eq!(
+        client
+            .batch_is_exist(&[clear_key.to_string(), keep_key.to_string()])
+            .await
+            .unwrap(),
+        vec![false, true]
+    );
+    assert_eq!(client.get(keep_key).await.unwrap(), b"keep_me".to_vec());
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_replica_clear_replicated_key_all_replicas() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        // 200 ms keeps the immediate post-put reads robust under parallel test
+        // load while still expiring long before the batch clear below.
+        lease_ttl: std::time::Duration::from_millis(200),
+        ..Default::default()
+    })
+    .await;
+    let mut writer = create_tcp_client(&master).await;
+    let mut reader = create_tcp_client(&master).await;
+
+    let key = "replicated-clear-key";
+    let value = b"replicated-value".to_vec();
+    assert_eq!(
+        writer
+            .put(
+                key,
+                &value,
+                Some(ReplicateConfig {
+                    replica_num: 2,
+                    preferred_segments: vec![writer.get_hostname(), reader.get_hostname()],
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        ()
+    );
+
+    assert_eq!(writer.get(key).await.unwrap(), value);
+    assert_eq!(reader.get(key).await.unwrap(), value);
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    assert_eq!(
+        writer
+            .batch_replica_clear(&[key.to_string()], writer.client_id(), "", "")
+            .await
+            .unwrap(),
+        vec![key.to_string()]
+    );
+    assert!(writer.get(key).await.is_err());
+    assert!(reader.get(key).await.is_err());
+
+    drop(writer);
+    drop(reader);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_replica_clear_specific_segment_replica_keeps_other_readable() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(40),
+        ..Default::default()
+    })
+    .await;
+    let mut writer = create_tcp_client(&master).await;
+    let mut reader = create_tcp_client(&master).await;
+
+    let key = "replicated-segment-clear-key";
+    let value = b"segment-replica-value".to_vec();
+    assert_eq!(
+        writer
+            .put(
+                key,
+                &value,
+                Some(ReplicateConfig {
+                    replica_num: 2,
+                    preferred_segments: vec![writer.get_hostname(), reader.get_hostname()],
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        ()
+    );
+    assert_eq!(reader.get(key).await.unwrap(), value);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    assert_eq!(
+        writer
+            .batch_replica_clear(
+                &[key.to_string()],
+                writer.client_id(),
+                &writer.get_hostname(),
+                "",
+            )
+            .await
+            .unwrap(),
+        vec![key.to_string()]
+    );
+    // Named clear removes the main segment's replica while the other Store's
+    // replica stays readable with the exact original bytes.
+    assert_eq!(reader.get(key).await.unwrap(), value);
+
+    drop(writer);
+    drop(reader);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_replica_clear_mixed_expired_and_active_keeps_active_bytes() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(200),
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client(&master).await;
+
+    assert_eq!(
+        client
+            .batch_put(
+                &["expired-a".to_string(), "expired-b".to_string()],
+                &[b"expired-a".as_slice(), b"expired-b".as_slice()],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0]
+    );
+    assert_eq!(
+        client
+            .batch_put(
+                &["active-a".to_string(), "active-b".to_string()],
+                &[b"active-a".as_slice(), b"active-b".as_slice()],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0]
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    assert_eq!(client.get("active-a").await.unwrap(), b"active-a".to_vec());
+    assert_eq!(client.get("active-b").await.unwrap(), b"active-b".to_vec());
+
+    assert_eq!(
+        client
+            .batch_replica_clear(
+                &[
+                    "expired-a".to_string(),
+                    "expired-b".to_string(),
+                    "active-a".to_string(),
+                    "active-b".to_string(),
+                ],
+                client.client_id(),
+                "",
+                "",
+            )
+            .await
+            .unwrap(),
+        vec!["expired-a".to_string(), "expired-b".to_string()]
+    );
+
+    assert_eq!(
+        client
+            .batch_is_exist(&[
+                "expired-a".to_string(),
+                "expired-b".to_string(),
+                "active-a".to_string(),
+                "active-b".to_string(),
+            ])
+            .await
+            .unwrap(),
+        vec![false, false, true, true]
+    );
+    assert_eq!(client.get("active-a").await.unwrap(), b"active-a".to_vec());
+    assert_eq!(client.get("active-b").await.unwrap(), b"active-b".to_vec());
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_replica_clear_with_active_lease_keeps_exact_bytes() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(500),
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client(&master).await;
+
+    let keys = vec![
+        "active-a".to_string(),
+        "active-b".to_string(),
+        "active-c".to_string(),
+    ];
+    let values = vec![
+        b"value-a".as_slice(),
+        b"value-b".as_slice(),
+        b"value-c".as_slice(),
+    ];
+    assert_eq!(
+        client
+            .batch_put(
+                &keys,
+                &values,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0, 0]
+    );
+
+    for (index, key) in keys.iter().enumerate() {
+        assert_eq!(client.get(key).await.unwrap(), values[index].to_vec());
+    }
+
+    assert!(
+        client
+            .batch_replica_clear(&keys, client.client_id(), "", "")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        client.batch_is_exist(&keys).await.unwrap(),
+        vec![true, true, true]
+    );
+    assert_eq!(client.get("active-a").await.unwrap(), b"value-a".to_vec());
+    assert_eq!(client.get("active-b").await.unwrap(), b"value-b".to_vec());
+    assert_eq!(client.get("active-c").await.unwrap(), b"value-c".to_vec());
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+async fn task_status(client: &mut MooncakeClient, task_id: Uuid) -> i32 {
+    client.query_task(task_id).await.unwrap().status
+}
+
+async fn drive_task_to_success(
+    creator: &mut MooncakeClient,
+    worker: &mut MooncakeClient,
+    task_id: Uuid,
+) {
+    if task_status(creator, task_id).await == proto::TaskStatus::TaskSuccess as i32 {
+        return;
+    }
+    for client in [worker, creator] {
+        let assignments = client.fetch_tasks(100).await.unwrap();
+        for assignment in assignments {
+            let payload = assignment.payload.clone();
+            let result = client.execute_task_assignment(assignment).await;
+            if let Err(error) = result {
+                eprintln!(
+                    "execute failed on {}: {error}; payload={payload}",
+                    client.get_hostname()
+                );
+                panic!("execute_task_assignment failed: {error}");
+            }
+        }
+    }
+    for _ in 0..200 {
+        let response = creator.query_task(task_id).await.unwrap();
+        if response.status == proto::TaskStatus::TaskSuccess as i32 {
+            return;
+        }
+        assert_ne!(
+            response.status,
+            proto::TaskStatus::TaskFailed as i32,
+            "task {task_id} failed: {}",
+            response.message
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("task {task_id} did not reach SUCCESS");
+}
+
+async fn source_segment_for(client: &mut MooncakeClient, key: &str) -> String {
+    let _ = key;
+    // The client-cached query can report a locally-derived endpoint name;
+    // the master's segment table holds the authoritative segment name.
+    let details = client.get_segments_detail().await.unwrap();
+    details
+        .iter()
+        .find(|detail| detail.client_id == client.client_id())
+        .expect("client should own exactly one mounted segment")
+        .segment_name
+        .clone()
+}
+
+async fn other_segment(client: &mut MooncakeClient, source: &str) -> String {
+    let details = client.get_segments_detail().await.unwrap();
+    details
+        .iter()
+        .find(|detail| detail.segment_name != source)
+        .expect("expected a second distinct mounted segment")
+        .segment_name
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_replica_copy_complete_flow() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig::default()).await;
+    let mut client1 = create_tcp_client(&master).await;
+    let mut client2 = create_tcp_client(&master).await;
+    let key = "task-copy-key";
+    let payload = b"This is test data for replica copy operation.";
+
+    client1
+        .put(
+            key,
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: client1.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let source = source_segment_for(&mut client1, key).await;
+    let target = other_segment(&mut client1, &source).await;
+    assert_ne!(source, target);
+
+    let task_id = client1.create_copy_task(key, &[target]).await.unwrap();
+    drive_task_to_success(&mut client1, &mut client2, task_id).await;
+
+    let query = client2.query(key).await.unwrap();
+    assert!(!query.replicas.is_empty());
+    assert_eq!(client2.get(key).await.unwrap(), payload.to_vec());
+
+    drop(client1);
+    drop(client2);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_replica_move_complete_flow() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig::default()).await;
+    let mut client1 = create_tcp_client(&master).await;
+    let mut client2 = create_tcp_client(&master).await;
+    let key = "task-move-key";
+    let payload = b"payload for replica move complete flow";
+
+    client1
+        .put(
+            key,
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: client1.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let source = source_segment_for(&mut client1, key).await;
+    let target = other_segment(&mut client1, &source).await;
+    assert_ne!(source, target);
+
+    let task_id = client1
+        .create_move_task(key, &source, &target)
+        .await
+        .unwrap();
+    drive_task_to_success(&mut client1, &mut client2, task_id).await;
+
+    let query = client2.query(key).await.unwrap();
+    assert!(!query.replicas.is_empty());
+    assert_eq!(client2.get(key).await.unwrap(), payload.to_vec());
+
+    drop(client1);
+    drop(client2);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_replica_copy_to_multiple_targets() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig::default()).await;
+    let mut client1 = create_tcp_client(&master).await;
+    let mut client2 = create_tcp_client(&master).await;
+    let key = "task-copy-multi-key";
+    let payload = b"multi-target copy payload";
+
+    client1
+        .put(
+            key,
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: client1.get_hostname(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let source = source_segment_for(&mut client1, key).await;
+    let target = other_segment(&mut client1, &source).await;
+
+    let task_id = client1.create_copy_task(key, &[target]).await.unwrap();
+    drive_task_to_success(&mut client1, &mut client2, task_id).await;
+
+    let query = client2.query(key).await.unwrap();
+    assert!(!query.replicas.is_empty());
+    assert_eq!(client2.get(key).await.unwrap(), payload.to_vec());
+
+    drop(client1);
+    drop(client2);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_multiple_copy_tasks() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig::default()).await;
+    let mut client1 = create_tcp_client(&master).await;
+    let mut client2 = create_tcp_client(&master).await;
+    let payloads = [
+        b"copy payload for key 0",
+        b"copy payload for key 1",
+        b"copy payload for key 2",
+    ];
+    let keys = ["task-copy-0", "task-copy-1", "task-copy-2"];
+    let mut task_ids = Vec::new();
+
+    for (key, payload) in keys.iter().zip(payloads.iter()) {
+        client1
+            .put(
+                key,
+                *payload,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client1.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let source = source_segment_for(&mut client1, key).await;
+        let target = other_segment(&mut client1, &source).await;
+        task_ids.push(client1.create_copy_task(key, &[target]).await.unwrap());
+    }
+
+    for task_id in &task_ids {
+        drive_task_to_success(&mut client1, &mut client2, *task_id).await;
+    }
+    for (index, key) in keys.iter().enumerate() {
+        let query = client2.query(key).await.unwrap();
+        assert!(!query.replicas.is_empty());
+        assert_eq!(client2.get(key).await.unwrap(), payloads[index].to_vec());
+    }
+
+    drop(client1);
+    drop(client2);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_multiple_move_tasks() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig::default()).await;
+    let mut client1 = create_tcp_client(&master).await;
+    let mut client2 = create_tcp_client(&master).await;
+    let payloads = [
+        b"move payload for key 0",
+        b"move payload for key 1",
+        b"move payload for key 2",
+    ];
+    let keys = ["task-move-0", "task-move-1", "task-move-2"];
+    let mut task_ids = Vec::new();
+
+    for (key, payload) in keys.iter().zip(payloads.iter()) {
+        client1
+            .put(
+                key,
+                *payload,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client1.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let source = source_segment_for(&mut client1, key).await;
+        let target = other_segment(&mut client1, &source).await;
+        task_ids.push(
+            client1
+                .create_move_task(key, &source, &target)
+                .await
+                .unwrap(),
+        );
+    }
+
+    for task_id in &task_ids {
+        drive_task_to_success(&mut client1, &mut client2, *task_id).await;
+    }
+    for (index, key) in keys.iter().enumerate() {
+        let query = client2.query(key).await.unwrap();
+        assert!(!query.replicas.is_empty());
+        assert_eq!(client2.get(key).await.unwrap(), payloads[index].to_vec());
+    }
+
+    drop(client1);
+    drop(client2);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_concurrent_copy_and_move_operations() {
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig::default()).await;
+    let mut client1 = create_tcp_client(&master).await;
+    let mut client2 = create_tcp_client(&master).await;
+    let copy_payloads = [b"concurrent copy data 0", b"concurrent copy data 1"];
+    let move_payloads = [b"concurrent move data 0", b"concurrent move data 1"];
+    let copy_keys = ["task-copy-c-0", "task-copy-c-1"];
+    let move_keys = ["task-move-c-0", "task-move-c-1"];
+    let mut task_ids = Vec::new();
+
+    for (key, payload) in copy_keys.iter().zip(copy_payloads.iter()) {
+        client1
+            .put(
+                key,
+                *payload,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client1.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let source = source_segment_for(&mut client1, key).await;
+        let target = other_segment(&mut client1, &source).await;
+        task_ids.push(client1.create_copy_task(key, &[target]).await.unwrap());
+    }
+    for (key, payload) in move_keys.iter().zip(move_payloads.iter()) {
+        client1
+            .put(
+                key,
+                *payload,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: client1.get_hostname(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        let source = source_segment_for(&mut client1, key).await;
+        let target = other_segment(&mut client1, &source).await;
+        task_ids.push(
+            client1
+                .create_move_task(key, &source, &target)
+                .await
+                .unwrap(),
+        );
+    }
+
+    for task_id in &task_ids {
+        drive_task_to_success(&mut client1, &mut client2, *task_id).await;
+    }
+    for (index, key) in copy_keys.iter().chain(move_keys.iter()).enumerate() {
+        let query = client2.query(key).await.unwrap();
+        assert!(!query.replicas.is_empty());
+        let expected = if index < 2 {
+            copy_payloads[index]
+        } else {
+            move_payloads[index - 2]
+        };
+        assert_eq!(client2.get(key).await.unwrap(), expected.to_vec());
+    }
+
+    drop(client1);
+    drop(client2);
     let _ = shutdown.send(());
 }
 

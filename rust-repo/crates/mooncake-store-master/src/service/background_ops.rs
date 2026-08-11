@@ -288,6 +288,19 @@ pub(crate) fn clear_promotion_task(state: &MasterState, key: &str) -> Option<Pro
     removed
 }
 
+/// Remove a promotion task because its prerequisite went away (object removal,
+/// upsert replacement, holder-client expiry, or recovery cleanup). Mirrors the
+/// C++ `ErasePromotionTaskIfPresent` accounting: in-flight gauge decrement plus
+/// the cancelled counter.
+pub(crate) fn cancel_promotion_task(state: &MasterState, key: &str) -> Option<PromotionTaskEntry> {
+    let removed = clear_promotion_task(state, key);
+    if removed.is_some() {
+        metrics::PROMOTION_CANCELLED.inc();
+        metrics::PROMOTION_IN_FLIGHT.dec();
+    }
+    removed
+}
+
 fn has_quota_evictable_memory_replica(object: &ObjectEntry) -> bool {
     object.replicas.iter().any(|replica| {
         replica.replica_type == ReplicaType::Memory
@@ -492,7 +505,7 @@ fn evict_memory_pressure_object(
             entry.value_mut().remove(key);
         }
         clear_offloading_task(state, key);
-        clear_promotion_task(state, key);
+        cancel_promotion_task(state, key);
     }
     if quota_removal_failed {
         return Err(HaError::Snapshot(format!(
@@ -884,7 +897,7 @@ pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -
                 entry.value_mut().remove(&key);
             }
             clear_offloading_task(state, &key);
-            clear_promotion_task(state, &key);
+            cancel_promotion_task(state, &key);
         }
         if state
             .persist_object_image_or_remove_or_fence(&key, "automatic_nof_eviction")
@@ -963,6 +976,7 @@ pub(crate) fn try_push_promotion_queue(
     let current_freq = state.promotion_sketch.write().increment(key);
     let threshold = state.runtime_config.promotion_admission_threshold.max(1);
     if current_freq < threshold {
+        metrics::PROMOTION_REJECTED_FREQUENCY.inc();
         return PromotionQueueResult::FrequencyRejected;
     }
     if memory_usage_ratio(state) >= state.runtime_config.eviction_high_watermark_ratio {
@@ -975,6 +989,7 @@ pub(crate) fn try_push_promotion_queue(
                 None,
             );
         }
+        metrics::PROMOTION_REJECTED_WATERMARK.inc();
         return PromotionQueueResult::WatermarkRejected;
     }
 
@@ -1054,6 +1069,7 @@ pub(crate) fn try_push_promotion_queue(
         state
             .promotion_in_flight
             .fetch_sub(1, AtomicOrdering::Relaxed);
+        metrics::PROMOTION_REJECTED_CAP.inc();
         if record_candidate {
             record_or_refresh_candidate(
                 state,
@@ -1103,6 +1119,8 @@ pub(crate) fn try_push_promotion_queue(
         },
     );
     erase_promotion_candidate(state, key);
+    metrics::PROMOTION_ADMITTED.inc();
+    metrics::PROMOTION_IN_FLIGHT.inc();
     PromotionQueueResult::Queued
 }
 

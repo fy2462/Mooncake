@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::ffi::c_void;
 
 use super::MooncakeClient;
+use super::transfer_local::validate_target_address;
 use crate::hot_cache::HotCachePutToken;
 
 pub(super) fn scoped_cache_key<'a>(tenant_id: &str, key: &'a str) -> Cow<'a, str> {
@@ -334,7 +335,32 @@ impl MooncakeClient {
                 "buffer too small for key {key}: required={object_size}, available={size}"
             )));
         }
-        let buffer = self.resolve_writable_buffer_region(buffer, object_size)?;
+        // C++ reads into arbitrary caller host memory; the TE zero-copy path
+        // requires the destination to be a pre-registered buffer. When the
+        // caller passes an unregistered pointer (e.g. a ctypes destination),
+        // stage the read into the client's registered local buffer via the
+        // generic Vec path and copy into the caller's memory.
+        let buffer = match self.resolve_writable_buffer_region(buffer, object_size) {
+            Ok(region) => region,
+            Err(_unregistered) => {
+                let data = self
+                    .read_from_replica_for_tenant(key, tenant_id, replica)
+                    .await?;
+                let target = validate_target_address(buffer)?;
+                if data.len() != object_size {
+                    return Err(StoreError::Internal(format!(
+                        "staged get_into read {} bytes for key {key}, expected {object_size}",
+                        data.len()
+                    )));
+                }
+                // SAFETY: caller supplied a writable `size >= object_size`
+                // buffer; `data` is exactly object_size bytes.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), target as *mut u8, data.len());
+                }
+                return Ok(data.len());
+            }
+        };
         if replica.replica_type == mooncake_store_core::ReplicaType::Disk
             || (replica.replica_type == mooncake_store_core::ReplicaType::LocalDisk
                 && !self.is_local_replica(replica))

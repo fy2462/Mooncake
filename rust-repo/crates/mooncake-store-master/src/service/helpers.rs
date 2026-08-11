@@ -34,7 +34,7 @@ use std::time::SystemTime;
 use tonic::Status;
 use uuid::Uuid;
 
-use super::background_ops::{clear_offloading_task, clear_promotion_task};
+use super::background_ops::{cancel_promotion_task, clear_offloading_task, clear_promotion_task};
 use super::state::{
     ClientEntry, DelayedReplicaReleaseEntry, MasterRuntimeConfig, MasterState, ObjectEntry,
 };
@@ -909,7 +909,7 @@ pub(crate) fn release_object_replicas(
     // and restart reconstruction.
     release_replicas(state, replicas)?;
     clear_offloading_task(state, key);
-    clear_promotion_task(state, key);
+    cancel_promotion_task(state, key);
     Ok(())
 }
 
@@ -1297,15 +1297,10 @@ pub(crate) fn cleanup_stale_handles(
         }
         let is_stale = match r.replica_type {
             ReplicaType::Memory | ReplicaType::NoFSsd => !r.handle_valid,
-            ReplicaType::LocalDisk if r.local_disk_storage_id.is_some() => {
-                if r.holder_client_id
-                    .is_none_or(|cid| !alive_clients.contains(&cid))
-                {
-                    r.holder_client_id = None;
-                    r.handle_valid = false;
-                }
-                false
-            }
+            // C++ CleanupStaleHandles removes every completed LocalDisk
+            // replica whose owner client is no longer alive (see
+            // Replica::has_stale_local_disk_client); keep the identical
+            // contract regardless of durable storage identity.
             ReplicaType::LocalDisk => r
                 .holder_client_id
                 .is_some_and(|cid| !alive_clients.contains(&cid)),
@@ -1456,7 +1451,7 @@ fn clear_invalid_handles_for_keys(
             state.processing_keys.remove(key);
             state.replication_tasks.remove(key);
             clear_offloading_task(state, key);
-            clear_promotion_task(state, key);
+            cancel_promotion_task(state, key);
             for mut entry in state.client_objects.iter_mut() {
                 entry.value_mut().remove(key);
             }
@@ -1472,6 +1467,25 @@ fn clear_invalid_handles_for_keys(
                 return;
             }
         }
+    }
+    cancel_promotions_for_stale_holders(state, alive_clients);
+}
+
+/// Cancel promotion tasks whose LocalDisk holder is no longer alive, mirroring
+/// the C++ ClearInvalidHandles end-state: a dead holder cannot drive the
+/// promotion to completion, so the task must be erased and the cluster-wide
+/// in-flight slot released immediately (C++ reaches the same effect through
+/// CleanupStaleHandles removing the stale LocalDisk replica and EraseMetadata
+/// calling ErasePromotionTaskIfPresent).
+fn cancel_promotions_for_stale_holders(state: &MasterState, alive_clients: &HashSet<Uuid>) {
+    let stale_keys = state
+        .promotion_tasks
+        .iter()
+        .filter(|entry| !alive_clients.contains(&entry.holder_id))
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in stale_keys {
+        cancel_promotion_task(state, &key);
     }
 }
 
@@ -1715,6 +1729,7 @@ mod tests {
         {
             let mut quotas = service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.recompute_effective_quotas(500);
             quotas.restore_object_checked(&tenant_id, 60).unwrap();
             quotas.reserve(&tenant_id, 50).unwrap();
         }
@@ -1763,6 +1778,7 @@ mod tests {
         {
             let mut quotas = service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.recompute_effective_quotas(500);
             quotas.restore_object_checked(&tenant_id, 100).unwrap();
             quotas.reserve(&tenant_id, 50).unwrap();
         }
@@ -1817,6 +1833,7 @@ mod tests {
         {
             let mut quotas = settled_service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.recompute_effective_quotas(500);
             quotas.restore_object_checked(&tenant_id, 100).unwrap();
             quotas.reserve(&tenant_id, 150).unwrap();
         }
@@ -1838,6 +1855,7 @@ mod tests {
         {
             let mut quotas = revoked_service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 500, 500).unwrap();
+            quotas.recompute_effective_quotas(500);
             quotas.restore_object_checked(&tenant_id, 100).unwrap();
             quotas.reserve(&tenant_id, 150).unwrap();
         }
@@ -1881,6 +1899,7 @@ mod tests {
         {
             let mut quotas = service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 100, 100).unwrap();
+            quotas.recompute_effective_quotas(100);
             quotas.register_object(&tenant_id);
             quotas.reserve(&tenant_id, 100).unwrap();
         }
@@ -1924,12 +1943,11 @@ mod tests {
     fn authoritative_remove_quota_mismatch_fences_service() {
         let service = quota_enabled_service();
         let tenant_id = TenantId::new("tenant-a".into()).unwrap();
-        service
-            .state
-            .tenant_quotas
-            .write()
-            .upsert_policy(&tenant_id, 100, 100)
-            .unwrap();
+        {
+            let mut quotas = service.state.tenant_quotas.write();
+            quotas.upsert_policy(&tenant_id, 100, 100).unwrap();
+            quotas.recompute_effective_quotas(100);
+        }
         let object = ObjectEntry {
             replicas: Vec::new(),
             size: 100,
@@ -1966,6 +1984,7 @@ mod tests {
         {
             let mut quotas = service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 400, 400).unwrap();
+            quotas.recompute_effective_quotas(400);
             quotas.restore_object_checked(&tenant_id, 200).unwrap();
         }
         let replica = |handle_valid| ReplicaDescriptor {

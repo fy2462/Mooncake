@@ -544,6 +544,155 @@ fn publish_fixture_with_identity_and_shape(
     (root, provider, segment_id, client_id, task_id)
 }
 
+/// Builds the C++ default-test metadata payload from
+/// `ha/snapshot/snapshot_test_utils.h`: a single default object owned by
+/// `UUID{1, 2}` with one complete DISK replica whose file path and object size
+/// must survive the format-agnostic decode. The client UUID is written in the
+/// C++ `{high}-{low}` decimal-pair shape, and the replica is the exact
+/// `PackDiskReplica` array.
+fn synthetic_cpp_metadata_with_disk_replica(
+    lease_timeout_ms: u64,
+    shape: SyntheticCppMetadataShape,
+) -> Vec<u8> {
+    let include_data_type = matches!(
+        shape,
+        SyntheticCppMetadataShape::V2DataType
+            | SyntheticCppMetadataShape::V3DataTypeHardPinned
+            | SyntheticCppMetadataShape::CurrentV4
+    );
+    let include_hard_pinned = matches!(
+        shape,
+        SyntheticCppMetadataShape::V2HardPinned
+            | SyntheticCppMetadataShape::V3DataTypeHardPinned
+            | SyntheticCppMetadataShape::CurrentV4
+    );
+    let include_group_id = matches!(shape, SyntheticCppMetadataShape::CurrentV4);
+    let mut metadata = vec![
+        "1-2".into(),
+        1_700_000_000_000_u64.into(),
+        4096_u64.into(),
+        lease_timeout_ms.into(),
+        false.into(),
+        0_u64.into(),
+        1_u64.into(),
+    ];
+    if include_data_type {
+        metadata.push((ObjectDataType::Tensor as u64).into());
+    }
+    metadata.push(Value::Array(vec![
+        1_u64.into(),
+        (ReplicaStatus::Complete as i32 as i64).into(),
+        (ReplicaType::Disk as i32 as i64).into(),
+        Value::Array(vec![
+            "/tmp/mooncake_snapshot_disk.data".into(),
+            4096_u64.into(),
+        ]),
+    ]));
+    if include_hard_pinned {
+        metadata.push(true.into());
+    }
+    if include_group_id {
+        metadata.push("test-group".into());
+    }
+    let item = Value::Array(vec!["key-1".into(), Value::Array(metadata)]);
+    let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
+    encode(&Value::Map(vec![(
+        "shards".into(),
+        Value::Map(vec![(0.into(), Value::Binary(compress(&shard)))]),
+    )]))
+}
+
+fn publish_disk_replica_fixture(
+    lease_timeout_ms: u64,
+    shape: SyntheticCppMetadataShape,
+) -> (tempfile::TempDir, CatalogBackedSnapshotProvider) {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let segment_id = Uuid::new_v4();
+    let client_id = Uuid::new_v4();
+    let mut descriptor = SnapshotDescriptor::new("20260610_120000_001");
+    descriptor.last_included_seq = 42;
+    catalog.publish(&descriptor).unwrap();
+    object_store
+        .upload_string(
+            &descriptor.manifest_key,
+            &format!("messagepack|1.0.0|{}", descriptor.snapshot_id),
+        )
+        .unwrap();
+    object_store
+        .upload_buffer(
+            &format!("{}segments", descriptor.object_prefix),
+            &synthetic_cpp_segments(segment_id, client_id),
+        )
+        .unwrap();
+    object_store
+        .upload_buffer(
+            &format!("{}metadata", descriptor.object_prefix),
+            &synthetic_cpp_metadata_with_disk_replica(lease_timeout_ms, shape),
+        )
+        .unwrap();
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    (root, provider)
+}
+
+/// C++ CatalogBackedSnapshotProviderTest.LoadLatestSnapshotWith* pins every
+/// historical metadata layout and requires the default object plus its
+/// complete DISK replica to round-trip intact after a catalog snapshot load.
+#[test]
+fn cpp_parity_catalog_provider_loads_default_disk_object_for_each_metadata_shape() {
+    let future_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    for (shape, expected_data_type, expected_hard_pinned, expected_group_id) in [
+        (
+            SyntheticCppMetadataShape::V2DataType,
+            ObjectDataType::Tensor,
+            false,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::V2HardPinned,
+            ObjectDataType::Unknown,
+            true,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::V3DataTypeHardPinned,
+            ObjectDataType::Tensor,
+            true,
+            "",
+        ),
+        (
+            SyntheticCppMetadataShape::CurrentV4,
+            ObjectDataType::Tensor,
+            true,
+            "test-group",
+        ),
+    ] {
+        let (_root, provider) = publish_disk_replica_fixture(future_ms, shape);
+        let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+        assert_eq!(snapshot.objects.len(), 1);
+        let (scoped_key, object) = &snapshot.objects[0];
+        assert_eq!(scoped_key, "default\0key-1");
+        assert_eq!(object.user_key, "key-1");
+        assert_eq!(object.tenant_id, TenantId::default());
+        assert_eq!(object.client_id, Uuid::from_u64_pair(1, 2));
+        assert_eq!(object.size, 4096);
+        assert_eq!(object.data_type, expected_data_type);
+        assert_eq!(object.hard_pinned, expected_hard_pinned);
+        assert_eq!(object.group_id, expected_group_id);
+        assert_eq!(object.replicas.len(), 1);
+        let replica = &object.replicas[0];
+        assert_eq!(replica.status, ReplicaStatus::Complete);
+        assert_eq!(replica.replica_type, ReplicaType::Disk);
+        assert_eq!(replica.segment_name, "/tmp/mooncake_snapshot_disk.data");
+        assert_eq!(replica.size, 4096);
+    }
+}
+
 #[test]
 fn test_catalog_provider_loads_synthetic_cpp_wire_shapes() {
     let future_ms = SystemTime::now()

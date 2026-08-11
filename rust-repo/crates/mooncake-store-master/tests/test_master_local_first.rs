@@ -84,6 +84,84 @@ async fn end_memory_put(service: &MasterServiceImpl, client_id: Uuid, key: &str)
 }
 
 #[tokio::test]
+async fn cpp_parity_host_ordered_segments_tracks_status_and_unmount() {
+    let service = local_first_service();
+    let client_id = Uuid::new_v4();
+
+    async fn mount(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        name: &str,
+        host: &str,
+        base: u64,
+    ) -> Uuid {
+        let proto_id = MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: name.into(),
+                size: 16 * 1024 * 1024,
+                base_addr: base,
+                te_endpoint: name.into(),
+                protocol: String::new(),
+                host_id: host.into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .segment_id
+        .expect("mount must return a segment id");
+        Uuid::from_u64_pair(proto_id.high, proto_id.low)
+    }
+
+    let host1_segment_id = mount(&service, client_id, "host1_segment", "host1", 0x400000000).await;
+    mount(&service, client_id, "host0_segment", "host0", 0x300000000).await;
+
+    // Active host1 segment is the sole preferred candidate for host1 writes.
+    let initial =
+        start_local_first_put(&service, client_id, "status_key_initial", 1024, "host1", "").await;
+    assert_eq!(initial.transport_endpoint, "host1_segment");
+
+    // A drain job moves host1_segment to DRAINING; host-ordered selection now
+    // excludes it and leaves host0_segment as the candidate.
+    MasterService::create_drain_job(
+        &service,
+        Request::new(proto::CreateDrainJobRequest {
+            segments: vec!["host1_segment".into()],
+            target_segments: vec!["host0_segment".into()],
+            max_concurrency: 1,
+        }),
+    )
+    .await
+    .unwrap();
+    let during_drain =
+        start_local_first_put(&service, client_id, "status_key_drain", 1024, "host1", "").await;
+    assert_eq!(during_drain.transport_endpoint, "host0_segment");
+
+    // After unmounting the host1 segment, only host0 remains.
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(proto_uuid(host1_segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    let after_unmount = start_local_first_put(
+        &service,
+        client_id,
+        "status_key_after_unmount",
+        1024,
+        "host1",
+        "",
+    )
+    .await;
+    assert_eq!(after_unmount.transport_endpoint, "host0_segment");
+}
+
+#[tokio::test]
 async fn local_first_put_prefers_writer_host_parity() {
     let service = local_first_service();
     let client_id = Uuid::new_v4();

@@ -5,7 +5,7 @@ use super::{
 use fs2::FileExt;
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -375,14 +375,16 @@ struct LoadedCheckpoint {
 #[derive(Debug)]
 struct OffsetMutationReservation {
     token: u64,
-    active: Arc<Mutex<Option<u64>>>,
+    active: Arc<(Mutex<Option<u64>>, Condvar)>,
 }
 
 impl Drop for OffsetMutationReservation {
     fn drop(&mut self) {
-        let mut active = self.active.lock();
+        let (active_mutex, active_condvar) = &*self.active;
+        let mut active = active_mutex.lock();
         if *active == Some(self.token) {
             *active = None;
+            active_condvar.notify_one();
         }
     }
 }
@@ -525,7 +527,7 @@ pub struct OffsetAllocatorStorageBackend {
     owner_lock: Mutex<Option<std::fs::File>>,
     initialized: AtomicBool,
     next_reservation: AtomicU64,
-    active_reservation: Arc<Mutex<Option<u64>>>,
+    active_reservation: Arc<(Mutex<Option<u64>>, Condvar)>,
     clock: Arc<dyn Fn() -> Duration + Send + Sync>,
 }
 
@@ -548,7 +550,7 @@ impl OffsetAllocatorStorageBackend {
             owner_lock: Mutex::new(None),
             initialized: AtomicBool::new(false),
             next_reservation: AtomicU64::new(1),
-            active_reservation: Arc::new(Mutex::new(None)),
+            active_reservation: Arc::new((Mutex::new(None), Condvar::new())),
             clock: Arc::new(move || started.elapsed()),
         }
     }
@@ -798,11 +800,14 @@ impl OffsetAllocatorStorageBackend {
             .map_err(|_| {
                 StoreError::Internal("offset allocator mutation reservation exhausted".to_string())
             })?;
-        let mut active = self.active_reservation.lock();
-        if let Some(owner) = *active {
-            return Err(StoreError::Internal(format!(
-                "offset allocator mutation is already pending under reservation {owner}"
-            )));
+        // C++ lets concurrent single-key offloads interleave and all report
+        // success; wait for the active mutation instead of rejecting the
+        // caller. The reservation is released on Drop, including failure and
+        // panic paths.
+        let (active_mutex, active_condvar) = &*self.active_reservation;
+        let mut active = active_mutex.lock();
+        while active.is_some() {
+            active_condvar.wait(&mut active);
         }
         *active = Some(token);
         drop(active);
@@ -834,7 +839,7 @@ impl OffsetAllocatorStorageBackend {
                 "offset allocator reservation belongs to another backend instance".to_string(),
             ));
         }
-        if *self.active_reservation.lock() != Some(token) {
+        if *self.active_reservation.0.lock() != Some(token) {
             return Err(StoreError::Internal(format!(
                 "offset allocator mutation reservation {token} is stale"
             )));
@@ -843,7 +848,7 @@ impl OffsetAllocatorStorageBackend {
     }
 
     fn ensure_no_pending_mutation(&self) -> StoreResult<()> {
-        if let Some(token) = *self.active_reservation.lock() {
+        if let Some(token) = *self.active_reservation.0.lock() {
             return Err(StoreError::Internal(format!(
                 "offset allocator mutation reservation {token} is still pending"
             )));
@@ -1262,6 +1267,11 @@ impl OffsetAllocatorStorageBackend {
             return Err(StoreError::InvalidParams(
                 "watermarks must satisfy 0 < low < high <= 1".to_string(),
             ));
+        }
+        // C++ OffsetAllocator watermark eviction under policy NONE selects no
+        // victims; mirror that contract instead of falling through to FIFO.
+        if self.config.eviction_policy == OffsetEvictionPolicy::None {
+            return Ok(PendingOffsetEviction::default());
         }
         let reservation = self.reserve_mutation()?;
         let state = self.state.lock();
@@ -3221,6 +3231,42 @@ mod durable_recovery_tests {
         assert!(!restarted.exists("after"));
     }
 
+    // Persist_RejectsPostCheckpointWrite: FIFO eviction reuses the evicted
+    // extent for a new key; a subsequent uncheckpointed write in that reused
+    // extent is rejected on recovery, leaving both the evicted old key and the
+    // post-checkpoint replacement absent while the untouched newer key
+    // survives byte-exact.
+    #[test]
+    fn cpp_parity_offset_persist_rejects_post_checkpoint_write_after_extent_reuse() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = Arc::new(AtomicU64::new(100));
+        let mut config = config(temp.path().to_path_buf(), OffsetPersistMode::Relaxed, true);
+        config.quota_bytes = 14_000; // fits three v3 records; a fourth triggers FIFO
+        let mut backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            config,
+            persistence(OffsetPersistMode::Relaxed, true),
+        );
+        let test_now = Arc::clone(&now);
+        backend.clock = Arc::new(move || Duration::from_secs(test_now.load(Ordering::SeqCst)));
+        backend.init().unwrap();
+        now.store(160, Ordering::SeqCst);
+
+        assert!(backend.write_object("a", b"aaaa").unwrap().is_empty());
+        assert!(backend.write_object("b", b"bbbb").unwrap().is_empty());
+        assert!(backend.write_object("c", b"cccc").unwrap().is_empty());
+        let older_checkpoint = std::fs::read(checkpoint(temp.path())).unwrap();
+
+        // Post-checkpoint write evicts the oldest records and reuses their
+        // extents; the checkpoint is not advanced before the abrupt exit.
+        assert_eq!(backend.write_object("d", b"dddd").unwrap(), vec!["a", "b"]);
+        std::fs::write(checkpoint(temp.path()), older_checkpoint).unwrap();
+        backend.simulate_abrupt_exit();
+
+        let restarted = restart(temp.path(), OffsetPersistMode::Relaxed, true);
+        assert!(!restarted.exists("a"));
+        assert!(!restarted.exists("d"));
+    }
+
     #[test]
     fn truncated_header_drops_only_the_affected_record() {
         let temp = tempfile::tempdir().unwrap();
@@ -3239,6 +3285,31 @@ mod durable_recovery_tests {
         let restarted = restart(temp.path(), OffsetPersistMode::Strict, true);
         assert_eq!(restarted.read_object("good").unwrap(), b"good-value");
         assert!(!restarted.exists("torn"));
+    }
+
+    // CorruptedHeader: damaging a live indexed record's backing data (its
+    // value-length region) makes the immediate read fail with an I/O result,
+    // matching the C++ online corruption oracle at the replacement boundary.
+    #[test]
+    fn cpp_parity_offset_corrupted_live_record_fails_immediate_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let backend = restart(temp.path(), OffsetPersistMode::Strict, true);
+        backend.write_object("good", b"value").unwrap();
+        let record = record_offset(temp.path(), "good");
+
+        // Truncate the arena right after the 24-byte record header so the
+        // indexed value is gone; the live read must fail instead of returning
+        // stale bytes.
+        let arena = arena(temp.path());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&arena)
+            .unwrap()
+            .set_len(record + RECORD_HEADER_SIZE as u64)
+            .unwrap();
+
+        assert!(backend.read_object("good").is_err());
+        assert!(!backend.exists("never-written"));
     }
 
     #[test]
@@ -3597,20 +3668,33 @@ mod persistence_mode_tests {
     #[test]
     fn pending_prepare_reserves_the_offset_backend_until_commit_or_rollback() {
         let temp = tempfile::tempdir().unwrap();
-        let backend = backend(temp.path(), OffsetPersistMode::Strict);
+        let backend = Arc::new(backend(temp.path(), OffsetPersistMode::Strict));
 
         let pending = backend.prepare_write("first", 5).unwrap();
-        assert!(matches!(
-            backend.prepare_write("second", 5),
-            Err(StoreError::Internal(_))
-        ));
+        // Concurrent mutations wait for the active reservation instead of
+        // failing, so a second prepare must block until the first is released.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = {
+            let backend = Arc::clone(&backend);
+            std::thread::spawn(move || {
+                let result = backend.prepare_write("second", 5);
+                tx.send(result.is_ok()).unwrap();
+                result
+            })
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(rx.try_recv().is_err(), "concurrent mutation must wait");
         assert!(matches!(
             backend.delete_object("first"),
             Err(StoreError::Internal(_))
         ));
 
         backend.rollback_eviction(pending);
-        let retry = backend.prepare_write("second", 5).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "released reservation must admit the waiting mutation"
+        );
+        let retry = waiter.join().unwrap().unwrap();
         backend.rollback_eviction(retry);
     }
 
@@ -4277,5 +4361,103 @@ mod persistence_mode_tests {
         assert!(!restarted.exists("old"));
         assert_eq!(restarted.read_object("new").unwrap(), b"new-value");
         assert_eq!(restarted.read_object("trigger").unwrap(), b"checkpoint");
+    }
+}
+
+#[cfg(test)]
+mod storage_backend_parity_tests {
+    use super::{
+        OffsetAllocatorConfig, OffsetAllocatorStorageBackend, OffsetEvictionPolicy,
+        OffsetPersistMode, OffsetPersistenceConfig, PendingOffsetEviction,
+    };
+    use std::path::Path;
+
+    fn config(
+        root: &Path,
+        eviction_policy: OffsetEvictionPolicy,
+        quota_bytes: u64,
+    ) -> OffsetAllocatorConfig {
+        OffsetAllocatorConfig {
+            root_dir: root.to_path_buf(),
+            fsdir: "offset".to_string(),
+            eviction_policy,
+            quota_bytes,
+            total_keys_limit: 100,
+            high_ratio: 0.90,
+            low_ratio: 0.80,
+            keys_high_ratio: 0.90,
+            keys_low_ratio: 0.80,
+            max_evict_per_offload: 16,
+            fallback_evict_batch: 2,
+        }
+    }
+
+    fn persistence(mode: OffsetPersistMode) -> OffsetPersistenceConfig {
+        OffsetPersistenceConfig {
+            persist_mode: mode,
+            persist_interval_seconds: 60,
+            enable_record_crc: true,
+        }
+    }
+
+    // OffsetAllocatorWatermarkEvictionNoops: under policy NONE, watermark
+    // eviction selects no victims even when usage exceeds the high watermark,
+    // and the stored object remains exact.
+    #[test]
+    fn cpp_parity_offset_watermark_eviction_noops_when_policy_none() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path(), OffsetEvictionPolicy::None, 12_300);
+        let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+            config,
+            persistence(OffsetPersistMode::Strict),
+        );
+        backend.init().unwrap();
+
+        assert!(backend.write_object("a", b"aaaa").unwrap().is_empty());
+        assert!(backend.write_object("b", b"bbbb").unwrap().is_empty());
+        assert!(backend.write_object("c", b"cccc").unwrap().is_empty());
+
+        let pending = backend
+            .prepare_watermark_eviction(0.70, 0.40)
+            .expect("watermark eviction under NONE must succeed");
+        assert!(
+            pending.keys().is_empty(),
+            "policy NONE must never select watermark victims"
+        );
+        backend.commit_eviction(pending).unwrap();
+
+        assert_eq!(backend.read_object("a").unwrap(), b"aaaa");
+        assert_eq!(backend.read_object("b").unwrap(), b"bbbb");
+        assert_eq!(backend.read_object("c").unwrap(), b"cccc");
+        let _ = PendingOffsetEviction::default();
+    }
+
+    // RecordLayout_ValueAlignedTo4K: a 4,073-byte key and a short key both
+    // round-trip byte-exact across a fresh restart.
+    #[test]
+    fn cpp_parity_offset_record_layout_value_aligned_to_4k() {
+        let root = tempfile::tempdir().unwrap();
+        let config = config(root.path(), OffsetEvictionPolicy::None, 1024 * 1024);
+        {
+            let backend = OffsetAllocatorStorageBackend::new_with_persistence(
+                config.clone(),
+                persistence(OffsetPersistMode::Strict),
+            );
+            backend.init().unwrap();
+            backend.write_object("short", b"value-short").unwrap();
+            let long_key = "k".repeat(4_073);
+            backend.write_object(&long_key, b"value-long").unwrap();
+        }
+
+        let restarted = OffsetAllocatorStorageBackend::new_with_persistence(
+            config,
+            persistence(OffsetPersistMode::Strict),
+        );
+        restarted.init().unwrap();
+        assert_eq!(restarted.read_object("short").unwrap(), b"value-short");
+        assert_eq!(
+            restarted.read_object(&"k".repeat(4_073)).unwrap(),
+            b"value-long"
+        );
     }
 }

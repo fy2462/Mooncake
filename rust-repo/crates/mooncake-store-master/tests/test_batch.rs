@@ -101,6 +101,65 @@ async fn put_end_one(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
 }
 
 #[tokio::test]
+async fn batch_exist_ten_ready_plus_missing_preserves_order_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "batch-exist:1".into(),
+            size: 128 * 1024 * 1024,
+            base_addr: 0x300000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut keys = Vec::new();
+    for index in 0..10 {
+        let key = format!("test_key{index}");
+        put_start_one(&service, client_id, &key).await;
+        put_end_one(&service, client_id, &key).await;
+        keys.push(key);
+    }
+
+    for key in &keys {
+        let exists = MasterService::exist_key(
+            &service,
+            Request::new(proto::ExistKeyRequest {
+                key: key.clone(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .exists;
+        assert!(exists, "individual exist check failed for {key}");
+    }
+
+    keys.push("non_existent_key".into());
+    let results = MasterService::batch_exist_key(
+        &service,
+        Request::new(proto::BatchExistKeyRequest {
+            keys,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .results;
+    assert_eq!(results.len(), 11);
+    assert_eq!(&results[..10], &[true; 10]);
+    assert!(!results[10]);
+}
+
+#[tokio::test]
 async fn test_batch_put_start_supports_nof_replicas() {
     let service = MasterServiceImpl::default();
     let client_id = Uuid::new_v4();

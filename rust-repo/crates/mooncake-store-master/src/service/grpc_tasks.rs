@@ -17,6 +17,25 @@
 
 use super::*;
 
+/// Select the copy source replica, mirroring the C++ task executor: iterate
+/// replicas in order, skip any replica whose segment is one of the targets,
+/// and keep Rust's unambiguous-name requirement. Returns the first eligible
+/// replica or None when every candidate is targeted.
+fn select_copy_source<'a>(
+    candidates: impl Iterator<Item = &'a ReplicaDescriptor>,
+    targets: &std::collections::HashSet<&str>,
+) -> Option<&'a ReplicaDescriptor> {
+    let candidates = candidates.collect::<Vec<_>>();
+    candidates.iter().copied().find(|candidate| {
+        !targets.contains(candidate.segment_name.as_str())
+            && candidates
+                .iter()
+                .filter(|replica| replica.segment_name == candidate.segment_name)
+                .count()
+                == 1
+    })
+}
+
 impl MasterServiceImpl {
     // -----------------------------------------------------------------------
     // CreateCopyTask — replicate a key's data to additional segments
@@ -118,19 +137,16 @@ impl MasterServiceImpl {
                     && client_id_by_exact_replica_segment(&self.state, replica).is_some()
             })
             .collect::<Vec<_>>();
-        let source = source_candidates
+        let target_names = req
+            .targets
             .iter()
-            .copied()
-            .find(|candidate| {
-                source_candidates
-                    .iter()
-                    .filter(|replica| replica.segment_name == candidate.segment_name)
-                    .count()
-                    == 1
-            })
-            .ok_or(Status::failed_precondition(
-                "object has no unambiguous routable source replica",
-            ))?;
+            .map(|target| target.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let source = select_copy_source(source_candidates.into_iter(), &target_names).ok_or(
+            Status::failed_precondition(
+                "object has no unambiguous routable source replica outside targets",
+            ),
+        )?;
         let source_segment = source.segment_name.clone();
         let assigned_client = client_id_by_exact_replica_segment(&self.state, source)
             .ok_or(Status::failed_precondition("source segment missing"))?;
@@ -530,6 +546,7 @@ impl MasterServiceImpl {
 mod task_lifecycle_parity_tests {
     use super::*;
     use chrono::DateTime;
+    use serde_json::Value;
 
     fn fixed_task_time() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-08-03T00:00:00Z")
@@ -647,6 +664,157 @@ mod task_lifecycle_parity_tests {
         .await
         .unwrap()
         .into_inner()
+    }
+
+    fn task_payload_json(payload: &str) -> Value {
+        serde_json::from_str(payload).unwrap()
+    }
+
+    async fn mount_distinct_task_segment(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        segment_name: &str,
+        base: u64,
+    ) {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.into(),
+                size: 4096,
+                base_addr: base,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    // TaskWithReplicaCopyPayload: a real two-target copy task is Pending with
+    // a nonempty payload whose key and ordered targets decode exactly.
+    #[tokio::test]
+    async fn cpp_parity_pending_copy_task_envelope_contains_two_target_payload() {
+        let service = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_distinct_task_segment(&service, client_id, "copy-src:1", 0x100000000).await;
+        mount_distinct_task_segment(&service, client_id, "copy-tgt-a:1", 0x200000000).await;
+        mount_distinct_task_segment(&service, client_id, "copy-tgt-b:1", 0x300000000).await;
+        commit_task_source_object(&service, client_id, "test_key", "copy-src:1").await;
+
+        let task_id = MasterService::create_copy_task(
+            &service,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "test_key".into(),
+                targets: vec!["copy-tgt-a:1".into(), "copy-tgt-b:1".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        let durable_id = Uuid::from_u64_pair(task_id.high, task_id.low);
+
+        let entry = service
+            .state
+            .tasks
+            .get(&durable_id)
+            .expect("task must be queued before fetch");
+        assert_eq!(entry.info.id, durable_id);
+        assert_eq!(entry.info.task_type, TaskType::ReplicaCopy);
+        assert_eq!(entry.info.status, TaskStatus::Pending);
+        assert!(!entry.payload.is_empty());
+        let payload = task_payload_json(&entry.payload);
+        assert_eq!(payload["key"], "test_key");
+        let targets = payload["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0], "copy-tgt-a:1");
+        assert_eq!(targets[1], "copy-tgt-b:1");
+    }
+
+    // TaskWithReplicaMovePayload: a real move task is Pending with a nonempty
+    // payload decoding to the exact key/source/target.
+    #[tokio::test]
+    async fn cpp_parity_pending_move_task_envelope_contains_complete_payload() {
+        let service = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_distinct_task_segment(&service, client_id, "move-src:1", 0x100000000).await;
+        mount_distinct_task_segment(&service, client_id, "move-tgt:1", 0x200000000).await;
+        commit_task_source_object(&service, client_id, "test_key", "move-src:1").await;
+
+        let task_id = MasterService::create_move_task(
+            &service,
+            Request::new(proto::CreateMoveTaskRequest {
+                key: "test_key".into(),
+                source: "move-src:1".into(),
+                target: "move-tgt:1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        let durable_id = Uuid::from_u64_pair(task_id.high, task_id.low);
+
+        let entry = service
+            .state
+            .tasks
+            .get(&durable_id)
+            .expect("task must be queued before fetch");
+        assert_eq!(entry.info.id, durable_id);
+        assert_eq!(entry.info.task_type, TaskType::ReplicaMove);
+        assert_eq!(entry.info.status, TaskStatus::Pending);
+        assert!(!entry.payload.is_empty());
+        let payload = task_payload_json(&entry.payload);
+        assert_eq!(payload["key"], "test_key");
+        assert_eq!(payload["source"], "move-src:1");
+        assert_eq!(payload["target"], "move-tgt:1");
+    }
+
+    fn memory_replica(segment_name: &str) -> ReplicaDescriptor {
+        ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: segment_name.to_string(),
+            offset: 0,
+            size: 1024,
+            status: ReplicaStatus::Complete,
+            replica_type: ReplicaType::Memory,
+            holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+            protocol: "tcp".to_string(),
+        }
+    }
+
+    // SourceSegmentSelectionLogic: with segment2/segment3 targeted, the first
+    // eligible replica is segment1.
+    #[test]
+    fn cpp_parity_copy_source_excludes_targets_and_uses_first_eligible_replica() {
+        let replicas = [
+            memory_replica("segment1"),
+            memory_replica("segment2"),
+            memory_replica("segment3"),
+        ];
+        let targets = ["segment2", "segment3"].into_iter().collect();
+        let source = select_copy_source(replicas.iter(), &targets).expect("source must exist");
+        assert_eq!(source.segment_name, "segment1");
+    }
+
+    // SourceSegmentSelectionAllInTargets: when every replica segment is a
+    // target, no source is selected.
+    #[test]
+    fn cpp_parity_copy_source_all_replicas_targeted_returns_none() {
+        let replicas = [memory_replica("segment1"), memory_replica("segment2")];
+        let targets = ["segment1", "segment2"].into_iter().collect();
+        assert!(select_copy_source(replicas.iter(), &targets).is_none());
     }
 
     async fn complete_task(service: &MasterServiceImpl, client_id: Uuid, task_id: proto::Uuid) {

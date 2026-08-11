@@ -2573,6 +2573,7 @@ mod tests {
             background_mutation_gate: RwLock::new(()),
             service_fenced: AtomicBool::new(false),
             tenant_quotas: RwLock::new(crate::tenant_quota::TenantQuotaTable::new(0)),
+            tenant_quota_policy_mutations: parking_lot::Mutex::new(()),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
             kv_event_publisher: Arc::new(

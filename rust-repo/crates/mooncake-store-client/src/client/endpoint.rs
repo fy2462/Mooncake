@@ -10,6 +10,8 @@ const BINDER_ATTEMPTS_PER_SETUP: usize = 20;
 const MIN_ALLOWED_PORT: u16 = 1024;
 const EPHEMERAL_PORT_START: u16 = 32_768;
 const EPHEMERAL_PORT_END: u16 = 60_999;
+/// C++ `getDefaultHandshakePort()` (mooncake-transfer-engine config default).
+const DEFAULT_HANDSHAKE_PORT: u16 = 12_001;
 
 pub(super) struct ResolvedClientEndpoint {
     pub(super) server_name: String,
@@ -144,11 +146,66 @@ fn parse_explicit_port(raw_port: &str, server_name: &str) -> StoreResult<u16> {
 }
 
 fn format_host_port(host: &str, port: u16) -> String {
-    if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
+    format!("{}:{port}", maybe_wrap_ipv6(host))
+}
+
+/// Validate a pure IPv6 literal, optionally carrying a zone scope. A scope
+/// plus a trailing port (`fe80::1%eth0:12345`) is rejected exactly like C++
+/// `isValidIpV6`.
+pub(crate) fn is_valid_ipv6_literal(input: &str) -> bool {
+    if input.is_empty() || !input.contains(':') {
+        return false;
     }
+    let (address_part, scope) = match input.split_once('%') {
+        Some((address, scope)) => (address, Some(scope)),
+        None => (input, None),
+    };
+    if let Some(scope) = scope {
+        if scope.is_empty() || scope.contains(':') {
+            return false;
+        }
+    }
+    address_part.parse::<std::net::Ipv6Addr>().is_ok()
+}
+
+/// Wrap a pure IPv6/scoped literal in square brackets; leave every other
+/// hostname form untouched (C++ `maybeWrapIpV6`).
+pub(crate) fn maybe_wrap_ipv6(input: &str) -> String {
+    if is_valid_ipv6_literal(input) {
+        format!("[{input}]")
+    } else {
+        input.to_string()
+    }
+}
+
+/// Split an endpoint into `(host, port)` with C++ `parseHostNameWithPort`
+/// semantics: bracketed IPv6 keeps the exact host and explicit port, bare
+/// IPv6/scoped literals use the default handshake port 12001, and
+/// host:port / ipv4:port / unbracketed scoped-literal:port forms split at
+/// the final colon.
+pub(crate) fn parse_host_name_with_port(input: &str) -> (String, u16) {
+    let input = input.trim();
+    if let Some(bracketed) = input.strip_prefix('[') {
+        if let Some(closing) = bracketed.find(']') {
+            let host = &bracketed[..closing];
+            let suffix = &bracketed[closing + 1..];
+            if let Some(raw_port) = suffix.strip_prefix(':')
+                && let Ok(port) = raw_port.parse::<u16>()
+            {
+                return (host.to_string(), port);
+            }
+            return (host.to_string(), DEFAULT_HANDSHAKE_PORT);
+        }
+    }
+    if is_valid_ipv6_literal(input) {
+        return (input.to_string(), DEFAULT_HANDSHAKE_PORT);
+    }
+    if let Some((host, raw_port)) = input.rsplit_once(':')
+        && let Ok(port) = raw_port.parse::<u16>()
+    {
+        return (host.to_string(), port);
+    }
+    (input.to_string(), DEFAULT_HANDSHAKE_PORT)
 }
 
 fn parse_env_u16(name: &str) -> Option<u16> {
@@ -235,8 +292,9 @@ fn reserve_port(port: u16) -> std::io::Result<PortReservation> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedClientEndpoint, ResolvedClientEndpoint, format_host_port, reserve_endpoint,
-        validated_port_range, validated_setup_retries,
+        ParsedClientEndpoint, ResolvedClientEndpoint, format_host_port, is_valid_ipv6_literal,
+        maybe_wrap_ipv6, parse_host_name_with_port, reserve_endpoint, validated_port_range,
+        validated_setup_retries,
     };
     use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 
@@ -274,6 +332,101 @@ mod tests {
             format_host_port("2001:db8::1", 12300),
             "[2001:db8::1]:12300"
         );
+    }
+
+    #[test]
+    fn cpp_parity_parses_bracketed_ipv6_port_variations() {
+        // C++ IPv6ParsingTest.IPv6AddressFormatVariations: bracketed IPv6
+        // literals (loopback, global, scoped link-local) parse to the exact
+        // host string and port.
+        for (input, expected_host, expected_port) in [
+            ("[::1]:8080", "::1", 8080),
+            ("[2001:db8::1]:9000", "2001:db8::1", 9000),
+            ("[fe80::1%lo]:7000", "fe80::1%lo", 7000),
+        ] {
+            let parsed = ParsedClientEndpoint::parse(input).unwrap();
+            assert_eq!(parsed.host, expected_host, "host mismatch for {input}");
+            assert_eq!(
+                parsed.port,
+                Some(expected_port),
+                "port mismatch for {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_parity_ipv6_literal_validation_matrix() {
+        // C++ IPv6ParsingTest.IsValidIpV6.
+        for valid in [
+            "::1",
+            "::",
+            "2001:db8::1",
+            "fe80::1",
+            "fe80::a236:bcff:fecb:a1be",
+            "fe80::1%eth0",
+            "fe80::a236:bcff:fecb:a1be%eno2",
+        ] {
+            assert!(is_valid_ipv6_literal(valid), "{valid} should be valid");
+        }
+        for invalid in [
+            "fe80::1%eth0:12345",
+            "fe80::a236:bcff:fecb:a1be%eno2:17813",
+            "192.168.1.1",
+            "localhost",
+            "",
+            "not-an-ip",
+        ] {
+            assert!(
+                !is_valid_ipv6_literal(invalid),
+                "{invalid} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_parity_parse_host_name_with_port_matrix() {
+        // C++ IPv6ParsingTest.ParseHostNameWithPort.
+        assert_eq!(
+            parse_host_name_with_port("[::1]:17813"),
+            ("::1".to_string(), 17813)
+        );
+        assert_eq!(
+            parse_host_name_with_port("[fe80::a236:bcff:fecb:a1be%eno2]:17813"),
+            ("fe80::a236:bcff:fecb:a1be%eno2".to_string(), 17813)
+        );
+        assert_eq!(
+            parse_host_name_with_port("fe80::a236:bcff:fecb:a1be%eno2:15773"),
+            ("fe80::a236:bcff:fecb:a1be%eno2".to_string(), 15773)
+        );
+        assert_eq!(
+            parse_host_name_with_port("::1"),
+            ("::1".to_string(), 12_001)
+        );
+        assert_eq!(
+            parse_host_name_with_port("fe80::a236:bcff:fecb:a1be%eno2"),
+            ("fe80::a236:bcff:fecb:a1be%eno2".to_string(), 12_001)
+        );
+        assert_eq!(
+            parse_host_name_with_port("192.168.1.1:8080"),
+            ("192.168.1.1".to_string(), 8080)
+        );
+        assert_eq!(
+            parse_host_name_with_port("localhost:17813"),
+            ("localhost".to_string(), 17813)
+        );
+    }
+
+    #[test]
+    fn cpp_parity_wraps_ipv6_literals_only() {
+        // C++ IPv6ParsingTest.MaybeWrapIpV6.
+        assert_eq!(maybe_wrap_ipv6("::1"), "[::1]");
+        assert_eq!(maybe_wrap_ipv6("fe80::1%eth0"), "[fe80::1%eth0]");
+        assert_eq!(
+            maybe_wrap_ipv6("fe80::a236:bcff:fecb:a1be%eno2"),
+            "[fe80::a236:bcff:fecb:a1be%eno2]"
+        );
+        assert_eq!(maybe_wrap_ipv6("192.168.1.1"), "192.168.1.1");
+        assert_eq!(maybe_wrap_ipv6("localhost"), "localhost");
     }
 
     #[test]

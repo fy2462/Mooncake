@@ -137,6 +137,18 @@ impl MasterServiceImpl {
             .collect()
     }
 
+    /// Test-only entry point mirroring the C++ `BatchGetReplicaListForAdmin`:
+    /// the read-only admin batch query must neither admit promotion tasks nor
+    /// update store-observed cache-hit counters.
+    #[doc(hidden)]
+    pub fn batch_replica_lists_for_admin_for_test(
+        &self,
+        keys: &[String],
+        tenant_id: &str,
+    ) -> Vec<proto::BatchGetReplicaListResult> {
+        self.batch_get_replica_list_for_admin(keys, tenant_id)
+    }
+
     // ---- GetReplicaListByRegex ----
     // 按正则表达式批量获取对象的 Complete 副本列表。过滤掉无 Complete 副本的匹配 key。
     // Batch fetch Complete replica lists by regex; filters out matching keys with no Complete replicas.

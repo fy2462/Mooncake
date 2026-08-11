@@ -1,11 +1,12 @@
 use mooncake_store_core::{StoreError, error::StoreResult};
 use parking_lot::Mutex;
 use prometheus::core::Collector;
+use prometheus::proto::{Metric, MetricFamily, MetricType, Quantile, Summary as ProtoSummary};
 use prometheus::{
     Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
     Registry, TextEncoder,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -67,6 +68,8 @@ const SSD_LATENCY_BUCKETS_US: &[f64] = &[
     30_000_000.0,
 ];
 
+const SSD_LATENCY_SUMMARY_SAMPLE_CAPACITY: usize = 4_096;
+
 #[derive(Clone, Copy)]
 pub(crate) enum TransferOperationKind {
     Read,
@@ -78,6 +81,95 @@ struct TransferSnapshot {
     read_bytes: u64,
     write_bytes: u64,
     timestamp: Instant,
+}
+
+/// A minimal Prometheus SUMMARY metric family. The prometheus crate has no
+/// built-in summary type, so this custom collector derives p50/p90/p99
+/// quantiles from the observed latency samples on render. The family name
+/// matches the C++ `mooncake_ssd_*_latency_summary_us` families.
+#[derive(Clone)]
+struct SsdLatencySummary {
+    desc: prometheus::core::Desc,
+    samples: Arc<parking_lot::RwLock<SsdLatencySummaryState>>,
+}
+
+#[derive(Default)]
+struct SsdLatencySummaryState {
+    samples: VecDeque<f64>,
+    sample_count: u64,
+    sample_sum: f64,
+}
+
+impl SsdLatencySummary {
+    fn new(name: &str, help: &str, const_labels: HashMap<String, String>) -> Self {
+        let desc = prometheus::core::Desc::new(
+            name.to_string(),
+            help.to_string(),
+            Vec::new(),
+            const_labels,
+        )
+        .expect("valid summary descriptor");
+        Self {
+            desc,
+            samples: Arc::new(parking_lot::RwLock::new(SsdLatencySummaryState::default())),
+        }
+    }
+
+    fn observe(&self, value: f64) {
+        let mut state = self.samples.write();
+        state.sample_count = state.sample_count.saturating_add(1);
+        state.sample_sum += value;
+        if state.samples.len() == SSD_LATENCY_SUMMARY_SAMPLE_CAPACITY {
+            state.samples.pop_front();
+        }
+        state.samples.push_back(value);
+    }
+}
+
+impl Collector for SsdLatencySummary {
+    fn desc(&self) -> Vec<&prometheus::core::Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let state = self.samples.read();
+        let mut samples = state.samples.iter().copied().collect::<Vec<_>>();
+        let sample_count = state.sample_count;
+        let sample_sum = state.sample_sum;
+        drop(state);
+        samples.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let percentile = |q: f64| {
+            if samples.is_empty() {
+                return None;
+            }
+            let index = ((samples.len() as f64 - 1.0) * q).round() as usize;
+            Some(samples[index])
+        };
+        let mut summary = ProtoSummary::default();
+        summary.set_sample_count(sample_count);
+        summary.set_sample_sum(sample_sum);
+        for (quantile, value) in [
+            (0.5, percentile(0.5)),
+            (0.9, percentile(0.9)),
+            (0.99, percentile(0.99)),
+        ] {
+            if let Some(value) = value {
+                let mut proto_quantile = Quantile::default();
+                proto_quantile.set_quantile(quantile);
+                proto_quantile.set_value(value);
+                summary.mut_quantile().push(proto_quantile);
+            }
+        }
+        let mut metric = Metric::default();
+        metric.set_label(self.desc.const_label_pairs.clone().into());
+        metric.set_summary(summary);
+        let mut family = MetricFamily::default();
+        family.set_name(self.desc.fq_name.clone());
+        family.set_help(self.desc.help.clone());
+        family.set_field_type(MetricType::SUMMARY);
+        family.mut_metric().push(metric);
+        vec![family]
+    }
 }
 
 #[derive(Default)]
@@ -194,6 +286,9 @@ pub(crate) struct ClientMetrics {
     ssd_write_ops: IntCounter,
     ssd_read_latency_us: Histogram,
     ssd_write_latency_us: Histogram,
+    ssd_read_latency_summary_us: SsdLatencySummary,
+    ssd_write_latency_summary_us: SsdLatencySummary,
+    ssd_total_latency_summary_us: SsdLatencySummary,
     ssd_total_bytes: IntCounter,
     ssd_total_ops: IntCounter,
     ssd_total_latency_us: Histogram,
@@ -422,6 +517,23 @@ impl ClientMetrics {
             SSD_LATENCY_BUCKETS_US,
         ))
         .map_err(metric_error)?;
+        // C++ SsdMetric also exposes summary families for read/write/total
+        // latency; keep the same on-wire names for serialization parity.
+        let ssd_read_latency_summary_us = SsdLatencySummary::new(
+            "mooncake_ssd_read_latency_summary_us",
+            "SSD read latency (us)",
+            labels.clone(),
+        );
+        let ssd_write_latency_summary_us = SsdLatencySummary::new(
+            "mooncake_ssd_write_latency_summary_us",
+            "SSD write latency (us)",
+            labels.clone(),
+        );
+        let ssd_total_latency_summary_us = SsdLatencySummary::new(
+            "mooncake_ssd_total_latency_summary_us",
+            "SSD total latency (us)",
+            labels.clone(),
+        );
 
         for collector in [
             Box::new(healthy.clone()) as Box<dyn prometheus::core::Collector>,
@@ -445,6 +557,9 @@ impl ClientMetrics {
             Box::new(ssd_write_ops.clone()),
             Box::new(ssd_read_latency_us.clone()),
             Box::new(ssd_write_latency_us.clone()),
+            Box::new(ssd_read_latency_summary_us.clone()),
+            Box::new(ssd_write_latency_summary_us.clone()),
+            Box::new(ssd_total_latency_summary_us.clone()),
             Box::new(ssd_total_bytes.clone()),
             Box::new(ssd_total_ops.clone()),
             Box::new(ssd_total_latency_us.clone()),
@@ -486,6 +601,9 @@ impl ClientMetrics {
             ssd_write_ops,
             ssd_read_latency_us,
             ssd_write_latency_us,
+            ssd_read_latency_summary_us,
+            ssd_write_latency_summary_us,
+            ssd_total_latency_summary_us,
             ssd_total_bytes,
             ssd_total_ops,
             ssd_total_latency_us,
@@ -613,9 +731,11 @@ impl ClientMetrics {
         self.ssd_read_bytes.inc_by(bytes);
         self.ssd_read_ops.inc_by(key_count);
         self.ssd_read_latency_us.observe(latency_us);
+        self.ssd_read_latency_summary_us.observe(latency_us);
         self.ssd_total_bytes.inc_by(bytes);
         self.ssd_total_ops.inc_by(key_count);
         self.ssd_total_latency_us.observe(latency_us);
+        self.ssd_total_latency_summary_us.observe(latency_us);
     }
 
     pub(crate) fn observe_ssd_write(&self, bytes: u64, key_count: u64, elapsed: Duration) {
@@ -623,9 +743,11 @@ impl ClientMetrics {
         self.ssd_write_bytes.inc_by(bytes);
         self.ssd_write_ops.inc_by(key_count);
         self.ssd_write_latency_us.observe(latency_us);
+        self.ssd_write_latency_summary_us.observe(latency_us);
         self.ssd_total_bytes.inc_by(bytes);
         self.ssd_total_ops.inc_by(key_count);
         self.ssd_total_latency_us.observe(latency_us);
+        self.ssd_total_latency_summary_us.observe(latency_us);
     }
 
     pub(crate) fn summary(&self) -> String {
@@ -682,20 +804,26 @@ impl ClientMetrics {
         self.append_operation_summary(&mut output, TransferOperationKind::Read);
         self.append_operation_summary(&mut output, TransferOperationKind::Write);
         output.push_str("\n=== SSD Metrics Summary ===\n");
-        output.push_str(&format!(
-            "SSD Read: {}, ops={}\n",
-            format_bytes(self.ssd_read_bytes.get()),
-            self.ssd_read_ops.get()
+        output.push_str(&ssd_metrics_line(
+            "Read",
+            self.ssd_read_bytes.get(),
+            self.ssd_read_ops.get(),
+            elapsed,
+        ));
+        output.push_str(&ssd_metrics_line(
+            "Write",
+            self.ssd_write_bytes.get(),
+            self.ssd_write_ops.get(),
+            elapsed,
         ));
         output.push_str(&format!(
-            "SSD Write: {}, ops={}\n",
-            format_bytes(self.ssd_write_bytes.get()),
-            self.ssd_write_ops.get()
-        ));
-        output.push_str(&format!(
-            "SSD Total: {}, ops={}\n\n=== SSD Latency Summary (microseconds) ===\n",
-            format_bytes(self.ssd_total_bytes.get()),
-            self.ssd_total_ops.get()
+            "{}\n\n=== SSD Latency Summary (microseconds) ===\n",
+            ssd_metrics_line(
+                "Total",
+                self.ssd_total_bytes.get(),
+                self.ssd_total_ops.get(),
+                elapsed
+            )
         ));
         output.push_str(&format!(
             "Read: {}\nWrite: {}\nTotal: {}\n",
@@ -835,11 +963,16 @@ fn histogram_summary(histogram: &Histogram) -> String {
         .and_then(|family| family.get_metric().first())
         .map(|metric| metric.get_histogram().get_bucket())
         .unwrap_or_default();
-    let p95_target = count.saturating_mul(95).div_ceil(100);
-    let p95 = buckets
-        .iter()
-        .find(|bucket| bucket.get_cumulative_count() >= p95_target)
-        .map(|bucket| bucket.get_upper_bound());
+    let percentile = |target: u64| {
+        buckets
+            .iter()
+            .find(|bucket| bucket.get_cumulative_count() >= target)
+            .map(|bucket| bucket.get_upper_bound())
+    };
+    let p50 = percentile(count.saturating_mul(50).div_ceil(100));
+    let p90 = percentile(count.saturating_mul(90).div_ceil(100));
+    let p95 = percentile(count.saturating_mul(95).div_ceil(100));
+    let p99 = percentile(count.saturating_mul(99).div_ceil(100));
     let mut previous_count = 0;
     let mut max_bucket = None;
     for bucket in buckets {
@@ -852,8 +985,17 @@ fn histogram_summary(histogram: &Histogram) -> String {
         "count={count}, avg={:.1}us",
         histogram.get_sample_sum() / count as f64
     );
+    if let Some(p50) = p50 {
+        summary.push_str(&format!(", p50<{p50}us"));
+    }
+    if let Some(p90) = p90 {
+        summary.push_str(&format!(", p90<{p90}us"));
+    }
     if let Some(p95) = p95 {
         summary.push_str(&format!(", p95<{p95}us"));
+    }
+    if let Some(p99) = p99 {
+        summary.push_str(&format!(", p99<{p99}us"));
     }
     if let Some(max_bucket) = max_bucket {
         summary.push_str(&format!(", max<{max_bucket}us"));
@@ -867,6 +1009,21 @@ fn format_bytes(bytes: u64) -> String {
 
 fn format_rate(bytes_per_second: f64) -> String {
     format_rate_with_suffix(bytes_per_second, "B")
+}
+
+/// One SSD summary line. Throughput and IOPS are emitted only when the byte
+/// count is nonzero (C++ omits them for empty metrics).
+fn ssd_metrics_line(label: &str, bytes: u64, ops: u64, elapsed: f64) -> String {
+    if bytes == 0 {
+        format!("SSD {label}: {}\n", format_bytes(0))
+    } else {
+        format!(
+            "SSD {label}: {}, ops={ops}, throughput={}/s, IOPS={}\n",
+            format_bytes(bytes),
+            format_rate(bytes as f64 / elapsed),
+            (ops as f64 / elapsed).round() as u64,
+        )
+    }
 }
 
 fn format_rate_with_suffix(value: f64, suffix: &str) -> String {
@@ -890,8 +1047,12 @@ fn format_rate_with_suffix(value: f64, suffix: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientMetrics, TransferOperationKind, parse_bool_value, parse_metrics_interval};
+    use super::{
+        ClientMetrics, SSD_LATENCY_SUMMARY_SAMPLE_CAPACITY, SsdLatencySummary,
+        TransferOperationKind, parse_bool_value, parse_metrics_interval, ssd_metrics_line,
+    };
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]
@@ -1068,5 +1229,263 @@ mod tests {
         assert_eq!(parse_metrics_interval(Some("15")), Duration::from_secs(15));
         assert_eq!(parse_metrics_interval(Some("-1")), Duration::ZERO);
         assert_eq!(parse_metrics_interval(Some("invalid")), Duration::ZERO);
+    }
+
+    fn fresh_metrics() -> ClientMetrics {
+        ClientMetrics::new(HashMap::new(), true, true).unwrap()
+    }
+
+    // InitialValuesTest: a fresh ClientMetrics has every SSD counter at zero.
+    #[test]
+    fn cpp_parity_ssd_metrics_initial_values_are_zero() {
+        let metrics = fresh_metrics();
+        assert_eq!(metrics.ssd_read_bytes.get(), 0);
+        assert_eq!(metrics.ssd_write_bytes.get(), 0);
+        assert_eq!(metrics.ssd_read_ops.get(), 0);
+        assert_eq!(metrics.ssd_write_ops.get(), 0);
+        assert_eq!(metrics.ssd_total_bytes.get(), 0);
+        assert_eq!(metrics.ssd_total_ops.get(), 0);
+    }
+
+    // ReadMetricsTest: reads accumulate bytes/ops without touching writes.
+    #[test]
+    fn cpp_parity_ssd_read_metrics_accumulate_without_writes() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_read(1024 * 1024, 3, Duration::from_micros(1500));
+        metrics.observe_ssd_read(2 * 1024 * 1024, 5, Duration::from_micros(3000));
+
+        assert_eq!(metrics.ssd_read_bytes.get(), 3 * 1024 * 1024);
+        assert_eq!(metrics.ssd_read_ops.get(), 8);
+        assert_eq!(metrics.ssd_write_bytes.get(), 0);
+        assert_eq!(metrics.ssd_write_ops.get(), 0);
+        assert_eq!(metrics.ssd_total_bytes.get(), 3 * 1024 * 1024);
+        assert_eq!(metrics.ssd_total_ops.get(), 8);
+    }
+
+    // WriteMetricsTest: writes accumulate and leave reads at zero.
+    #[test]
+    fn cpp_parity_ssd_write_metrics_leave_reads_zero() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_write(5 * 1024 * 1024, 10, Duration::from_micros(50_000));
+
+        assert_eq!(metrics.ssd_write_bytes.get(), 5 * 1024 * 1024);
+        assert_eq!(metrics.ssd_write_ops.get(), 10);
+        assert_eq!(metrics.ssd_read_bytes.get(), 0);
+        assert_eq!(metrics.ssd_read_ops.get(), 0);
+    }
+
+    // TotalMetricsTest: total counters aggregate reads and writes.
+    #[test]
+    fn cpp_parity_ssd_total_metrics_aggregate_read_and_write() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_read(1024 * 1024, 3, Duration::from_micros(1500));
+        metrics.observe_ssd_write(2 * 1024 * 1024, 4, Duration::from_micros(2500));
+
+        assert_eq!(metrics.ssd_total_bytes.get(), 3 * 1024 * 1024);
+        assert_eq!(metrics.ssd_total_ops.get(), 7);
+    }
+
+    // FailureNotCountedTest: a failed operation contributes nothing, and the
+    // following successful 4-KiB read is the only recorded operation.
+    #[test]
+    fn cpp_parity_ssd_failure_is_not_counted_before_success() {
+        let metrics = fresh_metrics();
+        assert_eq!(metrics.ssd_read_ops.get(), 0);
+        assert_eq!(metrics.ssd_read_bytes.get(), 0);
+        assert_eq!(metrics.ssd_total_ops.get(), 0);
+        assert_eq!(metrics.ssd_total_bytes.get(), 0);
+
+        metrics.observe_ssd_read(4096, 1, Duration::from_micros(100));
+
+        assert_eq!(metrics.ssd_read_ops.get(), 1);
+        assert_eq!(metrics.ssd_read_bytes.get(), 4096);
+        assert_eq!(metrics.ssd_write_ops.get(), 0);
+        assert_eq!(metrics.ssd_write_bytes.get(), 0);
+        assert_eq!(metrics.ssd_total_ops.get(), 1);
+        assert_eq!(metrics.ssd_total_bytes.get(), 4096);
+    }
+
+    // ConcurrentTest: eight threads of concurrent observations produce exact
+    // aggregate totals.
+    #[test]
+    fn cpp_parity_ssd_concurrent_observations_have_exact_totals() {
+        let metrics = Arc::new(fresh_metrics());
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let metrics = Arc::clone(&metrics);
+            workers.push(std::thread::spawn(move || {
+                for _ in 0..1_000 {
+                    metrics.observe_ssd_read(4096, 1, Duration::from_micros(500));
+                    metrics.observe_ssd_write(8192, 1, Duration::from_micros(1_000));
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(metrics.ssd_read_ops.get(), 8_000);
+        assert_eq!(metrics.ssd_read_bytes.get(), 8_000 * 4096);
+        assert_eq!(metrics.ssd_write_ops.get(), 8_000);
+        assert_eq!(metrics.ssd_write_bytes.get(), 8_000 * 8192);
+        assert_eq!(metrics.ssd_total_ops.get(), 16_000);
+        assert_eq!(metrics.ssd_total_bytes.get(), 8_000 * (4096 + 8192));
+    }
+
+    // IntegrationWithClientMetric: the SSD read family renders in aggregate
+    // Prometheus text.
+    #[test]
+    fn cpp_parity_client_metrics_integrates_ssd_read() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_read(1024 * 1024, 10, Duration::from_micros(1500));
+
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        assert!(text.contains("mooncake_ssd_read_bytes_total"));
+        assert!(text.contains("mooncake_ssd_read_ops_total"));
+        assert!(text.contains("mooncake_ssd_read_latency_us"));
+    }
+
+    // SerializeWithDynamicLabels: static labels appear on an SSD family.
+    #[test]
+    fn cpp_parity_ssd_prometheus_serializes_dynamic_labels() {
+        let metrics = ClientMetrics::new(
+            HashMap::from([("instance_id".to_string(), "test123".to_string())]),
+            true,
+            true,
+        )
+        .unwrap();
+        metrics.observe_ssd_read(128, 1, Duration::from_micros(100));
+
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        assert!(text.contains("mooncake_ssd_read_bytes_total"));
+        assert!(text.lines().any(|line| {
+            line.starts_with("mooncake_ssd_read_latency_summary_us{")
+                && line.contains("instance_id=\"test123\"")
+        }));
+    }
+
+    #[test]
+    fn ssd_latency_summary_retains_bounded_quantile_samples() {
+        let summary = SsdLatencySummary::new(
+            "bounded_ssd_latency_summary_us",
+            "bounded summary test",
+            HashMap::new(),
+        );
+        for value in 0..4_097 {
+            summary.observe(value as f64);
+        }
+
+        let state = summary.samples.read();
+        assert_eq!(state.samples.len(), SSD_LATENCY_SUMMARY_SAMPLE_CAPACITY);
+        assert_eq!(state.sample_count, 4_097);
+        assert_eq!(
+            state.sample_sum,
+            (0..4_097).map(|value| value as f64).sum::<f64>()
+        );
+    }
+
+    // LatencyBucketBoundaryTest: 25/50/30,000,000/60,000,000 us land in the
+    // expected buckets including the +Inf overflow.
+    #[test]
+    fn cpp_parity_ssd_latency_bucket_boundaries() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_read(0, 0, Duration::from_micros(25));
+        metrics.observe_ssd_read(0, 0, Duration::from_micros(50));
+        metrics.observe_ssd_read(0, 0, Duration::from_micros(30_000_000));
+        metrics.observe_ssd_read(0, 0, Duration::from_micros(60_000_000));
+
+        let histogram = &metrics.ssd_read_latency_us;
+        assert_eq!(histogram.get_sample_count(), 4);
+        assert_eq!(histogram.get_sample_sum(), 90_000_075.0);
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        assert!(text.contains("mooncake_ssd_read_latency_us_bucket{le=\"50\"} 2"));
+        assert!(
+            text.contains("mooncake_ssd_read_latency_us_bucket{le=\"3e+07\"} 3")
+                || text.contains("mooncake_ssd_read_latency_us_bucket{le=\"30000000\"} 3")
+        );
+        assert!(text.contains("mooncake_ssd_read_latency_us_bucket{le=\"+Inf\"} 4"));
+    }
+
+    // EmptyBatchMetricsTest: zero bytes/keys still record latency only.
+    #[test]
+    fn cpp_parity_empty_ssd_batch_records_latency_only() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_read(0, 0, Duration::from_micros(10));
+
+        assert_eq!(metrics.ssd_read_ops.get(), 0);
+        assert_eq!(metrics.ssd_read_bytes.get(), 0);
+        assert_eq!(metrics.ssd_read_latency_us.get_sample_count(), 1);
+    }
+
+    // SerializeTest: every C++-asserted SSD Prometheus family name appears,
+    // including the latency summary family.
+    #[test]
+    fn cpp_parity_ssd_serialization_contains_cpp_metric_names() {
+        let metrics = fresh_metrics();
+        metrics.observe_ssd_read(1024, 5, Duration::from_micros(200));
+        metrics.observe_ssd_write(2048, 3, Duration::from_micros(1000));
+
+        let text = String::from_utf8(metrics.render_prometheus(true, false).unwrap()).unwrap();
+        for name in [
+            "mooncake_ssd_read_bytes_total",
+            "mooncake_ssd_write_bytes_total",
+            "mooncake_ssd_read_ops_total",
+            "mooncake_ssd_write_ops_total",
+            "mooncake_ssd_read_latency_us",
+            "mooncake_ssd_write_latency_us",
+            "mooncake_ssd_total_bytes_total",
+            "mooncake_ssd_total_ops_total",
+            "mooncake_ssd_total_latency_us",
+            "mooncake_ssd_read_latency_summary_us",
+        ] {
+            assert!(text.contains(name), "missing family {name}");
+        }
+    }
+
+    // SummaryMetricsTest: the SSD summary omits throughput/IOPS when empty and
+    // emits them with percentiles once data exists.
+    #[test]
+    fn cpp_parity_ssd_summary_has_three_throughput_and_iops_sections() {
+        let metrics = fresh_metrics();
+        let empty = metrics.summary();
+        assert!(empty.contains("SSD Metrics Summary"));
+        assert!(empty.contains("SSD Read: 0 B"));
+        assert!(empty.contains("SSD Write: 0 B"));
+        assert!(empty.contains("Read: No data"));
+        assert!(empty.contains("Write: No data"));
+        assert!(!empty.contains("throughput="));
+        assert!(!empty.contains("IOPS="));
+
+        metrics.observe_ssd_read(5 * 1024 * 1024, 100, Duration::from_micros(500));
+        metrics.observe_ssd_write(10 * 1024 * 1024, 50, Duration::from_micros(2000));
+        let summary = metrics.summary();
+        assert!(summary.contains("SSD Read: 5.00 MB"), "{summary}");
+        assert!(summary.contains("SSD Write: 10.00 MB"), "{summary}");
+        assert!(summary.contains("ops=100"), "{summary}");
+        assert!(summary.contains("ops=50"), "{summary}");
+        assert!(summary.contains("throughput="), "{summary}");
+        assert!(summary.contains("/s"), "{summary}");
+        assert!(summary.contains("IOPS="), "{summary}");
+        assert!(summary.contains("p50<"), "{summary}");
+        assert!(summary.contains("p90<"), "{summary}");
+        assert!(summary.contains("p99<"), "{summary}");
+    }
+
+    // ThroughputCalculationTest: the pure ssd_metrics_line seam produces exact
+    // throughput and IOPS for a deterministic elapsed time.
+    #[test]
+    fn cpp_parity_ssd_summary_has_three_throughput_and_iops_sections_deterministic() {
+        let read = ssd_metrics_line("Read", 5 * 1024 * 1024, 100, 1.0);
+        assert!(read.contains("SSD Read: 5.00 MB, ops=100"), "{read}");
+        assert!(read.contains("throughput=5.00 MB/s"), "{read}");
+        assert!(read.contains("IOPS=100"), "{read}");
+
+        let write = ssd_metrics_line("Write", 10 * 1024 * 1024, 50, 2.0);
+        assert!(write.contains("throughput=5.00 MB/s"), "{write}");
+        assert!(write.contains("IOPS=25"), "{write}");
+
+        let total = ssd_metrics_line("Total", 0, 0, 1.0);
+        assert!(total.contains("SSD Total: 0 B"));
+        assert!(!total.contains("throughput="));
+        assert!(!total.contains("IOPS="));
     }
 }

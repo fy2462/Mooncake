@@ -515,6 +515,57 @@ fn test_capability_driven_controller_reports_catching_up_when_lagging() {
     );
 }
 
+fn fresh_etcd_standby_controller() -> CapabilityDrivenStandbyController {
+    let spec = HABackendSpec {
+        backend_type: HABackendType::Etcd,
+        connstring: "http://127.0.0.1:2379".into(),
+        cluster_namespace: "fresh-controller-test".into(),
+        pod_identity: None,
+    };
+    let config = MasterServiceSupervisorConfig {
+        local_hostname: "127.0.0.1:50051".into(),
+        cluster_id: "fresh-controller-test".into(),
+        enable_snapshot_restore: true,
+        snapshot_backup_dir: Some(temp_dir()),
+        snapshot_object_store_type: Some(SnapshotObjectStoreType::Local),
+        ..Default::default()
+    };
+    CapabilityDrivenStandbyController::new(spec, config)
+}
+
+#[test]
+fn cpp_parity_fresh_production_controller_rejects_promotion() {
+    let mut controller = fresh_etcd_standby_controller();
+    let error = controller.promote_standby().unwrap_err();
+    assert!(matches!(error, HaError::UnavailableInCurrentStatus));
+    controller.stop_standby();
+}
+
+#[test]
+fn cpp_parity_stop_never_started_standby_is_safe() {
+    let mut controller = fresh_etcd_standby_controller();
+    controller.stop_standby();
+    // Rust has no separate Stopped state; the C++ safety contract is that a
+    // never-started stop completes without error or panic.
+    controller.stop_standby();
+}
+
+#[test]
+fn cpp_parity_double_stop_without_start_is_idempotent() {
+    let mut controller = fresh_etcd_standby_controller();
+    controller.stop_standby();
+    controller.stop_standby();
+    controller.stop_standby();
+}
+
+#[test]
+fn cpp_parity_two_unchanged_sync_status_reads_keep_the_same_state() {
+    let controller = fresh_etcd_standby_controller();
+    let first = controller.sync_status();
+    let second = controller.sync_status();
+    assert_eq!(first, second);
+}
+
 #[test]
 fn test_master_service_supervisor_tracks_runtime_state() {
     let mut supervisor = MasterServiceSupervisor::new(Box::new(NoopControllerShim::default()));

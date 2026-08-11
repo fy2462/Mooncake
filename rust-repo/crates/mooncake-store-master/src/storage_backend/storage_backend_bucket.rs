@@ -1,5 +1,6 @@
 use super::storage_backend_config::BucketFile;
 use super::*;
+use std::collections::HashSet;
 
 impl StorageBackend {
     pub(super) fn bucket_dir(&self) -> PathBuf {
@@ -90,8 +91,18 @@ impl StorageBackend {
         config.validate()?;
         std::fs::create_dir_all(self.bucket_dir())?;
 
+        // C++ BatchOffload rejects a duplicate key with OBJECT_ALREADY_EXISTS
+        // and preserves the original bytes. Reject the whole batch atomically
+        // (including duplicates within the batch) so a sibling new key is
+        // never published alongside a rejection.
+        let mut seen = HashSet::new();
         for (key, _) in entries {
-            self.remove_key_from_buckets(key)?;
+            if !seen.insert(key.as_str()) {
+                return Err(format!("duplicate key in batch: {key}").into());
+            }
+            if self.is_exist_bucket(key)? {
+                return Err(format!("key already exists: {key}").into());
+            }
         }
 
         let mut next_bucket_id = self

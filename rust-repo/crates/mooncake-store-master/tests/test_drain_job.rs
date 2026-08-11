@@ -938,3 +938,136 @@ async fn test_new_allocations_exclude_draining_segments() {
     assert_eq!(put.replicas.len(), 1);
     assert_eq!(put.replicas[0].segment_name, "eligible-target:1");
 }
+
+// CreateDrainJobMarksSegmentDrainingAndSkipsAllocation: creating a drain job
+// marks the source DRAINING and a new put that prefers the source is
+// redirected to the requested target and completes.
+#[tokio::test]
+async fn cpp_parity_drain_job_marks_draining_and_redirects_allocation() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::ZERO,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "drain-skip-source:1").await;
+    mount_memory_segment(&service, client_id, "drain-skip-target:1").await;
+
+    let job_id = create_drain_job(&service, "drain-skip-source:1", &["drain-skip-target:1"]).await;
+    assert_eq!(
+        query_segment_status(&service, "drain-skip-source:1").await,
+        proto::SegmentStatus::Draining as i32
+    );
+
+    let put = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "drain_skip_allocation_key".into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "drain-skip-source:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(put.replicas.len(), 1);
+    assert_eq!(put.replicas[0].segment_name, "drain-skip-target:1");
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "drain_skip_allocation_key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let _ = job_id;
+}
+
+// DrainJobSchedulesMoveTaskAndConvergesToDrained: a successful drain marks the
+// source drained (Rust Unavailable status mapping) and the replica location
+// set is exactly target-present/source-absent.
+#[tokio::test]
+async fn cpp_parity_drain_job_converges_and_replica_location_exact() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::ZERO,
+        put_start_release_timeout: Duration::ZERO,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "drain-converge-source:1").await;
+    mount_memory_segment(&service, client_id, "drain-converge-target:1").await;
+    put_complete_on_segment(
+        &service,
+        client_id,
+        "drain-converge-key",
+        "drain-converge-source:1",
+    )
+    .await;
+
+    let job_id = create_drain_job(
+        &service,
+        "drain-converge-source:1",
+        &["drain-converge-target:1"],
+    )
+    .await;
+    MasterService::move_start(
+        &service,
+        Request::new(proto::MoveStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "drain-converge-key".into(),
+            source: "drain-converge-source:1".into(),
+            target: "drain-converge-target:1".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::move_end(
+        &service,
+        Request::new(proto::MoveEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "drain-converge-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    report_drain_task(&service, job_id, proto::TaskStatus::TaskSuccess).await;
+    service.process_drain_jobs_once_for_test();
+
+    let job = query_drain_job(&service, job_id).await;
+    assert_eq!(job.status, proto::JobStatus::Succeeded as i32);
+    assert_eq!(job.active_units, 0);
+    assert!(job.succeeded_units >= 1);
+    assert_eq!(
+        query_segment_status(&service, "drain-converge-source:1").await,
+        proto::SegmentStatus::Unavailable as i32
+    );
+
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "drain-converge-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    let segment_names = replicas
+        .iter()
+        .map(|replica| replica.segment_name.clone())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(segment_names.contains("drain-converge-target:1"));
+    assert!(!segment_names.contains("drain-converge-source:1"));
+}

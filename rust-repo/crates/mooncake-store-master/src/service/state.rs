@@ -340,6 +340,9 @@ pub(crate) struct MasterState {
     pub(crate) service_fenced: AtomicBool,
     /// Per-tenant quota admission/accounting table.
     pub(crate) tenant_quotas: RwLock<TenantQuotaTable>,
+    /// Serializes policy persistence so connector writes commit in the same
+    /// order as their corresponding in-memory policy mutations.
+    pub(crate) tenant_quota_policy_mutations: Mutex<()>,
     /// Tracks in-flight remote source pulls so only one node fetches a given key.
     /// 远端回源协调表：确保同一 key 只有一个节点从远端（如 S3）拉取数据。
     pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
@@ -685,6 +688,7 @@ impl MasterState {
             background_mutation_gate: RwLock::new(()),
             service_fenced: AtomicBool::new(false),
             tenant_quotas: RwLock::new(TenantQuotaTable::new(0)),
+            tenant_quota_policy_mutations: Mutex::new(()),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
             kv_event_publisher: Arc::new(KvEventPublisher::new(Default::default())),

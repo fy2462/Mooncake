@@ -1,3 +1,4 @@
+use super::catalog_snapshot::parse_uuid;
 use super::snapshot::SnapshotObjectStore;
 use super::types::HaError;
 use crate::TenantId;
@@ -78,7 +79,7 @@ pub(super) fn encode_task_manager(tasks: &[TaskEntry]) -> Result<Vec<u8>, HaErro
         .iter()
         .map(|task| {
             Value::Array(vec![
-                task.info.id.to_string().into(),
+                cpp_uuid_string(task.info.id).into(),
                 task_type_to_cxx(task.info.task_type).into(),
                 task_status_to_cxx(task.info.status).into(),
                 task.payload.clone().into(),
@@ -87,7 +88,7 @@ pub(super) fn encode_task_manager(tasks: &[TaskEntry]) -> Result<Vec<u8>, HaErro
                 task.info.message.clone().into(),
                 task.info
                     .assigned_client
-                    .map(|id| id.to_string())
+                    .map(cpp_uuid_string)
                     .unwrap_or_default()
                     .into(),
             ])
@@ -100,10 +101,18 @@ pub(super) fn encode_task_manager(tasks: &[TaskEntry]) -> Result<Vec<u8>, HaErro
         .map_err(|error| snapshot_error(error.to_string()))
 }
 
+/// Serializes a UUID in the C++ mooncake on-wire `{high}-{low}` decimal-pair
+/// format used by `UuidToString` in `src/types.cpp`. The C++ task manager
+/// persists task and assigned-client UUIDs in this shape.
+fn cpp_uuid_string(uuid: Uuid) -> String {
+    let (high, low) = uuid.as_u64_pair();
+    format!("{high}-{low}")
+}
+
 fn decode_task(fields: &[Value]) -> Result<TaskEntry, HaError> {
     let task_id = fields[0]
         .as_str()
-        .and_then(|value| Uuid::parse_str(value).ok())
+        .and_then(|value| parse_uuid(value).ok())
         .filter(|value| !value.is_nil())
         .ok_or_else(|| snapshot_error("task has invalid UUID"))?;
     let task_type = match fields[1].as_i64() {
@@ -142,7 +151,7 @@ fn decode_task(fields: &[Value]) -> Result<TaskEntry, HaError> {
         .ok_or_else(|| snapshot_error("task message is not a string"))?;
     let assigned_client = fields[7]
         .as_str()
-        .and_then(|value| Uuid::parse_str(value).ok())
+        .and_then(|value| parse_uuid(value).ok())
         .filter(|value| !value.is_nil())
         .ok_or_else(|| snapshot_error("task assigned client UUID is invalid"))?;
     let key = extract_task_key(&payload, task_type)?;

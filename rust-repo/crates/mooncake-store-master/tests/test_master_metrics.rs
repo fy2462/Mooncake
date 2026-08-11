@@ -391,3 +391,125 @@ async fn test_cache_total_metrics_track_object_inventory() {
     .unwrap();
     assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total);
 }
+
+#[tokio::test]
+async fn cpp_parity_remove_same_memory_global_disk_object_decrements_both_totals() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "remove-cache-totals".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "remove-cache-totals:1").await;
+
+    let base_mem_total = metrics::MEM_CACHE_TOTAL.get();
+    let base_file_total = metrics::FILE_CACHE_TOTAL.get();
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "remove_cache_total_metric_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "remove-cache-totals:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    for replica_type in [
+        proto::replica_descriptor::ReplicaType::Memory,
+        proto::replica_descriptor::ReplicaType::Disk,
+    ] {
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "remove_cache_total_metric_key".into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total + 1);
+    assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_file_total + 1);
+
+    MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "remove_cache_total_metric_key".into(),
+            force: true,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total);
+    assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_file_total);
+}
+
+#[tokio::test]
+async fn cpp_parity_processing_global_disk_revoke_preserves_cache_totals() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "revoke-processing-disk-metrics".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "revoke-processing-disk:1").await;
+
+    let base_mem_total = metrics::MEM_CACHE_TOTAL.get();
+    let base_file_total = metrics::FILE_CACHE_TOTAL.get();
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "revoke_processing_disk_metric_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "revoke-processing-disk:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "revoke_processing_disk_metric_key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total + 1);
+    assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_file_total);
+
+    MasterService::put_revoke(
+        &service,
+        Request::new(proto::PutRevokeRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "revoke_processing_disk_metric_key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total + 1);
+    assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_file_total);
+}

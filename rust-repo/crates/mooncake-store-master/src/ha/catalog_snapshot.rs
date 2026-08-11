@@ -743,9 +743,9 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
             _ => 3_i64,
         };
         mounted_segments.push((
-            segment.id.to_string().into(),
+            cpp_uuid_string(segment.id).into(),
             Value::Array(vec![
-                segment.id.to_string().into(),
+                cpp_uuid_string(segment.id).into(),
                 segment.name.clone().into(),
                 segment.base.into(),
                 segment.size.into(),
@@ -771,11 +771,11 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
         .into_iter()
         .map(|(client_id, segment_ids)| {
             (
-                client_id.to_string().into(),
+                cpp_uuid_string(client_id).into(),
                 Value::Array(
                     segment_ids
                         .into_iter()
-                        .map(|id| Value::String(id.to_string().into()))
+                        .map(|id| Value::String(cpp_uuid_string(id).into()))
                         .collect(),
                 ),
             )
@@ -799,8 +799,11 @@ fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
                 fields.push(size.into());
             }
             fields.push(entry.ssd_total_capacity_bytes.into());
-            fields.push(entry.client_id.to_string().into());
-            (entry.storage_id.to_string().into(), Value::Array(fields))
+            fields.push(cpp_uuid_string(entry.client_id).into());
+            (
+                cpp_uuid_string(entry.storage_id).into(),
+                Value::Array(fields),
+            )
         })
         .collect();
 
@@ -823,7 +826,7 @@ fn encode_metadata(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {
     for (scoped_key, object) in &snapshot.objects {
         let user_key = validated_user_key(scoped_key, object)?;
         let mut fields = vec![
-            object.client_id.to_string().into(),
+            cpp_uuid_string(object.client_id).into(),
             system_time_ms(object.put_start_time.unwrap_or(UNIX_EPOCH))?.into(),
             object.size.into(),
             system_time_ms(object.lease_timeout.unwrap_or(UNIX_EPOCH))?.into(),
@@ -881,7 +884,7 @@ fn encode_replica(
                 base.checked_add(replica.offset)
                     .ok_or_else(|| snapshot_error("memory replica address overflow"))?
                     .into(),
-                replica.segment_id.to_string().into(),
+                cpp_uuid_string(replica.segment_id).into(),
                 false.into(),
                 Value::Nil,
             ])
@@ -893,8 +896,8 @@ fn encode_replica(
         ReplicaType::LocalDisk => Value::Array(vec![
             replica
                 .holder_client_id
-                .unwrap_or_else(Uuid::nil)
-                .to_string()
+                .map(cpp_uuid_string)
+                .unwrap_or_else(|| cpp_uuid_string(Uuid::nil()))
                 .into(),
             replica.size.into(),
             replica.segment_name.clone().into(),
@@ -1628,8 +1631,32 @@ fn value_bool(value: &Value, name: &str) -> Result<bool, HaError> {
         .ok_or_else(|| snapshot_error(format!("{name} is not a boolean")))
 }
 
-fn parse_uuid(value: &str) -> Result<Uuid, HaError> {
-    Uuid::parse_str(value).map_err(|error| snapshot_error(format!("invalid UUID {value}: {error}")))
+/// Parses a UUID string from a C++-compatible master snapshot.
+///
+/// The C++ mooncake store serializes UUIDs as decimal `{high}-{low}` pairs
+/// (see `UuidToString`/`StringToUuid` in `src/types.cpp`), while Rust-native
+/// callers may write standard hyphenated hex UUIDs. Both forms must round-trip
+/// so a Rust standby can restore a C++-produced snapshot and a C++ standby can
+/// restore a Rust-produced snapshot.
+pub(super) fn parse_uuid(value: &str) -> Result<Uuid, HaError> {
+    if let Ok(uuid) = Uuid::parse_str(value) {
+        return Ok(uuid);
+    }
+    let (high, low) = value
+        .split_once('-')
+        .ok_or_else(|| snapshot_error(format!("invalid UUID {value}: not hyphenated")))?;
+    let high = u64::from_str_radix(high, 10)
+        .map_err(|_| snapshot_error(format!("invalid UUID {value}: high half is not decimal")))?;
+    let low = u64::from_str_radix(low, 10)
+        .map_err(|_| snapshot_error(format!("invalid UUID {value}: low half is not decimal")))?;
+    Ok(Uuid::from_u64_pair(high, low))
+}
+
+/// Serializes a UUID in the C++ mooncake on-wire `{high}-{low}` decimal-pair
+/// format used by `UuidToString` in `src/types.cpp`.
+fn cpp_uuid_string(uuid: Uuid) -> String {
+    let (high, low) = uuid.as_u64_pair();
+    format!("{high}-{low}")
 }
 
 fn time_from_ms(value: u64) -> Result<SystemTime, HaError> {

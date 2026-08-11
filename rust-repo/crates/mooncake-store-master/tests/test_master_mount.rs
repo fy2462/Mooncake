@@ -9,6 +9,7 @@ use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
@@ -101,6 +102,10 @@ fn proto_uuid(id: Uuid) -> proto::Uuid {
         high: id.as_u64_pair().0,
         low: id.as_u64_pair().1,
     }
+}
+
+fn uuid_from_proto(id: proto::Uuid) -> Uuid {
+    Uuid::from_u64_pair(id.high, id.low)
 }
 
 #[tokio::test]
@@ -435,6 +440,446 @@ async fn test_mount_segment_returns_id_usable_for_unmount() {
         &service,
         Request::new(proto::QuerySegmentStatusRequest {
             segment_name: "return-id:1234".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::NotFound);
+}
+
+async fn mount_segment_named(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+    size: u64,
+    base_addr: u64,
+) -> Uuid {
+    let mount = MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size,
+            base_addr,
+            te_endpoint: segment_name.into(),
+            protocol: "tcp".into(),
+            host_id: "host-0".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    uuid_from_proto(mount.segment_id.expect("mount should return a segment id"))
+}
+
+async fn unmount_segment_named(service: &MasterServiceImpl, client_id: Uuid, segment_id: Uuid) {
+    MasterService::unmount_segment(
+        service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(proto_uuid(segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn put_mount_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    size: u64,
+    replica_num: u32,
+    preferred_segment: Option<&str>,
+) -> proto::PutStartResponse {
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: size,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num,
+                preferred_segment: preferred_segment.unwrap_or("").into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+}
+
+async fn put_end_mount_object(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn get_mount_object(
+    service: &MasterServiceImpl,
+    key: &str,
+) -> Result<proto::GetReplicaListResponse, tonic::Status> {
+    MasterService::get_replica_list(
+        service,
+        Request::new(proto::GetReplicaListRequest {
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .map(|response| response.into_inner())
+}
+
+async fn remove_mount_object(service: &MasterServiceImpl, key: &str) -> Result<(), tonic::Code> {
+    MasterService::remove(
+        service,
+        Request::new(proto::RemoveRequest {
+            key: key.into(),
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|status| status.code())
+}
+
+async fn segments_detail(service: &MasterServiceImpl) -> Vec<proto::SegmentDetailInfo> {
+    MasterService::get_segments_detail(service, Request::new(proto::GetSegmentsDetailRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .segments
+}
+
+#[tokio::test]
+async fn randomized_repeated_mount_unmount_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let mut state = Uuid::new_v4().as_u128();
+    for _ in 0..10 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let size = 16 * 1024 * 1024 * (1 + (state % 10) as u64);
+        let mounted = mount_segment_named(
+            &service,
+            client_id,
+            "test_random_segment",
+            size,
+            0x300000000,
+        )
+        .await;
+        unmount_segment_named(&service, client_id, mounted).await;
+    }
+}
+
+#[tokio::test]
+async fn concurrent_mount_unmount_parity() {
+    let service = Arc::new(MasterServiceImpl::default());
+    let mut tasks = Vec::new();
+    for task_index in 0..4 {
+        let service = Arc::clone(&service);
+        tasks.push(tokio::spawn(async move {
+            let client_id = Uuid::new_v4();
+            let segment_name = format!("segment_{task_index}");
+            let base = 0x300000000 + task_index as u64 * 0x10000000;
+            let mut success = 0usize;
+            for _ in 0..100 {
+                let mounted =
+                    mount_segment_named(&service, client_id, &segment_name, 16 * 1024 * 1024, base)
+                        .await;
+                unmount_segment_named(&service, client_id, mounted).await;
+                success += 1;
+            }
+            success
+        }));
+    }
+    let mut total = 0usize;
+    for task in tasks {
+        total += task.await.unwrap();
+    }
+    assert!(total > 0);
+    assert_eq!(total, 400);
+}
+
+#[tokio::test]
+async fn unmount_cleans_stale_object_handles_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment_id = mount_segment_named(
+        &service,
+        client_id,
+        "test_segment",
+        16 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+
+    for (index, key) in ["segment_object", "another_segment_object"]
+        .into_iter()
+        .enumerate()
+    {
+        let started = put_mount_object(&service, client_id, key, 1024 * 1024, 1, None).await;
+        assert_eq!(started.replicas.len(), 1);
+        put_end_mount_object(&service, client_id, key).await;
+        let list = get_mount_object(&service, key).await.unwrap();
+        assert_eq!(list.replicas.len(), 1);
+
+        unmount_segment_named(&service, client_id, segment_id).await;
+        assert_eq!(
+            get_mount_object(&service, key).await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            remove_mount_object(&service, key).await,
+            Err(tonic::Code::NotFound)
+        );
+
+        if index == 0 {
+            let remounted = mount_segment_named(
+                &service,
+                client_id,
+                "test_segment",
+                16 * 1024 * 1024,
+                0x300000000,
+            )
+            .await;
+            assert_eq!(remounted, segment_id);
+        }
+    }
+}
+
+#[tokio::test]
+async fn unmount_immediately_cleans_objects_and_reallocates_elsewhere_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment1 = mount_segment_named(
+        &service,
+        client_id,
+        "segment1",
+        16 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+    mount_segment_named(
+        &service,
+        client_id,
+        "segment2",
+        16 * 1024 * 1024,
+        0x400000000,
+    )
+    .await;
+
+    let key1 = "key1";
+    let key2 = "key2";
+    put_mount_object(&service, client_id, key1, 1024, 1, Some("segment1")).await;
+    put_end_mount_object(&service, client_id, key1).await;
+    put_mount_object(&service, client_id, key2, 1024, 1, Some("segment2")).await;
+    put_end_mount_object(&service, client_id, key2).await;
+
+    unmount_segment_named(&service, client_id, segment1).await;
+
+    let all_keys = MasterService::get_all_keys_for_admin(
+        &service,
+        Request::new(proto::GetAllKeysForAdminRequest {}),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .keys;
+    assert_eq!(all_keys.len(), 1);
+
+    assert_eq!(
+        get_mount_object(&service, key1).await.unwrap_err().code(),
+        tonic::Code::NotFound
+    );
+    assert!(get_mount_object(&service, key2).await.is_ok());
+
+    let restarted = put_mount_object(&service, client_id, key1, 1024, 1, None).await;
+    put_end_mount_object(&service, client_id, key1).await;
+    assert_eq!(restarted.replicas.len(), 1);
+    assert_eq!(restarted.replicas[0].segment_name, "segment2");
+    assert!(get_mount_object(&service, key1).await.is_ok());
+}
+
+#[tokio::test]
+async fn replicated_object_survives_partial_unmount_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment1 = mount_segment_named(
+        &service,
+        client_id,
+        "segment1",
+        64 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+    mount_segment_named(
+        &service,
+        client_id,
+        "segment2",
+        64 * 1024 * 1024,
+        0x400000000,
+    )
+    .await;
+
+    let started =
+        put_mount_object(&service, client_id, "replicated_key", 1024 * 1024, 2, None).await;
+    assert_eq!(started.replicas.len(), 2);
+    put_end_mount_object(&service, client_id, "replicated_key").await;
+
+    let replicas = get_mount_object(&service, "replicated_key")
+        .await
+        .unwrap()
+        .replicas;
+    assert_eq!(replicas.len(), 2);
+    let mut segment_names = HashSet::new();
+    for replica in &replicas {
+        assert_eq!(
+            replica.status,
+            proto::replica_descriptor::ReplicaStatus::Complete as i32
+        );
+        assert_eq!(replica.size, 1024 * 1024);
+        segment_names.insert(replica.segment_name.clone());
+    }
+    assert_eq!(segment_names.len(), 2);
+
+    unmount_segment_named(&service, client_id, segment1).await;
+    assert!(get_mount_object(&service, "replicated_key").await.is_ok());
+}
+
+#[tokio::test]
+async fn bulk_unmount_1000_keys_within_one_second_parity() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment_id = mount_segment_named(
+        &service,
+        client_id,
+        "perf_test_segment",
+        256 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+
+    for index in 0..1000 {
+        put_mount_object(
+            &service,
+            client_id,
+            &format!("key_{index}"),
+            1024,
+            1,
+            Some("perf_test_segment"),
+        )
+        .await;
+        put_end_mount_object(&service, client_id, &format!("key_{index}")).await;
+    }
+
+    let started = std::time::Instant::now();
+    unmount_segment_named(&service, client_id, segment_id).await;
+    assert!(started.elapsed() < Duration::from_millis(1000));
+
+    for index in 0..1000 {
+        assert_eq!(
+            get_mount_object(&service, &format!("key_{index}"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+}
+
+#[tokio::test]
+async fn cpp_parity_mount_segment_success() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment_id = mount_segment_named(
+        &service,
+        client_id,
+        "explicit-mount",
+        16 * 1024 * 1024,
+        0x500000000,
+    )
+    .await;
+
+    let details = segments_detail(&service).await;
+    assert_eq!(details.len(), 1);
+    let detail = &details[0];
+    assert_eq!(detail.segment_id.unwrap(), proto_uuid(segment_id));
+    assert_eq!(detail.segment_name, "explicit-mount");
+    assert_eq!(detail.size_bytes, 16 * 1024 * 1024);
+    assert_eq!(detail.base_address, 0x500000000);
+    assert_eq!(detail.client_id.unwrap(), proto_uuid(client_id));
+    assert_eq!(detail.allocator_capacity_bytes, 16 * 1024 * 1024);
+    assert_eq!(detail.allocator_used_bytes, 0);
+
+    let started = put_mount_object(
+        &service,
+        client_id,
+        "preferred-key",
+        1024,
+        1,
+        Some("explicit-mount"),
+    )
+    .await;
+    assert_eq!(started.replicas.len(), 1);
+    assert_eq!(started.replicas[0].segment_name, "explicit-mount");
+}
+
+#[tokio::test]
+async fn cpp_parity_unmount_segment_success() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let before = segments_detail(&service)
+        .await
+        .iter()
+        .map(|detail| detail.allocator_capacity_bytes)
+        .sum::<u64>();
+    let segment_id = mount_segment_named(
+        &service,
+        client_id,
+        "unmount-me",
+        16 * 1024 * 1024,
+        0x600000000,
+    )
+    .await;
+    let after_mount = segments_detail(&service)
+        .await
+        .iter()
+        .map(|detail| detail.allocator_capacity_bytes)
+        .sum::<u64>();
+    assert_eq!(after_mount - before, 16 * 1024 * 1024);
+
+    unmount_segment_named(&service, client_id, segment_id).await;
+
+    let after = segments_detail(&service).await;
+    assert!(
+        after
+            .iter()
+            .all(|detail| detail.segment_id != Some(proto_uuid(segment_id)))
+    );
+    assert_eq!(
+        after
+            .iter()
+            .map(|detail| detail.allocator_capacity_bytes)
+            .sum::<u64>(),
+        before
+    );
+    let status = MasterService::query_segment_status(
+        &service,
+        Request::new(proto::QuerySegmentStatusRequest {
+            segment_name: "unmount-me".into(),
         }),
     )
     .await
@@ -1866,4 +2311,439 @@ async fn test_nof_disabled_rejects_nof_operations() {
     .await
     .unwrap_err();
     assert_eq!(unmount_err.code(), tonic::Code::Unavailable);
+}
+
+async fn mount_segment_simple(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+    size: u64,
+    base_addr: u64,
+) -> Uuid {
+    let mount = MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size,
+            base_addr,
+            te_endpoint: segment_name.into(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    uuid_from_proto(mount.segment_id.expect("mount returns a segment id"))
+}
+
+async fn query_status(service: &MasterServiceImpl, segment_name: &str) -> i32 {
+    MasterService::query_segment_status(
+        service,
+        Request::new(proto::QuerySegmentStatusRequest {
+            segment_name: segment_name.into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .status
+}
+
+async fn put_on_segment(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    preferred: &str,
+) -> String {
+    let response = MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: preferred.into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    response.replicas[0].segment_name.clone()
+}
+
+// SegmentLifecycleStatusControlsAllocation: an Active segment allocates, a
+// drain job marks it DRAINING (allocation skips it), and cancelling the job
+// restores Active allocation.
+#[tokio::test]
+async fn cpp_parity_segment_lifecycle_status_controls_allocation() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_segment_simple(
+        &service,
+        client_id,
+        "lifecycle-a:1",
+        16 * 1024 * 1024,
+        0x100000000,
+    )
+    .await;
+    mount_segment_simple(
+        &service,
+        client_id,
+        "lifecycle-b:1",
+        16 * 1024 * 1024,
+        0x200000000,
+    )
+    .await;
+    assert_eq!(
+        query_status(&service, "lifecycle-a:1").await,
+        proto::SegmentStatus::Active as i32
+    );
+    assert_eq!(
+        put_on_segment(&service, client_id, "lifecycle-key-1", "lifecycle-a:1").await,
+        "lifecycle-a:1"
+    );
+
+    let job_id = MasterService::create_drain_job(
+        &service,
+        Request::new(proto::CreateDrainJobRequest {
+            segments: vec!["lifecycle-a:1".into()],
+            target_segments: vec!["lifecycle-b:1".into()],
+            max_concurrency: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .job_id
+    .unwrap();
+    assert_eq!(
+        query_status(&service, "lifecycle-a:1").await,
+        proto::SegmentStatus::Draining as i32
+    );
+    assert_eq!(
+        put_on_segment(&service, client_id, "lifecycle-key-2", "lifecycle-a:1").await,
+        "lifecycle-b:1"
+    );
+
+    MasterService::cancel_drain_job(
+        &service,
+        Request::new(proto::CancelDrainJobRequest {
+            job_id: Some(job_id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        query_status(&service, "lifecycle-a:1").await,
+        proto::SegmentStatus::Active as i32
+    );
+    assert_eq!(
+        put_on_segment(&service, client_id, "lifecycle-key-3", "lifecycle-a:1").await,
+        "lifecycle-a:1"
+    );
+}
+
+// ReMountSegmentSuccess: an initial mount followed by a remount of the same
+// segment plus a new one succeeds and both are available.
+#[tokio::test]
+async fn cpp_parity_remount_segment_success() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_segment_simple(
+        &service,
+        client_id,
+        "remount-a:1",
+        16 * 1024 * 1024,
+        0x100000000,
+    )
+    .await;
+
+    let remount = MasterService::re_mount_segment(
+        &service,
+        Request::new(proto::ReMountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_names: vec!["remount-a:1".into(), "remount-b:1".into()],
+            segment_sizes: vec![16 * 1024 * 1024, 32 * 1024 * 1024],
+            base_addrs: vec![0x100000000, 0x200000000],
+            te_endpoints: vec!["remount-a:1".into(), "remount-b:1".into()],
+            protocols: vec!["tcp".into(), "tcp".into()],
+            segment_ids: vec![],
+            host_ids: vec![],
+        }),
+    )
+    .await;
+    assert!(remount.is_ok(), "remount must succeed: {:?}", remount.err());
+    assert_eq!(
+        query_status(&service, "remount-a:1").await,
+        proto::SegmentStatus::Active as i32
+    );
+    assert_eq!(
+        query_status(&service, "remount-b:1").await,
+        proto::SegmentStatus::Active as i32
+    );
+    assert_eq!(
+        put_on_segment(&service, client_id, "remount-key", "remount-b:1").await,
+        "remount-b:1"
+    );
+}
+
+async fn drain_to_completion(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    source: &str,
+    target: &str,
+    key: &str,
+) {
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: source.into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let job_id = MasterService::create_drain_job(
+        service,
+        Request::new(proto::CreateDrainJobRequest {
+            segments: vec![source.into()],
+            target_segments: vec![target.into()],
+            max_concurrency: 1,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .job_id
+    .unwrap();
+    let job_uuid = uuid_from_proto(job_id);
+    MasterService::move_start(
+        service,
+        Request::new(proto::MoveStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            source: source.into(),
+            target: target.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::move_end(
+        service,
+        Request::new(proto::MoveEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let task = service
+        .drain_task_for_test(job_uuid)
+        .expect("drain task must exist");
+    MasterService::mark_task_to_complete(
+        service,
+        Request::new(proto::MarkTaskToCompleteRequest {
+            client_id: Some(proto_uuid(client_id)),
+            request: Some(proto::TaskCompleteRequest {
+                id: Some(proto_uuid(task.info.id)),
+                status: proto::TaskStatus::TaskSuccess as i32,
+                message: String::new(),
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    service.process_drain_jobs_once_for_test();
+}
+
+// PrepareUnmountDrainedSegment: a segment drained to completion can be
+// unmounted successfully.
+#[tokio::test]
+async fn cpp_parity_prepare_unmount_drained_segment() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    mount_segment_simple(
+        &service,
+        client_id,
+        "drained-seg-a:1",
+        16 * 1024 * 1024,
+        0x100000000,
+    )
+    .await;
+    let target = mount_segment_simple(
+        &service,
+        client_id,
+        "drained-seg-b:1",
+        16 * 1024 * 1024,
+        0x200000000,
+    )
+    .await;
+    drain_to_completion(
+        &service,
+        client_id,
+        "drained-seg-a:1",
+        "drained-seg-b:1",
+        "drained-key",
+    )
+    .await;
+    assert_eq!(
+        query_status(&service, "drained-seg-a:1").await,
+        proto::SegmentStatus::Unavailable as i32
+    );
+
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(proto_uuid(target)),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    // The drained source's unmount also succeeds after final removal.
+    let source_id = service.segment_id_by_name("drained-seg-a:1").unwrap();
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(proto_uuid(source_id)),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+// ReMountUnmountingSegment: an identity-aware remount while the segment is in
+// the graceful-unmount state fails closed, and the final unmount succeeds.
+#[tokio::test]
+async fn cpp_parity_remount_unmounting_segment() {
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment_id = mount_segment_simple(
+        &service,
+        client_id,
+        "remount-unmounting:1",
+        16 * 1024 * 1024,
+        0x100000000,
+    )
+    .await;
+    MasterService::graceful_unmount_segment(
+        &service,
+        Request::new(proto::GracefulUnmountSegmentRequest {
+            segment_id: Some(proto_uuid(segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+            grace_period_ms: 60_000,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        query_status(&service, "remount-unmounting:1").await,
+        proto::SegmentStatus::GracefullyUnmounting as i32
+    );
+
+    let remount = MasterService::re_mount_segment(
+        &service,
+        Request::new(proto::ReMountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_names: vec!["remount-unmounting:1".into()],
+            segment_sizes: vec![16 * 1024 * 1024],
+            base_addrs: vec![0x100000000],
+            te_endpoints: vec!["remount-unmounting:1".into()],
+            protocols: vec!["tcp".into()],
+            segment_ids: vec![proto_uuid(segment_id)],
+            host_ids: vec![String::new()],
+        }),
+    )
+    .await;
+    assert!(
+        remount.is_err(),
+        "remount during graceful unmount must fail closed"
+    );
+
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(proto_uuid(segment_id)),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cpp_parity_query_segments_exact_ten_client_matrix() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig::default());
+    for index in 0..10u32 {
+        let client_id = Uuid::new_v4();
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: format!("query_seg_{index}"),
+                size: 16 * 1024 * 1024,
+                base_addr: 0x100000000 + u64::from(index) * 16 * 1024 * 1024,
+                te_endpoint: format!("query_seg_{index}"),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    // Every one of the ten 16-MiB segments reports used=0 and capacity=16 MiB
+    // by name, matching C++ SegmentTest.QuerySegments.
+    for index in 0..10u32 {
+        let response = MasterService::query_segments(
+            &service,
+            Request::new(proto::QuerySegmentsRequest {
+                segment_name: format!("query_seg_{index}"),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.total_size, 16 * 1024 * 1024);
+        assert_eq!(response.used_size, 0);
+    }
+
+    // A missing name reports SEGMENT_NOT_FOUND (NotFound) with zero values.
+    let missing = MasterService::query_segments(
+        &service,
+        Request::new(proto::QuerySegmentsRequest {
+            segment_name: "non_existent_segment".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.code(), tonic::Code::NotFound);
 }

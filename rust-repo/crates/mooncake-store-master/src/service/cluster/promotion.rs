@@ -32,7 +32,10 @@ impl MasterServiceImpl {
         }
         let mut objects = HashMap::new();
         let mut tasks = Vec::new();
-        while tasks.len() < self.state.runtime_config.promotion_max_per_heartbeat {
+        // C++ clamps a configured zero to one (see master_service.cpp config
+        // normalization); honor the same contract at the delivery site.
+        let max_tasks = self.state.runtime_config.promotion_max_per_heartbeat.max(1);
+        while tasks.len() < max_tasks {
             let Some((scoped_key, size)) = entry
                 .promotion_objects
                 .iter()
@@ -78,6 +81,11 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        // C++ checks object existence before task existence so a missing key
+        // reports OBJECT_NOT_FOUND regardless of the transient task state.
+        if !self.state.objects.contains_key(&scoped_key) {
+            return Err(Status::not_found("key not found"));
+        }
         let mut task = self
             .state
             .promotion_tasks
@@ -105,10 +113,6 @@ impl MasterServiceImpl {
             return Err(Status::failed_precondition(
                 "promotion buffer already allocated",
             ));
-        }
-        let object_exists = self.state.objects.contains_key(&scoped_key);
-        if !object_exists {
-            return Err(Status::not_found("key not found"));
         }
         let reserved_quota_charge = req.size;
         self.reserve_tenant_quota(&tenant_id, reserved_quota_charge)?;
@@ -183,6 +187,11 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        // C++ reports OBJECT_NOT_FOUND for a missing key before consulting the
+        // transient promotion task table.
+        if !self.state.objects.contains_key(&scoped_key) {
+            return Err(Status::not_found("key not found"));
+        }
         let task = self
             .state
             .promotion_tasks
@@ -248,7 +257,15 @@ impl MasterServiceImpl {
         }
         sync_cache_total_accounting(&mut object);
         drop(object);
-        clear_promotion_task(&self.state, &scoped_key);
+        if clear_promotion_task(&self.state, &scoped_key).is_some() {
+            metrics::PROMOTION_IN_FLIGHT.dec();
+            if committed {
+                metrics::PROMOTION_COMPLETED.inc();
+                metrics::PROMOTION_COMPLETED_BYTES.inc_by(task.object_size);
+            } else {
+                metrics::PROMOTION_CANCELLED.inc();
+            }
+        }
         if let Some(mut local_disk) = self.state.local_disk_segments.get_mut(&task.storage_id) {
             local_disk.promotion_objects.remove(&scoped_key);
         }
@@ -281,6 +298,11 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        // C++ NotifyPromotionFailure reports OBJECT_NOT_FOUND for a missing
+        // key and only then tolerates an absent task as idempotent success.
+        if !self.state.objects.contains_key(&scoped_key) {
+            return Err(Status::not_found("key not found"));
+        }
         let Some(task) = self
             .state
             .promotion_tasks
@@ -310,7 +332,10 @@ impl MasterServiceImpl {
                 "tenant quota invariant failed while revoking promotion",
             ));
         }
-        clear_promotion_task(&self.state, &scoped_key);
+        if clear_promotion_task(&self.state, &scoped_key).is_some() {
+            metrics::PROMOTION_FAILED.inc();
+            metrics::PROMOTION_IN_FLIGHT.dec();
+        }
         let removed = match (task.staged_segment_id, task.staged_offset) {
             (Some(segment_id), Some(offset)) => {
                 detach_staged_promotion_replica(&self.state, &scoped_key, segment_id, offset)

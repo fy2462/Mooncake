@@ -403,6 +403,7 @@ fn test_tenant_quota_table_uses_typed_ids_for_deterministic_assignment() {
     let mut table = TenantQuotaTable::new(0);
     table.upsert_policy(&alpha, 2, 3).unwrap();
     table.upsert_policy(&beta, 2, 3).unwrap();
+    table.recompute_effective_quotas(3);
     assert_eq!(table.get_snapshot(&alpha).unwrap().effective_quota_bytes, 2);
     assert_eq!(table.get_snapshot(&beta).unwrap().effective_quota_bytes, 1);
 }
@@ -412,6 +413,7 @@ fn test_tenant_quota_settle_tracks_zero_and_partial_memory_charge() {
     let tenant = TenantId::new("tenant-a".into()).unwrap();
     let mut table = TenantQuotaTable::new(0);
     table.upsert_policy(&tenant, 512, 512).unwrap();
+    table.recompute_effective_quotas(512);
 
     table.reserve(&tenant, 200).unwrap();
     table.register_object(&tenant);
@@ -442,6 +444,7 @@ fn test_tenant_quota_deficit_includes_used_and_reserved_bytes() {
     let tenant = TenantId::new("tenant-a".into()).unwrap();
     let mut table = TenantQuotaTable::new(0);
     table.upsert_policy(&tenant, 500, 500).unwrap();
+    table.recompute_effective_quotas(500);
     table.restore_object_checked(&tenant, 300).unwrap();
     table.reserve(&tenant, 100).unwrap();
 
@@ -1182,6 +1185,295 @@ async fn test_promotion_registers_first_physical_memory_charge() {
     assert_eq!(promoted.reserved_bytes, 0);
     assert_eq!(promoted.committed_count, 1);
     assert_eq!(promoted.metadata_object_count, 1);
+}
+
+fn tenant_quota_service(capacity: u64) -> MasterServiceImpl {
+    MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        tenant_quota_connector_uri: temp_policy_uri(),
+        tenant_quota_pool_capacity_bytes: capacity,
+        ..Default::default()
+    })
+}
+
+// RegisteredTenantQuotaAdmissionDoesNotCreateImplicitTenants: an over-quota
+// put preserves the prior 80-byte charge and never creates an implicit tenant
+// snapshot for an unrelated tenant.
+#[tokio::test]
+async fn cpp_parity_quota_rejection_preserves_80_bytes_and_creates_no_implicit_tenant() {
+    let service = tenant_quota_service(512);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 100)
+        .expect("tenant policy");
+    let client_id = Uuid::new_v4();
+    mount_segment(&service, client_id, "implicit-tenant:1", 4096).await;
+    put_complete(
+        &service,
+        client_id,
+        "tenant-a",
+        "key-a",
+        80,
+        proto::ReplicateConfig {
+            replica_num: 1,
+            preferred_segment: "implicit-tenant:1".into(),
+            with_hard_pin: true,
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let over = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "key-b".into(),
+            slice_length: 30,
+            tenant_id: "tenant-a".into(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "implicit-tenant:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(over.code(), tonic::Code::ResourceExhausted);
+
+    let snapshot = service
+        .get_tenant_quota_snapshot("tenant-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.used_bytes, 80);
+    assert!(
+        service
+            .get_tenant_quota_snapshot("tenant-b")
+            .unwrap()
+            .is_none()
+    );
+}
+
+// CopyStartRequiresQuotaForNewReplica: a copy that would exceed the tenant
+// quota is rejected and the original charge stays intact.
+#[tokio::test]
+async fn cpp_parity_copy_start_over_quota_preserves_accounting() {
+    let service = tenant_quota_service(512);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 150)
+        .expect("tenant policy");
+    let client_id = Uuid::new_v4();
+    mount_segment(&service, client_id, "copy-quota-a:1", 1024).await;
+    mount_segment(&service, client_id, "copy-quota-b:1", 1024).await;
+    put_complete(
+        &service,
+        client_id,
+        "tenant-a",
+        "key",
+        100,
+        proto::ReplicateConfig {
+            replica_num: 1,
+            preferred_segment: "copy-quota-a:1".into(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let copy = MasterService::copy_start(
+        &service,
+        Request::new(proto::CopyStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "key".into(),
+            source: "copy-quota-a:1".into(),
+            targets: vec!["copy-quota-b:1".into()],
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(copy.code(), tonic::Code::ResourceExhausted);
+
+    let snapshot = service
+        .get_tenant_quota_snapshot("tenant-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.used_bytes, 100);
+    assert_eq!(snapshot.reserved_bytes, 0);
+    assert_eq!(snapshot.committed_count, 1);
+}
+
+// MoveStartRequiresQuotaForTemporaryReplica: an over-quota move start is
+// rejected without mutating the accounting.
+#[tokio::test]
+async fn cpp_parity_move_start_over_quota_preserves_accounting() {
+    let service = tenant_quota_service(512);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 150)
+        .expect("tenant policy");
+    let client_id = Uuid::new_v4();
+    mount_segment(&service, client_id, "move-quota-a:1", 1024).await;
+    mount_segment(&service, client_id, "move-quota-b:1", 1024).await;
+    put_complete(
+        &service,
+        client_id,
+        "tenant-a",
+        "key",
+        100,
+        proto::ReplicateConfig {
+            replica_num: 1,
+            preferred_segment: "move-quota-a:1".into(),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let error = MasterService::move_start(
+        &service,
+        Request::new(proto::MoveStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "key".into(),
+            source: "move-quota-a:1".into(),
+            target: "move-quota-b:1".into(),
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+
+    let snapshot = service
+        .get_tenant_quota_snapshot("tenant-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.used_bytes, 100);
+    assert_eq!(snapshot.reserved_bytes, 0);
+}
+
+// EffectiveQuotaUsesOnlyExplicitPolicyAndScalesProportionally: requested
+// quotas 200/400 over capacity 300 scale to 100/200.
+#[tokio::test]
+async fn cpp_parity_service_effective_quotas_scale_200_400_to_100_200() {
+    let service = tenant_quota_service(300);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 200)
+        .expect("tenant policy");
+    service
+        .upsert_tenant_quota_policy("tenant-b", 400)
+        .expect("tenant policy");
+    mount_segment(&service, Uuid::new_v4(), "scale-capacity:1", 300).await;
+
+    let a = service
+        .get_tenant_quota_snapshot("tenant-a")
+        .unwrap()
+        .unwrap();
+    let b = service
+        .get_tenant_quota_snapshot("tenant-b")
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.effective_quota_bytes, 100);
+    assert_eq!(b.effective_quota_bytes, 200);
+}
+
+async fn unsolicited_offload(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    tenant_id: &str,
+    key: &str,
+    size: i64,
+) -> Result<(), tonic::Status> {
+    MasterService::notify_offload_success(
+        service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec![key.into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: key.len() as i64,
+                data_size: size,
+                transport_endpoint: "disk-endpoint".into(),
+            }],
+            tasks: vec![proto::OffloadTaskItem {
+                tenant_id: tenant_id.into(),
+                key: key.into(),
+                size: size.max(0),
+                generation_id: None,
+            }],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+// MultiTenantModeAllowsRegisteredOffloadSuccess: a registered tenant's
+// unsolicited LocalDisk completion after an ordinary MountSegment succeeds
+// without a Rust LocalDisk session and creates a zero-charge object.
+#[tokio::test]
+async fn cpp_parity_registered_unsolicited_offload_without_disk_session_creates_zero_charge_object()
+{
+    let service = tenant_quota_service(1000);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 1000)
+        .expect("tenant policy");
+    let client_id = Uuid::new_v4();
+    mount_segment(&service, client_id, "classic-unsolicited:1", 4096).await;
+
+    unsolicited_offload(&service, client_id, "tenant-a", "cold", 128)
+        .await
+        .expect("registered unsolicited offload must succeed");
+    let exists = MasterService::exist_key(
+        &service,
+        Request::new(proto::ExistKeyRequest {
+            key: "cold".into(),
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .exists;
+    assert!(exists);
+    let snapshot = service
+        .get_tenant_quota_snapshot("tenant-a")
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.used_bytes, 0);
+}
+
+// NotifyOffloadSuccessDoesNotCountAddReplicaUpdateAsNewDiskUsage: repeated
+// unsolicited reports for the same key never transfer LocalDisk ownership, and
+// the derived per-client SSD usage stays with the first reporter.
+#[tokio::test]
+async fn cpp_parity_repeat_offload_update_preserves_existing_disk_owner_usage() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        enable_offload: true,
+        tenant_quota_connector_uri: temp_policy_uri(),
+        tenant_quota_pool_capacity_bytes: 1000,
+        ..Default::default()
+    });
+    service
+        .upsert_tenant_quota_policy("tenant-a", 1000)
+        .expect("tenant policy");
+    let client_a = Uuid::new_v4();
+    let client_b = Uuid::new_v4();
+    mount_segment(&service, client_a, "repeat-offload:1", 4096).await;
+    mount_local_disk(&service, client_a).await;
+    mount_local_disk(&service, client_b).await;
+
+    unsolicited_offload(&service, client_a, "tenant-a", "cold", 128)
+        .await
+        .expect("first unsolicited report must succeed");
+    let usage = service.local_ssd_usage_metrics_for_test();
+    assert_eq!(usage.get(&client_a), Some(&128));
+    assert_eq!(usage.get(&client_b), Some(&0));
+
+    unsolicited_offload(&service, client_b, "tenant-a", "cold", 128)
+        .await
+        .expect("repeated unsolicited report must succeed");
+    let usage = service.local_ssd_usage_metrics_for_test();
+    assert_eq!(usage.get(&client_a), Some(&128));
+    assert_eq!(usage.get(&client_b), Some(&0));
 }
 
 #[test]

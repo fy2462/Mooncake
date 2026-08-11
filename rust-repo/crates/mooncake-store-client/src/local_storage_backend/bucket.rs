@@ -973,7 +973,20 @@ impl BucketStorageBackend {
                 record: record.clone(),
             })
             .collect::<Vec<_>>();
-        records.sort_by(|left, right| left.storage_key.cmp(&right.storage_key));
+        // C++ notifies victims beginning with the oldest bucket; preserve the
+        // FIFO/LRU selection order instead of re-sorting by storage key.
+        let created_seq = |bucket_id: u64| {
+            state
+                .buckets
+                .get(&bucket_id)
+                .map(|meta| meta.created_seq)
+                .unwrap_or(u64::MAX)
+        };
+        records.sort_by(|left, right| {
+            created_seq(left.record.bucket_id)
+                .cmp(&created_seq(right.record.bucket_id))
+                .then_with(|| left.storage_key.cmp(&right.storage_key))
+        });
         drop(state);
         let mut reserved = self.reservations.names.lock();
         for snapshot in &records {
@@ -1275,6 +1288,7 @@ fn sync_directory(path: &Path) -> StoreResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
     fn config(root: &TempDir) -> BucketStorageConfig {
@@ -1499,6 +1513,178 @@ mod tests {
                 .delete_object_if_generation("tenant-a", first_generation)
                 .unwrap()
         );
+    }
+
+    // BucketStorageBackend_ConcurrentReadsNoBlocking: four synchronized readers
+    // each complete ten five-key loads spanning multiple buckets; all 40 loads
+    // succeed and every byte is exact.
+    #[test]
+    fn cpp_parity_bucket_concurrent_reads_all_complete() {
+        let root = TempDir::new().unwrap();
+        let config = config(&root);
+        let backend = Arc::new(BucketStorageBackend::new(config));
+        let keys: Vec<String> = (0..12).map(|i| format!("key-{i}")).collect();
+        for (i, key) in keys.iter().enumerate() {
+            write(
+                &backend,
+                key,
+                &vec![b'a' + (i % 26) as u8; 16],
+                Uuid::new_v4(),
+            );
+        }
+
+        let barrier = Arc::new(Barrier::new(4));
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let backend = Arc::clone(&backend);
+            let keys = keys.clone();
+            let barrier = Arc::clone(&barrier);
+            readers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let mut loads = 0;
+                for _ in 0..10 {
+                    for (i, key) in keys.iter().enumerate() {
+                        assert_eq!(
+                            backend.read_object(key).unwrap(),
+                            vec![b'a' + (i % 26) as u8; 16]
+                        );
+                    }
+                    loads += 1;
+                }
+                loads
+            }));
+        }
+        let mut total = 0;
+        for reader in readers {
+            total += reader.join().unwrap();
+        }
+        assert_eq!(total, 40);
+    }
+
+    // BucketWatermarkEvictionUsesHandlerAndKeepsNewest: three one-key buckets
+    // watermark-evict the two oldest in FIFO order, and the newest remains
+    // byte-exact after commit.
+    #[test]
+    fn cpp_parity_bucket_watermark_eviction_uses_handler_and_keeps_newest() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_size_limit = 64;
+        config.bucket_keys_limit = 1;
+        config.quota_bytes = 90;
+        let backend = BucketStorageBackend::new(config);
+        write(&backend, "oldest", b"0000000000000000", Uuid::new_v4());
+        write(&backend, "middle", b"1111111111111111", Uuid::new_v4());
+        write(&backend, "newest", b"2222222222222222", Uuid::new_v4());
+
+        let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(
+            pending.keys(),
+            vec!["oldest".to_string(), "middle".to_string()]
+        );
+        backend.commit_eviction(pending).unwrap();
+
+        assert!(matches!(
+            backend.read_object("oldest"),
+            Err(StoreError::KeyNotFound(_))
+        ));
+        assert!(matches!(
+            backend.read_object("middle"),
+            Err(StoreError::KeyNotFound(_))
+        ));
+        assert_eq!(backend.read_object("newest").unwrap(), b"2222222222222222");
+    }
+
+    // BucketWatermarkEvictionRestoresMetadataWhenNotificationFails: a failed
+    // notification leaves the oldest key exact; retrying the same watermark
+    // selection then removes it.
+    #[test]
+    fn cpp_parity_bucket_watermark_eviction_restores_metadata_when_notification_fails() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_size_limit = 64;
+        config.bucket_keys_limit = 1;
+        config.quota_bytes = 90;
+        let backend = BucketStorageBackend::new(config);
+        write(&backend, "oldest", b"0000000000000000", Uuid::new_v4());
+        write(&backend, "middle", b"1111111111111111", Uuid::new_v4());
+        write(&backend, "newest", b"2222222222222222", Uuid::new_v4());
+
+        let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(
+            pending.keys(),
+            vec!["oldest".to_string(), "middle".to_string()]
+        );
+        backend.rollback_eviction(pending);
+
+        assert_eq!(backend.read_object("oldest").unwrap(), b"0000000000000000");
+
+        let retried = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(
+            retried.keys(),
+            vec!["oldest".to_string(), "middle".to_string()]
+        );
+        backend.commit_eviction(retried).unwrap();
+
+        assert!(matches!(
+            backend.read_object("oldest"),
+            Err(StoreError::KeyNotFound(_))
+        ));
+        assert_eq!(backend.read_object("newest").unwrap(), b"2222222222222222");
+    }
+
+    // MissingBucketDataFileCleanup: after externally removing the sole durable
+    // bucket file, a fresh backend initializes successfully and reports the
+    // former key absent from existence and inventory.
+    #[test]
+    fn cpp_parity_bucket_missing_data_file_cleanup() {
+        let root = TempDir::new().unwrap();
+        let config = config(&root);
+        {
+            let backend = BucketStorageBackend::new(config.clone());
+            write(&backend, "missing-key", b"value", Uuid::new_v4());
+            write(&backend, "other-key", b"other", Uuid::new_v4());
+            assert!(backend.bucket_dir().exists());
+            for entry in std::fs::read_dir(backend.bucket_dir()).unwrap() {
+                let path = entry.unwrap().path();
+                assert!(path.is_file());
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+
+        let restarted = BucketStorageBackend::new(config);
+        assert!(matches!(
+            restarted.read_object("missing-key"),
+            Err(StoreError::KeyNotFound(_))
+        ));
+        assert!(restarted.scan_records().unwrap().is_empty());
+    }
+
+    // BucketWatermarkEvictionNoopsWhenPolicyIsNone: under policy NONE with
+    // usage above the high watermark, watermark eviction selects no victims,
+    // commits without side effects, and the object remains exact.
+    #[test]
+    fn cpp_parity_bucket_watermark_eviction_noops_when_policy_none() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.eviction_policy = BucketEvictionPolicy::None;
+        config.quota_bytes = 64;
+        config.bucket_size_limit = 64;
+        config.bucket_keys_limit = 2;
+        let backend = BucketStorageBackend::new(config);
+        write(&backend, "a", b"aaaaaaaa", Uuid::new_v4());
+        write(&backend, "b", b"bbbbbbbb", Uuid::new_v4());
+
+        let pending = backend
+            .prepare_watermark_eviction(0.70, 0.40)
+            .expect("watermark eviction under NONE must succeed");
+        assert!(
+            pending.keys().is_empty(),
+            "policy NONE must never select watermark victims"
+        );
+        backend.commit_eviction(pending).unwrap();
+
+        assert_eq!(backend.read_object("a").unwrap(), b"aaaaaaaa");
+        assert_eq!(backend.read_object("b").unwrap(), b"bbbbbbbb");
     }
 
     #[test]

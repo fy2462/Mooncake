@@ -145,6 +145,36 @@ fn test_replica_descriptor_full() {
     assert_eq!(rd.replica_type, ReplicaType::Memory);
 }
 
+// MemoryReplicaDescriptorHandling: the canonical replica identity tuple is
+// (segment_id, offset, replica_type) with status, size, and endpoint preserved.
+#[test]
+fn cpp_parity_memory_replica_descriptor_equivalent_identity_and_metadata() {
+    let segment_id = Uuid::new_v4();
+    let rd = ReplicaDescriptor {
+        segment_id,
+        segment_name: "test_segment:12345".into(),
+        offset: 0x1000,
+        size: 1024,
+        status: ReplicaStatus::Complete,
+        replica_type: ReplicaType::Memory,
+        holder_client_id: None,
+        local_disk_storage_id: None,
+        local_disk_generation_id: None,
+        refcnt: 0,
+        handle_valid: true,
+        base_addr: 0,
+        protocol: "tcp".into(),
+    };
+
+    assert_eq!(
+        (rd.segment_id, rd.offset, rd.replica_type),
+        (segment_id, 0x1000, ReplicaType::Memory)
+    );
+    assert_eq!(rd.status, ReplicaStatus::Complete);
+    assert_eq!(rd.size, 1024);
+    assert_eq!(rd.segment_name, "test_segment:12345");
+}
+
 #[test]
 fn test_replica_descriptor_clone() {
     let rd = ReplicaDescriptor {

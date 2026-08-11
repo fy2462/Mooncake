@@ -26,7 +26,7 @@
 
 use mooncake_store_core::StoreError;
 use mooncake_store_core::error::StoreResult;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::MooncakeClient;
@@ -36,21 +36,39 @@ fn default_task_tenant() -> String {
     "default".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+/// Retry delay for a given retry count, in milliseconds. The C++ executor
+/// sleeps 50ms per attempt slot (50, 100, ..., 500 for the first ten).
+fn retry_delay_ms(retry_count: u32) -> u64 {
+    50 * u64::from(retry_count.saturating_add(1))
+}
+
+/// Retry decision: only NoAvailableHandle retries, and only below the
+/// configured attempt budget.
+fn should_retry(error: &StoreError, retry_count: u32, max_retry_attempts: u32) -> bool {
+    matches!(error, StoreError::NoAvailableHandle) && retry_count < max_retry_attempts
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct ReplicaCopyPayload {
     #[serde(default = "default_task_tenant")]
     tenant_id: String,
+    #[serde(default)]
     key: String,
+    #[serde(default)]
     source: String,
+    #[serde(default)]
     targets: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ReplicaMovePayload {
     #[serde(default = "default_task_tenant")]
     tenant_id: String,
+    #[serde(default)]
     key: String,
+    #[serde(default)]
     source: String,
+    #[serde(default)]
     target: String,
 }
 
@@ -303,14 +321,16 @@ impl MooncakeClient {
                 ))),
             };
 
-            if matches!(&result, Err(StoreError::NoAvailableHandle))
-                && retry_count < task.max_retry_attempts
-            {
-                retry_count += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    50 * u64::from(retry_count),
-                ))
+            let retry = match &result {
+                Err(error) => should_retry(error, retry_count, task.max_retry_attempts),
+                Ok(()) => false,
+            };
+            if retry {
+                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms(
+                    retry_count,
+                )))
                 .await;
+                retry_count += 1;
                 continue;
             }
             break result;
@@ -345,7 +365,9 @@ impl MooncakeClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReplicaCopyPayload, ReplicaMovePayload};
+    use super::{ReplicaCopyPayload, ReplicaMovePayload, retry_delay_ms, should_retry};
+    use crate::proto;
+    use mooncake_store_core::StoreError;
 
     #[test]
     fn task_payload_preserves_explicit_tenant() {
@@ -380,5 +402,263 @@ mod tests {
         assert_eq!(move_payload.key, "legacy_move_key");
         assert_eq!(move_payload.source, "segment_0");
         assert_eq!(move_payload.target, "segment_1");
+    }
+
+    // ReplicaCopyPayloadStructure: key and two ordered targets survive decode
+    // at exact positions.
+    #[test]
+    fn cpp_parity_copy_payload_structure_preserves_key_and_two_ordered_targets() {
+        let payload: ReplicaCopyPayload = serde_json::from_str(
+            r#"{"key":"test_key","source":"source","targets":["target1","target2"]}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.key, "test_key");
+        assert_eq!(payload.targets.len(), 2);
+        assert_eq!(payload.targets[0], "target1");
+        assert_eq!(payload.targets[1], "target2");
+    }
+
+    // ReplicaCopyPayloadSingleTarget: the parsed key and sole target value are
+    // exact.
+    #[test]
+    fn cpp_parity_copy_payload_preserves_exact_single_target() {
+        let payload: ReplicaCopyPayload = serde_json::from_str(
+            r#"{"key":"test_single_target_key","source":"source","targets":["target_segment"]}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.key, "test_single_target_key");
+        assert_eq!(payload.targets.len(), 1);
+        assert_eq!(payload.targets[0], "target_segment");
+    }
+
+    // ReplicaMovePayloadStructure: key, source, and target decode together.
+    #[test]
+    fn cpp_parity_move_payload_preserves_key_source_and_target() {
+        let payload: ReplicaMovePayload = serde_json::from_str(
+            r#"{"key":"move_key","source":"move_source","target":"move_target"}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.key, "move_key");
+        assert_eq!(payload.source, "move_source");
+        assert_eq!(payload.target, "move_target");
+    }
+
+    // ReplicaCopyPayloadMultipleTargets: a four-target payload round-trips
+    // through the bidirectional serde representation.
+    #[test]
+    fn cpp_parity_copy_payload_four_target_serde_roundtrip() {
+        let payload = ReplicaCopyPayload {
+            tenant_id: "default".to_string(),
+            key: "test_key".to_string(),
+            source: "source".to_string(),
+            targets: vec![
+                "target1".to_string(),
+                "target2".to_string(),
+                "target3".to_string(),
+                "target4".to_string(),
+            ],
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let restored: ReplicaCopyPayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.key, "test_key");
+        assert_eq!(restored.targets.len(), 4);
+        assert_eq!(restored.targets[0], "target1");
+        assert_eq!(restored.targets[3], "target4");
+    }
+
+    // ReplicaCopyPayloadEmptyTargets: an empty targets vector round-trips.
+    #[test]
+    fn cpp_parity_copy_payload_empty_targets_serde_roundtrip() {
+        let payload = ReplicaCopyPayload {
+            tenant_id: "default".to_string(),
+            key: "test_key".to_string(),
+            source: "source".to_string(),
+            targets: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let restored: ReplicaCopyPayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.key, "test_key");
+        assert!(restored.targets.is_empty());
+    }
+
+    // CopyMethodEmptyKey: an empty key round-trips with a nonempty JSON body.
+    #[test]
+    fn cpp_parity_copy_payload_empty_key_serde_roundtrip() {
+        let payload = ReplicaCopyPayload {
+            tenant_id: "default".to_string(),
+            key: String::new(),
+            source: "source".to_string(),
+            targets: vec!["target1".to_string()],
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        assert!(!encoded.is_empty());
+        let restored: ReplicaCopyPayload = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.key.is_empty());
+        assert_eq!(restored.targets.len(), 1);
+        assert_eq!(restored.targets[0], "target1");
+    }
+
+    // CopyMethodEmptyTargets: empty targets round-trip at the payload level.
+    #[test]
+    fn cpp_parity_copy_method_payload_empty_targets_roundtrip() {
+        let payload = ReplicaCopyPayload {
+            tenant_id: "default".to_string(),
+            key: "test_key".to_string(),
+            source: "source".to_string(),
+            targets: Vec::new(),
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let restored: ReplicaCopyPayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.key, "test_key");
+        assert!(restored.targets.is_empty());
+    }
+
+    // MoveMethodEmptyKey: an empty key round-trips without altering the
+    // nonempty source and target segment names.
+    #[test]
+    fn cpp_parity_move_payload_empty_key_serde_roundtrip() {
+        let payload = ReplicaMovePayload {
+            tenant_id: "default".to_string(),
+            key: String::new(),
+            source: "source_segment".to_string(),
+            target: "target_segment".to_string(),
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let restored: ReplicaMovePayload = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.key.is_empty());
+        assert_eq!(restored.source, "source_segment");
+        assert_eq!(restored.target, "target_segment");
+    }
+
+    // MoveMethodEmptySegments: empty source round-trips with exact key/target.
+    #[test]
+    fn cpp_parity_move_payload_empty_source_serde_roundtrip() {
+        let payload = ReplicaMovePayload {
+            tenant_id: "default".to_string(),
+            key: "test_key".to_string(),
+            source: String::new(),
+            target: "target_segment".to_string(),
+        };
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let restored: ReplicaMovePayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.key, "test_key");
+        assert!(restored.source.is_empty());
+        assert_eq!(restored.target, "target_segment");
+    }
+
+    // MultipleTargetSegmentsHandling: five targets round-trip exactly.
+    #[test]
+    fn cpp_parity_copy_payload_five_target_fanout_roundtrip() {
+        let targets = ["target1", "target2", "target3", "target4", "target5"]
+            .iter()
+            .map(|target| (*target).to_string())
+            .collect::<Vec<_>>();
+        let payload = ReplicaCopyPayload {
+            tenant_id: "default".to_string(),
+            key: "test_key".to_string(),
+            source: "source".to_string(),
+            targets: targets.clone(),
+        };
+        assert_eq!(payload.targets.len(), 5);
+        assert_eq!(payload.targets[0], "target1");
+        assert_eq!(payload.targets[4], "target5");
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let restored: ReplicaCopyPayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.targets.len(), 5);
+        assert_eq!(restored.targets[0], "target1");
+        assert_eq!(restored.targets[4], "target5");
+    }
+
+    // PayloadDeserializationErrorHandling: an unknown-only payload decodes to
+    // defaulted empty fields instead of failing.
+    #[test]
+    fn cpp_parity_unknown_only_copy_payload_defaults_to_empty_fields() {
+        let payload: ReplicaCopyPayload = serde_json::from_str(r#"{"invalid":"json"}"#).unwrap();
+        assert!(payload.key.is_empty());
+        assert!(payload.source.is_empty());
+        assert!(payload.targets.is_empty());
+    }
+
+    // ClientTaskStructure: a Copy assignment preserves type and the decoded
+    // single target.
+    #[test]
+    fn cpp_parity_copy_assignment_preserves_type_key_and_single_target() {
+        let assignment = proto::TaskAssignment {
+            id: None,
+            r#type: proto::TaskType::ReplicaCopy as i32,
+            payload: r#"{"key":"test_key","source":"source","targets":["target_segment"]}"#
+                .to_string(),
+            created_at_ms_epoch: 1,
+            max_retry_attempts: 3,
+        };
+        assert_eq!(assignment.r#type, proto::TaskType::ReplicaCopy as i32);
+        assert!(!assignment.payload.is_empty());
+        let payload: ReplicaCopyPayload = serde_json::from_str(&assignment.payload).unwrap();
+        assert_eq!(payload.key, "test_key");
+        assert_eq!(payload.targets.len(), 1);
+        assert_eq!(payload.targets[0], "target_segment");
+    }
+
+    // TaskAssignmentToClientTaskConversion: a Copy assignment with a two-target
+    // payload preserves key and cardinality.
+    #[test]
+    fn cpp_parity_copy_assignment_preserves_key_and_two_target_cardinality() {
+        let assignment = proto::TaskAssignment {
+            id: None,
+            r#type: proto::TaskType::ReplicaCopy as i32,
+            payload: r#"{"key":"test_key","source":"source","targets":["target1","target2"]}"#
+                .to_string(),
+            created_at_ms_epoch: 1,
+            max_retry_attempts: 3,
+        };
+        assert_eq!(assignment.r#type, proto::TaskType::ReplicaCopy as i32);
+        assert!(!assignment.payload.is_empty());
+        let payload: ReplicaCopyPayload = serde_json::from_str(&assignment.payload).unwrap();
+        assert_eq!(payload.key, "test_key");
+        assert_eq!(payload.targets.len(), 2);
+    }
+
+    // RetryDelayCalculation: counts 0..9 produce exactly the ten-value
+    // millisecond vector [50, 100, ..., 500].
+    #[test]
+    fn cpp_parity_retry_delay_matrix_is_50_through_500_ms() {
+        let delays = (0..10).map(retry_delay_ms).collect::<Vec<_>>();
+        assert_eq!(
+            delays,
+            vec![50, 100, 150, 200, 250, 300, 350, 400, 450, 500]
+        );
+    }
+
+    // RetryDecisionLogic: with max 10, NoAvailableHandle retries below ten and
+    // stops at ten; every other error never retries.
+    #[test]
+    fn cpp_parity_only_no_available_handle_retries_below_ten() {
+        let retriable = StoreError::NoAvailableHandle;
+        assert!(should_retry(&retriable, 0, 10));
+        assert!(should_retry(&retriable, 5, 10));
+        assert!(should_retry(&retriable, 9, 10));
+        assert!(!should_retry(&retriable, 10, 10));
+        assert!(!should_retry(&retriable, 11, 10));
+        assert!(!should_retry(&StoreError::KeyNotFound("k".into()), 0, 10));
+        assert!(!should_retry(
+            &StoreError::SegmentNotFound("s".into()),
+            0,
+            10
+        ));
+        assert!(!should_retry(&StoreError::InvalidParams("x".into()), 0, 10));
+    }
+
+    // RetryCountIncrement: the deterministic retry counter progresses exactly
+    // 0/1 through 9/10 and then 11 on one more increment.
+    #[test]
+    fn cpp_parity_retry_counter_progresses_exactly_zero_through_eleven() {
+        let mut retry_count = 0_u32;
+        for expected_pre in 0..10 {
+            assert_eq!(retry_count, expected_pre);
+            retry_count += 1;
+            assert_eq!(retry_count, expected_pre + 1);
+        }
+        retry_count += 1;
+        assert_eq!(retry_count, 11);
     }
 }

@@ -249,10 +249,21 @@ impl StorageBackend {
         &self,
         entries: &[(String, Vec<u8>)],
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // C++ BatchOffload rejects an empty batch with INVALID_KEY and skips
+        // entries whose slice vector is empty (a successful count of zero with
+        // the key absent). Enforce both at this callable boundary.
+        if entries.is_empty() {
+            return Err("empty batch is invalid".into());
+        }
+        let entries = entries
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
         match self.backend_type {
-            StorageBackendType::Bucket => return self.batch_offload_bucket(entries),
+            StorageBackendType::Bucket => return self.batch_offload_bucket(&entries),
             StorageBackendType::OffsetAllocator => {
-                return self.batch_offload_offset_allocator(entries);
+                return self.batch_offload_offset_allocator(&entries);
             }
             _ => {}
         }
@@ -260,7 +271,7 @@ impl StorageBackend {
         if self.backend_type != StorageBackendType::Distributed {
             std::fs::create_dir_all(&dir)?;
         }
-        for (key, value) in entries {
+        for (key, value) in &entries {
             let path = self.key_path(key);
             if let Some(adapter) = self.distributed_adapter() {
                 adapter.write_file(&path, value)?;

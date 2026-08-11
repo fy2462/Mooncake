@@ -12,6 +12,21 @@ lazy_static! {
         "total failed items in batch exist_key requests"
     )
     .unwrap();
+    pub static ref BATCH_EXIST_KEY_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_exist_key_items_total",
+        "total items processed by batch exist_key requests"
+    )
+    .unwrap();
+    pub static ref BATCH_EXIST_KEY_PARTIAL_SUCCESSES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_exist_key_partial_successes_total",
+        "total batch exist_key requests with partial per-item failures"
+    )
+    .unwrap();
+    pub static ref BATCH_EXIST_KEY_FAILED_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_exist_key_failed_items_total",
+        "total failed items in batch exist_key requests"
+    )
+    .unwrap();
     pub static ref BATCH_QUERY_IP_REQUESTS: IntCounter = IntCounter::new(
         "mooncake_store_batch_query_ip_total",
         "total batch query_ip requests (items)"

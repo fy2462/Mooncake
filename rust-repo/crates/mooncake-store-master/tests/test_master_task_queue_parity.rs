@@ -1,9 +1,9 @@
 mod common;
 
 use common::proto_uuid;
+use mooncake_store_master::MasterServiceImpl;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
-use mooncake_store_master::MasterServiceImpl;
 use std::collections::HashSet;
 use tonic::Request;
 use uuid::Uuid;

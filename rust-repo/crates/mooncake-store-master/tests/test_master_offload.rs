@@ -2,6 +2,7 @@ use mooncake_store_core::ReplicaType;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
+use std::sync::Arc;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
@@ -178,6 +179,98 @@ async fn put_complete(
 }
 
 #[tokio::test]
+async fn concurrent_local_disk_mounts_parity() {
+    let service = Arc::new(MasterServiceImpl::with_runtime_config(
+        MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        },
+    ));
+
+    let mut tasks = Vec::new();
+    for _ in 0..100 {
+        let service = Arc::clone(&service);
+        tasks.push(tokio::spawn(async move {
+            let client_id = Uuid::new_v4();
+            let storage_id = Uuid::new_v4();
+            let recovery_session_id = Uuid::new_v4();
+            begin_local_disk_recovery(&service, client_id, storage_id, recovery_session_id).await;
+            commit_local_disk_recovery(&service, client_id, storage_id, recovery_session_id).await;
+        }));
+    }
+
+    let mut success = 0usize;
+    for task in tasks {
+        task.await.unwrap();
+        success += 1;
+    }
+    assert_eq!(success, 100);
+}
+
+#[tokio::test]
+async fn heartbeat_batches_three_thousand_new_objects_parity() {
+    const KEY_COUNT: usize = 3000;
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "hb-mem", 16 * 1024 * 1024).await;
+
+    // C++ mounts the local disk segment with offloading disabled, then the
+    // first heartbeat enables offloading and observes an empty queue.
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+    begin_local_disk_recovery(&service, client_id, storage_id, recovery_session_id).await;
+    MasterService::mount_local_disk_segment(
+        &service,
+        Request::new(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(uuid_proto(client_id)),
+            enable_offloading: false,
+            storage_id: Some(uuid_proto(storage_id)),
+            recovery_complete: true,
+            recovery_session_id: Some(uuid_proto(recovery_session_id)),
+        }),
+    )
+    .await
+    .unwrap();
+
+    async fn put_phase(service: &MasterServiceImpl, client_id: Uuid, prefix: &str) -> Vec<String> {
+        let keys = (0..KEY_COUNT)
+            .map(|index| format!("{prefix}-{index}"))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            put_complete(service, client_id, key, 1024, "hb-mem").await;
+        }
+        keys
+    }
+
+    // Phase 1: objects created while offloading is disabled; heartbeat
+    // enables offloading and returns an empty batch.
+    put_phase(&service, client_id, "hb-p1").await;
+    let first = take_offload_tasks(&service, client_id).await;
+    assert_eq!(first.len(), 0);
+
+    // Phase 2: offloading is now enabled, so all 3000 new objects are queued.
+    let second_keys = put_phase(&service, client_id, "hb-p2").await;
+    let second = take_offload_tasks(&service, client_id).await;
+    assert_eq!(second.len(), second_keys.len());
+    for task in &second {
+        assert!(second_keys.contains(&task.key));
+        assert_eq!(task.size, 1024);
+    }
+
+    // Phase 3: a fresh 3000-object batch is queued and returned again.
+    let third_keys = put_phase(&service, client_id, "hb-p3").await;
+    let third = take_offload_tasks(&service, client_id).await;
+    assert_eq!(third.len(), third_keys.len());
+    for task in &third {
+        assert!(third_keys.contains(&task.key));
+        assert_eq!(task.size, 1024);
+    }
+}
+
+#[tokio::test]
 async fn test_offload_object_heartbeat_and_notify_offload_success() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_offload: true,
@@ -298,7 +391,10 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
         vec![0]
     );
 
-    let unknown = MasterService::notify_offload_success(
+    // C++ classic path accepts a registered tenant's unsolicited completion
+    // (create-on-missing) without an admitted task; the object is then a
+    // readable LocalDisk-only entry.
+    MasterService::notify_offload_success(
         &service,
         Request::new(proto::NotifyOffloadSuccessRequest {
             client_id: Some(proto::Uuid {
@@ -323,10 +419,8 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
         }),
     )
     .await
-    .unwrap_err();
-    assert_eq!(unknown.code(), Code::FailedPrecondition);
-
-    let unknown = MasterService::get_replica_list(
+    .unwrap();
+    let disk_only = MasterService::get_replica_list(
         &service,
         Request::new(proto::GetReplicaListRequest {
             key: "tenant-disk-key".into(),
@@ -334,8 +428,11 @@ async fn test_offload_object_heartbeat_and_notify_offload_success() {
         }),
     )
     .await
-    .unwrap_err();
-    assert_eq!(unknown.code(), Code::NotFound);
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert_eq!(disk_only.len(), 1);
+    assert_eq!(disk_only[0].replica_type, ReplicaType::LocalDisk as i32);
 
     // Reattachment is permitted only inside an explicit recovery transaction
     // and must present the exact Master-issued byte generation.

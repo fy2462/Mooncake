@@ -289,7 +289,7 @@ impl MasterServiceImpl {
         self.state.processing_keys.remove(scoped_key);
         self.state.replication_tasks.remove(scoped_key);
         clear_offloading_task(&self.state, scoped_key);
-        clear_promotion_task(&self.state, scoped_key);
+        cancel_promotion_task(&self.state, scoped_key);
         release_object_replicas(&self.state, scoped_key, &object.replicas)?;
         Ok(())
     }
@@ -843,6 +843,7 @@ mod tests {
         {
             let mut quotas = service.state.tenant_quotas.write();
             quotas.upsert_policy(&tenant_id, 100, 100).unwrap();
+            quotas.recompute_effective_quotas(100);
             quotas.register_object(&tenant_id);
             quotas.reserve(&tenant_id, 50).unwrap();
         }

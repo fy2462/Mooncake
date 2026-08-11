@@ -232,6 +232,8 @@ impl MasterServiceImpl {
             &req.tenant_id,
             self.state.runtime_config.enable_tenant_quota,
         )?;
+        metrics::BATCH_EXIST_KEY_REQUESTS.inc();
+        metrics::BATCH_EXIST_KEY_ITEMS.inc_by(req.keys.len() as u64);
         let results = self.batch_completed_objects_exist_and_grant_lease(&tenant_id, &req.keys)?;
         Ok(Response::new(proto::BatchExistKeyResponse { results }))
     }
@@ -372,7 +374,7 @@ impl MasterServiceImpl {
                 // cleared generation.
                 self.persist_object_image_or_remove(&key, "batch_replica_clear")?;
                 clear_offloading_task(&self.state, &key);
-                clear_promotion_task(&self.state, &key);
+                cancel_promotion_task(&self.state, &key);
                 release_replicas(&self.state, &removed_replicas)?;
                 cleared.push(raw_key.clone());
             }
@@ -531,9 +533,17 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let mut statuses = Vec::with_capacity(req.keys.len());
+        // C++ BatchRemove cleans stale handles before consulting the object
+        // (CleanupStaleHandles then Exists → OBJECT_NOT_FOUND). Mirror that:
+        // a stale-held LocalDisk replica is erased first, which can invalidate
+        // the object and cancel its promotion task.
+        let alive_clients = get_alive_clients_snapshot(&self.state);
         for raw_key in &req.keys {
             let key = tenant_id.make_scoped_key(raw_key);
             let _mutation_guard = self.state.key_mutations.lock(&key);
+            clear_invalid_handles_for_key_locked(&self.state, &alive_clients, &key).map_err(
+                |error| Status::internal(format!("stale-handle cleanup failed: {error}")),
+            )?;
             if self.state.replication_tasks.contains_key(&key) {
                 statuses.push(BatchStatus::HasReplicationTask.into());
                 continue;

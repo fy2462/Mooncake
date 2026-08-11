@@ -41,7 +41,8 @@ mod cache;
 mod operations;
 
 pub use batch::{
-    BATCH_EXIST_KEY_FAILURES, BATCH_EXIST_KEY_REQUESTS, BATCH_PUT_END_FAILURES,
+    BATCH_EXIST_KEY_FAILED_ITEMS, BATCH_EXIST_KEY_FAILURES, BATCH_EXIST_KEY_ITEMS,
+    BATCH_EXIST_KEY_PARTIAL_SUCCESSES, BATCH_EXIST_KEY_REQUESTS, BATCH_PUT_END_FAILURES,
     BATCH_PUT_END_REQUESTS, BATCH_PUT_REVOKE_FAILURES, BATCH_PUT_REVOKE_REQUESTS,
     BATCH_QUERY_IP_FAILURES, BATCH_QUERY_IP_REQUESTS, BATCH_REMOVE_FAILURES, BATCH_REMOVE_REQUESTS,
     BATCH_REPLICA_CLEAR_FAILURES, BATCH_REPLICA_CLEAR_REQUESTS, BATCH_UPSERT_END_FAILURES,
@@ -105,6 +106,56 @@ lazy_static! {
 
 // Promotion retry lifecycle counters. Names intentionally match the C++ master.
 lazy_static! {
+    pub static ref PROMOTION_IN_FLIGHT: IntGauge = IntGauge::new(
+        "master_promotion_in_flight",
+        "Current number of in-flight L2->L1 promotion tasks"
+    )
+    .unwrap();
+    pub static ref PROMOTION_ADMITTED: IntCounter = IntCounter::new(
+        "master_promotion_admitted_total",
+        "Total promotion tasks admitted past all gates and enqueued"
+    )
+    .unwrap();
+    pub static ref PROMOTION_COMPLETED: IntCounter = IntCounter::new(
+        "master_promotion_completed_total",
+        "Total promotion tasks committed via NotifyPromotionSuccess"
+    )
+    .unwrap();
+    pub static ref PROMOTION_COMPLETED_BYTES: IntCounter = IntCounter::new(
+        "master_promotion_completed_bytes_total",
+        "Total bytes promoted from LOCAL_DISK to MEMORY"
+    )
+    .unwrap();
+    pub static ref PROMOTION_EXPIRED: IntCounter = IntCounter::new(
+        "master_promotion_expired_total",
+        "Total promotion tasks expired via the reaper (put_start_release_timeout_sec)"
+    )
+    .unwrap();
+    pub static ref PROMOTION_FAILED: IntCounter = IntCounter::new(
+        "master_promotion_failed_total",
+        "Total promotion tasks aborted by holder via NotifyPromotionFailure"
+    )
+    .unwrap();
+    pub static ref PROMOTION_CANCELLED: IntCounter = IntCounter::new(
+        "master_promotion_cancelled_total",
+        "Total promotion tasks removed because the prerequisite went away"
+    )
+    .unwrap();
+    pub static ref PROMOTION_REJECTED_FREQUENCY: IntCounter = IntCounter::new(
+        "master_promotion_rejected_frequency_total",
+        "Promotion attempts rejected because CountMinSketch frequency was below promotion_admission_threshold"
+    )
+    .unwrap();
+    pub static ref PROMOTION_REJECTED_WATERMARK: IntCounter = IntCounter::new(
+        "master_promotion_rejected_watermark_total",
+        "Promotion attempts rejected because DRAM was at or above the eviction high watermark"
+    )
+    .unwrap();
+    pub static ref PROMOTION_REJECTED_CAP: IntCounter = IntCounter::new(
+        "master_promotion_rejected_cap_total",
+        "Promotion attempts rejected because promotion_in_flight was at promotion_queue_limit"
+    )
+    .unwrap();
     pub static ref PROMOTION_CANDIDATE_RECORDED: IntCounter = IntCounter::new(
         "master_promotion_candidate_recorded_total",
         "promotion candidates recorded for background retry"
@@ -474,6 +525,9 @@ pub fn register_metrics() {
     // Batch counters
     register_counter(&BATCH_EXIST_KEY_REQUESTS);
     register_counter(&BATCH_EXIST_KEY_FAILURES);
+    register_counter(&BATCH_EXIST_KEY_ITEMS);
+    register_counter(&BATCH_EXIST_KEY_PARTIAL_SUCCESSES);
+    register_counter(&BATCH_EXIST_KEY_FAILED_ITEMS);
     register_counter(&BATCH_QUERY_IP_REQUESTS);
     register_counter(&BATCH_QUERY_IP_FAILURES);
     register_counter(&BATCH_REPLICA_CLEAR_REQUESTS);

@@ -304,17 +304,35 @@ impl MasterServiceImpl {
         request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
         let req = request.into_inner();
-        let tenant_filter = resolve_request_tenant(
-            &req.tenant_id,
-            self.state.runtime_config.enable_tenant_quota,
-        )?;
+        // Legacy C++ RemoveAll carries no tenant scope and removes every
+        // tenant's objects.  Preserve that behavior for the empty-tenant
+        // request even in strict multi-tenant mode; a named tenant still
+        // scopes removal to that tenant.
+        let all_tenants = req.tenant_id.is_empty();
+        let tenant_filter = if all_tenants {
+            None
+        } else {
+            // Legacy C++ RemoveAll is a scalar operation with no error
+            // channel; an unparsable tenant simply removes nothing.
+            match resolve_request_tenant(
+                &req.tenant_id,
+                self.state.runtime_config.enable_tenant_quota,
+            ) {
+                Ok(tenant_id) => Some(tenant_id),
+                Err(_) => {
+                    return Ok(Response::new(proto::RemoveAllResponse { removed_count: 0 }));
+                }
+            }
+        };
         let keys = self
             .state
             .objects
             .iter()
             .filter(|entry| {
-                if entry.tenant_id != tenant_filter {
-                    return false;
+                if let Some(ref tenant_filter) = tenant_filter {
+                    if entry.tenant_id != *tenant_filter {
+                        return false;
+                    }
                 }
                 !self.state.replication_tasks.contains_key(entry.key())
                     && entry
@@ -558,6 +576,9 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        if !self.state.objects.contains_key(&key) {
+            return Err(Status::not_found("key not found"));
+        }
         let task = self
             .state
             .replication_tasks
@@ -709,6 +730,14 @@ impl MasterServiceImpl {
             if invalid_targets.is_empty() {
                 self.persist_object_image_or_remove(&key, "copy_end_target_missing")?;
             } else {
+                // A target whose segment was unmounted is already detached from
+                // the allocator; releasing it would fence the master.  Mirror
+                // the C++ REPLICA_IS_GONE outcome by only releasing replicas
+                // whose segments are still registered.
+                let invalid_targets = invalid_targets
+                    .into_iter()
+                    .filter(|replica| replica_segment_registered(self, replica))
+                    .collect::<Vec<_>>();
                 self.persist_detached_allocator_replicas(
                     &key,
                     invalid_targets,
@@ -740,6 +769,9 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        if !self.state.objects.contains_key(&key) {
+            return Err(Status::not_found("key not found"));
+        }
         let task = self
             .state
             .replication_tasks
@@ -787,6 +819,10 @@ impl MasterServiceImpl {
             }
         }
         self.state.replication_tasks.remove(&key);
+        let removed = removed
+            .into_iter()
+            .filter(|replica| replica_segment_registered(self, replica))
+            .collect::<Vec<_>>();
         self.persist_detached_allocator_replicas(&key, removed, "copy_revoke")?;
         Ok(Response::new(proto::CopyRevokeResponse {}))
     }
@@ -1055,6 +1091,9 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        if !self.state.objects.contains_key(&key) {
+            return Err(Status::not_found("key not found"));
+        }
         let task = self
             .state
             .replication_tasks
@@ -1284,6 +1323,9 @@ impl MasterServiceImpl {
                 .as_ref()
                 .ok_or(Status::invalid_argument("missing client_id"))?,
         );
+        if !self.state.objects.contains_key(&key) {
+            return Err(Status::not_found("key not found"));
+        }
         let task = self
             .state
             .replication_tasks
@@ -1325,5 +1367,13 @@ impl MasterServiceImpl {
         self.state.replication_tasks.remove(&key);
         self.persist_detached_allocator_replicas(&key, removed, "move_revoke")?;
         Ok(Response::new(proto::MoveRevokeResponse {}))
+    }
+}
+
+fn replica_segment_registered(service: &MasterServiceImpl, replica: &ReplicaDescriptor) -> bool {
+    match replica.replica_type {
+        ReplicaType::Memory => service.state.segments.contains_key(&replica.segment_id),
+        ReplicaType::NoFSsd => service.state.nof_segments.contains_key(&replica.segment_id),
+        _ => true,
     }
 }

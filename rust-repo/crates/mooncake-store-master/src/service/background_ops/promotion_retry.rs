@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::metrics;
+use mooncake_store_core::ReplicaType;
 
 use super::{MasterState, erase_promotion_candidate, try_push_promotion_queue};
 
@@ -68,6 +69,27 @@ pub(crate) fn run_promotion_candidate_retry(state: &MasterState, partitions: usi
             continue;
         }
         drop(candidate);
+
+        // C++ pre-filters candidates under the shard lock: an object that is
+        // missing, invalid, already in flight, or no longer LocalDisk-only is
+        // erased without consulting the transient admission gates (which would
+        // otherwise return WatermarkRejected before reaching object state).
+        let ineligible = state.objects.get(&key).is_none_or(|object| {
+            object.replicas.is_empty()
+                || state.promotion_tasks.contains_key(&key)
+                || object
+                    .replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::Memory)
+                || !object
+                    .replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::LocalDisk)
+        });
+        if ineligible {
+            erase_promotion_candidate(state, &key);
+            continue;
+        }
 
         let result = try_push_promotion_queue(state, &key, false);
         if result == super::PromotionQueueResult::Queued {

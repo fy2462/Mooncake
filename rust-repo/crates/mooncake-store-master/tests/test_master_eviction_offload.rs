@@ -551,3 +551,329 @@ async fn test_processing_keys_excluded_from_eviction() {
     .unwrap_err();
     assert!(err.message().contains("replica is not ready"));
 }
+
+async fn mount_combo_segment(service: &MasterServiceImpl, client_id: Uuid) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(uuid_proto(client_id)),
+            segment_name: "combo-segment:1".into(),
+            size: 16 * 1024 * 1024,
+            base_addr: 0x300000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn put_completed_memory(service: &MasterServiceImpl, client_id: Uuid, key: &str) {
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(uuid_proto(client_id)),
+            key: key.into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(uuid_proto(client_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn queued_offload_keys(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+) -> std::collections::BTreeSet<String> {
+    MasterService::offload_object_heartbeat(
+        service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(uuid_proto(client_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .objects
+    .into_keys()
+    .collect()
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_a_offload_at_put_end() {
+    // C++ ComboA_OffloadAtPutEnd: default mode (offload_on_evict=false,
+    // offload_force_evict=false) queues exactly the three completed keys at
+    // PutEnd, visible in the next offload heartbeat.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_combo_segment(&service, client_id).await;
+    mount_local_disk(&service, client_id).await;
+
+    for key in ["key_a1", "key_a2", "key_a3"] {
+        put_completed_memory(&service, client_id, key).await;
+    }
+    let queued = queued_offload_keys(&service, client_id).await;
+    assert_eq!(
+        queued,
+        ["key_a1", "key_a2", "key_a3"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_b_put_end_skips_offload_queue() {
+    // C++ ComboB_PutEndSkipsOffloadQueue: offload_on_evict=true leaves the
+    // heartbeat offload queue empty immediately after three completed puts.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_combo_segment(&service, client_id).await;
+    mount_local_disk(&service, client_id).await;
+
+    for key in ["key_b1", "key_b2", "key_b3"] {
+        put_completed_memory(&service, client_id, key).await;
+    }
+    assert!(queued_offload_keys(&service, client_id).await.is_empty());
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_c_put_end_skips_offload_queue() {
+    // C++ ComboC_PutEndSkipsOffloadQueue: with offload_force_evict=true and
+    // offload_on_evict=true, PutEnd still skips the offload queue.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: true,
+        offload_force_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_combo_segment(&service, client_id).await;
+    mount_local_disk(&service, client_id).await;
+
+    for key in ["key_c1", "key_c2"] {
+        put_completed_memory(&service, client_id, key).await;
+    }
+    assert!(queued_offload_keys(&service, client_id).await.is_empty());
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_d_force_evict_alone_is_ignored() {
+    // C++ ComboD_ForceEvictAloneIsIgnored: offload_force_evict=true alone does
+    // not change the default PutEnd queueing; two completed keys are queued.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_force_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_combo_segment(&service, client_id).await;
+    mount_local_disk(&service, client_id).await;
+
+    for key in ["key_d1", "key_d2"] {
+        put_completed_memory(&service, client_id, key).await;
+    }
+    let queued = queued_offload_keys(&service, client_id).await;
+    assert_eq!(
+        queued,
+        ["key_d1", "key_d2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
+}
+
+const PRESSURE_SEGMENT_SIZE: u64 = 1024 * 1024 * 16 * 15; // 240 MiB
+const PRESSURE_OBJECT_SIZE: u64 = 1024 * 15; // 15 KiB
+const PRESSURE_ATTEMPTS: usize = 1024 * 16 + 50; // 16,434
+
+async fn pressure_put_loop(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    prefix: &str,
+    evict_on_failure: bool,
+) -> (usize, bool) {
+    let mut success_puts = 0usize;
+    let mut saw_failure = false;
+    let mut slept_for_lease = false;
+    for index in 0..PRESSURE_ATTEMPTS {
+        let key = format!("{prefix}_{index}");
+        match MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_proto(client_id)),
+                key: key.clone(),
+                slice_length: PRESSURE_OBJECT_SIZE,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        {
+            Ok(_) => {
+                MasterService::put_end(
+                    service,
+                    Request::new(proto::PutEndRequest {
+                        client_id: Some(uuid_proto(client_id)),
+                        key,
+                        replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                        tenant_id: String::new(),
+                    }),
+                )
+                .await
+                .unwrap();
+                success_puts += 1;
+            }
+            Err(_) => {
+                saw_failure = true;
+                if !slept_for_lease {
+                    // C++ waits 50 ms per failure while its background eviction
+                    // runs; with the exact 2,000 ms lease TTL the first
+                    // eviction can only reclaim keys whose lease expired, so
+                    // advance past one TTL once and then evict deterministically.
+                    tokio::time::sleep(Duration::from_millis(2100)).await;
+                    slept_for_lease = true;
+                }
+                if evict_on_failure {
+                    service.run_eviction_cycle_for_test(1);
+                }
+            }
+        }
+    }
+    (success_puts, saw_failure)
+}
+
+async fn mount_pressure_segment(service: &MasterServiceImpl, client_id: Uuid) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(uuid_proto(client_id)),
+            segment_name: "pressure-segment:1".into(),
+            size: PRESSURE_SEGMENT_SIZE,
+            base_addr: 0x300000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_a_eviction_works() {
+    // C++ ComboA_EvictionWorks: default mode with no LocalDisk still evicts
+    // memory under pressure, so 16,434 attempts complete more than capacity.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_pressure_segment(&service, client_id).await;
+    let (success_puts, _) = pressure_put_loop(&service, client_id, "combo_a", true).await;
+    assert!(success_puts > 1024 * 16, "success_puts = {success_puts}");
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_b_eviction_triggers_offload() {
+    // C++ ComboB_EvictionTriggersOffload: with an offloading-enabled LocalDisk
+    // mount, pressure causes at least one PutStart failure and leaves a
+    // nonempty heartbeat offload queue.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_pressure_segment(&service, client_id).await;
+    mount_local_disk(&service, client_id).await;
+    let (_, saw_failure) = pressure_put_loop(&service, client_id, "combo_b", true).await;
+    assert!(saw_failure);
+    let queued = queued_offload_keys(&service, client_id).await;
+    assert!(!queued.is_empty(), "eviction must queue offload work");
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_b_no_fallback_without_force_evict() {
+    // C++ ComboB_NoFallbackWithoutForceEvict: without a LocalDisk mount,
+    // offload-on-evict cannot fall back, so puts are data-preserving capped at
+    // the memory capacity.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_pressure_segment(&service, client_id).await;
+    let (success_puts, _) = pressure_put_loop(&service, client_id, "combo_b_nofb", false).await;
+    assert!(success_puts <= 1024 * 16, "success_puts = {success_puts}");
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_c_force_evict_reaches_capacity() {
+    // C++ ComboC_EvictionWithForceEvict: force eviction never falls below the
+    // memory capacity across the full pressure fixture.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: true,
+        offload_force_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_pressure_segment(&service, client_id).await;
+    mount_local_disk(&service, client_id).await;
+    let (success_puts, _) = pressure_put_loop(&service, client_id, "combo_c", true).await;
+    assert!(success_puts >= 1024 * 16, "success_puts = {success_puts}");
+}
+
+#[tokio::test]
+async fn cpp_parity_combo_d_force_evict_alone_allows_strict_capacity_overflow() {
+    // C++ ComboD_EvictionWorks: force-evict alone (default offload_on_evict)
+    // still evicts under pressure without a LocalDisk mount.
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_force_evict: true,
+        lease_ttl: Duration::from_millis(2000),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_pressure_segment(&service, client_id).await;
+    let (success_puts, _) = pressure_put_loop(&service, client_id, "combo_d", true).await;
+    assert!(success_puts > 1024 * 16, "success_puts = {success_puts}");
+}

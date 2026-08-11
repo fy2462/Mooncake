@@ -57,9 +57,11 @@ impl MooncakeClient {
                 if dst_offsets[buf_idx][key_idx].len() != range_count
                     || src_offsets[buf_idx][key_idx].len() != range_count
                 {
-                    return Err(StoreError::InvalidParams(format!(
-                        "range dimension mismatch at buffer index {buf_idx}, key index {key_idx}"
-                    )));
+                    // C++/wheel contract: a mismatched range matrix reports
+                    // negative sentinels for that key instead of aborting the
+                    // whole call.
+                    buffer_results.push(vec![-1; range_count]);
+                    continue;
                 }
 
                 let value = match self.get(&keys[buf_idx][key_idx]).await {
@@ -219,16 +221,9 @@ impl MooncakeClient {
                     "range matrix key dimension mismatch at buffer index {buf_idx}"
                 )));
             }
-            for key_idx in 0..key_count {
-                let range_count = sizes[buf_idx][key_idx].len();
-                if dst_offsets[buf_idx][key_idx].len() != range_count
-                    || src_offsets[buf_idx][key_idx].len() != range_count
-                {
-                    return Err(StoreError::InvalidParams(format!(
-                        "range dimension mismatch at buffer index {buf_idx}, key index {key_idx}"
-                    )));
-                }
-            }
+            // Range-dimension mismatches are reported per key as negative
+            // sentinels by the read loop below (C++/wheel contract), so no
+            // upfront validation error is raised here.
         }
 
         let count = buffers.len();
@@ -237,6 +232,14 @@ impl MooncakeClient {
             let mut buf_results = vec![];
             for (key_idx, key) in keys[buf_idx].iter().enumerate() {
                 let range_count = sizes[buf_idx][key_idx].len();
+                if dst_offsets[buf_idx][key_idx].len() != range_count
+                    || src_offsets[buf_idx][key_idx].len() != range_count
+                {
+                    // C++/wheel contract: mismatched range matrices report
+                    // negative sentinels for that key instead of aborting.
+                    buf_results.push(vec![-1; range_count]);
+                    continue;
+                }
                 let replicas = match query_result_cache.and_then(|cache| cache.get(key)) {
                     Some(cached) if cached.success && !cached.is_lease_expired() => {
                         cached.replicas.clone()
@@ -251,7 +254,16 @@ impl MooncakeClient {
                         buf_results.push(vec![-1; range_count]);
                         continue;
                     }
-                    _ => self.fetch_replicas(key).await?,
+                    _ => match self.fetch_replicas(key).await {
+                        Ok(replicas) => replicas,
+                        // Missing keys report negative sentinels and let the
+                        // remaining keys continue (C++/wheel contract).
+                        Err(StoreError::KeyNotFound(_)) => {
+                            buf_results.push(vec![-1; range_count]);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    },
                 };
                 let replica = match self.select_best_replica(&replicas) {
                     Some(r) => r,

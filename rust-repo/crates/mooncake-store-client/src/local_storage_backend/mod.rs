@@ -2811,6 +2811,72 @@ mod tests {
         assert_eq!(backend.space_usage(), (54, 180));
     }
 
+    // StoreObjectWatermarkEvictionReturnsEvictedKeys: three keyed 1-KiB
+    // objects under a 4-KiB quota watermark-evict exactly the two oldest in
+    // FIFO order, delete their files, keep the newest, and an immediately
+    // repeated watermark call returns no keys.
+    #[test]
+    fn cpp_parity_store_object_watermark_eviction_returns_evicted_keys() {
+        let (backend, _tmp) = backend_with_available_space_sequence(4096, vec![u64::MAX]);
+        let value = [b'Z'; 1024];
+        backend.write_object("key_1", &value).unwrap();
+        backend.write_object("key_2", &value).unwrap();
+        backend.write_object("key_3", &value).unwrap();
+
+        let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(
+            pending.keys(),
+            vec!["key_1".to_string(), "key_2".to_string()]
+        );
+        backend.commit_eviction(pending).unwrap();
+
+        assert!(!backend.exists("key_1"));
+        assert!(!backend.exists("key_2"));
+        assert!(backend.exists("key_3"));
+        assert_eq!(backend.read_object("key_3").unwrap(), value);
+
+        let second = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert!(second.keys().is_empty());
+        backend.commit_eviction(second).unwrap();
+        assert!(backend.exists("key_3"));
+    }
+
+    // StoreObjectWatermarkEvictionKeepsFilesWhenNotificationFails: a failed
+    // eviction notification leaves all three files intact; retrying the same
+    // watermark selection deletes the same ordered pair on that backend.
+    #[test]
+    fn cpp_parity_store_object_watermark_eviction_keeps_files_when_notification_fails() {
+        let (backend, _tmp) = backend_with_available_space_sequence(4096, vec![u64::MAX]);
+        let value = [b'N'; 1024];
+        backend.write_object("key_1", &value).unwrap();
+        backend.write_object("key_2", &value).unwrap();
+        backend.write_object("key_3", &value).unwrap();
+
+        let pending = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(
+            pending.keys(),
+            vec!["key_1".to_string(), "key_2".to_string()]
+        );
+        backend.rollback_eviction(pending);
+
+        assert!(backend.exists("key_1"));
+        assert!(backend.exists("key_2"));
+        assert!(backend.exists("key_3"));
+        assert_eq!(backend.read_object("key_1").unwrap(), value);
+
+        let retried = backend.prepare_watermark_eviction(0.70, 0.40).unwrap();
+        assert_eq!(
+            retried.keys(),
+            vec!["key_1".to_string(), "key_2".to_string()]
+        );
+        backend.commit_eviction(retried).unwrap();
+
+        assert!(!backend.exists("key_1"));
+        assert!(!backend.exists("key_2"));
+        assert!(backend.exists("key_3"));
+        assert_eq!(backend.read_object("key_3").unwrap(), value);
+    }
+
     #[test]
     fn cpp_parity_eviction_strategy_test_cpp_evictionstrategytest_fifoevictkey_8345f96c() {
         let (backend, _tmp) = backend_with_available_space_sequence(512, vec![u64::MAX]);
@@ -2921,6 +2987,54 @@ mod tests {
         assert_eq!(backend.space_usage(), (126, 126));
         assert_eq!(backend.read_object("a").unwrap(), vec![1_u8; 40]);
         assert_eq!(backend.read_object("b").unwrap(), vec![2_u8; 40]);
+    }
+
+    // StoreObjectOverwriteReleasesPreviousReservation: overwriting an existing
+    // quota-sized object releases its reservation so a second quota-sized
+    // object fits without eviction, and the replacement reads back exact.
+    #[test]
+    fn cpp_parity_store_object_overwrite_releases_previous_reservation() {
+        let (backend, _tmp) = backend_with_available_space_sequence(2400, vec![u64::MAX]);
+        backend.write_object("old_key", &[b'A'; 1024]).unwrap();
+
+        let evicted = backend.write_object("old_key", &[b'B'; 1024]).unwrap();
+        assert!(evicted.is_empty(), "same-key overwrite must not evict");
+
+        let evicted = backend.write_object("second_key", &[b'C'; 1024]).unwrap();
+        assert!(
+            evicted.is_empty(),
+            "released reservation must admit the second object"
+        );
+
+        assert_eq!(backend.read_object("old_key").unwrap(), vec![b'B'; 1024]);
+        assert_eq!(backend.read_object("second_key").unwrap(), vec![b'C'; 1024]);
+    }
+
+    // StoreObjectRejectsOverwriteDuringFailedEviction: a nested overwrite of
+    // an in-flight eviction victim is rejected and the old bytes survive the
+    // failed eviction; after rollback the separate incoming object is admitted
+    // on the same backend.
+    #[test]
+    fn cpp_parity_store_object_rejects_overwrite_during_failed_eviction() {
+        let (backend, _tmp) = backend_with_available_space_sequence(3300, vec![u64::MAX]);
+        backend.write_object("old_key", &[b'A'; 1024]).unwrap();
+
+        let pending = backend.prepare_write("incoming_key", 2560).unwrap();
+        assert_eq!(pending.keys(), vec!["old_key".to_string()]);
+        assert!(
+            backend.write_object("old_key", &[b'B'; 512]).is_err(),
+            "nested overwrite of a reserved eviction victim must be rejected"
+        );
+        assert_eq!(backend.read_object("old_key").unwrap(), vec![b'A'; 1024]);
+
+        backend.rollback_eviction(pending);
+        assert_eq!(backend.read_object("old_key").unwrap(), vec![b'A'; 1024]);
+
+        backend.write_object("incoming_key", &[b'C'; 2560]).unwrap();
+        assert_eq!(
+            backend.read_object("incoming_key").unwrap(),
+            vec![b'C'; 2560]
+        );
     }
 
     #[test]

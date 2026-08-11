@@ -19,7 +19,7 @@ fn ranges_overlap(
     first_base < second_end && second_base < first_end
 }
 
-fn validate_target_address(buffer: *mut c_void) -> StoreResult<usize> {
+pub(crate) fn validate_target_address(buffer: *mut c_void) -> StoreResult<usize> {
     let target = buffer as usize;
     if target == 0 {
         return Err(StoreError::InvalidParams(

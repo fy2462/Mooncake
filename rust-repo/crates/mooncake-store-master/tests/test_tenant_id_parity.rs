@@ -665,6 +665,70 @@ async fn non_strict_requests_ignore_tenant_and_use_default() {
 }
 
 #[tokio::test]
+async fn cpp_parity_single_tenant_collapses_duplicate_remove_and_has_no_quota_snapshot() {
+    let service = non_strict_service();
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "single-tenant:1").await;
+
+    // C++ SingleTenantModeCollapsesTenantsAndDisablesQuota: an 800-byte object
+    // completed as tenant-a is visible as tenant-b.
+    put_start(
+        &service,
+        client_id,
+        "single-tenant:1",
+        "tenant-a",
+        "shared-key",
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "shared-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: "tenant-a".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(exists(&service, "tenant-b", "shared-key").await);
+
+    // A duplicate PutStart as tenant-b fails OBJECT_ALREADY_EXISTS.
+    let duplicate = put_start(
+        &service,
+        client_id,
+        "single-tenant:1",
+        "tenant-b",
+        "shared-key",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(duplicate.code(), Code::AlreadyExists);
+
+    // Forced removal as tenant-b succeeds and leaves tenant-a with no snapshot
+    // because multi-tenancy (and therefore quota accounting) is disabled.
+    MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "shared-key".into(),
+            force: true,
+            tenant_id: "tenant-b".into(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn invalid_batch_put_tenant_is_rejected_before_any_item_changes_state() {
     let service = strict_service(false);
     let client_id = Uuid::new_v4();
@@ -1106,6 +1170,183 @@ async fn non_strict_remote_pull_coordination_uses_one_default_tenant_key() {
 }
 
 #[tokio::test]
+async fn wrapped_put_start_rejects_empty_and_nul_tenants_parity() {
+    let service = strict_service(false);
+    service
+        .upsert_tenant_quota_policy("registered-tenant", 4096)
+        .unwrap();
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "wrapped-write:1").await;
+
+    for (index, tenant_id) in ["", "tenant\0bad"].into_iter().enumerate() {
+        let error = put_start(
+            &service,
+            client_id,
+            "wrapped-write:1",
+            tenant_id,
+            &format!("invalid-{index}"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::ResourceExhausted);
+    }
+    assert_eq!(object_count(&service).await, 0);
+}
+
+#[tokio::test]
+async fn wrapped_read_control_invalid_tenant_matrix_parity() {
+    let service = strict_service(true);
+    service.upsert_tenant_quota_policy("default", 4096).unwrap();
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "wrapped-read:1").await;
+    mount_local_disk(&service, client_id).await;
+
+    let get_error = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "missing-key".into(),
+            tenant_id: "_invalid-tenant".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(get_error.code(), Code::InvalidArgument);
+
+    let batch_error = MasterService::batch_get_replica_list(
+        &service,
+        Request::new(proto::BatchGetReplicaListRequest {
+            keys: vec!["key-a".into(), "key-b".into()],
+            tenant_id: "tenant\0bad".into(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(batch_error.code(), Code::InvalidArgument);
+
+    let offload_error = MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["key".into()],
+            tasks: vec![proto::OffloadTaskItem {
+                tenant_id: "_invalid-tenant".into(),
+                key: "key".into(),
+                size: 1,
+                generation_id: Some(proto_uuid(Uuid::new_v4())),
+            }],
+            metadatas: vec![offload_metadata("key", 1)],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(offload_error.code(), Code::InvalidArgument);
+
+    let removed = MasterService::remove_all(
+        &service,
+        Request::new(proto::RemoveAllRequest {
+            force: false,
+            tenant_id: "_invalid-tenant".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .removed_count;
+    assert_eq!(removed, 0);
+}
+
+#[tokio::test]
+async fn wrapped_exist_normalizes_empty_and_ignores_tenant_when_disabled_parity() {
+    let strict = strict_service(false);
+    strict.upsert_tenant_quota_policy("default", 4096).unwrap();
+    let client_id = Uuid::new_v4();
+    mount_memory(&strict, client_id, "wrapped-exist:1").await;
+    assert!(!exists(&strict, "", "missing-key").await);
+
+    let single = non_strict_service();
+    let client_id = Uuid::new_v4();
+    mount_memory(&single, client_id, "wrapped-exist:2").await;
+    assert!(!exists(&single, "_invalid-tenant", "missing-key").await);
+}
+
+#[tokio::test]
+async fn cpp_parity_strict_mode_requires_explicit_default_and_named_registration() {
+    let service = strict_service(false);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 1000)
+        .unwrap();
+    let client_id = Uuid::new_v4();
+    mount_memory(&service, client_id, "strict-mode:1").await;
+
+    for (index, tenant_id) in ["tenant-b", "default"].into_iter().enumerate() {
+        let error = put_start(
+            &service,
+            client_id,
+            "strict-mode:1",
+            tenant_id,
+            &format!("implicit-{index}"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::ResourceExhausted);
+    }
+
+    assert!(TenantId::new("tenant\0bad".to_owned()).is_err());
+
+    service.upsert_tenant_quota_policy("default", 100).unwrap();
+    async fn put_small(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        segment: &str,
+        tenant_id: &str,
+        key: &str,
+    ) {
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.to_owned(),
+                slice_length: 10,
+                config: Some(replica_config(segment)),
+                tenant_id: tenant_id.to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.to_owned(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: tenant_id.to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    put_small(
+        &service,
+        client_id,
+        "strict-mode:1",
+        "default",
+        "default-key",
+    )
+    .await;
+    put_small(
+        &service,
+        client_id,
+        "strict-mode:1",
+        "tenant-a",
+        "tenant-a-key",
+    )
+    .await;
+    assert!(exists(&service, "default", "default-key").await);
+    assert!(exists(&service, "tenant-a", "tenant-a-key").await);
+}
+
+#[tokio::test]
 async fn ping_ignores_tenant_like_the_cpp_control_plane() {
     let service = strict_service(false);
     let client_id = Uuid::new_v4();
@@ -1246,4 +1487,65 @@ async fn tenant_tasks_carry_tenant_in_payload() {
     }
     assert!(saw_copy);
     assert!(saw_move);
+}
+
+// MultiTenantModeRejectsUnregisteredOffloadSuccess: an unsolicited
+// NotifyOffloadSuccess for an unregistered tenant fails with
+// TENANT_NOT_REGISTERED (ResourceExhausted) even when no Rust-only LocalDisk
+// session is mounted, and no object is created.
+#[tokio::test]
+async fn cpp_parity_single_unregistered_unsolicited_offload_without_disk_session_does_not_create_object()
+ {
+    let service = strict_service(false);
+    service
+        .upsert_tenant_quota_policy("tenant-a", 1000)
+        .expect("tenant policy");
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "unregistered-offload:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["ghost".into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: 5,
+                data_size: 128,
+                transport_endpoint: "disk-endpoint".into(),
+            }],
+            tasks: vec![],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+
+    let exists = MasterService::exist_key(
+        &service,
+        Request::new(proto::ExistKeyRequest {
+            key: "ghost".into(),
+            tenant_id: "tenant-b".into(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .exists;
+    assert!(!exists);
 }

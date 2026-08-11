@@ -10,10 +10,8 @@ impl MasterServiceImpl {
     ) -> Result<Response<proto::BatchPutStartResponse>, Status> {
         let req = request.into_inner();
         let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
-        if req.keys.len() != req.slice_lengths.len() || req.keys.is_empty() {
-            return Err(Status::invalid_argument(
-                "keys and slice_lengths mismatch or empty",
-            ));
+        if req.keys.is_empty() {
+            return Err(Status::invalid_argument("batch keys must not be empty"));
         }
         let config = req
             .config
@@ -51,9 +49,9 @@ impl MasterServiceImpl {
         let mut results = Vec::with_capacity(req.keys.len());
         let invalid_group_ids =
             !config.group_ids.is_empty() && config.group_ids.len() != req.keys.len();
-        for (idx, (raw_key, slice_len)) in req.keys.iter().zip(req.slice_lengths.iter()).enumerate()
-        {
-            if invalid_group_ids {
+        let invalid_size_count = req.slice_lengths.len() != req.keys.len();
+        for (idx, raw_key) in req.keys.iter().enumerate() {
+            if invalid_group_ids || invalid_size_count {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
@@ -62,7 +60,8 @@ impl MasterServiceImpl {
                 });
                 continue;
             }
-            if *slice_len == 0 {
+            let slice_len = req.slice_lengths[idx];
+            if slice_len == 0 {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
                     replicas: vec![],
@@ -102,7 +101,7 @@ impl MasterServiceImpl {
                 continue;
             }
             let Ok(requested_quota_charge) =
-                checked_requested_memory_quota_charge(*slice_len, memory_replica_count)
+                checked_requested_memory_quota_charge(slice_len, memory_replica_count)
             else {
                 results.push(proto::BatchStartEntryResult {
                     key: raw_key.clone(),
@@ -146,7 +145,7 @@ impl MasterServiceImpl {
                 &self.state,
                 &key,
                 Some(client_id),
-                *slice_len,
+                slice_len,
                 memory_replica_count,
                 &config,
             );
@@ -165,7 +164,7 @@ impl MasterServiceImpl {
                 match allocate_nof_replicas(
                     &self.state,
                     &key,
-                    *slice_len,
+                    slice_len,
                     nof_replica_count,
                     &config.preferred_nof_segments,
                 ) {
@@ -183,7 +182,7 @@ impl MasterServiceImpl {
                     }
                 }
             }
-            if let Some(disk_replica) = global_disk_replica(&self.state, &key, *slice_len) {
+            if let Some(disk_replica) = global_disk_replica(&self.state, &key, slice_len) {
                 replicas.push(disk_replica);
             }
             let expected_replica_count =
@@ -212,7 +211,7 @@ impl MasterServiceImpl {
                     key.clone(),
                     ObjectEntry {
                         replicas,
-                        size: *slice_len,
+                        size: slice_len,
                         last_access: now,
                         hard_pinned: config.with_hard_pin,
                         data_type: config.data_type,

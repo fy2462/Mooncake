@@ -253,7 +253,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
                 }
             }
             clear_offloading_task(state, &key);
-            clear_promotion_task(state, &key);
+            cancel_promotion_task(state, &key);
         }
         if state.service_fenced.load(AtomicOrdering::Acquire) {
             return;
@@ -377,7 +377,7 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
             }
             state.processing_keys.remove(&key);
             clear_offloading_task(state, &key);
-            clear_promotion_task(state, &key);
+            cancel_promotion_task(state, &key);
         }
         if state.service_fenced.load(AtomicOrdering::Acquire) {
             return;
@@ -468,6 +468,8 @@ pub(crate) fn reap_expired_background_tasks(state: &MasterState, now: Instant) {
             None
         };
         if let Some(task) = clear_promotion_task(state, &key) {
+            metrics::PROMOTION_EXPIRED.inc();
+            metrics::PROMOTION_IN_FLIGHT.dec();
             if let Some(projected) = projected_quotas {
                 *state.tenant_quotas.write() = projected;
             }

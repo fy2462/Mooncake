@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex, RwLock};
 
@@ -1295,4 +1296,74 @@ fn cxl_restore_rejects_replica_alias_identity_mismatch() {
     let error = restored.restore_cxl_allocations(&[replica]).unwrap_err();
     assert!(error.contains("identity mismatch"));
     assert_eq!(restored.usage_totals(), (capacity, 0));
+}
+
+#[test]
+fn cpp_parity_host_ordered_segments_keeps_name_until_last_registration() {
+    let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::LocalFirst);
+    let client_id = Uuid::new_v4();
+    let mut seg0 = make_seg("shared_host_segment", 16 * 1024 * 1024);
+    seg0.host_id = "host1".into();
+    let mut seg1 = seg0.clone();
+    seg1.id = Uuid::new_v4();
+    seg1.base = 0x200000000;
+    allocator.add_segment(seg0.clone(), 0, client_id);
+    allocator.add_segment(seg1.clone(), 0, client_id);
+    let config = ReplicateConfig {
+        replica_num: 1,
+        host_id: "host1".into(),
+        ..Default::default()
+    };
+
+    // Two distinct-ID registrations with one same name and host deduplicate to
+    // a single host-selection name (C++ HostOrderedSegmentsKeepsName...).
+    let first = allocator.allocate_for_client("test_key", Some(client_id), 128, 1, &config);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].segment_name, "shared_host_segment");
+
+    // Removing one registration keeps the name until the last one is gone.
+    allocator.remove_segment(&seg0.id);
+    let after_one = allocator.allocate_for_client("test_key", Some(client_id), 128, 1, &config);
+    assert_eq!(after_one.len(), 1);
+    assert_eq!(after_one[0].segment_name, "shared_host_segment");
+
+    allocator.remove_segment(&seg1.id);
+    let after_last = allocator.allocate_for_client("test_key", Some(client_id), 128, 1, &config);
+    assert!(after_last.is_empty());
+}
+
+#[test]
+fn cpp_parity_host_ordered_segments_rotates_stably_by_key() {
+    let mut allocator = SegmentAllocator::new().with_strategy(AllocationStrategy::LocalFirst);
+    let client_id = Uuid::new_v4();
+    let mut seg_a = make_seg("host1_segment_a", 16 * 1024 * 1024);
+    seg_a.host_id = "host1".into();
+    let mut seg_b = make_seg("host1_segment_b", 16 * 1024 * 1024);
+    seg_b.host_id = "host1".into();
+    allocator.add_segment(seg_a.clone(), 0, client_id);
+    allocator.add_segment(seg_b.clone(), 0, client_id);
+    let config = ReplicateConfig {
+        replica_num: 1,
+        host_id: "host1".into(),
+        ..Default::default()
+    };
+
+    // C++ HostOrderedSegmentsRotateWithinSameHostByKey: sorted two-name order
+    // is deterministically rotated from the request key's hash. The Rust
+    // contract is the same formula with std DefaultHasher (stable_key_hash).
+    let key = "stable_rotation_key";
+    let mut sorted = vec!["host1_segment_a".to_string(), "host1_segment_b".to_string()];
+    sorted.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    let start = (hasher.finish() as usize) % sorted.len();
+
+    let first = allocator.allocate_for_client(key, Some(client_id), 128, 1, &config);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].segment_name, sorted[start]);
+
+    // Same key is deterministic; the next candidate follows wrap-around order.
+    let second = allocator.allocate_for_client(key, Some(client_id), 128, 1, &config);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].segment_name, sorted[start]);
 }

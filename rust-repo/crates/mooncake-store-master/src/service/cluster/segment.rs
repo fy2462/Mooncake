@@ -919,6 +919,25 @@ impl MasterServiceImpl {
                 matches.into_iter().next()
             };
             let restored = restored_entry.is_some();
+            if restored {
+                let restored_segment_id = restored_entry
+                    .as_ref()
+                    .map(|(segment_id, _, _, _, _)| *segment_id)
+                    .expect("restored entry always carries a segment id");
+                if self
+                    .state
+                    .segments
+                    .get(&restored_segment_id)
+                    .is_some_and(|entry| {
+                        entry.status == crate::proto::SegmentStatus::GracefullyUnmounting
+                    })
+                {
+                    // C++ ReMountSegment during UNMOUNTING returns
+                    // UNAVAILABLE_IN_CURRENT_STATUS; fail closed instead of
+                    // resurrecting a segment that is being retired.
+                    return Err(Status::unavailable("segment is being gracefully unmounted"));
+                }
+            }
             let (restored_segment_id, restored_host_id) = if let Some((
                 segment_id,
                 restored_name,
@@ -1479,7 +1498,7 @@ impl MasterServiceImpl {
                         "tenant quota invariant failed while fencing stale promotion",
                     ));
                 }
-                let Some(task) = clear_promotion_task(&self.state, &key) else {
+                let Some(task) = cancel_promotion_task(&self.state, &key) else {
                     self.state.fence_after_invariant_failure(
                         "local_disk_recovery_promotion_task",
                         &format!("key={key:?} disappeared under the snapshot mutation guard"),
@@ -1622,7 +1641,7 @@ impl MasterServiceImpl {
                     self.state.processing_keys.remove(&key);
                     self.state.replication_tasks.remove(&key);
                     clear_offloading_task(&self.state, &key);
-                    clear_promotion_task(&self.state, &key);
+                    cancel_promotion_task(&self.state, &key);
                 }
                 if changed {
                     self.persist_object_image_or_remove(&key, "local_disk_recovery_cleanup")?;

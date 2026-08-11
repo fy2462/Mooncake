@@ -183,6 +183,462 @@ impl BucketStorageConfig {
     }
 }
 
+/// Client-side FileStorage configuration mirroring the C++
+/// `FileStorageConfig` surface (mooncake-store/include/storage_backend.h).
+///
+/// Environment names, defaults, parsing, and validation follow the C++
+/// implementation so the wheel FileStorage configuration oracle is
+/// reproducible from Rust.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileStorageConfig {
+    pub storage_backend_type: FileStorageBackendType,
+    pub storage_filepath: PathBuf,
+    pub local_buffer_size: u64,
+    pub scanmeta_iterator_keys_limit: i64,
+    pub total_keys_limit: i64,
+    pub total_size_limit: u64,
+    pub heartbeat_interval_seconds: u32,
+    pub client_buffer_gc_interval_seconds: u32,
+    pub client_buffer_gc_ttl_ms: u64,
+    pub use_uring: bool,
+    pub enable_disk_watermark_eviction: bool,
+    pub disk_eviction_high_watermark_ratio: f64,
+    pub disk_eviction_low_watermark_ratio: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStorageBackendType {
+    Bucket,
+    FilePerKey,
+    OffsetAllocator,
+    Distributed,
+}
+
+const DEFAULT_LOCAL_BUFFER_SIZE: u64 = 1280 * 1024 * 1024; // ~1.2 GB
+const DEFAULT_SCANMETA_ITERATOR_KEYS_LIMIT: i64 = 20_000;
+const DEFAULT_TOTAL_KEYS_LIMIT: i64 = 10_000_000;
+const DEFAULT_TOTAL_SIZE_LIMIT: u64 = 2 * 1024 * 1024 * 1024 * 1024; // 2 TB
+
+impl Default for FileStorageConfig {
+    fn default() -> Self {
+        Self {
+            storage_backend_type: FileStorageBackendType::Bucket,
+            storage_filepath: PathBuf::from("/data/file_storage"),
+            local_buffer_size: DEFAULT_LOCAL_BUFFER_SIZE,
+            scanmeta_iterator_keys_limit: DEFAULT_SCANMETA_ITERATOR_KEYS_LIMIT,
+            total_keys_limit: DEFAULT_TOTAL_KEYS_LIMIT,
+            total_size_limit: DEFAULT_TOTAL_SIZE_LIMIT,
+            heartbeat_interval_seconds: 10,
+            client_buffer_gc_interval_seconds: 1,
+            client_buffer_gc_ttl_ms: 5000,
+            use_uring: false,
+            enable_disk_watermark_eviction: true,
+            disk_eviction_high_watermark_ratio: 0.90,
+            disk_eviction_low_watermark_ratio: 0.80,
+        }
+    }
+}
+
+impl FileStorageConfig {
+    pub fn from_environment() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let mut config = Self::default();
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR") {
+            config.storage_backend_type = match value.as_str() {
+                "bucket_storage_backend" => FileStorageBackendType::Bucket,
+                "file_per_key_storage_backend" => FileStorageBackendType::FilePerKey,
+                "offset_allocator_storage_backend" => FileStorageBackendType::OffsetAllocator,
+                "distributed_storage_backend" => FileStorageBackendType::Distributed,
+                _ => config.storage_backend_type,
+            };
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_FILE_STORAGE_PATH") {
+            config.storage_filepath = PathBuf::from(value);
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES") {
+            if let Ok(size) = value.parse::<i64>()
+                && size > 0
+            {
+                config.local_buffer_size = size as u64;
+            }
+        }
+        let scan_limit = lookup("MOONCAKE_OFFLOAD_SCANMETA_ITERATOR_KEYS_LIMIT")
+            .or_else(|| lookup("MOONCAKE_SCANMETA_ITERATOR_KEYS_LIMIT"));
+        if let Some(value) = scan_limit
+            && let Ok(size) = value.parse::<i64>()
+            && size > 0
+        {
+            config.scanmeta_iterator_keys_limit = size;
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_TOTAL_KEYS_LIMIT")
+            && let Ok(size) = value.parse::<i64>()
+            && size > 0
+        {
+            config.total_keys_limit = size;
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES")
+            && let Ok(size) = value.parse::<i64>()
+            && size > 0
+        {
+            config.total_size_limit = size as u64;
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS")
+            && let Ok(seconds) = value.parse::<u32>()
+            && seconds > 0
+        {
+            config.heartbeat_interval_seconds = seconds;
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_CLIENT_BUFFER_GC_INTERVAL_SECONDS")
+            && let Ok(seconds) = value.parse::<u32>()
+            && seconds > 0
+        {
+            config.client_buffer_gc_interval_seconds = seconds;
+        }
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_CLIENT_BUFFER_GC_TTL_MS")
+            && let Ok(ms) = value.parse::<i64>()
+            && ms >= 0
+        {
+            config.client_buffer_gc_ttl_ms = ms as u64;
+        }
+        let use_uring = lookup("MOONCAKE_OFFLOAD_USE_URING")
+            .or_else(|| lookup("MOONCAKE_USE_URING"))
+            .unwrap_or_default();
+        config.use_uring = use_uring == "true" || use_uring == "1";
+        if let Some(value) = lookup("MOONCAKE_OFFLOAD_ENABLE_DISK_WATERMARK_EVICTION") {
+            config.enable_disk_watermark_eviction =
+                matches!(value.as_str(), "1" | "true" | "TRUE" | "True");
+        }
+        let preferred_high = lookup("MOONCAKE_OFFLOAD_DISK_EVICTION_HIGH_WATERMARK_RATIO");
+        let fallback_high = lookup("MOONCAKE_DISK_EVICTION_HIGH_WATERMARK_RATIO");
+        config.disk_eviction_high_watermark_ratio = parse_ratio_or(
+            preferred_high
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or(fallback_high.as_deref()),
+            config.disk_eviction_high_watermark_ratio,
+        );
+        let preferred_low = lookup("MOONCAKE_OFFLOAD_DISK_EVICTION_LOW_WATERMARK_RATIO");
+        let fallback_low = lookup("MOONCAKE_DISK_EVICTION_LOW_WATERMARK_RATIO");
+        config.disk_eviction_low_watermark_ratio = parse_ratio_or(
+            preferred_low
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .or(fallback_low.as_deref()),
+            config.disk_eviction_low_watermark_ratio,
+        );
+        config
+    }
+
+    /// C++ `FileStorageConfig::ValidatePath`: non-empty absolute path without
+    /// `..` traversal that exists as a writable, non-symlink directory.
+    pub fn validate_path(&self, path: &std::path::Path) -> Result<(), String> {
+        if path.as_os_str().is_empty() {
+            return Err("storage_filepath is invalid".to_string());
+        }
+        if !path.is_absolute() {
+            return Err(format!(
+                "storage_filepath must be an absolute path: {}",
+                path.display()
+            ));
+        }
+        if path
+            .components()
+            .any(|component| component.as_os_str() == "..")
+        {
+            return Err(format!("path traversal is not allowed: {}", path.display()));
+        }
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|_| format!("storage_filepath does not exist: {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!("symbolic link is not allowed: {}", path.display()));
+        }
+        if !metadata.is_dir() {
+            return Err(format!(
+                "storage_filepath is not a directory: {}",
+                path.display()
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o222 == 0 {
+                return Err(format!(
+                    "no write permission on directory: {}",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// C++ `FileStorageConfig::Validate`: path plus positive global limits,
+    /// heartbeat, and ordered in-range watermark ratios.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_path(&self.storage_filepath)?;
+        if self.total_keys_limit <= 0 {
+            return Err("total_keys_limit must > 0".to_string());
+        }
+        if self.total_size_limit == 0 {
+            return Err("total_size_limit should not be zero".to_string());
+        }
+        if self.heartbeat_interval_seconds == 0 {
+            return Err("heartbeat_interval_seconds must > 0".to_string());
+        }
+        let low = self.disk_eviction_low_watermark_ratio;
+        let high = self.disk_eviction_high_watermark_ratio;
+        if !(low > 0.0 && low <= 1.0) {
+            return Err("disk_eviction_low_watermark_ratio must be in (0, 1]".to_string());
+        }
+        if !(high > 0.0 && high <= 1.0) {
+            return Err("disk_eviction_high_watermark_ratio must be in (0, 1]".to_string());
+        }
+        if low >= high {
+            return Err("disk_eviction_low_watermark_ratio must be lower than high".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// C++ `ParseEnvRatioOr`: empty or malformed/out-of-range ratios fall back to
+/// the default; valid ratios must be in (0.0, 1.0].
+fn parse_ratio_or(raw: Option<&str>, default_value: f64) -> f64 {
+    let Some(raw) = raw else {
+        return default_value;
+    };
+    let Ok(value) = raw.trim().parse::<f64>() else {
+        return default_value;
+    };
+    if !value.is_finite() || value <= 0.0 || value > 1.0 {
+        return default_value;
+    }
+    value
+}
+
+#[cfg(test)]
+mod file_storage_config_tests {
+    use super::*;
+
+    fn lookup_from<'a>(
+        entries: &'a [(&'a str, &'a str)],
+    ) -> impl FnMut(&str) -> Option<String> + 'a {
+        move |name| {
+            entries
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        }
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_defaults_when_no_env_set() {
+        // C++ FileStorageTest.DefaultValuesWhenNoEnvSet: no overrides keeps
+        // path, buffer, scan, bucket/global limits, heartbeat, enabled
+        // eviction, and the 0.90/0.80 watermark defaults.
+        let config = FileStorageConfig::from_lookup(lookup_from(&[]));
+        assert_eq!(config.storage_backend_type, FileStorageBackendType::Bucket);
+        assert_eq!(config.storage_filepath, PathBuf::from("/data/file_storage"));
+        assert_eq!(config.local_buffer_size, DEFAULT_LOCAL_BUFFER_SIZE);
+        assert_eq!(
+            config.scanmeta_iterator_keys_limit,
+            DEFAULT_SCANMETA_ITERATOR_KEYS_LIMIT
+        );
+        assert_eq!(config.total_keys_limit, DEFAULT_TOTAL_KEYS_LIMIT);
+        assert_eq!(config.total_size_limit, DEFAULT_TOTAL_SIZE_LIMIT);
+        assert_eq!(config.heartbeat_interval_seconds, 10);
+        assert_eq!(config.client_buffer_gc_interval_seconds, 1);
+        assert_eq!(config.client_buffer_gc_ttl_ms, 5000);
+        assert!(!config.use_uring);
+        assert!(config.enable_disk_watermark_eviction);
+        assert_eq!(config.disk_eviction_high_watermark_ratio, 0.90);
+        assert_eq!(config.disk_eviction_low_watermark_ratio, 0.80);
+
+        let bucket = BucketStorageConfig::from_lookup(lookup_from(&[]));
+        assert_eq!(bucket.bucket_keys_limit, 500);
+        assert_eq!(bucket.total_keys_limit, 10_000_000);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_read_int64_from_env() {
+        // C++ FileStorageTest.ReadInt64FromEnv: local buffer 2 GiB, bucket key
+        // limit 1000, and global key limit 5,000,000.
+        let config = FileStorageConfig::from_lookup(lookup_from(&[
+            ("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES", "2147483648"),
+            ("MOONCAKE_OFFLOAD_TOTAL_KEYS_LIMIT", "5000000"),
+        ]));
+        assert_eq!(config.local_buffer_size, 2 * 1024 * 1024 * 1024);
+        assert_eq!(config.total_keys_limit, 5_000_000);
+
+        let bucket = BucketStorageConfig::from_lookup(lookup_from(&[(
+            "MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT",
+            "1000",
+        )]));
+        assert_eq!(bucket.bucket_keys_limit, 1000);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_read_disk_watermark_config_from_env() {
+        // C++ FileStorageTest.ReadDiskWatermarkConfigFromEnv: legacy aliases
+        // load, preferred offload variables override them, zero disables
+        // eviction, and malformed ratios restore 0.90/0.80 defaults.
+        let legacy = FileStorageConfig::from_lookup(lookup_from(&[
+            ("MOONCAKE_DISK_EVICTION_HIGH_WATERMARK_RATIO", "0.75"),
+            ("MOONCAKE_DISK_EVICTION_LOW_WATERMARK_RATIO", "0.60"),
+        ]));
+        assert_eq!(legacy.disk_eviction_high_watermark_ratio, 0.75);
+        assert_eq!(legacy.disk_eviction_low_watermark_ratio, 0.60);
+
+        let preferred = FileStorageConfig::from_lookup(lookup_from(&[
+            ("MOONCAKE_DISK_EVICTION_HIGH_WATERMARK_RATIO", "0.75"),
+            (
+                "MOONCAKE_OFFLOAD_DISK_EVICTION_HIGH_WATERMARK_RATIO",
+                "0.95",
+            ),
+            ("MOONCAKE_DISK_EVICTION_LOW_WATERMARK_RATIO", "0.60"),
+            ("MOONCAKE_OFFLOAD_DISK_EVICTION_LOW_WATERMARK_RATIO", "0.85"),
+        ]));
+        assert_eq!(preferred.disk_eviction_high_watermark_ratio, 0.95);
+        assert_eq!(preferred.disk_eviction_low_watermark_ratio, 0.85);
+
+        let disabled = FileStorageConfig::from_lookup(lookup_from(&[(
+            "MOONCAKE_OFFLOAD_ENABLE_DISK_WATERMARK_EVICTION",
+            "false",
+        )]));
+        assert!(!disabled.enable_disk_watermark_eviction);
+
+        let malformed = FileStorageConfig::from_lookup(lookup_from(&[
+            (
+                "MOONCAKE_OFFLOAD_DISK_EVICTION_HIGH_WATERMARK_RATIO",
+                "not-a-ratio",
+            ),
+            ("MOONCAKE_OFFLOAD_DISK_EVICTION_LOW_WATERMARK_RATIO", "1.5"),
+        ]));
+        assert_eq!(malformed.disk_eviction_high_watermark_ratio, 0.90);
+        assert_eq!(malformed.disk_eviction_low_watermark_ratio, 0.80);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_invalid_int_value_uses_default() {
+        // C++ FileStorageTest.InvalidIntValueUsesDefault: malformed
+        // bucket/global-size values and a negative heartbeat fall back.
+        let config = FileStorageConfig::from_lookup(lookup_from(&[
+            ("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES", "bogus"),
+            ("MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES", "-5"),
+            ("MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS", "-1"),
+        ]));
+        assert_eq!(config.local_buffer_size, DEFAULT_LOCAL_BUFFER_SIZE);
+        assert_eq!(config.total_size_limit, DEFAULT_TOTAL_SIZE_LIMIT);
+        assert_eq!(config.heartbeat_interval_seconds, 10);
+
+        let bucket = BucketStorageConfig::from_lookup(lookup_from(&[(
+            "MOONCAKE_OFFLOAD_BUCKET_SIZE_LIMIT_BYTES",
+            "not-a-number",
+        )]));
+        assert_eq!(bucket.bucket_size_limit, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn file_storage_uint32_intervals_reject_overflow() {
+        let config = FileStorageConfig::from_lookup(lookup_from(&[
+            ("MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS", "4294967296"),
+            (
+                "MOONCAKE_OFFLOAD_CLIENT_BUFFER_GC_INTERVAL_SECONDS",
+                "4294967296",
+            ),
+        ]));
+
+        assert_eq!(config.heartbeat_interval_seconds, 10);
+        assert_eq!(config.client_buffer_gc_interval_seconds, 1);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_empty_env_value_uses_default() {
+        // C++ FileStorageTest.EmptyEnvValueUsesDefault: an empty
+        // MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT falls back to the default 500.
+        let bucket = BucketStorageConfig::from_lookup(lookup_from(&[(
+            "MOONCAKE_OFFLOAD_BUCKET_KEYS_LIMIT",
+            "",
+        )]));
+        assert_eq!(bucket.bucket_keys_limit, 500);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_validate_success_with_valid_config() {
+        // C++ FileStorageTest.ValidateSuccessWithValidConfig: an existing
+        // absolute storage path with positive global limits and heartbeat
+        // validates successfully.
+        let root = tempfile::tempdir().unwrap();
+        let mut config = FileStorageConfig::default();
+        config.storage_filepath = root.path().to_path_buf();
+        assert_eq!(config.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_validate_fails_on_empty_storage_path() {
+        // C++ FileStorageTest.ValidateFailsOnEmptyStoragePath: empty,
+        // whitespace, relative, traversal, and nonexistent paths fail while an
+        // existing fixture path succeeds.
+        let root = tempfile::tempdir().unwrap();
+        for (path, should_fail) in [
+            ("", true),
+            ("   ", true),
+            ("relative/path", true),
+            ("/tmp/../etc", true),
+            ("/tmp/definitely_missing_mooncake_dir", true),
+            (root.path().to_str().unwrap(), false),
+        ] {
+            let mut config = FileStorageConfig::default();
+            config.storage_filepath = PathBuf::from(path);
+            assert_eq!(
+                config.validate().is_err(),
+                should_fail,
+                "path {path:?} validation mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_validate_fails_on_invalid_limits() {
+        // C++ FileStorageTest.ValidateFailsOnInvalidLimits: zero global
+        // key/size/heartbeat limits and invalid watermark ranges/order fail.
+        let root = tempfile::tempdir().unwrap();
+        let valid_path = root.path().to_path_buf();
+
+        let mut zero_keys = FileStorageConfig::default();
+        zero_keys.storage_filepath = valid_path.clone();
+        zero_keys.total_keys_limit = 0;
+        assert!(zero_keys.validate().is_err());
+
+        let mut zero_size = FileStorageConfig::default();
+        zero_size.storage_filepath = valid_path.clone();
+        zero_size.total_size_limit = 0;
+        assert!(zero_size.validate().is_err());
+
+        let mut zero_heartbeat = FileStorageConfig::default();
+        zero_heartbeat.storage_filepath = valid_path.clone();
+        zero_heartbeat.heartbeat_interval_seconds = 0;
+        assert!(zero_heartbeat.validate().is_err());
+
+        let mut high_zero = FileStorageConfig::default();
+        high_zero.storage_filepath = valid_path.clone();
+        high_zero.disk_eviction_high_watermark_ratio = 0.0;
+        assert!(high_zero.validate().is_err());
+
+        let mut high_too_large = FileStorageConfig::default();
+        high_too_large.storage_filepath = valid_path.clone();
+        high_too_large.disk_eviction_high_watermark_ratio = 1.5;
+        assert!(high_too_large.validate().is_err());
+
+        let mut reversed = FileStorageConfig::default();
+        reversed.storage_filepath = valid_path.clone();
+        reversed.disk_eviction_high_watermark_ratio = 0.70;
+        reversed.disk_eviction_low_watermark_ratio = 0.90;
+        assert!(reversed.validate().is_err());
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OffsetEvictionPolicy {
     None,

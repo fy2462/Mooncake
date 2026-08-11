@@ -631,6 +631,11 @@ fn parse_tenant_quota_bytes(value: &str) -> Result<u64, String> {
 }
 
 fn normalize_policy_tenant_id(tenant_id: &str) -> Result<String, String> {
+    // C++ rejects a raw empty YAML tenant name before canonicalization; do not
+    // let TenantId's empty-to-default normalization accept it.
+    if tenant_id.is_empty() {
+        return Err("invalid tenant name ''".to_string());
+    }
     TenantId::new(tenant_id.to_owned())
         .map(TenantId::into_string)
         .map_err(|_| format!("invalid tenant name '{tenant_id}'"))
@@ -704,6 +709,48 @@ tenants:
         assert_eq!(snapshot.tenant_quotas["tenant-b"], 2 * 1024 * 1024);
     }
 
+    // ParsesValidYamlUnits: the GB/MB/bare-number unit matrix parses to exact
+    // byte values.
+    #[test]
+    fn cpp_parity_yaml_parses_gb_mb_and_bare_bytes() {
+        let snapshot = parse_tenant_quota_policy_yaml(
+            r#"
+version: 1
+tenants:
+  - name: tenant-a
+    quota: 200GB
+  - name: tenant-b
+    quota: 500MB
+  - name: experiment
+    quota: 12345
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.tenant_quotas["tenant-a"], 200 * 1024 * 1024 * 1024);
+        assert_eq!(snapshot.tenant_quotas["tenant-b"], 500 * 1024 * 1024);
+        assert_eq!(snapshot.tenant_quotas["experiment"], 12_345);
+    }
+
+    // RoundTripsYamlSpecialScalarNames: YAML special-scalar tenant names
+    // survive format + parse exactly.
+    #[test]
+    fn cpp_parity_yaml_round_trips_exact_special_scalar_names() {
+        let snapshot = TenantQuotaPolicySnapshot {
+            producer_view_version: 0,
+            tenant_quotas: BTreeMap::from([
+                ("foo#bar".to_string(), 1),
+                ("true".to_string(), 2),
+                ("[a, b]".to_string(), 3),
+                ("key: val".to_string(), 4),
+                ("quote\"slash\\".to_string(), 5),
+            ]),
+        };
+
+        let yaml = format_tenant_quota_policy_yaml(&snapshot);
+        assert_eq!(parse_tenant_quota_policy_yaml(&yaml).unwrap(), snapshot);
+    }
+
     #[test]
     fn formats_versioned_tenant_quota_yaml() {
         let snapshot = TenantQuotaPolicySnapshot {
@@ -745,6 +792,31 @@ tenants:
         )
         .unwrap_err();
         assert!(err.contains("quota must be positive"));
+    }
+
+    // RejectsInvalidYamlPolicies: the exact C++ invalid-policy matrix is all
+    // rejected, including the raw empty tenant name.
+    #[test]
+    fn cpp_parity_yaml_rejects_exact_eleven_invalid_policies() {
+        let invalid_policies = [
+            "version: 2\n\ntenants: []\n",
+            "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: 1XB\n",
+            "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: 0\n",
+            "version: 1\n\ntenants:\n  - name: \"\"\n    quota: 1KB\n",
+            "version: 1\n\ntenants:\n  - name: _system\n    quota: 1KB\n",
+            "version: 1\n\ntenants:\n  - name: \"tenant\\0bad\"\n    quota: 1KB\n",
+            "version: 1\n\ntenants:\n  - name: \"tenant\\nline\"\n    quota: 1KB\n",
+            "version: 1\n\ntenants:\n  - name: \"tenant\\x7f\"\n    quota: 1KB\n",
+            "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: 1KB\n  - name: tenant-a\n    quota: 2KB\n",
+            "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: 18446744073709551616\n",
+            "version: 1\n\ntenants:\n  - name: tenant-a\n    quota: 18446744073709551615TB\n",
+        ];
+        for (index, policy) in invalid_policies.iter().enumerate() {
+            assert!(
+                parse_tenant_quota_policy_yaml(policy).is_err(),
+                "invalid policy case {index} must be rejected"
+            );
+        }
     }
 
     #[test]

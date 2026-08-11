@@ -74,7 +74,9 @@ use std::time::{Duration, SystemTime};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-pub(crate) use self::background_ops::{clear_offloading_task, clear_promotion_task};
+pub(crate) use self::background_ops::{
+    cancel_promotion_task, clear_offloading_task, clear_promotion_task,
+};
 use self::background_ops::{
     detach_staged_promotion_replica, push_offloading_queue, run_automatic_eviction_once,
     run_automatic_nof_eviction_once, run_eviction_cycle, run_nof_eviction_cycle,
@@ -132,6 +134,8 @@ pub struct MasterServiceImpl {
     /// cannot stop a blocking task, so the flag is cleared by that task's RAII
     /// guard only when it has actually exited.
     snapshot_save_in_flight: Arc<AtomicBool>,
+    #[cfg(test)]
+    policy_save_test_barrier: parking_lot::Mutex<Option<std::sync::Arc<PolicySaveTestBarrier>>>,
     metadata_state: MetadataState,
     graceful_unmount_scheduler: GracefulUnmountScheduler,
     processing_reaper: ProcessingReaper,
@@ -1458,6 +1462,55 @@ struct ReplicaMovePayload<'a> {
     target: &'a str,
 }
 
+/// Test-only barrier that makes the tenant-quota policy delete's
+/// admission-disabled window observable between policy erasure and the
+/// connector save. Production builds compile the helper calls to no-ops.
+#[cfg(test)]
+pub(crate) struct PolicySaveTestBarrier {
+    started: std::sync::Mutex<bool>,
+    started_cv: std::sync::Condvar,
+    released: std::sync::Mutex<bool>,
+    released_cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl PolicySaveTestBarrier {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: std::sync::Mutex::new(false),
+            started_cv: std::sync::Condvar::new(),
+            released: std::sync::Mutex::new(false),
+            released_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    pub(crate) fn wait_started(&self) {
+        let mut started = self.started.lock().unwrap();
+        while !*started {
+            started = self.started_cv.wait(started).unwrap();
+        }
+    }
+
+    pub(crate) fn release_save(&self) {
+        let mut released = self.released.lock().unwrap();
+        *released = true;
+        self.released_cv.notify_all();
+    }
+
+    fn signal_started(&self) {
+        let mut started = self.started.lock().unwrap();
+        *started = true;
+        self.started_cv.notify_all();
+    }
+
+    fn wait_until_released(&self) {
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.released_cv.wait(released).unwrap();
+        }
+    }
+}
+
 impl MasterServiceImpl {
     pub(crate) fn resolve_write_tenant(&self, raw: &str) -> Result<TenantId, Status> {
         if !self.state.runtime_config.enable_tenant_quota {
@@ -1485,6 +1538,7 @@ impl MasterServiceImpl {
             TenantQuotaError::TenantNotRegistered => {
                 Status::resource_exhausted("tenant not registered")
             }
+            TenantQuotaError::TenantNotFound => Status::not_found("tenant not found"),
             TenantQuotaError::InvalidArgument => Status::invalid_argument("invalid tenant quota"),
             TenantQuotaError::AccountingMismatch => {
                 Status::failed_precondition("tenant quota accounting mismatch")
@@ -1695,8 +1749,11 @@ impl MasterServiceImpl {
         &self,
         tenant_id: &str,
     ) -> Result<Option<TenantQuotaSnapshot>, Status> {
+        // C++ GetTenantQuotaSnapshot always succeeds and returns the table's
+        // optional row; with multi-tenancy disabled the table is empty, so a
+        // snapshot query reports "no snapshot" rather than an error.
         if !self.state.runtime_config.enable_tenant_quota {
-            return Err(Status::failed_precondition("tenant quota is disabled"));
+            return Ok(None);
         }
         let tenant_id = resolve_request_tenant(tenant_id, true)?;
         self.get_tenant_quota_snapshot_for_tenant(&tenant_id)
@@ -1707,7 +1764,7 @@ impl MasterServiceImpl {
         tenant_id: &TenantId,
     ) -> Result<Option<TenantQuotaSnapshot>, Status> {
         if !self.state.runtime_config.enable_tenant_quota {
-            return Err(Status::failed_precondition("tenant quota is disabled"));
+            return Ok(None);
         }
         Ok(self.state.tenant_quotas.read().get_snapshot(tenant_id))
     }
@@ -1727,6 +1784,16 @@ impl MasterServiceImpl {
         self.upsert_tenant_quota_policy_for_tenant(&tenant_id, requested_quota_bytes)
     }
 
+    /// Test-only accessor delegating to the production LocalDisk usage
+    /// derivation used by SSD metrics.
+    #[doc(hidden)]
+    pub fn local_ssd_usage_metrics_for_test(&self) -> std::collections::HashMap<Uuid, u64> {
+        helpers::local_ssd_usage_metrics(&self.state)
+            .into_iter()
+            .map(|(client_id, metrics)| (client_id, metrics.used_bytes))
+            .collect()
+    }
+
     pub(crate) fn upsert_tenant_quota_policy_for_tenant(
         &self,
         tenant_id: &TenantId,
@@ -1740,14 +1807,19 @@ impl MasterServiceImpl {
                 "master service is not serving tenant quota mutations",
             ));
         };
+        let _policy_mutation_guard = self.state.tenant_quota_policy_mutations.lock();
         let capacity = self.tenant_quota_capacity_bytes();
-        let mut quotas = self.state.tenant_quotas.write();
-        let mut next = quotas.clone();
+        let mut next = self.state.tenant_quotas.read().clone();
         next.upsert_policy(tenant_id, requested_quota_bytes, capacity)
             .map_err(Self::tenant_quota_status)?;
+        next.recompute_effective_quotas(capacity);
         let policy_snapshot = self.tenant_quota_policy_snapshot_from_table(&next)?;
         self.save_tenant_quota_policy_snapshot(&policy_snapshot)?;
-        *quotas = next;
+        let mut quotas = self.state.tenant_quotas.write();
+        quotas
+            .upsert_policy(tenant_id, requested_quota_bytes, capacity)
+            .map_err(Self::tenant_quota_status)?;
+        quotas.recompute_effective_quotas(capacity);
         Ok(quotas
             .get_snapshot(tenant_id)
             .expect("tenant policy exists after upsert"))
@@ -1779,16 +1851,50 @@ impl MasterServiceImpl {
                 "master service is not serving tenant quota mutations",
             ));
         };
+        let _policy_mutation_guard = self.state.tenant_quota_policy_mutations.lock();
         let capacity = self.tenant_quota_capacity_bytes();
-        let mut quotas = self.state.tenant_quotas.write();
-        let mut next = quotas.clone();
-        let deleted = next
-            .erase_policy(tenant_id, capacity)
-            .map_err(Self::tenant_quota_status)?;
-        let policy_snapshot = self.tenant_quota_policy_snapshot_from_table(&next)?;
-        self.save_tenant_quota_policy_snapshot(&policy_snapshot)?;
-        *quotas = next;
+        // C++ deletion semantics: the tenant's explicit policy is removed from
+        // the live admission table BEFORE the connector save completes, so
+        // concurrent reservations observe TENANT_NOT_REGISTERED while
+        // persistence is still in flight. A failed save rolls the policy back.
+        let (deleted, previous_requested) = {
+            let mut quotas = self.state.tenant_quotas.write();
+            let previous_requested = quotas
+                .list_snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.tenant_id == *tenant_id)
+                .map(|snapshot| snapshot.requested_quota_bytes);
+            let deleted = quotas
+                .erase_policy(tenant_id, capacity)
+                .map_err(Self::tenant_quota_status)?;
+            (deleted, previous_requested)
+        };
+        let policy_snapshot = {
+            let quotas = self.state.tenant_quotas.read();
+            self.tenant_quota_policy_snapshot_from_table(&quotas)?
+        };
+        #[cfg(test)]
+        if let Some(barrier) = self.policy_save_test_barrier.lock().take() {
+            barrier.signal_started();
+            barrier.wait_until_released();
+        }
+        let save_result = self.save_tenant_quota_policy_snapshot(&policy_snapshot);
+        if let Err(status) = save_result {
+            if let Some(requested) = previous_requested {
+                let mut quotas = self.state.tenant_quotas.write();
+                let _ = quotas.upsert_policy(tenant_id, requested, capacity);
+                quotas.recompute_effective_quotas(capacity);
+            }
+            return Err(status);
+        }
         Ok(deleted)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_policy_save_barrier(&self) -> std::sync::Arc<PolicySaveTestBarrier> {
+        let barrier = std::sync::Arc::new(PolicySaveTestBarrier::new());
+        *self.policy_save_test_barrier.lock() = Some(barrier.clone());
+        barrier
     }
 
     fn tenant_quota_policy_snapshot_from_table(
@@ -2070,6 +2176,7 @@ impl MasterServiceImpl {
             service_fenced: AtomicBool::new(false),
             // 租户配额表：per-tenant 存储配额分配与追踪
             tenant_quotas: RwLock::new(tenant_quotas),
+            tenant_quota_policy_mutations: parking_lot::Mutex::new(()),
 
             // ── 远端回源 / remote pull ──
             // key → PendingRemotePullEntry：缓存未命中时从 S3 等远端回拉数据的追踪状态
@@ -2175,6 +2282,8 @@ impl MasterServiceImpl {
         let service = Self {
             state,
             snapshot_save_in_flight: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            policy_save_test_barrier: parking_lot::Mutex::new(None),
             metadata_state,
             graceful_unmount_scheduler,
             processing_reaper,
@@ -2716,6 +2825,15 @@ impl MasterServiceImpl {
     }
 
     #[doc(hidden)]
+    pub fn expire_client_for_test(&self, client_id: Uuid) {
+        if let Some(mut entry) = self.state.clients.get_mut(&client_id) {
+            entry.last_ping = SystemTime::now()
+                .checked_sub(Duration::from_secs(3600))
+                .unwrap_or(entry.last_ping);
+        }
+    }
+
+    #[doc(hidden)]
     pub fn promotion_candidate_count_for_test(&self) -> usize {
         self.state
             .promotion_candidate_count
@@ -2772,6 +2890,16 @@ impl MasterServiceImpl {
     #[doc(hidden)]
     pub fn run_promotion_candidate_retry_for_test(&self) {
         run_promotion_candidate_retry(&self.state, 256);
+    }
+
+    #[doc(hidden)]
+    pub fn run_promotion_candidate_retry_with_budget_for_test(&self, partitions: usize) {
+        run_promotion_candidate_retry(&self.state, partitions);
+    }
+
+    #[doc(hidden)]
+    pub fn clear_promotion_candidates_for_reload_for_test(&self) {
+        self.state.clear_transient_promotion_candidates();
     }
 
     #[cfg(test)]
@@ -3753,6 +3881,34 @@ mod snapshot_restore_tests {
         assert!(!snapshot_child_exists(&restored, KEY).await);
     }
 
+    #[test]
+    fn cpp_parity_snapshot_child_persist_state_uses_etcd_oplog_boundary_in_snapshot_descriptor() {
+        const SNAPSHOT_ID: &str = "20240601_120000_456";
+        const EXPECTED_SEQUENCE: u64 = 123;
+        const PRODUCER_VIEW_VERSION: u64 = 19;
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let service = MasterServiceImpl::default();
+        let replacement = {
+            let manager = crate::oplog::OpLogManager::new(
+                Some(Box::new(crate::oplog::InMemoryOpLog::new(16))),
+                0,
+            );
+            manager.set_initial_sequence_id(EXPECTED_SEQUENCE).unwrap();
+            manager
+        };
+        service.replace_oplog_manager(replacement).unwrap();
+
+        let descriptor =
+            publish_service_snapshot(&provider, &service, SNAPSHOT_ID, PRODUCER_VIEW_VERSION);
+
+        assert_eq!(descriptor.snapshot_id, SNAPSHOT_ID);
+        assert_eq!(descriptor.last_included_seq, EXPECTED_SEQUENCE);
+        assert_eq!(descriptor.producer_view_version, PRODUCER_VIEW_VERSION);
+        assert!(descriptor.created_at_ms > 0);
+    }
+
     #[tokio::test]
     async fn cpp_parity_snapshot_child_restore_falls_back_when_latest_metadata_is_corrupt() {
         const OLD_KEY: &str = "restore_fallback_key_1";
@@ -3853,6 +4009,3768 @@ mod snapshot_restore_tests {
         assert_eq!(snapshot_child_replicas(&restored, VALID_KEY).await.len(), 1);
         assert_eq!(snapshot_child_keys(&restored).await, vec![VALID_KEY]);
         assert!(!snapshot_child_exists(&restored, EXPIRED_KEY).await);
+    }
+
+    #[derive(PartialEq, Debug)]
+    struct SnapshotObjectProbe {
+        key: String,
+        replicas: Vec<(String, i32, i32, u64, u32)>,
+    }
+
+    #[derive(PartialEq, Debug)]
+    struct SnapshotSegmentProbe {
+        id: String,
+        name: String,
+        size: u64,
+        client: String,
+        status: i32,
+    }
+
+    fn snapshot_state_probe(
+        snapshot: &LoadedSnapshot,
+    ) -> (Vec<SnapshotObjectProbe>, Vec<SnapshotSegmentProbe>, usize) {
+        let mut objects = snapshot
+            .objects
+            .iter()
+            .map(|(key, object)| SnapshotObjectProbe {
+                key: key.clone(),
+                replicas: object
+                    .replicas
+                    .iter()
+                    .map(|replica| {
+                        (
+                            replica.segment_name.clone(),
+                            replica.replica_type as i32,
+                            replica.status as i32,
+                            replica.size,
+                            replica.refcnt,
+                        )
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        objects.sort_by(|left, right| left.key.cmp(&right.key));
+        let mut segments = snapshot
+            .segments
+            .iter()
+            .map(|entry| SnapshotSegmentProbe {
+                id: entry.segment.id.to_string(),
+                name: entry.segment.name.clone(),
+                size: entry.segment.size,
+                client: entry.client_id.to_string(),
+                status: entry.status as i32,
+            })
+            .collect::<Vec<_>>();
+        segments.sort_by(|left, right| left.id.cmp(&right.id));
+        (objects, segments, snapshot.tasks.len())
+    }
+
+    async fn snapshot_roundtrip_restored_service(
+        provider: &CatalogBackedSnapshotProvider,
+        source: &MasterServiceImpl,
+        client_id: Uuid,
+        snapshot_id: &str,
+        segment_name: &str,
+        expected_object_count: usize,
+        expected_segment_count: usize,
+    ) -> MasterServiceImpl {
+        let first = source.capture_loaded_snapshot(snapshot_id);
+        assert_eq!(first.objects.len(), expected_object_count);
+        assert_eq!(first.segments.len(), expected_segment_count);
+        publish_service_snapshot(provider, source, snapshot_id, 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        let second = restored.capture_loaded_snapshot(format!("{snapshot_id}-second"));
+        assert_eq!(
+            snapshot_state_probe(&second),
+            snapshot_state_probe(&first),
+            "second save must match first"
+        );
+        mount_snapshot_child_segment(&restored, client_id, segment_name).await;
+        restored
+    }
+
+    async fn snapshot_child_put_complete(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        segment_name: &str,
+    ) {
+        put_snapshot_child_object(service, client_id, key, None, true).await;
+    }
+
+    async fn snapshot_put_start_end_flow_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-put-end:1").await;
+        put_snapshot_child_object(&source, client_id, "test_key", None, true).await;
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+
+        let restored = snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_001",
+            "snapshot-put-end:1",
+            1,
+            1,
+        )
+        .await;
+        assert_eq!(
+            snapshot_child_replicas(&restored, "test_key").await.len(),
+            1
+        );
+        assert!(snapshot_child_exists(&restored, "test_key").await);
+    }
+
+    async fn snapshot_random_put_start_end_flow_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-random-put:1").await;
+        for index in 0..10 {
+            put_snapshot_child_object(&source, client_id, &format!("test_key{index}"), None, true)
+                .await;
+        }
+        // The C++ RandomPutStartEndFlow body queries every completed object,
+        // which grants a fresh lease that keeps the object restorable.
+        for index in 0..10 {
+            assert_eq!(
+                snapshot_child_replicas(&source, &format!("test_key{index}"))
+                    .await
+                    .len(),
+                1
+            );
+        }
+
+        let restored = snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_002",
+            "snapshot-random-put:1",
+            10,
+            1,
+        )
+        .await;
+        assert_eq!(snapshot_child_keys(&restored).await.len(), 10);
+    }
+
+    async fn snapshot_regex_lookup_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-regex:1").await;
+        for index in 0..10 {
+            put_snapshot_child_object(&source, client_id, &format!("test_key{index}"), None, true)
+                .await;
+        }
+        // The C++ GetReplicaListByRegex body performs the regex lookup on the
+        // live service, granting leases that keep objects restorable.
+        assert_eq!(
+            MasterService::get_replica_list_by_regex(
+                &source,
+                Request::new(proto::GetReplicaListByRegexRequest {
+                    key_regex: "^test_key".into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .entries
+            .len(),
+            10
+        );
+
+        let restored = snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_003",
+            "snapshot-regex:1",
+            10,
+            1,
+        )
+        .await;
+        let keys = MasterService::get_replica_list_by_regex(
+            &restored,
+            Request::new(proto::GetReplicaListByRegexRequest {
+                key_regex: "^test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .entries;
+        assert_eq!(keys.len(), 10);
+    }
+
+    async fn snapshot_get_replica_list_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-get:1").await;
+        put_snapshot_child_object(&source, client_id, "test_key", None, true).await;
+        // The C++ GetReplicaList body queries the key before the snapshot.
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+
+        let restored = snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_004",
+            "snapshot-get:1",
+            1,
+            1,
+        )
+        .await;
+        assert_eq!(
+            snapshot_child_replicas(&restored, "test_key").await.len(),
+            1
+        );
+    }
+
+    async fn snapshot_remove_object_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-remove:1").await;
+        put_snapshot_child_object(&source, client_id, "test_key", None, true).await;
+        MasterService::remove(
+            &source,
+            Request::new(proto::RemoveRequest {
+                key: "test_key".into(),
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_keys(&source).await.len(), 0);
+
+        snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_005",
+            "snapshot-remove:1",
+            0,
+            1,
+        )
+        .await;
+    }
+
+    async fn snapshot_random_remove_object_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-random-remove:1").await;
+        let mut state = Uuid::new_v4().as_u128();
+        for _ in 0..10 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let key = format!("test_key{}", state % 1000);
+            put_snapshot_child_object(&source, client_id, &key, None, true).await;
+            MasterService::remove(
+                &source,
+                Request::new(proto::RemoveRequest {
+                    key: key.clone(),
+                    force: true,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(snapshot_child_keys(&source).await.len(), 0);
+
+        snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_006",
+            "snapshot-random-remove:1",
+            0,
+            1,
+        )
+        .await;
+    }
+
+    async fn snapshot_remove_by_regex_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-remove-regex:1").await;
+        for index in 0..10 {
+            put_snapshot_child_object(&source, client_id, &format!("test_key{index}"), None, true)
+                .await;
+        }
+        let removed = MasterService::remove_by_regex(
+            &source,
+            Request::new(proto::RemoveByRegexRequest {
+                pattern: "^test_key".into(),
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .removed_count;
+        assert_eq!(removed, 10);
+
+        snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_007",
+            "snapshot-remove-regex:1",
+            0,
+            1,
+        )
+        .await;
+    }
+
+    async fn snapshot_remove_all_preserves_keys_test(provider: &CatalogBackedSnapshotProvider) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-remove-all:1").await;
+        for index in 0..10 {
+            put_snapshot_child_object(&source, client_id, &format!("test_key{index}"), None, true)
+                .await;
+            assert!(snapshot_child_exists(&source, &format!("test_key{index}")).await);
+        }
+        assert_eq!(snapshot_child_keys(&source).await.len(), 10);
+
+        let restored = snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            "20260806_000000_008",
+            "snapshot-remove-all:1",
+            10,
+            1,
+        )
+        .await;
+        for index in 0..10 {
+            assert!(snapshot_child_exists(&restored, &format!("test_key{index}")).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_put_start_end_flow() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_put_start_end_flow_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_random_put_start_end_flow() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_random_put_start_end_flow_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_get_replica_list_by_regex() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_regex_lookup_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_get_replica_list() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_get_replica_list_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_remove_object_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_random_remove_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_random_remove_object_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_by_regex() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_remove_by_regex_test(&provider).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_all_preserves_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        snapshot_remove_all_preserves_keys_test(&provider).await;
+    }
+
+    async fn snapshot_roundtrip_empty(provider: &CatalogBackedSnapshotProvider, snapshot_id: &str) {
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-empty:1").await;
+        snapshot_roundtrip_restored_service(
+            provider,
+            &source,
+            client_id,
+            snapshot_id,
+            "snapshot-empty:1",
+            0,
+            1,
+        )
+        .await;
+    }
+
+    async fn snapshot_put_keys(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        keys: &[&str],
+        grant_lease: bool,
+    ) {
+        for key in keys {
+            put_snapshot_child_object(service, client_id, key, None, true).await;
+            if grant_lease {
+                assert!(snapshot_child_exists(service, key).await);
+            }
+        }
+    }
+
+    async fn mount_snapshot_segment_named(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        segment_name: &str,
+        index: u64,
+    ) -> proto::Uuid {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.into(),
+                size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE + index * 0x1000000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .segment_id
+        .unwrap()
+    }
+
+    async fn put_snapshot_object_custom(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        size: u64,
+        replica_num: u32,
+    ) {
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: size,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn put_snapshot_object_preferred(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        preferred_segment: &str,
+    ) {
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: preferred_segment.into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_get_replica_list_by_regex_complex() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-regex-complex:1").await;
+        let keys = [
+            "test_key_01",
+            "test_key_02",
+            "test_key_10",
+            "prod_key_alpha",
+            "prod_key_beta",
+            "data_part_1_chunk_a",
+            "data_part_2_chunk_b",
+            "config/user/settings.json",
+            "logs/app-2025-08-13.log",
+            "short",
+            "a_very_very_very_long_key_that_tests_length_limits",
+            "test-key-extra",
+            "another_key",
+        ];
+        snapshot_put_keys(&source, client_id, &keys, true).await;
+        assert_eq!(
+            MasterService::get_replica_list_by_regex(
+                &source,
+                Request::new(proto::GetReplicaListByRegexRequest {
+                    key_regex: "^test_key_".into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .entries
+            .len(),
+            3
+        );
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_010000_001",
+            "snapshot-regex-complex:1",
+            13,
+            1,
+        )
+        .await;
+        assert_eq!(
+            MasterService::get_replica_list_by_regex(
+                &restored,
+                Request::new(proto::GetReplicaListByRegexRequest {
+                    key_regex: "^test_key_".into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .entries
+            .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_by_regex_complex() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-remove-regex-complex:1").await;
+        let keys = [
+            "test_key_01",
+            "test_key_02",
+            "test_key_10",
+            "prod_key_alpha",
+            "prod_key_beta",
+            "data_part_1_chunk_a",
+            "data_part_2_chunk_b",
+            "config/user/settings.json",
+            "logs/app-2025-08-13.log",
+            "short",
+            "a_very_very_very_long_key_that_tests_length_limits",
+            "test-key-extra",
+            "another_key",
+        ];
+        snapshot_put_keys(&source, client_id, &keys, true).await;
+        let removed = MasterService::remove_by_regex(
+            &source,
+            Request::new(proto::RemoveByRegexRequest {
+                pattern: "^test_key_".into(),
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .removed_count;
+        assert_eq!(removed, 3);
+
+        snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_010000_002",
+            "snapshot-remove-regex-complex:1",
+            10,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_mount_unmount_offset_allocator() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment_id = MasterService::mount_segment(
+            &source,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: "snapshot-mount:1".into(),
+                size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE,
+                te_endpoint: "snapshot-mount:1".into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .segment_id
+        .unwrap();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_id),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let remounted = MasterService::mount_segment(
+            &source,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: "snapshot-mount:1".into(),
+                size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE,
+                te_endpoint: "snapshot-mount:1".into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .segment_id
+        .unwrap();
+        assert_eq!(remounted, segment_id);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_010000_003",
+            "snapshot-mount:1",
+            0,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_keys(&restored).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_random_mount_unmount() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let mut state = Uuid::new_v4().as_u128();
+        for _ in 0..10 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let size = 16 * 1024 * 1024 * (1 + (state % 10) as u64);
+            let mounted = MasterService::mount_segment(
+                &source,
+                Request::new(proto::MountSegmentRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    segment_name: "random-mount:1".into(),
+                    size,
+                    base_addr: 0x310000000,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                    host_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .segment_id
+            .unwrap();
+            MasterService::unmount_segment(
+                &source,
+                Request::new(proto::UnmountSegmentRequest {
+                    segment_id: Some(mounted),
+                    client_id: Some(uuid_to_proto(client_id)),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        snapshot_roundtrip_empty(&provider, "20260806_010000_004").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_put_start_invalid_params() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-invalid:1").await;
+        for (index, (replica_num, slice_length)) in
+            [(0u32, 1024u64), (1, 0)].into_iter().enumerate()
+        {
+            let result = MasterService::put_start(
+                &source,
+                Request::new(proto::PutStartRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: format!("invalid-{index}"),
+                    slice_length,
+                    tenant_id: String::new(),
+                    config: Some(proto::ReplicateConfig {
+                        replica_num,
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await;
+            assert!(result.is_err());
+        }
+        snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_010000_005",
+            "snapshot-invalid:1",
+            0,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_exist_key() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-batch-exist:1").await;
+        let keys = [
+            "test_key0",
+            "test_key1",
+            "test_key2",
+            "test_key3",
+            "test_key4",
+            "test_key5",
+            "test_key6",
+            "test_key7",
+            "test_key8",
+            "test_key9",
+        ];
+        snapshot_put_keys(&source, client_id, &keys, true).await;
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_010000_006",
+            "snapshot-batch-exist:1",
+            10,
+            1,
+        )
+        .await;
+        let mut batch_keys = keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+        batch_keys.push("missing".into());
+        let results = MasterService::batch_exist_key(
+            &restored,
+            Request::new(proto::BatchExistKeyRequest {
+                keys: batch_keys,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .results;
+        assert_eq!(&results[..10], &[true; 10]);
+        assert!(!results[10]);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_replica_segments_are_unique() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        for index in 0..20 {
+            mount_snapshot_segment_named(&source, client_id, &format!("segment_{index}"), index)
+                .await;
+        }
+        let started = MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "replica_uniqueness_test_key".into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 10,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 10);
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "replica_uniqueness_test_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let replicas = snapshot_child_replicas(&source, "replica_uniqueness_test_key").await;
+        assert_eq!(replicas.len(), 10);
+        let unique = replicas
+            .iter()
+            .map(|replica| replica.segment_name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 10);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_020000_001",
+            "segment_0",
+            1,
+            20,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "replica_uniqueness_test_key").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_replication_factor_two_single_segment() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "single_segment").await;
+        put_snapshot_object_custom(
+            &source,
+            client_id,
+            "replication_factor_two_single_segment",
+            1024,
+            2,
+        )
+        .await;
+        let replicas =
+            snapshot_child_replicas(&source, "replication_factor_two_single_segment").await;
+        assert_eq!(replicas.len(), 1);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_020000_002",
+            "single_segment",
+            1,
+            1,
+        )
+        .await;
+        assert_eq!(
+            snapshot_child_replicas(&restored, "replication_factor_two_single_segment")
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_cleanup_stale_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment_id =
+            mount_snapshot_segment_named(&source, client_id, "stale-handles:1", 0).await;
+        put_snapshot_child_object(&source, client_id, "segment_object", None, true).await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "segment_object")
+                .await
+                .len(),
+            1
+        );
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_id),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(!snapshot_child_exists(&source, "segment_object").await);
+        snapshot_roundtrip_empty(&provider, "20260806_020000_003").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_unmount_immediate_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment1 = mount_snapshot_segment_named(&source, client_id, "segment1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment2", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "key1", "segment1").await;
+        put_snapshot_object_preferred(&source, client_id, "key2", "segment2").await;
+        assert!(snapshot_child_exists(&source, "key1").await);
+        assert!(snapshot_child_exists(&source, "key2").await);
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment1),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut absent = false;
+        for _ in 0..50 {
+            if !snapshot_child_exists(&source, "key1").await {
+                absent = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(absent, "key1 should be removed after unmount");
+        assert!(snapshot_child_exists(&source, "key2").await);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_020000_004",
+            "segment2",
+            1,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "key2").await);
+        assert!(!snapshot_child_exists(&restored, "key1").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_readable_after_partial_unmount() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment1 = mount_snapshot_segment_named(&source, client_id, "segment1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment2", 1).await;
+        put_snapshot_object_custom(&source, client_id, "replicated_key", 1024 * 1024, 2).await;
+        let replicas = snapshot_child_replicas(&source, "replicated_key").await;
+        assert_eq!(replicas.len(), 2);
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment1),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(snapshot_child_exists(&source, "replicated_key").await);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_020000_005",
+            "segment2",
+            1,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "replicated_key").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_leased_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-remove-lease:1").await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        assert!(snapshot_child_exists(&source, "test_key").await);
+        let blocked = MasterService::remove(
+            &source,
+            Request::new(proto::RemoveRequest {
+                key: "test_key".into(),
+                force: false,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code(), tonic::Code::FailedPrecondition);
+        MasterService::remove(
+            &source,
+            Request::new(proto::RemoveRequest {
+                key: "test_key".into(),
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        snapshot_roundtrip_empty(&provider, "20260806_020000_006").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_all_leased_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-remove-all-lease:1").await;
+        for index in 0..10 {
+            let key = format!("test_key{index}");
+            put_snapshot_child_object(&source, client_id, &key, None, true).await;
+            if index >= 5 {
+                assert!(snapshot_child_exists(&source, &key).await);
+            }
+        }
+        let removed = MasterService::remove_all(
+            &source,
+            Request::new(proto::RemoveAllRequest {
+                force: false,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .removed_count;
+        assert_eq!(removed, 5);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_020000_007",
+            "snapshot-remove-all-lease:1",
+            5,
+            1,
+        )
+        .await;
+        for index in 5..10 {
+            assert!(snapshot_child_exists(&restored, &format!("test_key{index}")).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_remove_soft_pin_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-soft-pin:1").await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        assert!(snapshot_child_exists(&source, "test_key").await);
+        MasterService::remove(
+            &source,
+            Request::new(proto::RemoveRequest {
+                key: "test_key".into(),
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        snapshot_roundtrip_empty(&provider, "20260806_020000_008").await;
+    }
+
+    async fn snapshot_batch_replica_clear(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        keys: &[&str],
+        segment_name: &str,
+    ) -> Vec<String> {
+        MasterService::batch_replica_clear(
+            service,
+            Request::new(proto::BatchReplicaClearRequest {
+                object_keys: keys.iter().map(|key| key.to_string()).collect(),
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.to_string(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .cleared_keys
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_all_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-clear-all:1").await;
+        let keys = [
+            "batch_clear_key_0",
+            "batch_clear_key_1",
+            "batch_clear_key_2",
+            "batch_clear_key_3",
+            "batch_clear_key_4",
+        ];
+        snapshot_put_keys(&source, client_id, &keys, false).await;
+        let cleared = snapshot_batch_replica_clear(&source, client_id, &keys, "").await;
+        assert_eq!(cleared.len(), 5);
+        snapshot_roundtrip_empty(&provider, "20260806_030000_001").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_specific_segment() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment2", 1).await;
+        MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "segment_specific_key".into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "segment1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "segment_specific_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let cleared =
+            snapshot_batch_replica_clear(&source, client_id, &["segment_specific_key"], "segment1")
+                .await;
+        assert_eq!(cleared, vec!["segment_specific_key".to_string()]);
+        snapshot_roundtrip_empty(&provider, "20260806_030000_002").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_lease_active() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-clear-lease:1").await;
+        put_snapshot_child_object(&source, client_id, "lease_active_key", None, true).await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "lease_active_key")
+                .await
+                .len(),
+            1
+        );
+        let cleared =
+            snapshot_batch_replica_clear(&source, client_id, &["lease_active_key"], "").await;
+        assert!(cleared.is_empty());
+        assert!(snapshot_child_exists(&source, "lease_active_key").await);
+
+        snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_030000_003",
+            "snapshot-clear-lease:1",
+            1,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_different_client() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id1 = Uuid::new_v4();
+        let client_id2 = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id1, "snapshot-clear-client:1").await;
+        put_snapshot_child_object(&source, client_id1, "client_specific_key", None, true).await;
+        let cleared =
+            snapshot_batch_replica_clear(&source, client_id2, &["client_specific_key"], "").await;
+        assert!(cleared.is_empty());
+        assert!(snapshot_child_exists(&source, "client_specific_key").await);
+
+        snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id1,
+            "20260806_030000_004",
+            "snapshot-clear-client:1",
+            1,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_nonexistent_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-clear-missing:1").await;
+        let cleared = snapshot_batch_replica_clear(
+            &source,
+            client_id,
+            &["non_existent_key1", "non_existent_key2"],
+            "",
+        )
+        .await;
+        assert!(cleared.is_empty());
+        snapshot_roundtrip_empty(&provider, "20260806_030000_005").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_empty_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-clear-empty:1").await;
+        let cleared = snapshot_batch_replica_clear(&source, client_id, &[], "").await;
+        assert!(cleared.is_empty());
+        snapshot_roundtrip_empty(&provider, "20260806_030000_006").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_empty_string_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id, "snapshot-clear-empty-string:1").await;
+        put_snapshot_child_object(&source, client_id, "valid_key", None, true).await;
+        let cleared = snapshot_batch_replica_clear(
+            &source,
+            client_id,
+            &["", "valid_key", "", "another_empty"],
+            "",
+        )
+        .await;
+        assert_eq!(cleared, vec!["valid_key".to_string()]);
+        snapshot_roundtrip_empty(&provider, "20260806_030000_007").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_replica_clear_mixed_scenario() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id1 = Uuid::new_v4();
+        let client_id2 = Uuid::new_v4();
+        mount_snapshot_child_segment(&source, client_id1, "snapshot-clear-mixed:1").await;
+        put_snapshot_child_object(&source, client_id1, "mixed_key1", None, true).await;
+        put_snapshot_child_object(&source, client_id1, "mixed_key2", None, true).await;
+        put_snapshot_child_object(&source, client_id2, "mixed_key3", None, true).await;
+        let cleared = snapshot_batch_replica_clear(
+            &source,
+            client_id1,
+            &["mixed_key1", "mixed_key2", "mixed_key3", "non_existent", ""],
+            "",
+        )
+        .await;
+        assert_eq!(cleared.len(), 2);
+        assert!(!snapshot_child_exists(&source, "mixed_key1").await);
+        assert!(!snapshot_child_exists(&source, "mixed_key2").await);
+        assert!(snapshot_child_exists(&source, "mixed_key3").await);
+
+        snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id2,
+            "20260806_030000_008",
+            "snapshot-clear-mixed:1",
+            1,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_copy_start() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        for index in 0..4 {
+            mount_snapshot_segment_named(
+                &source,
+                client_id,
+                &format!("segment_{}", index + 1),
+                index,
+            )
+            .await;
+        }
+        let missing = MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "non_existent_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_2".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        let started = MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_2".into(), "segment_3".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.targets.len(), 2);
+        MasterService::copy_end(
+            &source,
+            Request::new(proto::CopyEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let skip_started = MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_3".into(), "segment_4".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(skip_started.targets.len(), 1);
+        MasterService::copy_end(
+            &source,
+            Request::new(proto::CopyEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 4);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_040000_001",
+            "segment_1",
+            1,
+            4,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "test_key").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_move_start() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        for index in 0..3 {
+            mount_snapshot_segment_named(
+                &source,
+                client_id,
+                &format!("segment_{}", index + 1),
+                index,
+            )
+            .await;
+        }
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        let same = MasterService::move_start(
+            &source,
+            Request::new(proto::MoveStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                target: "segment_1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(same.code(), tonic::Code::InvalidArgument);
+        let started = MasterService::move_start(
+            &source,
+            Request::new(proto::MoveStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                target: "segment_2".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.target.unwrap().segment_name, "segment_2");
+        MasterService::move_end(
+            &source,
+            Request::new(proto::MoveEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_040000_002",
+            "segment_2",
+            1,
+            3,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "test_key").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_copy_revoke() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment_1 = mount_snapshot_segment_named(&source, client_id, "segment_1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_2", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_2".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_1),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let revoked = MasterService::copy_revoke(
+            &source,
+            Request::new(proto::CopyRevokeRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await;
+        assert!(revoked.is_ok() || revoked.unwrap_err().code() == tonic::Code::NotFound);
+        assert!(!snapshot_child_exists(&source, "test_key").await);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_040000_003",
+            "segment_2",
+            0,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_keys(&restored).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_move_revoke() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment_1 = mount_snapshot_segment_named(&source, client_id, "segment_1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_2", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        MasterService::move_start(
+            &source,
+            Request::new(proto::MoveStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                target: "segment_2".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_1),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let revoked = MasterService::move_revoke(
+            &source,
+            Request::new(proto::MoveRevokeRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await;
+        assert!(revoked.is_ok() || revoked.unwrap_err().code() == tonic::Code::NotFound);
+        assert!(!snapshot_child_exists(&source, "test_key").await);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_040000_004",
+            "segment_2",
+            0,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_keys(&restored).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_copy_end() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment_1 = mount_snapshot_segment_named(&source, client_id, "segment_1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_2", 1).await;
+        let segment_3 = mount_snapshot_segment_named(&source, client_id, "segment_3", 2).await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_2".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::copy_end(
+            &source,
+            Request::new(proto::CopyEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 2);
+
+        MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_3".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_1),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let gone = MasterService::copy_end(
+            &source,
+            Request::new(proto::CopyEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(gone.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+
+        MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_2".into(),
+                targets: vec!["segment_3".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_3),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let target_gone = MasterService::copy_end(
+            &source,
+            Request::new(proto::CopyEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(target_gone.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_040000_005",
+            "segment_2",
+            1,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "test_key").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_move_end() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_1", 0).await;
+        let segment_2 = mount_snapshot_segment_named(&source, client_id, "segment_2", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_1").await;
+        MasterService::move_start(
+            &source,
+            Request::new(proto::MoveStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_1".into(),
+                target: "segment_2".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::move_end(
+            &source,
+            Request::new(proto::MoveEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+
+        MasterService::move_start(
+            &source,
+            Request::new(proto::MoveStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                source: "segment_2".into(),
+                target: "segment_1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_2),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let ended = MasterService::move_end(
+            &source,
+            Request::new(proto::MoveEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await;
+        let ended_code = ended.as_ref().err().map(|status| status.code());
+        assert!(
+            ended.is_ok()
+                || matches!(
+                    ended_code,
+                    Some(tonic::Code::FailedPrecondition) | Some(tonic::Code::NotFound)
+                )
+        );
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_040000_006",
+            "segment_1",
+            0,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_keys(&restored).await.is_empty());
+    }
+
+    async fn snapshot_task_roundtrip(
+        provider: &CatalogBackedSnapshotProvider,
+        source: &MasterServiceImpl,
+        client_id: Uuid,
+        snapshot_id: &str,
+        segment_name: &str,
+        expected_objects: usize,
+        expected_segments: usize,
+        expected_tasks: usize,
+    ) -> MasterServiceImpl {
+        let first = source.capture_loaded_snapshot(snapshot_id);
+        assert_eq!(first.objects.len(), expected_objects);
+        assert_eq!(first.segments.len(), expected_segments);
+        assert_eq!(first.tasks.len(), expected_tasks);
+        publish_service_snapshot(provider, source, snapshot_id, 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        let second = restored.capture_loaded_snapshot(format!("{snapshot_id}-second"));
+        assert_eq!(
+            snapshot_state_probe(&second),
+            snapshot_state_probe(&first),
+            "second save must match first"
+        );
+        mount_snapshot_child_segment(&restored, client_id, segment_name).await;
+        restored
+    }
+
+    async fn snapshot_roundtrip_no_remount(
+        provider: &CatalogBackedSnapshotProvider,
+        source: &MasterServiceImpl,
+        snapshot_id: &str,
+        expected_objects: usize,
+        expected_segments: usize,
+    ) {
+        let first = source.capture_loaded_snapshot(snapshot_id);
+        assert_eq!(first.objects.len(), expected_objects);
+        assert_eq!(first.segments.len(), expected_segments);
+        publish_service_snapshot(provider, source, snapshot_id, 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        let second = restored.capture_loaded_snapshot(format!("{snapshot_id}-second"));
+        assert_eq!(
+            snapshot_state_probe(&second),
+            snapshot_state_probe(&first),
+            "second save must match first"
+        );
+    }
+
+    async fn snapshot_roundtrip_any_state(
+        provider: &CatalogBackedSnapshotProvider,
+        source: &MasterServiceImpl,
+        snapshot_id: &str,
+    ) {
+        let all_keys = MasterService::get_all_keys(
+            source,
+            Request::new(proto::GetAllKeysRequest {
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .keys;
+        snapshot_grant_leases(source, &all_keys).await;
+        let first = source.capture_loaded_snapshot(snapshot_id);
+        publish_service_snapshot(provider, source, snapshot_id, 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        let second = restored.capture_loaded_snapshot(format!("{snapshot_id}-second"));
+        assert_eq!(
+            snapshot_state_probe(&second),
+            snapshot_state_probe(&first),
+            "second save must match first"
+        );
+    }
+
+    async fn snapshot_soft_pin_service(allow_evict_soft_pinned: bool) -> MasterServiceImpl {
+        MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::from_millis(200),
+            soft_pin_ttl: std::time::Duration::from_secs(10),
+            allow_evict_soft_pinned_objects: allow_evict_soft_pinned,
+            eviction_interval: std::time::Duration::from_millis(5),
+            ..Default::default()
+        })
+    }
+
+    async fn snapshot_put_soft_pinned(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        size: u64,
+    ) -> bool {
+        let Ok(response) = MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: size,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    with_soft_pin: true,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        else {
+            return false;
+        };
+        if response.into_inner().replicas.is_empty() {
+            return false;
+        }
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        true
+    }
+
+    async fn snapshot_put_unpinned(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        size: u64,
+    ) -> bool {
+        let Ok(response) = MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: size,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        else {
+            return false;
+        };
+        if response.into_inner().replicas.is_empty() {
+            return false;
+        }
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        true
+    }
+
+    async fn mount_snapshot_segment_with_endpoint(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        segment_name: &str,
+        index: u64,
+        te_endpoint: &str,
+    ) {
+        MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.into(),
+                size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE + index * 0x1000000,
+                te_endpoint: te_endpoint.into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn snapshot_batch_query_ip(
+        service: &MasterServiceImpl,
+        client_ids: &[Uuid],
+    ) -> std::collections::HashMap<String, Vec<String>> {
+        MasterService::batch_query_ip(
+            service,
+            Request::new(proto::BatchQueryIpRequest {
+                client_ids: client_ids.iter().map(|id| uuid_to_proto(*id)).collect(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .ips
+        .into_iter()
+        .map(|(client, ip_list)| (client, ip_list.addresses))
+        .collect()
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(
+            &source,
+            client_id,
+            "test_segment",
+            0,
+            "127.0.0.1:12345",
+        )
+        .await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        assert_eq!(
+            ips.get(&client_id.to_string()),
+            Some(&vec!["127.0.0.1".to_string()])
+        );
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_001", 0, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_multiple_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(&source, client_id, "segment1", 0, "127.0.0.1:12345")
+            .await;
+        mount_snapshot_segment_with_endpoint(&source, client_id, "segment2", 1, "127.0.0.2:23456")
+            .await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        assert_eq!(
+            ips.get(&client_id.to_string()).map(|list| list.len()),
+            Some(2)
+        );
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_002", 0, 2).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_empty_client_id() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(
+            &source,
+            client_id,
+            "test_segment",
+            0,
+            "127.0.0.1:12345",
+        )
+        .await;
+        let ips = snapshot_batch_query_ip(&source, &[]).await;
+        assert!(ips.is_empty());
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_003", 0, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_bracketed_ipv6() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(&source, client_id, "test_segment", 0, "[::1]:17813")
+            .await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        assert_eq!(
+            ips.get(&client_id.to_string()),
+            Some(&vec!["::1".to_string()])
+        );
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_004", 0, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_link_local_with_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(
+            &source,
+            client_id,
+            "test_segment",
+            0,
+            "fe80::a236:bcff:fecb:a1be%eno2:15773",
+        )
+        .await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        assert_eq!(
+            ips.get(&client_id.to_string()),
+            Some(&vec!["fe80::a236:bcff:fecb:a1be%eno2".to_string()])
+        );
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_005", 0, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_ipv6_no_port() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(
+            &source,
+            client_id,
+            "test_segment",
+            0,
+            "[2001:db8::1]",
+        )
+        .await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        assert_eq!(
+            ips.get(&client_id.to_string()),
+            Some(&vec!["2001:db8::1".to_string()])
+        );
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_006", 0, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_mixed_ipv4_ipv6() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_with_endpoint(
+            &source,
+            client_id,
+            "segment1",
+            0,
+            "192.168.1.1:12345",
+        )
+        .await;
+        mount_snapshot_segment_with_endpoint(&source, client_id, "segment2", 1, "[::1]:17813")
+            .await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        let addresses = ips.get(&client_id.to_string()).expect("client ips");
+        assert_eq!(addresses.len(), 2);
+        assert!(addresses.contains(&"192.168.1.1".to_string()));
+        assert!(addresses.contains(&"::1".to_string()));
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_060000_007", 0, 2).await;
+    }
+
+    async fn snapshot_grant_leases(service: &MasterServiceImpl, keys: &[String]) {
+        for key in keys {
+            let _ = snapshot_child_exists(service, key).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_concurrent_mount_unmount() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = Arc::new(MasterServiceImpl::default());
+        let mut tasks = Vec::new();
+        for task_index in 0..4 {
+            let source = Arc::clone(&source);
+            tasks.push(tokio::spawn(async move {
+                let client_id = Uuid::new_v4();
+                for _ in 0..100 {
+                    let mounted = MasterService::mount_segment(
+                        &*source,
+                        Request::new(proto::MountSegmentRequest {
+                            client_id: Some(uuid_to_proto(client_id)),
+                            segment_name: format!("segment_{task_index}"),
+                            size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                            base_addr: SNAPSHOT_CHILD_SEGMENT_BASE + task_index as u64 * 0x1000000,
+                            te_endpoint: String::new(),
+                            protocol: String::new(),
+                            host_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .segment_id
+                    .unwrap();
+                    MasterService::unmount_segment(
+                        &*source,
+                        Request::new(proto::UnmountSegmentRequest {
+                            segment_id: Some(mounted),
+                            client_id: Some(uuid_to_proto(client_id)),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_070000_001", 0, 0).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_concurrent_write_and_remove_all() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = Arc::new(MasterServiceImpl::default());
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "concurrent-write:1", 0).await;
+        let mut writers = Vec::new();
+        for thread_index in 0..4 {
+            let source = Arc::clone(&source);
+            writers.push(tokio::spawn(async move {
+                for object_index in 0..100 {
+                    put_snapshot_object_custom(
+                        &source,
+                        client_id,
+                        &format!("key_{thread_index}_{object_index}"),
+                        1024,
+                        1,
+                    )
+                    .await;
+                }
+            }));
+        }
+        for writer in writers {
+            writer.await.unwrap();
+        }
+        let mut keys = Vec::new();
+        for thread_index in 0..4 {
+            for object_index in 0..100 {
+                keys.push(format!("key_{thread_index}_{object_index}"));
+            }
+        }
+        snapshot_grant_leases(&source, &keys).await;
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_070000_002", 400, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_concurrent_read_and_remove_all() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = Arc::new(MasterServiceImpl::default());
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "concurrent-read:1", 0).await;
+        let keys = (0..1000)
+            .map(|index| format!("pre_key_{index}"))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            put_snapshot_object_custom(&source, client_id, key, 1024, 1).await;
+        }
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let source = Arc::clone(&source);
+            let keys = keys.clone();
+            readers.push(tokio::spawn(async move {
+                for key in &keys {
+                    let _ = MasterService::get_replica_list(
+                        &*source,
+                        Request::new(proto::GetReplicaListRequest {
+                            key: key.clone(),
+                            tenant_id: String::new(),
+                        }),
+                    )
+                    .await;
+                }
+            }));
+        }
+        for reader in readers {
+            reader.await.unwrap();
+        }
+        snapshot_grant_leases(&source, &keys).await;
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_070000_003", 1000, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_concurrent_remove_all_operations() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "concurrent-remove-all:1", 0).await;
+        let keys = (0..1000)
+            .map(|index| format!("pre_key_{index}"))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            put_snapshot_object_custom(&source, client_id, key, 1024, 1).await;
+        }
+        snapshot_grant_leases(&source, &keys).await;
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_070000_004", 1000, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_concurrent_mount_local_disk_segment() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = Arc::new(MasterServiceImpl::with_runtime_config(
+            MasterRuntimeConfig {
+                enable_offload: true,
+                ..Default::default()
+            },
+        ));
+        let mut tasks = Vec::new();
+        for _ in 0..100 {
+            let source = Arc::clone(&source);
+            tasks.push(tokio::spawn(async move {
+                let client_id = Uuid::new_v4();
+                let storage_id = Uuid::new_v4();
+                let session_id = Uuid::new_v4();
+                MasterService::mount_local_disk_segment(
+                    &*source,
+                    Request::new(proto::MountLocalDiskSegmentRequest {
+                        client_id: Some(uuid_to_proto(client_id)),
+                        enable_offloading: false,
+                        storage_id: Some(uuid_to_proto(storage_id)),
+                        recovery_complete: false,
+                        recovery_session_id: Some(uuid_to_proto(session_id)),
+                    }),
+                )
+                .await
+                .unwrap();
+                MasterService::mount_local_disk_segment(
+                    &*source,
+                    Request::new(proto::MountLocalDiskSegmentRequest {
+                        client_id: Some(uuid_to_proto(client_id)),
+                        enable_offloading: true,
+                        storage_id: Some(uuid_to_proto(storage_id)),
+                        recovery_complete: true,
+                        recovery_session_id: Some(uuid_to_proto(session_id)),
+                    }),
+                )
+                .await
+                .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_070000_005", 0, 0).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_single_slice_multi_replica_flow() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        for index in 0..3 {
+            mount_snapshot_segment_named(&source, client_id, &format!("segment_{index}"), index)
+                .await;
+        }
+        let started = MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "multi_slice_object".into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 3,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 3);
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "multi_slice_object".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot_child_replicas(&source, "multi_slice_object")
+                .await
+                .len(),
+            3
+        );
+
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_080000_001",
+            "segment_0",
+            1,
+            3,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "multi_slice_object").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_unmount_segment_performance() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment_id = MasterService::mount_segment(
+            &source,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: "perf_test_segment".into(),
+                size: 256 * 1024 * 1024,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .segment_id
+        .unwrap();
+        for index in 0..1000 {
+            put_snapshot_object_custom(&source, client_id, &format!("key_{index}"), 1024, 1).await;
+        }
+        let started = std::time::Instant::now();
+        MasterService::unmount_segment(
+            &source,
+            Request::new(proto::UnmountSegmentRequest {
+                segment_id: Some(segment_id),
+                client_id: Some(uuid_to_proto(client_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_080000_002", 0, 0).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_batch_query_ip_multiple_segments_empty_te_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment2", 1).await;
+        let ips = snapshot_batch_query_ip(&source, &[client_id]).await;
+        assert!(ips.contains_key(&client_id.to_string()));
+        assert!(ips.get(&client_id.to_string()).unwrap().is_empty());
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_080000_003", 0, 2).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_fetch_tasks_returns_assigned_only_and_drains_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let other_client = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        mount_snapshot_segment_named(&source, other_client, "segment_1", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "fetch_tasks_key_0", "segment_0").await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "fetch_tasks_key_0")
+                .await
+                .len(),
+            1
+        );
+        MasterService::create_copy_task(
+            &source,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "fetch_tasks_key_0".into(),
+                tenant_id: String::new(),
+                targets: vec!["segment_1".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::create_move_task(
+            &source,
+            Request::new(proto::CreateMoveTaskRequest {
+                key: "fetch_tasks_key_0".into(),
+                source: "segment_0".into(),
+                target: "segment_1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let fetched0 = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 16,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(fetched0.len(), 2);
+        let fetched1 = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(other_client)),
+                batch_size: 16,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert!(fetched1.is_empty());
+        let fetched0_again = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 16,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert!(fetched0_again.is_empty());
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_080000_004",
+            "segment_0",
+            1,
+            2,
+            2,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_evict_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::from_millis(2000),
+            eviction_interval: std::time::Duration::from_millis(5),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        MasterService::mount_segment(
+            &source,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: "test_segment".into(),
+                size: 1024 * 1024 * 16 * 15,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut success_puts = 0usize;
+        for index in 0..16_434 {
+            let key = format!("test_key{index}");
+            if snapshot_put_soft_pinned(&source, client_id, &key, 1024 * 15).await {
+                success_puts += 1;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        assert!(success_puts > 16_384);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_090000_001").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_try_evict_leased_object() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::from_millis(500),
+            eviction_interval: std::time::Duration::from_millis(5),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        MasterService::mount_segment(
+            &source,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: "test_segment".into(),
+                size: 1024 * 1024 * 16,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut success_puts = 0usize;
+        let mut failed_puts = 0usize;
+        for index in 0..26 {
+            let key = format!("test_key{index}");
+            if snapshot_put_soft_pinned(&source, client_id, &key, 1024 * 1024).await {
+                assert!(snapshot_child_exists(&source, &key).await);
+                success_puts += 1;
+            } else {
+                failed_puts += 1;
+            }
+        }
+        assert!(success_puts > 0);
+        assert!(failed_puts > 0);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_090000_002").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_soft_pin_objects_can_be_evicted() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_soft_pin_service(true).await;
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        let mut success_puts = 0usize;
+        for index in 0..66 {
+            let key = format!("test_key{index}");
+            if snapshot_put_soft_pinned(&source, client_id, &key, 1024 * 1024).await {
+                success_puts += 1;
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        assert!(success_puts > 16);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_090000_003").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_soft_pin_objects_not_allow_evict() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_soft_pin_service(false).await;
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        let mut success_keys = Vec::new();
+        for index in 0..66 {
+            let key = format!("test_key{index}");
+            if snapshot_put_soft_pinned(&source, client_id, &key, 1024 * 1024).await {
+                success_keys.push(key);
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+        assert!(success_keys.len() <= 17);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_090000_004").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_soft_pin_objects_not_evicted_before_other_objects() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::from_millis(200),
+            soft_pin_ttl: std::time::Duration::from_secs(10),
+            allow_evict_soft_pinned_objects: true,
+            eviction_ratio: 0.5,
+            eviction_interval: std::time::Duration::from_millis(5),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        for _ in 0..5 {
+            for index in 0..2 {
+                assert!(
+                    snapshot_put_soft_pinned(
+                        &source,
+                        client_id,
+                        &format!("pin_key{index}"),
+                        1024 * 1024,
+                    )
+                    .await
+                );
+            }
+            let mut failed_puts = 0usize;
+            for index in 0..20 {
+                if !snapshot_put_unpinned(&source, client_id, &format!("key{index}"), 1024 * 1024)
+                    .await
+                {
+                    failed_puts += 1;
+                }
+            }
+            assert!(failed_puts > 0);
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            for index in 0..2 {
+                assert!(snapshot_child_exists(&source, &format!("pin_key{index}")).await);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let _ = MasterService::remove_all(
+                &source,
+                Request::new(proto::RemoveAllRequest {
+                    force: true,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await;
+        }
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_100000_001").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_soft_pin_extended_on_get() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::from_millis(200),
+            soft_pin_ttl: std::time::Duration::from_millis(1000),
+            allow_evict_soft_pinned_objects: true,
+            eviction_ratio: 0.5,
+            eviction_interval: std::time::Duration::from_millis(5),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        for _ in 0..3 {
+            for index in 0..2 {
+                assert!(
+                    snapshot_put_soft_pinned(
+                        &source,
+                        client_id,
+                        &format!("pin_key{index}"),
+                        1024 * 1024,
+                    )
+                    .await
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            for index in 0..2 {
+                assert!(snapshot_child_exists(&source, &format!("pin_key{index}")).await);
+            }
+            let mut failed_puts = 0usize;
+            for index in 0..16 {
+                if !snapshot_put_unpinned(&source, client_id, &format!("key{index}"), 1024 * 1024)
+                    .await
+                {
+                    failed_puts += 1;
+                }
+            }
+            assert!(failed_puts > 0);
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            for index in 0..2 {
+                assert!(snapshot_child_exists(&source, &format!("pin_key{index}")).await);
+            }
+            let _ = MasterService::remove_all(
+                &source,
+                Request::new(proto::RemoveAllRequest {
+                    force: true,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await;
+        }
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_100000_002").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_protect_copy_move_source_from_eviction() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            lease_ttl: std::time::Duration::from_millis(100),
+            client_live_ttl: std::time::Duration::from_secs(600),
+            eviction_interval: std::time::Duration::from_millis(5),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_1", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_2", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "copy_key", "segment_1").await;
+        put_snapshot_object_preferred(&source, client_id, "move_key", "segment_1").await;
+        MasterService::copy_start(
+            &source,
+            Request::new(proto::CopyStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "copy_key".into(),
+                source: "segment_1".into(),
+                targets: vec!["segment_2".into()],
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::move_start(
+            &source,
+            Request::new(proto::MoveStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "move_key".into(),
+                source: "segment_1".into(),
+                target: "segment_2".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        for index in 0..4096 {
+            let key = format!("test_key_{index}");
+            if snapshot_put_unpinned(&source, client_id, &key, 1024 * 1024).await {
+            } else {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        let _ = MasterService::remove_all(
+            &source,
+            Request::new(proto::RemoveAllRequest {
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await;
+        assert!(
+            MasterService::copy_end(
+                &source,
+                Request::new(proto::CopyEndRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: "copy_key".into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            MasterService::move_end(
+                &source,
+                Request::new(proto::MoveEndRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: "move_key".into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .is_ok()
+        );
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_100000_003").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_offload_object_heartbeat() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "hb-mem", 0).await;
+        let storage_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        MasterService::mount_local_disk_segment(
+            &source,
+            Request::new(proto::MountLocalDiskSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                enable_offloading: false,
+                storage_id: Some(uuid_to_proto(storage_id)),
+                recovery_complete: false,
+                recovery_session_id: Some(uuid_to_proto(session_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::mount_local_disk_segment(
+            &source,
+            Request::new(proto::MountLocalDiskSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                enable_offloading: false,
+                storage_id: Some(uuid_to_proto(storage_id)),
+                recovery_complete: true,
+                recovery_session_id: Some(uuid_to_proto(session_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        for index in 0..3000 {
+            put_snapshot_object_preferred(&source, client_id, &format!("hb-p1-{index}"), "hb-mem")
+                .await;
+        }
+        let first = MasterService::offload_object_heartbeat(
+            &source,
+            Request::new(proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                enable_offloading: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(first.len(), 0);
+        for index in 0..3000 {
+            put_snapshot_object_preferred(&source, client_id, &format!("hb-p2-{index}"), "hb-mem")
+                .await;
+        }
+        let second = MasterService::offload_object_heartbeat(
+            &source,
+            Request::new(proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                enable_offloading: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(second.len(), 3000);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_110000_001").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_put_start_expiring() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            put_start_discard_timeout: std::time::Duration::from_millis(100),
+            put_start_release_timeout: std::time::Duration::from_millis(200),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        for index in 0..3 {
+            mount_snapshot_segment_named(&source, client_id, &format!("segment_{index}"), index)
+                .await;
+        }
+        let started = MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key_1".into(),
+                slice_length: 6 * 1024 * 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 3,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 3);
+        let duplicate = MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key_1".into(),
+                slice_length: 6 * 1024 * 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 3,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key_1".into(),
+                slice_length: 6 * 1024 * 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 3,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key_1".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(snapshot_child_exists(&source, "test_key_1").await);
+        let blocked = MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "test_key_2".into(),
+                slice_length: 6 * 1024 * 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 3,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code(), tonic::Code::ResourceExhausted);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_110000_002").await;
+    }
+
+    fn snapshot_ssd_service(root: &tempfile::TempDir) -> MasterServiceImpl {
+        MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            storage_fs_dir: root.path().to_string_lossy().into_owned(),
+            cluster_id: "ssd-snapshot-cluster".into(),
+            enable_disk_eviction: true,
+            quota_bytes: 1024 * 1024 * 1024,
+            ..Default::default()
+        })
+    }
+
+    async fn snapshot_ssd_put_start(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+    ) -> Vec<proto::ReplicaDescriptor> {
+        let started = MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        started.replicas
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_ssd_put_end_both_replica() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_ssd_service(&root);
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        let replicas = snapshot_ssd_put_start(&source, client_id, "disk_key").await;
+        assert_eq!(replicas.len(), 2);
+        assert!(
+            replicas
+                .iter()
+                .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32)
+        );
+        assert!(
+            replicas
+                .iter()
+                .any(|r| r.replica_type == proto::replica_descriptor::ReplicaType::Disk as i32)
+        );
+        let blocked = MasterService::get_replica_list(
+            &source,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(blocked.code(), tonic::Code::FailedPrecondition);
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "disk_key").await.len(), 2);
+        let restored = snapshot_roundtrip_restored_service(
+            &provider,
+            &source,
+            client_id,
+            "20260806_120000_001",
+            "test_segment",
+            1,
+            1,
+        )
+        .await;
+        assert!(snapshot_child_exists(&restored, "disk_key").await);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_ssd_put_revoke_disk_replica() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_ssd_service(&root);
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        snapshot_ssd_put_start(&source, client_id, "disk_key").await;
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "disk_key").await.len(), 1);
+        MasterService::put_revoke(
+            &source,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "disk_key").await.len(), 1);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_120000_002").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_ssd_put_revoke_memory_replica() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_ssd_service(&root);
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        snapshot_ssd_put_start(&source, client_id, "disk_key").await;
+        MasterService::put_revoke(
+            &source,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let not_ready = MasterService::get_replica_list(
+            &source,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(not_ready.code(), tonic::Code::FailedPrecondition);
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot_child_replicas(&source, "disk_key").await.len(), 1);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_120000_003").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_ssd_put_revoke_both_replica() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_ssd_service(&root);
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        snapshot_ssd_put_start(&source, client_id, "disk_key").await;
+        MasterService::put_revoke(
+            &source,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let not_ready = MasterService::get_replica_list(
+            &source,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(not_ready.code(), tonic::Code::FailedPrecondition);
+        MasterService::put_revoke(
+            &source,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let not_found = MasterService::get_replica_list(
+            &source,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(not_found.code(), tonic::Code::NotFound);
+        snapshot_roundtrip_any_state(&provider, &source, "20260806_120000_004").await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_ssd_remove_key() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = snapshot_ssd_service(&root);
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "test_segment", 0).await;
+        snapshot_ssd_put_start(&source, client_id, "disk_key").await;
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: "disk_key".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::remove(
+            &source,
+            Request::new(proto::RemoveRequest {
+                key: "disk_key".into(),
+                force: false,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let not_found = MasterService::get_replica_list(
+            &source,
+            Request::new(proto::GetReplicaListRequest {
+                key: "disk_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(not_found.code(), tonic::Code::NotFound);
+        snapshot_roundtrip_no_remount(&provider, &source, "20260806_120000_005", 0, 1).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_create_copy_task() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        for index in 0..3 {
+            mount_snapshot_segment_named(&source, client_id, &format!("segment_{index}"), index)
+                .await;
+        }
+        put_snapshot_object_preferred(&source, client_id, "test_key_1", "segment_0").await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "test_key_1").await.len(),
+            1
+        );
+        let task = MasterService::create_copy_task(
+            &source,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "test_key_1".into(),
+                tenant_id: String::new(),
+                targets: vec!["segment_1".into(), "segment_2".into()],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        assert!(
+            task.high != 0 || task.low != 0,
+            "copy task id must be non-zero"
+        );
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_001",
+            "segment_0",
+            1,
+            3,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_create_move_task() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        for index in 0..3 {
+            mount_snapshot_segment_named(&source, client_id, &format!("segment_{index}"), index)
+                .await;
+        }
+        put_snapshot_object_preferred(&source, client_id, "test_key_1", "segment_0").await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "test_key_1").await.len(),
+            1
+        );
+        let task = MasterService::create_move_task(
+            &source,
+            Request::new(proto::CreateMoveTaskRequest {
+                key: "test_key_1".into(),
+                source: "segment_0".into(),
+                target: "segment_1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        assert!(task.high != 0 || task.low != 0);
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_002",
+            "segment_0",
+            1,
+            3,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_query_task() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_1", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "test_key", "segment_0").await;
+        assert_eq!(snapshot_child_replicas(&source, "test_key").await.len(), 1);
+        let task = MasterService::create_copy_task(
+            &source,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "test_key".into(),
+                tenant_id: String::new(),
+                targets: vec!["segment_1".into()],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        let queried = MasterService::query_task(
+            &source,
+            Request::new(proto::QueryTaskRequest {
+                task_id: Some(task),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(queried.id, Some(task));
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_003",
+            "segment_0",
+            1,
+            2,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_fetch_tasks_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        let fetched = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 16,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert!(fetched.is_empty());
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_004",
+            "segment_0",
+            0,
+            1,
+            0,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_fetch_tasks_respects_batch_size() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_1", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "fetch_tasks_key_1", "segment_0").await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "fetch_tasks_key_1")
+                .await
+                .len(),
+            1
+        );
+        MasterService::create_copy_task(
+            &source,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "fetch_tasks_key_1".into(),
+                tenant_id: String::new(),
+                targets: vec!["segment_1".into()],
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::create_move_task(
+            &source,
+            Request::new(proto::CreateMoveTaskRequest {
+                key: "fetch_tasks_key_1".into(),
+                source: "segment_0".into(),
+                target: "segment_1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let first = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(first.len(), 1);
+        let second = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 1,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(second.len(), 1);
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_005",
+            "segment_0",
+            1,
+            2,
+            2,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_update_task_success() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_1", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "update_task_key_success", "segment_0")
+            .await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "update_task_key_success")
+                .await
+                .len(),
+            1
+        );
+        let task = MasterService::create_copy_task(
+            &source,
+            Request::new(proto::CreateCopyTaskRequest {
+                key: "update_task_key_success".into(),
+                tenant_id: String::new(),
+                targets: vec!["segment_1".into()],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        let fetched = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 16,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(fetched.len(), 1);
+        MasterService::mark_task_to_complete(
+            &source,
+            Request::new(proto::MarkTaskToCompleteRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                request: Some(proto::TaskCompleteRequest {
+                    id: Some(task),
+                    status: proto::TaskStatus::TaskSuccess as i32,
+                    message: "done".into(),
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        let queried = MasterService::query_task(
+            &source,
+            Request::new(proto::QueryTaskRequest {
+                task_id: Some(task),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(queried.status, proto::TaskStatus::TaskSuccess as i32);
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_006",
+            "segment_0",
+            1,
+            2,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_update_task_wrong_client() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let other_client = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        mount_snapshot_segment_named(&source, client_id, "segment_1", 1).await;
+        put_snapshot_object_preferred(&source, client_id, "update_task_wrong_client", "segment_0")
+            .await;
+        assert_eq!(
+            snapshot_child_replicas(&source, "update_task_wrong_client")
+                .await
+                .len(),
+            1
+        );
+        let task = MasterService::create_move_task(
+            &source,
+            Request::new(proto::CreateMoveTaskRequest {
+                key: "update_task_wrong_client".into(),
+                source: "segment_0".into(),
+                target: "segment_1".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .task_id
+        .unwrap();
+        let fetched = MasterService::fetch_tasks(
+            &source,
+            Request::new(proto::FetchTasksRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                batch_size: 16,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(fetched.len(), 1);
+        let rejected = MasterService::mark_task_to_complete(
+            &source,
+            Request::new(proto::MarkTaskToCompleteRequest {
+                client_id: Some(uuid_to_proto(other_client)),
+                request: Some(proto::TaskCompleteRequest {
+                    id: Some(task),
+                    status: proto::TaskStatus::TaskSuccess as i32,
+                    message: "should_not_work".into(),
+                }),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::PermissionDenied);
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_007",
+            "segment_0",
+            1,
+            2,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_snapshot_update_task_not_found() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "segment_0", 0).await;
+        let rejected = MasterService::mark_task_to_complete(
+            &source,
+            Request::new(proto::MarkTaskToCompleteRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                request: Some(proto::TaskCompleteRequest {
+                    id: Some(proto::Uuid {
+                        high: 0xdead,
+                        low: 0xbeef,
+                    }),
+                    status: proto::TaskStatus::TaskFailed as i32,
+                    message: "not_found".into(),
+                }),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(rejected.code(), tonic::Code::NotFound);
+        snapshot_task_roundtrip(
+            &provider,
+            &source,
+            client_id,
+            "20260806_050000_008",
+            "segment_0",
+            0,
+            1,
+            0,
+        )
+        .await;
     }
 
     fn invalid_integer_task_id_payload() -> Vec<u8> {
@@ -5677,5 +9595,401 @@ mod snapshot_restore_tests {
         assert_eq!(error.code(), tonic::Code::Unavailable);
         assert!(service.is_service_fenced());
         assert!(!service.is_service_available());
+    }
+}
+
+#[cfg(test)]
+mod tenant_quota_parity_tests {
+    use super::*;
+
+    fn quota_service() -> MasterServiceImpl {
+        MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_tenant_quota: true,
+            tenant_quota_pool_capacity_bytes: 2_000,
+            tenant_quota_connector_uri: "/tmp/mooncake-tq-parity-policy.yaml".to_string(),
+            ..Default::default()
+        })
+    }
+
+    fn committed_object(
+        tenant_id: &TenantId,
+        user_key: &str,
+        size: u64,
+    ) -> (SegmentEntry, String, ObjectEntry) {
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let segment = SegmentEntry {
+            segment: mooncake_store_core::Segment {
+                id: segment_id,
+                name: format!("tq-parity-segment-{user_key}"),
+                base: 0x3000,
+                size: size.max(1024),
+                te_endpoint: String::new(),
+                protocol: "tcp".to_string(),
+                host_id: String::new(),
+            },
+            used: size,
+            client_id,
+            status: proto::SegmentStatus::Active,
+        };
+        let object = ObjectEntry {
+            replicas: vec![ReplicaDescriptor {
+                segment_id,
+                segment_name: segment.segment.name.clone(),
+                offset: 0,
+                size,
+                status: ReplicaStatus::Complete,
+                replica_type: ReplicaType::Memory,
+                holder_client_id: Some(client_id),
+                local_disk_storage_id: None,
+                local_disk_generation_id: None,
+                refcnt: 0,
+                handle_valid: true,
+                base_addr: 0x3000,
+                protocol: "tcp".to_string(),
+            }],
+            size,
+            last_access: SystemTime::now(),
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id,
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: tenant_id.clone(),
+            group_id: String::new(),
+            quota_committed: true,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: size,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            user_key: user_key.to_string(),
+        };
+        (segment, tenant_id.make_scoped_key(user_key), object)
+    }
+
+    // RebuildUsageCreatesAndRemovesOrphans: the production snapshot restore
+    // path rebuilds committed quota charges, keeps explicit policies, and a
+    // later empty restore removes only the accounting-only orphan.
+    #[test]
+    fn cpp_parity_restore_rebuilds_then_removes_quota_orphan() {
+        let service = quota_service();
+        service.upsert_tenant_quota_policy("tenant-a", 100).unwrap();
+        let tenant_a = TenantId::new("tenant-a".to_string()).unwrap();
+        let orphan = TenantId::new("orphan".to_string()).unwrap();
+
+        let (segment_a, key_a, object_a) = committed_object(&tenant_a, "obj-a", 40);
+        let (segment_o, key_o, object_o) = committed_object(&orphan, "obj-o", 20);
+        restore_loaded_snapshot_state(
+            &service.state,
+            vec![segment_a, segment_o],
+            Vec::new(),
+            vec![(key_a, object_a), (key_o, object_o)],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+        let a_snapshot = service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .unwrap();
+        let o_snapshot = service
+            .get_tenant_quota_snapshot("orphan")
+            .unwrap()
+            .unwrap();
+        assert_eq!(a_snapshot.committed_count, 1);
+        assert_eq!(a_snapshot.metadata_object_count, 1);
+        assert!(a_snapshot.has_explicit_policy);
+        assert_eq!(o_snapshot.committed_count, 1);
+        assert_eq!(o_snapshot.metadata_object_count, 1);
+        assert!(!o_snapshot.has_explicit_policy);
+        assert!(o_snapshot.over_quota);
+
+        restore_loaded_snapshot_state(
+            &service.state,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            service
+                .get_tenant_quota_snapshot("orphan")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            service
+                .get_tenant_quota_snapshot("tenant-a")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // ShardedTenantQuotaTableTest.ConcurrentReserveNeverExceedsQuota: twenty
+    // synchronized reservations of 100 against a 1,000 quota stop at exactly
+    // ten successes with final reserved bytes exactly 1,000.
+    #[tokio::test]
+    async fn cpp_parity_twenty_concurrent_reservations_stop_exactly_at_quota() {
+        let service = Arc::new(quota_service());
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1_000)
+            .unwrap();
+        let tenant = TenantId::new("tenant-a".to_string()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(20));
+        let mut workers = Vec::new();
+        for _ in 0..20 {
+            let service = Arc::clone(&service);
+            let tenant = tenant.clone();
+            let barrier = Arc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                service.reserve_tenant_quota(&tenant, 100).is_ok()
+            }));
+        }
+        let successes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(successes, 10);
+        let snapshot = service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.reserved_bytes, 1_000);
+    }
+
+    // ShardedTenantQuotaTableTest.DifferentShardsUpdateIndependently: two
+    // tenants complete 1,000 reserve(1)/abort(1) cycles concurrently with zero
+    // failures and both end with reserved_bytes 0.
+    #[tokio::test]
+    async fn cpp_parity_two_tenants_complete_concurrent_reserve_abort_cycles() {
+        let service = Arc::new(quota_service());
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1_000)
+            .unwrap();
+        service
+            .upsert_tenant_quota_policy("tenant-b", 1_000)
+            .unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut workers = Vec::new();
+        for tenant_name in ["tenant-a", "tenant-b"] {
+            let service = Arc::clone(&service);
+            let barrier = Arc::clone(&barrier);
+            let tenant = TenantId::new(tenant_name.to_string()).unwrap();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..1_000 {
+                    service.reserve_tenant_quota(&tenant, 1).unwrap();
+                    service.abort_tenant_quota(&tenant, 1).unwrap();
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        for tenant_name in ["tenant-a", "tenant-b"] {
+            let snapshot = service
+                .get_tenant_quota_snapshot(tenant_name)
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.reserved_bytes, 0);
+        }
+    }
+
+    // ShardedTenantQuotaTableTest.RecomputeCanRunWithAccounting: recomputation
+    // racing 1,000 reserve/abort cycles stays consistent with zero failures
+    // and the final ledger is clean.
+    #[tokio::test]
+    async fn cpp_parity_recompute_and_accounting_are_concurrently_consistent() {
+        let service = Arc::new(quota_service());
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1_000)
+            .unwrap();
+        let tenant = TenantId::new("tenant-a".to_string()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let accounting = {
+            let service = Arc::clone(&service);
+            let tenant = tenant.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..1_000 {
+                    service.reserve_tenant_quota(&tenant, 1).unwrap();
+                    service.abort_tenant_quota(&tenant, 1).unwrap();
+                }
+            })
+        };
+        let recompute = {
+            let service = Arc::clone(&service);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..1_000 {
+                    let capacity = service.tenant_quota_capacity_bytes();
+                    service
+                        .state
+                        .tenant_quotas
+                        .write()
+                        .recompute_effective_quotas(capacity);
+                }
+            })
+        };
+        accounting.join().unwrap();
+        recompute.join().unwrap();
+
+        let snapshot = service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.reserved_bytes, 0);
+        assert_eq!(snapshot.effective_quota_bytes, 1_000);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_delete_disables_positive_and_zero_reservations_before_connector_save_finishes()
+     {
+        // C++ MasterServiceTenantQuotaTest.DeletePolicyBlocksValidatedReservationsBeforeConnectorSave:
+        // once deletion has disabled tenant-a admission but while the connector
+        // save is deliberately paused, both 1-byte and zero-byte reservations
+        // fail TENANT_NOT_REGISTERED; after save resumes, deletion succeeds
+        // with no snapshot.
+        let service = std::sync::Arc::new(quota_service());
+        let barrier = service.install_policy_save_barrier();
+        let tenant = TenantId::new("tenant-a".to_owned()).expect("valid tenant");
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1000)
+            .unwrap();
+
+        let delete_tenant = tenant.clone();
+        let delete_service = std::sync::Arc::clone(&service);
+        let delete_handle = std::thread::spawn(move || {
+            delete_service.delete_tenant_quota_policy_for_tenant(&delete_tenant)
+        });
+
+        barrier.wait_started();
+
+        let one_byte = service.reserve_tenant_quota(&tenant, 1).unwrap_err();
+        assert_eq!(one_byte.code(), tonic::Code::ResourceExhausted);
+        assert!(one_byte.message().contains("tenant not registered"));
+        let zero_byte = service.reserve_tenant_quota(&tenant, 0).unwrap_err();
+        assert_eq!(zero_byte.code(), tonic::Code::ResourceExhausted);
+        assert!(zero_byte.message().contains("tenant not registered"));
+
+        barrier.release_save();
+        let delete_result = delete_handle.join().expect("delete thread joined");
+        assert!(delete_result.is_ok(), "{delete_result:?}");
+        assert!(
+            service
+                .get_tenant_quota_snapshot("tenant-a")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tenant_quota_delete_and_upsert_persist_in_mutation_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy_path = temp.path().join("quota.yaml");
+        let service = Arc::new(MasterServiceImpl::with_runtime_config(
+            MasterRuntimeConfig {
+                enable_tenant_quota: true,
+                tenant_quota_pool_capacity_bytes: 2_000,
+                tenant_quota_connector_type: "file".to_string(),
+                tenant_quota_connector_uri: policy_path.display().to_string(),
+                ..Default::default()
+            },
+        ));
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1_000)
+            .unwrap();
+        let barrier = service.install_policy_save_barrier();
+        let tenant = TenantId::new("tenant-a".to_string()).unwrap();
+
+        let delete_service = Arc::clone(&service);
+        let delete_tenant = tenant.clone();
+        let delete = std::thread::spawn(move || {
+            delete_service.delete_tenant_quota_policy_for_tenant(&delete_tenant)
+        });
+        barrier.wait_started();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let upsert_service = Arc::clone(&service);
+        let upsert = std::thread::spawn(move || {
+            let result = upsert_service.upsert_tenant_quota_policy("tenant-a", 777);
+            tx.send(result).unwrap();
+        });
+        let premature = rx.recv_timeout(Duration::from_millis(100)).ok();
+        let upsert_overtook_delete = premature.is_some();
+        barrier.release_save();
+        delete.join().unwrap().unwrap();
+        let upsert_result = match premature {
+            Some(result) => result,
+            None => rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        };
+        upsert.join().unwrap();
+        upsert_result.unwrap();
+
+        assert!(
+            !upsert_overtook_delete,
+            "upsert overtook an in-flight delete save"
+        );
+        let persisted = crate::tenant_quota_policy_store::load_tenant_quota_policy(
+            "file",
+            policy_path.to_str().unwrap(),
+            "mooncake_cluster",
+        )
+        .unwrap();
+        assert_eq!(persisted.tenant_quotas.get("tenant-a"), Some(&777));
+    }
+
+    #[test]
+    fn failed_tenant_quota_delete_restores_effective_quotas() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy_path = temp.path().join("quota.yaml");
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_tenant_quota: true,
+            tenant_quota_pool_capacity_bytes: 2_000,
+            tenant_quota_connector_type: "file".to_string(),
+            tenant_quota_connector_uri: policy_path.display().to_string(),
+            ..Default::default()
+        });
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1_000)
+            .unwrap();
+        service
+            .upsert_tenant_quota_policy("tenant-b", 1_000)
+            .unwrap();
+
+        std::fs::remove_file(&policy_path).unwrap();
+        std::fs::create_dir(&policy_path).unwrap();
+        let error = service.delete_tenant_quota_policy("tenant-a").unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+
+        let tenant_a = service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .unwrap();
+        let tenant_b = service
+            .get_tenant_quota_snapshot("tenant-b")
+            .unwrap()
+            .unwrap();
+        assert_eq!(tenant_a.effective_quota_bytes, 1_000);
+        assert_eq!(tenant_b.effective_quota_bytes, 1_000);
     }
 }

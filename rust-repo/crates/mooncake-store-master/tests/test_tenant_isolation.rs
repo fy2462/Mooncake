@@ -17,6 +17,10 @@
 //! - Offload / Promotion 心跳 key 内部已作用域化
 
 use dashmap::DashMap;
+use mooncake_store_master::metrics::{
+    BATCH_EXIST_KEY_FAILED_ITEMS, BATCH_EXIST_KEY_FAILURES, BATCH_EXIST_KEY_ITEMS,
+    BATCH_EXIST_KEY_PARTIAL_SUCCESSES, BATCH_EXIST_KEY_REQUESTS,
+};
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::service::ObjectEntry;
@@ -368,15 +372,17 @@ fn regex_lookup_and_removal_are_tenant_scoped_parity() {
         .unwrap()
         .into_inner();
         assert_eq!(removed_default.removed_count, 1);
-        assert!(MasterService::get_replica_list(
-            &service,
-            Request::new(proto::GetReplicaListRequest {
-                key: "regex_shared_key".into(),
-                tenant_id: "default".into(),
-            }),
-        )
-        .await
-        .is_err());
+        assert!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "regex_shared_key".into(),
+                    tenant_id: "default".into(),
+                }),
+            )
+            .await
+            .is_err()
+        );
         for tenant_id in ["tenant_regex_a", "tenant_regex_b"] {
             MasterService::get_replica_list(
                 &service,
@@ -401,15 +407,17 @@ fn regex_lookup_and_removal_are_tenant_scoped_parity() {
         .unwrap()
         .into_inner();
         assert_eq!(removed_a.removed_count, 1);
-        assert!(MasterService::get_replica_list(
-            &service,
-            Request::new(proto::GetReplicaListRequest {
-                key: "regex_shared_key".into(),
-                tenant_id: "tenant_regex_a".into(),
-            }),
-        )
-        .await
-        .is_err());
+        assert!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "regex_shared_key".into(),
+                    tenant_id: "tenant_regex_a".into(),
+                }),
+            )
+            .await
+            .is_err()
+        );
         MasterService::get_replica_list(
             &service,
             Request::new(proto::GetReplicaListRequest {
@@ -448,15 +456,17 @@ fn batch_remove_and_remove_all_are_tenant_scoped_parity() {
         .unwrap()
         .into_inner();
         assert_eq!(removed_a.statuses, [0]);
-        assert!(MasterService::get_replica_list(
-            &service,
-            Request::new(proto::GetReplicaListRequest {
-                key: key.into(),
-                tenant_id: "tenant_batch_remove_a".into(),
-            }),
-        )
-        .await
-        .is_err());
+        assert!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: key.into(),
+                    tenant_id: "tenant_batch_remove_a".into(),
+                }),
+            )
+            .await
+            .is_err()
+        );
         for tenant_id in ["default", "tenant_batch_remove_b"] {
             MasterService::get_replica_list(
                 &service,
@@ -480,15 +490,17 @@ fn batch_remove_and_remove_all_are_tenant_scoped_parity() {
         .unwrap()
         .into_inner();
         assert_eq!(removed_b.removed_count, 1);
-        assert!(MasterService::get_replica_list(
-            &service,
-            Request::new(proto::GetReplicaListRequest {
-                key: key.into(),
-                tenant_id: "tenant_batch_remove_b".into(),
-            }),
-        )
-        .await
-        .is_err());
+        assert!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: key.into(),
+                    tenant_id: "tenant_batch_remove_b".into(),
+                }),
+            )
+            .await
+            .is_err()
+        );
         MasterService::get_replica_list(
             &service,
             Request::new(proto::GetReplicaListRequest {
@@ -510,15 +522,17 @@ fn batch_remove_and_remove_all_are_tenant_scoped_parity() {
         .unwrap()
         .into_inner();
         assert_eq!(removed_default.removed_count, 1);
-        assert!(MasterService::get_replica_list(
-            &service,
-            Request::new(proto::GetReplicaListRequest {
-                key: key.into(),
-                tenant_id: "default".into(),
-            }),
-        )
-        .await
-        .is_err());
+        assert!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: key.into(),
+                    tenant_id: "default".into(),
+                }),
+            )
+            .await
+            .is_err()
+        );
     });
 }
 
@@ -845,6 +859,435 @@ fn test_backward_compat_empty_tenant_defaults() {
             exists_d.exists,
             "explicit default tenant should find the key"
         );
+    });
+}
+
+#[test]
+fn same_key_tenant_isolation_with_exact_key_counts_parity() {
+    let service = strict_service(&["tenant_a", "tenant_b"], Duration::ZERO);
+    let client_id = Uuid::new_v4();
+    mount_seg(&service, "isolation:1", client_id, 4096);
+
+    put_object(&service, "shared_user_key", "tenant_a", client_id, 1024);
+    put_object(&service, "shared_user_key", "tenant_b", client_id, 2048);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let default_get = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "shared_user_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(default_get.code(), tonic::Code::NotFound);
+
+        let default_exists = MasterService::exist_key(
+            &service,
+            Request::new(proto::ExistKeyRequest {
+                key: "shared_user_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(!default_exists.exists);
+
+        for tenant_id in ["tenant_a", "tenant_b"] {
+            let exists = MasterService::exist_key(
+                &service,
+                Request::new(proto::ExistKeyRequest {
+                    key: "shared_user_key".into(),
+                    tenant_id: tenant_id.into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert!(exists.exists, "key should exist in {tenant_id}");
+            let list = MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "shared_user_key".into(),
+                    tenant_id: tenant_id.into(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(list.replicas.len(), 1);
+            assert_eq!(
+                list.replicas[0].size,
+                if tenant_id == "tenant_a" { 1024 } else { 2048 }
+            );
+        }
+
+        let count = MasterService::get_all_keys_for_admin(
+            &service,
+            Request::new(proto::GetAllKeysForAdminRequest {}),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .keys
+        .len();
+        assert_eq!(count, 2);
+
+        MasterService::remove(
+            &service,
+            Request::new(proto::RemoveRequest {
+                key: "shared_user_key".into(),
+                force: true,
+                tenant_id: "tenant_a".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "shared_user_key".into(),
+                    tenant_id: "tenant_a".into(),
+                }),
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+        assert!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "shared_user_key".into(),
+                    tenant_id: "tenant_b".into(),
+                }),
+            )
+            .await
+            .is_ok()
+        );
+        let count_after = MasterService::get_all_keys_for_admin(
+            &service,
+            Request::new(proto::GetAllKeysForAdminRequest {}),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .keys
+        .len();
+        assert_eq!(count_after, 1);
+    });
+}
+
+#[test]
+fn batch_upsert_and_revoke_are_tenant_scoped_parity() {
+    let service = strict_service(
+        &["tenant_batch_upsert_a", "tenant_batch_upsert_b"],
+        Duration::ZERO,
+    );
+    let client_id = Uuid::new_v4();
+    mount_seg(&service, "batch-upsert:1", client_id, 16 * 1024 * 1024);
+    let keys = ["tenant_batch_upsert_key_a", "tenant_batch_upsert_key_b"];
+    let sizes = [1024u64, 2048];
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        for tenant_id in ["tenant_batch_upsert_a", "tenant_batch_upsert_b"] {
+            let start = MasterService::batch_upsert_start(
+                &service,
+                Request::new(proto::BatchUpsertStartRequest {
+                    entries: keys
+                        .iter()
+                        .zip(sizes.iter())
+                        .map(|(key, size)| proto::UpsertEntry {
+                            client_id: Some(client_proto(client_id)),
+                            key: key.to_string(),
+                            slice_length: *size,
+                            config: Some(proto::ReplicateConfig {
+                                replica_num: 1,
+                                ..Default::default()
+                            }),
+                            tenant_id: tenant_id.into(),
+                        })
+                        .collect(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(start.statuses, [0, 0]);
+            assert_eq!(start.results.len(), 2);
+
+            let end = MasterService::batch_upsert_end(
+                &service,
+                Request::new(proto::BatchUpsertEndRequest {
+                    entries: keys
+                        .iter()
+                        .map(|key| proto::PutEndEntry {
+                            client_id: Some(client_proto(client_id)),
+                            key: key.to_string(),
+                            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                            tenant_id: tenant_id.into(),
+                        })
+                        .collect(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            assert_eq!(end.statuses, [0, 0]);
+        }
+
+        for key in keys {
+            assert_eq!(
+                MasterService::get_replica_list(
+                    &service,
+                    Request::new(proto::GetReplicaListRequest {
+                        key: key.into(),
+                        tenant_id: String::new(),
+                    }),
+                )
+                .await
+                .unwrap_err()
+                .code(),
+                tonic::Code::NotFound
+            );
+            for tenant_id in ["tenant_batch_upsert_a", "tenant_batch_upsert_b"] {
+                assert!(
+                    MasterService::get_replica_list(
+                        &service,
+                        Request::new(proto::GetReplicaListRequest {
+                            key: key.into(),
+                            tenant_id: tenant_id.into(),
+                        }),
+                    )
+                    .await
+                    .is_ok()
+                );
+            }
+        }
+
+        let revoke_key = "tenant_batch_upsert_revoke_key";
+        let revoke_start = MasterService::batch_upsert_start(
+            &service,
+            Request::new(proto::BatchUpsertStartRequest {
+                entries: vec![proto::UpsertEntry {
+                    client_id: Some(client_proto(client_id)),
+                    key: revoke_key.into(),
+                    slice_length: 1024,
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: 1,
+                        ..Default::default()
+                    }),
+                    tenant_id: "tenant_batch_upsert_a".into(),
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(revoke_start.statuses, [0]);
+
+        let revoke = MasterService::batch_upsert_revoke(
+            &service,
+            Request::new(proto::BatchUpsertRevokeRequest {
+                entries: vec![proto::PutEndEntry {
+                    client_id: Some(client_proto(client_id)),
+                    key: revoke_key.into(),
+                    replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                    tenant_id: "tenant_batch_upsert_a".into(),
+                }],
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(revoke.statuses, [0]);
+
+        assert_eq!(
+            MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: revoke_key.into(),
+                    tenant_id: "tenant_batch_upsert_a".into(),
+                }),
+            )
+            .await
+            .unwrap_err()
+            .code(),
+            tonic::Code::NotFound
+        );
+    });
+}
+
+#[test]
+fn legacy_remove_all_crosses_all_tenants_parity() {
+    let service = strict_service(
+        &["default", "legacy_remove_all_a", "legacy_remove_all_b"],
+        Duration::ZERO,
+    );
+    let client_id = Uuid::new_v4();
+    mount_seg(&service, "legacy-remove-all:1", client_id, 16 * 1024 * 1024);
+
+    put_object(
+        &service,
+        "legacy_remove_all_shared_key",
+        "default",
+        client_id,
+        1024,
+    );
+    put_object(
+        &service,
+        "legacy_remove_all_shared_key",
+        "legacy_remove_all_a",
+        client_id,
+        1024,
+    );
+    put_object(
+        &service,
+        "legacy_remove_all_shared_key",
+        "legacy_remove_all_b",
+        client_id,
+        1024,
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let first = MasterService::remove_all(
+            &service,
+            Request::new(proto::RemoveAllRequest {
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .removed_count;
+        assert_eq!(first, 3);
+
+        for tenant_id in ["default", "legacy_remove_all_a", "legacy_remove_all_b"] {
+            assert_eq!(
+                MasterService::get_replica_list(
+                    &service,
+                    Request::new(proto::GetReplicaListRequest {
+                        key: "legacy_remove_all_shared_key".into(),
+                        tenant_id: tenant_id.into(),
+                    }),
+                )
+                .await
+                .unwrap_err()
+                .code(),
+                tonic::Code::NotFound
+            );
+        }
+
+        let second = MasterService::remove_all(
+            &service,
+            Request::new(proto::RemoveAllRequest {
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .removed_count;
+        assert_eq!(second, 0);
+    });
+}
+
+#[test]
+fn wrapped_batch_exist_uses_tenant_path_and_metrics_parity() {
+    let service = strict_service(&["default", "wrapped_batch_exist_tenant"], Duration::ZERO);
+    let client_id = Uuid::new_v4();
+    mount_seg(
+        &service,
+        "wrapped-batch-exist:1",
+        client_id,
+        16 * 1024 * 1024,
+    );
+    put_object(
+        &service,
+        "wrapped_batch_default_only",
+        "default",
+        client_id,
+        1024,
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let tenant_keys = ["wrapped_batch_tenant_a", "wrapped_batch_tenant_b"];
+        let start = MasterService::batch_put_start(
+            &service,
+            Request::new(proto::BatchPutStartRequest {
+                client_id: Some(client_proto(client_id)),
+                keys: tenant_keys.iter().map(|key| key.to_string()).collect(),
+                slice_lengths: vec![1024, 2048],
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+                tenant_id: "wrapped_batch_exist_tenant".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(start.results.len(), 2);
+        assert!(start.results.iter().all(|result| result.status == 0));
+
+        MasterService::batch_put_end(
+            &service,
+            Request::new(proto::BatchPutEndRequest {
+                entries: tenant_keys
+                    .iter()
+                    .map(|key| proto::PutEndEntry {
+                        client_id: Some(client_proto(client_id)),
+                        key: key.to_string(),
+                        replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                        tenant_id: "wrapped_batch_exist_tenant".into(),
+                    })
+                    .collect(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let base_requests = BATCH_EXIST_KEY_REQUESTS.get();
+        let base_items = BATCH_EXIST_KEY_ITEMS.get();
+        let base_failures = BATCH_EXIST_KEY_FAILURES.get();
+        let base_partial = BATCH_EXIST_KEY_PARTIAL_SUCCESSES.get();
+        let base_failed_items = BATCH_EXIST_KEY_FAILED_ITEMS.get();
+
+        let lookup_keys = [
+            "wrapped_batch_tenant_a",
+            "wrapped_batch_default_only",
+            "wrapped_batch_missing",
+            "wrapped_batch_tenant_b",
+        ];
+        let response = MasterService::batch_exist_key(
+            &service,
+            Request::new(proto::BatchExistKeyRequest {
+                keys: lookup_keys.iter().map(|key| key.to_string()).collect(),
+                tenant_id: "wrapped_batch_exist_tenant".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.results, vec![true, false, false, true]);
+
+        assert_eq!(BATCH_EXIST_KEY_REQUESTS.get(), base_requests + 1);
+        assert_eq!(BATCH_EXIST_KEY_ITEMS.get(), base_items + 4);
+        assert_eq!(BATCH_EXIST_KEY_FAILURES.get(), base_failures);
+        assert_eq!(BATCH_EXIST_KEY_PARTIAL_SUCCESSES.get(), base_partial);
+        assert_eq!(BATCH_EXIST_KEY_FAILED_ITEMS.get(), base_failed_items);
     });
 }
 

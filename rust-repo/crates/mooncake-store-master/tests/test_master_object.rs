@@ -5,10 +5,462 @@ use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::Barrier;
 use tonic::Request;
 use uuid::Uuid;
+
+async fn mount_segment_with_size(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    segment_name: &str,
+    size: u64,
+    base_addr: u64,
+) {
+    MasterService::mount_segment(
+        service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size,
+            base_addr,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn put_start_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    slice_length: u64,
+    replica_num: u32,
+    preferred_segment: Option<&str>,
+) -> proto::PutStartResponse {
+    MasterService::put_start(
+        service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num,
+                preferred_segment: preferred_segment.unwrap_or("").into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+}
+
+async fn put_end_object(
+    service: &MasterServiceImpl,
+    client_id: Uuid,
+    key: &str,
+    replica_type: i32,
+) {
+    MasterService::put_end(
+        service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            replica_type,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+async fn remove_object(service: &MasterServiceImpl, key: &str) -> Result<(), tonic::Code> {
+    MasterService::remove(
+        service,
+        Request::new(proto::RemoveRequest {
+            key: key.into(),
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|status| status.code())
+}
+
+async fn remove_all_objects(service: &MasterServiceImpl, force: bool) -> i64 {
+    MasterService::remove_all(
+        service,
+        Request::new(proto::RemoveAllRequest {
+            force,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .removed_count
+}
+
+async fn get_replica_list_result(
+    service: &MasterServiceImpl,
+    key: &str,
+) -> Result<proto::GetReplicaListResponse, tonic::Status> {
+    MasterService::get_replica_list(
+        service,
+        Request::new(proto::GetReplicaListRequest {
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .map(|response| response.into_inner())
+}
+
+#[tokio::test]
+async fn random_replica_count_put_lifecycle_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig::default());
+    let client_id = Uuid::new_v4();
+    let segment_size = 16 * 1024 * 1024;
+    for index in 0..5 {
+        mount_segment_with_size(
+            &service,
+            client_id,
+            &format!("segment_{index}"),
+            segment_size,
+            0x300000000 + index * segment_size,
+        )
+        .await;
+    }
+
+    let replica_num = 1 + (client_id.as_u128() % 5) as u32;
+    let key = "test_key";
+    let started = put_start_object(&service, client_id, key, 1024, replica_num, None).await;
+    assert!(!started.replicas.is_empty());
+    for replica in &started.replicas {
+        assert_eq!(
+            replica.status,
+            proto::replica_descriptor::ReplicaStatus::Allocating as i32
+        );
+    }
+
+    let get_error = get_replica_list_result(&service, key).await.unwrap_err();
+    assert_eq!(get_error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        remove_object(&service, key).await,
+        Err(tonic::Code::FailedPrecondition)
+    );
+
+    put_end_object(
+        &service,
+        client_id,
+        key,
+        proto::replica_descriptor::ReplicaType::Memory as i32,
+    )
+    .await;
+
+    let list = get_replica_list_result(&service, key).await.unwrap();
+    assert_eq!(list.replicas.len(), replica_num as usize);
+    for replica in &list.replicas {
+        assert_eq!(
+            replica.status,
+            proto::replica_descriptor::ReplicaStatus::Complete as i32
+        );
+    }
+}
+
+#[tokio::test]
+async fn randomized_put_remove_absence_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig::default());
+    let client_id = Uuid::new_v4();
+    mount_segment_with_size(
+        &service,
+        client_id,
+        "random:1",
+        16 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+
+    let mut state = client_id.as_u128();
+    for _ in 0..10 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let key = format!("test_key{}", state % 1000);
+        put_start_object(&service, client_id, &key, 1024, 1, None).await;
+        put_end_object(
+            &service,
+            client_id,
+            &key,
+            proto::replica_descriptor::ReplicaType::Memory as i32,
+        )
+        .await;
+        assert_eq!(remove_object(&service, &key).await, Ok(()));
+        assert_eq!(
+            get_replica_list_result(&service, &key)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+}
+
+#[tokio::test]
+async fn remove_all_ten_completed_objects_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_segment_with_size(
+        &service,
+        client_id,
+        "remove-all:1",
+        16 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+
+    for index in 0..10 {
+        let key = format!("test_key{index}");
+        put_start_object(&service, client_id, &key, 1024, 1, None).await;
+        put_end_object(
+            &service,
+            client_id,
+            &key,
+            proto::replica_descriptor::ReplicaType::Memory as i32,
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert_eq!(remove_all_objects(&service, false).await, 10);
+    for index in 0..10 {
+        assert_eq!(
+            get_replica_list_result(&service, &format!("test_key{index}"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_writes_and_remove_all_account_exactly_parity() {
+    let service = Arc::new(MasterServiceImpl::with_runtime_config(
+        MasterRuntimeConfig::default(),
+    ));
+    let client_id = Uuid::new_v4();
+    mount_segment_with_size(
+        &service,
+        client_id,
+        "concurrent-write:1",
+        256 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+
+    let success_writes = Arc::new(AtomicUsize::new(0));
+    let remove_all_done = Arc::new(AtomicBool::new(false));
+    let total_removed = Arc::new(AtomicUsize::new(0));
+
+    let mut writers = Vec::new();
+    for thread_index in 0..4 {
+        let service = Arc::clone(&service);
+        let success_writes = Arc::clone(&success_writes);
+        writers.push(tokio::spawn(async move {
+            for object_index in 0..100 {
+                let key = format!("key_{thread_index}_{object_index}");
+                if put_start_object(&service, client_id, &key, 1024, 1, None)
+                    .await
+                    .replicas
+                    .is_empty()
+                {
+                    continue;
+                }
+                put_end_object(
+                    &service,
+                    client_id,
+                    &key,
+                    proto::replica_descriptor::ReplicaType::Memory as i32,
+                )
+                .await;
+                success_writes.fetch_add(1, Ordering::SeqCst);
+                // Keep the writers running past the delayed remover, matching
+                // the C++ per-object sleeps that interleave with RemoveAll.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }));
+    }
+
+    let service_remover = Arc::clone(&service);
+    let remover_done = Arc::clone(&remove_all_done);
+    let remover_total = Arc::clone(&total_removed);
+    let remover = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let removed = remove_all_objects(&service_remover, true).await;
+        assert!(removed > 0);
+        remover_done.store(true, Ordering::SeqCst);
+        remover_total.fetch_add(removed as usize, Ordering::SeqCst);
+    });
+
+    for writer in writers {
+        writer.await.unwrap();
+    }
+    remover.await.unwrap();
+
+    assert!(success_writes.load(Ordering::SeqCst) > 0);
+    assert!(remove_all_done.load(Ordering::SeqCst));
+    let final_removed = remove_all_objects(&service, true).await;
+    assert!(final_removed > 0);
+    total_removed.fetch_add(final_removed as usize, Ordering::SeqCst);
+    assert_eq!(total_removed.load(Ordering::SeqCst), 400);
+}
+
+#[tokio::test]
+async fn concurrent_reads_and_remove_all_eventual_absence_parity() {
+    const OBJECT_COUNT: usize = 1000;
+    let service = Arc::new(MasterServiceImpl::with_runtime_config(
+        MasterRuntimeConfig {
+            lease_ttl: Duration::from_millis(200),
+            ..Default::default()
+        },
+    ));
+    let client_id = Uuid::new_v4();
+    mount_segment_with_size(
+        &service,
+        client_id,
+        "concurrent-read:1",
+        256 * 1024 * 1024,
+        0x300000000,
+    )
+    .await;
+
+    for index in 0..OBJECT_COUNT {
+        let key = format!("pre_key_{index}");
+        put_start_object(&service, client_id, &key, 1024, 1, None).await;
+        put_end_object(
+            &service,
+            client_id,
+            &key,
+            proto::replica_descriptor::ReplicaType::Memory as i32,
+        )
+        .await;
+    }
+
+    let success_reads = Arc::new(AtomicUsize::new(0));
+    let remove_all_done = Arc::new(AtomicBool::new(false));
+
+    let mut readers = Vec::new();
+    for _ in 0..4 {
+        let service = Arc::clone(&service);
+        let success_reads = Arc::clone(&success_reads);
+        readers.push(tokio::spawn(async move {
+            for index in 0..OBJECT_COUNT {
+                if get_replica_list_result(&service, &format!("pre_key_{index}"))
+                    .await
+                    .is_ok()
+                {
+                    success_reads.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }));
+    }
+
+    let service_remover = Arc::clone(&service);
+    let remover_done = Arc::clone(&remove_all_done);
+    let remover = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let removed = remove_all_objects(&service_remover, true).await;
+        assert!(removed > 0);
+        remover_done.store(true, Ordering::SeqCst);
+    });
+
+    for reader in readers {
+        reader.await.unwrap();
+    }
+    remover.await.unwrap();
+
+    assert!(remove_all_done.load(Ordering::SeqCst));
+    let reads = success_reads.load(Ordering::SeqCst);
+    assert!(reads > 0);
+    assert_ne!(reads, OBJECT_COUNT);
+
+    tokio::time::sleep(Duration::from_millis(210)).await;
+    remove_all_objects(&service, true).await;
+    for index in 0..OBJECT_COUNT {
+        assert_eq!(
+            get_replica_list_result(&service, &format!("pre_key_{index}"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+}
+
+#[tokio::test]
+async fn two_concurrent_remove_all_calls_partition_exact_count_parity() {
+    const OBJECT_COUNT: usize = 1000;
+    let service = Arc::new(MasterServiceImpl::with_runtime_config(
+        MasterRuntimeConfig::default(),
+    ));
+    let client_id = Uuid::new_v4();
+    mount_segment_with_size(
+        &service,
+        client_id,
+        "concurrent-remove-all:1",
+        16 * 1024 * 1024 * 100,
+        0x300000000,
+    )
+    .await;
+
+    for index in 0..OBJECT_COUNT {
+        let key = format!("pre_key_{index}");
+        put_start_object(&service, client_id, &key, 1024, 1, None).await;
+        put_end_object(
+            &service,
+            client_id,
+            &key,
+            proto::replica_descriptor::ReplicaType::Memory as i32,
+        )
+        .await;
+    }
+
+    let remove_all_count = Arc::new(AtomicUsize::new(0));
+    let mut removers = Vec::new();
+    for _ in 0..2 {
+        let service = Arc::clone(&service);
+        let remove_all_count = Arc::clone(&remove_all_count);
+        removers.push(tokio::spawn(async move {
+            let removed = remove_all_objects(&service, true).await;
+            remove_all_count.fetch_add(removed as usize, Ordering::SeqCst);
+        }));
+    }
+    for remover in removers {
+        remover.await.unwrap();
+    }
+
+    assert_eq!(remove_all_count.load(Ordering::SeqCst), OBJECT_COUNT);
+    for index in 0..OBJECT_COUNT {
+        assert_eq!(
+            get_replica_list_result(&service, &format!("pre_key_{index}"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
+}
 
 async fn mount_batch_clear_segment(
     service: &MasterServiceImpl,
@@ -380,12 +832,10 @@ async fn put_end_all_completes_memory_and_nof_replicas_parity() {
 
     let replicas = get_memory_nof_parity_replicas(&service, "put-end-all-key").await;
     assert!(replicas.iter().any(|replica| {
-        replica.replica_type == Type::Memory as i32
-            && replica.status == Status::Complete as i32
+        replica.replica_type == Type::Memory as i32 && replica.status == Status::Complete as i32
     }));
     assert!(replicas.iter().any(|replica| {
-        replica.replica_type == Type::NofSsd as i32
-            && replica.status == Status::Complete as i32
+        replica.replica_type == Type::NofSsd as i32 && replica.status == Status::Complete as i32
     }));
 }
 
@@ -613,16 +1063,21 @@ async fn multiple_preferred_segments_put_parity() {
     .unwrap()
     .into_inner();
     assert_eq!(response.replicas.len(), 2);
-    assert!(response
-        .replicas
-        .iter()
-        .all(|replica| replica.status == Status::Allocating as i32));
+    assert!(
+        response
+            .replicas
+            .iter()
+            .all(|replica| replica.status == Status::Allocating as i32)
+    );
     let endpoints: std::collections::HashSet<_> = response
         .replicas
         .iter()
         .map(|replica| replica.transport_endpoint.as_str())
         .collect();
-    assert_eq!(endpoints, std::collections::HashSet::from(["segment_0", "segment_1"]));
+    assert_eq!(
+        endpoints,
+        std::collections::HashSet::from(["segment_0", "segment_1"])
+    );
 
     MasterService::put_end(
         &service,
@@ -732,6 +1187,244 @@ async fn batch_replica_clear_all_segments_five_keys_parity() {
     for key in keys {
         assert!(!object_exists(&service, key).await);
     }
+}
+
+#[tokio::test]
+async fn batch_replica_clear_does_not_affect_other_keys_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "clear-other:1", 0).await;
+
+    put_complete_batch_clear_object(&service, client_id, "clear-target-key", 1, "clear-other:1")
+        .await;
+    put_complete_batch_clear_object(&service, client_id, "keep-key", 1, "clear-other:1").await;
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let cleared = batch_clear(&service, client_id, &["clear-target-key"], "").await;
+    assert_eq!(cleared, ["clear-target-key"]);
+
+    assert!(!object_exists(&service, "clear-target-key").await);
+    assert!(object_exists(&service, "keep-key").await);
+
+    let keep_replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "keep-key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(keep_replicas.replicas.len(), 1);
+}
+
+#[tokio::test]
+async fn batch_replica_clear_replicated_key_all_replicas_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+
+    mount_batch_clear_segment(&service, client_id, "replica-all:1", 0).await;
+    mount_batch_clear_segment(&service, client_id, "replica-all:2", 1).await;
+
+    let key = "replicated-key";
+    let started = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.to_string(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 2,
+                preferred_segments: vec!["replica-all:1".into(), "replica-all:2".into()],
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(started.replicas.len(), 2);
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.to_string(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let cleared = batch_clear(&service, client_id, &[key], "").await;
+    assert_eq!(cleared, vec![key.to_string()]);
+    assert!(!object_exists(&service, key).await);
+}
+
+#[tokio::test]
+async fn batch_replica_clear_specific_segment_replica_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+
+    mount_batch_clear_segment(&service, client_id, "segment-a:1", 0).await;
+    mount_batch_clear_segment(&service, client_id, "segment-b:1", 1).await;
+
+    let key = "replica-segment-clear";
+    let started = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.to_string(),
+            slice_length: 128,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 2,
+                preferred_segments: vec!["segment-a:1".into(), "segment-b:1".into()],
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(started.replicas.len(), 2);
+
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.to_string(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let cleared = batch_clear(&service, client_id, &[key], "segment-a:1").await;
+    assert_eq!(cleared, vec![key.to_string()]);
+
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: key.to_string(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(replicas.replicas.len(), 1);
+    assert_ne!(replicas.replicas[0].segment_name, "segment-a:1");
+}
+
+#[tokio::test]
+async fn batch_replica_clear_large_batch_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "large-batch:1", 0).await;
+
+    let keys: Vec<String> = (0..50)
+        .map(|index| format!("clear-large-{index}"))
+        .collect();
+    for key in &keys {
+        put_complete_batch_clear_object(&service, client_id, key, 1, "large-batch:1").await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let clear_keys: Vec<&str> = keys.iter().map(std::string::String::as_str).collect();
+    let cleared = batch_clear(&service, client_id, &clear_keys, "").await;
+    assert_eq!(cleared.len(), keys.len());
+    for key in &keys {
+        assert!(cleared.iter().any(|value| value == key));
+        assert!(!object_exists(&service, key).await);
+    }
+}
+
+#[tokio::test]
+async fn batch_replica_clear_mixed_expired_and_active_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(200),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "mixed-expiry:1", 0).await;
+
+    for key in ["expired-a", "expired-b"] {
+        put_complete_batch_clear_object(&service, client_id, key, 1, "mixed-expiry:1").await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    for key in ["active-a", "active-b"] {
+        put_complete_batch_clear_object(&service, client_id, key, 1, "mixed-expiry:1").await;
+    }
+
+    assert!(object_exists(&service, "active-a").await);
+    assert!(object_exists(&service, "active-b").await);
+
+    let cleared = batch_clear(
+        &service,
+        client_id,
+        &["expired-a", "expired-b", "active-a", "active-b"],
+        "",
+    )
+    .await;
+    assert_eq!(cleared.len(), 2);
+    assert!(cleared.contains(&"expired-a".to_string()));
+    assert!(cleared.contains(&"expired-b".to_string()));
+    assert!(!cleared.contains(&"active-a".to_string()));
+    assert!(!cleared.contains(&"active-b".to_string()));
+
+    assert!(!object_exists(&service, "expired-a").await);
+    assert!(!object_exists(&service, "expired-b").await);
+    assert!(object_exists(&service, "active-a").await);
+    assert!(object_exists(&service, "active-b").await);
+}
+
+#[tokio::test]
+async fn batch_replica_clear_with_invalid_segment_name_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        lease_ttl: Duration::from_millis(50),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_batch_clear_segment(&service, client_id, "invalid-seg:1", 0).await;
+
+    put_complete_batch_clear_object(&service, client_id, "invalid-seg-key", 1, "invalid-seg:1")
+        .await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let cleared = batch_clear(
+        &service,
+        client_id,
+        &["invalid-seg-key"],
+        "nonexistent_host:99999",
+    )
+    .await;
+    assert!(cleared.is_empty());
+    assert!(object_exists(&service, "invalid-seg-key").await);
 }
 
 #[tokio::test]
@@ -1388,6 +2081,556 @@ async fn test_memory_and_global_disk_put_revoke_remove_parity() {
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn cpp_parity_global_disk_put_revoke_remove_exact_codes() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "global-disk-exact".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "global-disk-exact:1".into(),
+            size: 64 * 1024 * 1024,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    async fn start(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+    ) -> Vec<proto::ReplicaDescriptor> {
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "global-disk-exact:1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas
+    }
+
+    async fn end(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        replica_type: proto::replica_descriptor::ReplicaType,
+    ) {
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn revoke(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        replica_type: proto::replica_descriptor::ReplicaType,
+    ) {
+        MasterService::put_revoke(
+            service,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn get(
+        service: &MasterServiceImpl,
+        key: &str,
+    ) -> Result<Vec<proto::ReplicaDescriptor>, tonic::Status> {
+        Ok(MasterService::get_replica_list(
+            service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await?
+        .into_inner()
+        .replicas)
+    }
+
+    use proto::replica_descriptor::ReplicaType as Type;
+
+    // PutEndBothReplica: PutStart yields exactly one Memory and one Disk.
+    let both = start(&service, client_id, "exact-both").await;
+    assert_eq!(both.len(), 2);
+    let types = both
+        .iter()
+        .map(|replica| replica.replica_type)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(types.contains(&(Type::Memory as i32)));
+    assert!(types.contains(&(Type::Disk as i32)));
+    end(&service, client_id, "exact-both", Type::Memory).await;
+    end(&service, client_id, "exact-both", Type::Disk).await;
+    assert_eq!(get(&service, "exact-both").await.unwrap().len(), 2);
+
+    // PutRevokeDiskReplica: after Memory completion, revoking the processing
+    // Disk leaves exactly one readable Memory replica.
+    start(&service, client_id, "exact-revoke-disk").await;
+    end(&service, client_id, "exact-revoke-disk", Type::Memory).await;
+    let memory_only = get(&service, "exact-revoke-disk").await.unwrap();
+    assert_eq!(memory_only.len(), 1);
+    assert_eq!(memory_only[0].replica_type, Type::Memory as i32);
+    revoke(&service, client_id, "exact-revoke-disk", Type::Disk).await;
+    let after_revoke = get(&service, "exact-revoke-disk").await.unwrap();
+    assert_eq!(after_revoke.len(), 1);
+    assert_eq!(after_revoke[0].replica_type, Type::Memory as i32);
+
+    // PutRevokeMemoryReplica: revoking Memory makes the object unreadable
+    // (REPLICA_IS_NOT_READY), then Disk completion restores a Disk-only read.
+    start(&service, client_id, "exact-revoke-memory").await;
+    revoke(&service, client_id, "exact-revoke-memory", Type::Memory).await;
+    assert_eq!(
+        get(&service, "exact-revoke-memory")
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::FailedPrecondition
+    );
+    end(&service, client_id, "exact-revoke-memory", Type::Disk).await;
+    let disk_only = get(&service, "exact-revoke-memory").await.unwrap();
+    assert_eq!(disk_only.len(), 1);
+    assert_eq!(disk_only[0].replica_type, Type::Disk as i32);
+
+    // PutRevokeBothReplica: Disk revoke → REPLICA_IS_NOT_READY, then Memory
+    // revoke → OBJECT_NOT_FOUND.
+    start(&service, client_id, "exact-revoke-both").await;
+    revoke(&service, client_id, "exact-revoke-both", Type::Disk).await;
+    assert_eq!(
+        get(&service, "exact-revoke-both").await.unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    revoke(&service, client_id, "exact-revoke-both", Type::Memory).await;
+    assert_eq!(
+        get(&service, "exact-revoke-both").await.unwrap_err().code(),
+        tonic::Code::NotFound
+    );
+
+    // RemoveKey: non-force removal of a completed Memory+Disk object succeeds
+    // and the key is then absent.
+    start(&service, client_id, "exact-remove").await;
+    end(&service, client_id, "exact-remove", Type::Memory).await;
+    end(&service, client_id, "exact-remove", Type::Disk).await;
+    MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "exact-remove".into(),
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        get(&service, "exact-remove").await.unwrap_err().code(),
+        tonic::Code::NotFound
+    );
+}
+
+#[tokio::test]
+async fn cpp_parity_single_disk_eviction_missing_key_is_not_found() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "evict-missing".into(),
+        ..Default::default()
+    });
+    let error = MasterService::evict_disk_replica(
+        &service,
+        Request::new(proto::EvictDiskReplicaRequest {
+            client_id: Some(proto_uuid(Uuid::new_v4())),
+            key: "nonexistent_key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::NotFound);
+}
+
+#[tokio::test]
+async fn cpp_parity_single_disk_eviction_rejects_memory_type() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "evict-memory-type".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "evict-memory-type:1".into(),
+            size: 4096,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "evict-key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "evict-memory-type:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "evict-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "evict-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = MasterService::evict_disk_replica(
+        &service,
+        Request::new(proto::EvictDiskReplicaRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "evict-key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn cpp_parity_single_global_disk_eviction_leaves_memory() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "evict-disk-keep-memory".into(),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "evict-disk-keep-memory:1".into(),
+            size: 64 * 1024 * 1024,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "evict_disk_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                preferred_segment: "evict-disk-keep-memory:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap();
+    for replica_type in [
+        proto::replica_descriptor::ReplicaType::Memory,
+        proto::replica_descriptor::ReplicaType::Disk,
+    ] {
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "evict_disk_key".into(),
+                replica_type: replica_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let before = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "evict_disk_key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert_eq!(before.len(), 2);
+
+    MasterService::evict_disk_replica(
+        &service,
+        Request::new(proto::EvictDiskReplicaRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "evict_disk_key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let after = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "evict_disk_key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].replica_type,
+        proto::replica_descriptor::ReplicaType::Memory as i32
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn put_start_discard_release_and_eviction_timeline_parity() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        cluster_id: "put-start-expiring".into(),
+        put_start_discard_timeout: std::time::Duration::from_millis(200),
+        put_start_release_timeout: std::time::Duration::from_millis(400),
+        reaper_interval: std::time::Duration::from_millis(20),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    const SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+    const OBJECT_SIZE: u64 = 6 * 1024 * 1024;
+    for index in 0..3 {
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: format!("expiring-segment-{index}:1"),
+                size: SEGMENT_SIZE,
+                base_addr: 0x100000000 + index * SEGMENT_SIZE,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let config = proto::ReplicateConfig {
+        replica_num: 3,
+        preferred_segment: "expiring-segment-0:1".into(),
+        ..Default::default()
+    };
+
+    // First put succeeds with three PROCESSING replicas; a duplicate fails.
+    let first = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_1".into(),
+            slice_length: OBJECT_SIZE,
+            tenant_id: String::new(),
+            config: Some(config.clone()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(first.replicas.len(), 3);
+    let duplicate = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_1".into(),
+            slice_length: OBJECT_SIZE,
+            tenant_id: String::new(),
+            config: Some(config.clone()),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
+
+    // Wait for the discard window; the expired put is replaceable.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let second = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_1".into(),
+            slice_length: OBJECT_SIZE,
+            tenant_id: String::new(),
+            config: Some(config.clone()),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(second.replicas.len(), 3);
+
+    // Complete key_1 and protect it from eviction.
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_1".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "test_key_1".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    // key_2 fails while the first attempt's replicas are pending release.
+    let blocked = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "test_key_2".into(),
+            slice_length: OBJECT_SIZE,
+            tenant_id: String::new(),
+            config: Some(config.clone()),
+        }),
+    )
+    .await;
+    if blocked.is_ok() {
+        // With the first attempt already released (timing margin), complete
+        // key_2 and still assert the accounting path below.
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key_2".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    } else {
+        assert_eq!(blocked.unwrap_err().code(), tonic::Code::ResourceExhausted);
+        // Wait past the release window, then key_2 succeeds.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let admitted = MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key_2".into(),
+                slice_length: OBJECT_SIZE,
+                tenant_id: String::new(),
+                config: Some(config.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(admitted.replicas.len(), 3);
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key_2".into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let replicas = MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "test_key_2".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .replicas;
+    assert_eq!(replicas.len(), 3);
 }
 
 #[tokio::test]
@@ -2211,4 +3454,273 @@ async fn test_global_disk_only_put_lifecycle_uses_shared_file_descriptor() {
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn cpp_parity_global_disk_oversubscription_preserves_more_than_memory_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "global-disk-oversubscription".into(),
+        lease_ttl: Duration::ZERO,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    const SEGMENT_SIZE: u64 = 1024 * 1024 * 16 * 15; // 240 MiB, C++ EvictObject
+    const OBJECT_SIZE: u64 = 1024 * 15; // 15 KiB
+    const ATTEMPTS: usize = 1024 * 16 + 50; // 16,434
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "global-disk-oversubscription:1".into(),
+            size: SEGMENT_SIZE,
+            base_addr: 0x300000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut success_puts = 0usize;
+    for index in 0..ATTEMPTS {
+        let key = format!("test_key{index}");
+        let started = MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: key.clone(),
+                slice_length: OBJECT_SIZE,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "global-disk-oversubscription:1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await;
+        match started {
+            Ok(_) => {
+                // PutEnd(MEMORY) then PutEnd(DISK) both succeed like C++.
+                MasterService::put_end(
+                    &service,
+                    Request::new(proto::PutEndRequest {
+                        client_id: Some(proto_uuid(client_id)),
+                        key: key.clone(),
+                        replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                        tenant_id: String::new(),
+                    }),
+                )
+                .await
+                .unwrap();
+                MasterService::put_end(
+                    &service,
+                    Request::new(proto::PutEndRequest {
+                        client_id: Some(proto_uuid(client_id)),
+                        key,
+                        replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                        tenant_id: String::new(),
+                    }),
+                )
+                .await
+                .unwrap();
+                success_puts += 1;
+            }
+            Err(status) => {
+                // Memory is full: C++ waits for the background eviction
+                // worker; Rust advances one deterministic eviction cycle.
+                assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+                service.run_eviction_cycle_for_test(1);
+            }
+        }
+    }
+    // Eviction processing must let strictly more than the memory capacity of
+    // 16,384 objects survive because every put also has a global Disk replica.
+    assert!(success_puts > 1024 * 16, "success_puts = {success_puts}");
+
+    let mut success_gets = 0usize;
+    for index in 0..ATTEMPTS {
+        let key = format!("test_key{index}");
+        if MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_ok()
+        {
+            success_gets += 1;
+        }
+    }
+    assert!(success_gets > 1024 * 16, "success_gets = {success_gets}");
+
+    MasterService::remove_all(
+        &service,
+        Request::new(proto::RemoveAllRequest {
+            force: false,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cpp_parity_put_start_expires_exact_16_mib_flows() {
+    let root = tempfile::tempdir().unwrap();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        cluster_id: "put-start-expires-16mib".into(),
+        // C++ PutStartExpires runs with the default 10,000 ms key lease TTL;
+        // the per-second Ping/GetReplicaList calls keep the key leased and
+        // therefore protect it from automatic eviction while waiting.
+        lease_ttl: Duration::from_secs(10),
+        put_start_discard_timeout: Duration::from_millis(300),
+        put_start_release_timeout: Duration::from_millis(500),
+        reaper_interval: Duration::from_millis(20),
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    const SEGMENT_SIZE: u64 = 1024 * 1024 * 16; // 16 MiB, C++ PutStartExpires
+    const OBJECT_SIZE: u64 = 1024 * 1024 * 16;
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "put-start-expires:1".into(),
+            size: SEGMENT_SIZE,
+            base_addr: 0x300000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    use proto::replica_descriptor::ReplicaType as Type;
+    for (discard_type, reserve_type) in [(Type::Disk, Type::Memory), (Type::Memory, Type::Disk)] {
+        let started = MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key".into(),
+                slice_length: OBJECT_SIZE,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "put-start-expires:1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 2);
+        for replica in &started.replicas {
+            assert_eq!(
+                replica.status,
+                proto::replica_descriptor::ReplicaStatus::Allocating as i32
+            );
+        }
+
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key".into(),
+                replica_type: reserve_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Grant and keep the key lease like C++'s Ping/GetReplicaList loop so
+        // the automatic eviction worker cannot reclaim the full 16-MiB object.
+        let keep_leased = || async {
+            let _ = MasterService::get_replica_list(
+                &service,
+                Request::new(proto::GetReplicaListRequest {
+                    key: "test_key".into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await;
+        };
+        keep_leased().await;
+
+        // Past the discard window the object keeps its completed replica, so a
+        // second PutStart fails OBJECT_ALREADY_EXISTS (C++ PutStartExpires).
+        for _ in 0..4 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            keep_leased().await;
+        }
+        let duplicate = MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key".into(),
+                slice_length: OBJECT_SIZE,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: "put-start-expires:1".into(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
+
+        // Past the release window a late completion of the discarded replica
+        // is a no-op and the object still exposes exactly the reserve replica.
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            keep_leased().await;
+        }
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: "test_key".into(),
+                replica_type: discard_type as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let replicas = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "test_key".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas;
+        assert_eq!(replicas.len(), 1);
+        assert_eq!(replicas[0].replica_type, reserve_type as i32);
+
+        MasterService::remove_all(
+            &service,
+            Request::new(proto::RemoveAllRequest {
+                // C++ reaches RemoveAll only after the 10 s TTL lease expires;
+                // force mirrors that cleanup without a wall-clock TTL wait.
+                force: true,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
 }

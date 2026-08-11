@@ -608,8 +608,9 @@ fn test_full_local_storage_lifecycle() {
 #[test]
 fn cpp_parity_file_storage_batch_load_100_objects() {
     // C++ FileStorageTest.BatchLoad_WithStorageBackendAdaptor: after 100
-    // objects are offloaded, BatchLoad fills caller-owned slices with every
-    // exact value through the FilePerKey adaptor.
+    // objects are offloaded, a batch load returns every exact value. The Rust
+    // replacement boundary is the FilePerKey backend read path over the same
+    // 100-object workload.
     let backend = test_backend();
     let mut expected = Vec::with_capacity(100);
     for index in 0..100 {
@@ -629,4 +630,8 @@ fn cpp_parity_file_storage_batch_load_100_objects() {
     for ((key, loaded), (_, value)) in batch.iter().zip(&expected) {
         assert_eq!(loaded, value, "exact batch-load bytes for {key}");
     }
+
+    let removed = backend.remove_all().unwrap();
+    assert_eq!(removed, 100);
+    assert!(backend.scan_meta().unwrap().is_empty());
 }
