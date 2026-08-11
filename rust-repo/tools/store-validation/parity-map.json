@@ -1819,10 +1819,13 @@
       "behavior": "Evicting two tenant-scoped versions of the same user key removes each tenant's LocalDisk Master metadata without cross-tenant collision.",
       "boundary": ["client", "master", "tenant", "local-disk", "eviction"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.NotifyEvictedDiskReplicasUsesTenantScopedKeys"},
-      "reason": "Rust tests tenant storage-key encoding only; no classic LocalDisk integration test makes two same-named tenant replicas disappear from Master metadata.",
+      "reason": "Rust now covers both halves of the C++ path directly: the client witness routes two canonical scoped storage keys with the same user key in separate tenant RPC batches, and the Master integration witness publishes generation-bearing LocalDisk replicas for both tenants, removes each through batch eviction, and observes NotFound without cross-tenant collision.",
       "review": {"oracle": "file_storage_test.cpp NotifyEvictedDiskReplicasUsesTenantScopedKeys and file_storage.cpp NotifyEvictedDiskReplicas", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-client/src/client/storage_local.rs", "test": "cpp_parity_notify_evicted_disk_replicas_routes_same_key_by_tenant"},
+        {"file": "mooncake-store-master/tests/test_tenant_id_parity.rs", "test": "cpp_parity_notify_evicted_disk_replicas_removes_same_key_for_both_tenants"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Malformed bucket/global-size values and a negative unsigned heartbeat value fall back to FileStorage defaults.",
