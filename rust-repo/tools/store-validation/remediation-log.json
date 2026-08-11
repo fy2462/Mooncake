@@ -4553,5 +4553,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib client::storage_local::tests::cpp_parity_offset_completion_failure_propagates_and_rolls_back -- --exact",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib",
     "evidence": "compile-red proved the production finalizer was not independently exercisable; repaired exact witness PASS 1/1 with exact Internal propagation, absent key, zero used bytes, and empty scan; client lib PASS 376/376"
+  },
+  {
+    "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_PartialSuccess",
+    "rust": "mooncake-store-master/src/storage_backend/storage_backend_offset.rs:cpp_parity_offset_partial_success_persists_exact_subset",
+    "first_divergence": "The exact witness initially failed to compile because Rust exposed no deterministic selected-key failure seam. A test-only root-scoped predicate now drives the real public Master Offset batch path through a key2 failure while preserving its successful overall result.",
+    "repair_commit": "b5c62708",
+    "focused_command": "cargo test -p mooncake-store-master --lib storage_backend::storage_backend_offset::tests::cpp_parity_offset_partial_success_persists_exact_subset -- --exact",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "compile-red proved the selected-key failure seam was absent; repaired exact witness PASS 1/1 with key2 absent, exact key1/key3 bytes, and the same durable subset after reopening the backend; Master lib PASS 614/614; touched Rust file passes rustfmt --check"
   }
 ]
