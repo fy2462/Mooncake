@@ -2077,25 +2077,23 @@ async fn cpp_parity_global_disk_only_read_after_memory_eviction() {
             .unwrap();
     }
 
-    let evicted_seed_index = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            for (index, key) in seed_keys.iter().enumerate() {
-                let replicas = client.query(key).await.unwrap().replicas;
-                let has_disk = replicas
-                    .iter()
-                    .any(|replica| replica.replica_type == ReplicaType::Disk);
-                let has_memory = replicas
-                    .iter()
-                    .any(|replica| replica.replica_type == ReplicaType::Memory);
-                if has_disk && !has_memory {
-                    return index;
-                }
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let mut evicted_seed_index = None;
+    for (index, key) in seed_keys.iter().enumerate() {
+        let replicas = client.query(key).await.unwrap().replicas;
+        let has_disk = replicas
+            .iter()
+            .any(|replica| replica.replica_type == ReplicaType::Disk);
+        let has_memory = replicas
+            .iter()
+            .any(|replica| replica.replica_type == ReplicaType::Memory);
+        if has_disk && !has_memory {
+            evicted_seed_index = Some(index);
+            break;
         }
-    })
-    .await
-    .expect("memory eviction did not leave a Disk-only seed");
+    }
+    let evicted_seed_index =
+        evicted_seed_index.expect("memory eviction did not leave a Disk-only seed");
 
     let handle = client
         .get_buffer(&seed_keys[evicted_seed_index])
