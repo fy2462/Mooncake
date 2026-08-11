@@ -4373,5 +4373,23 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot test_catalog_provider_skips_invalid_client_id_metadata_record -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_catalog_snapshot",
     "evidence": "/tmp/mooncake-catalog-snapshot-invalid-client-id-record.typescript"
+  },
+  {
+    "cpp": "file_storage_test.cpp:FileStorageTest.BatchLoadRecordsSsdMetrics",
+    "rust": "mooncake-store-client/src/offload/server.rs:cpp_parity_file_storage_batch_load_records_ssd_metrics",
+    "first_divergence": "The production Rust P2P offload handler already read LocalDisk objects as a batch but did not share the client SSD metrics registry, so it could not publish the C++ all-success operation, byte, and one-latency-observation tuple. OffloadReadHandler now receives the client-owned optional ClientMetrics and records one observation only after every real backend read and exact-size check succeeds.",
+    "repair_commit": "914bbdd3",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib offload::server::tests::cpp_parity_file_storage_batch_load_records_ssd_metrics -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "exact success witness PASS 1/1; client lib PASS 366/366"
+  },
+  {
+    "cpp": "file_storage_test.cpp:FileStorageTest.BatchLoadFailureDoesNotRecordSsdMetrics",
+    "rust": "mooncake-store-client/src/offload/server.rs:cpp_parity_file_storage_batch_load_failure_does_not_record_ssd_metrics",
+    "first_divergence": "Rust had no production batch-read metric boundary proving that a later backend failure suppresses all earlier partial metric publication. The shared offload batch helper now returns before observing metrics on every read or size error, and the real FilePerKey witness proves an existing first key followed by a missing key leaves every read, total, and write metric at zero.",
+    "repair_commit": "914bbdd3",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib offload::server::tests::cpp_parity_file_storage_batch_load_failure_does_not_record_ssd_metrics -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "exact failure witness PASS 1/1; client lib PASS 366/366"
   }
 ]

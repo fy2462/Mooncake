@@ -1866,19 +1866,19 @@
       "behavior": "A successful batch read records one read op per slice, summed bytes, exactly one latency observation, and no write metrics when setup bypasses FileStorage.",
       "boundary": ["client", "file-storage", "metrics", "batch-load"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoadRecordsSsdMetrics"},
-      "reason": "Classic Rust LocalDisk exposes no injectable metric sink or test of successful batch read ops, bytes, and histogram semantics; later adapter evidence is excluded.",
+      "reason": "Rust offload::server::tests::cpp_parity_file_storage_batch_load_records_ssd_metrics drives the production LocalDisk offload batch helper through a real FilePerKey backend with three exact values, then proves read and total metrics publish 3 operations, 17 bytes, and exactly one latency observation while every write metric remains zero.",
       "review": {"oracle": "file_storage_test.cpp BatchLoadRecordsSsdMetrics and file_storage.cpp BatchLoad metric updates", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/offload/server.rs", "test": "cpp_parity_file_storage_batch_load_records_ssd_metrics"}],
+      "status": "covered"
     },
     {
       "behavior": "A batch read of two missing keys fails and leaves read ops, read bytes, and latency observations at zero.",
       "boundary": ["client", "file-storage", "metrics", "batch-load", "failure"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoadFailureDoesNotRecordSsdMetrics"},
-      "reason": "Rust proves only a one-key missing read error and has no classic metric object or failure-no-metrics batch test; later adapter evidence is excluded.",
+      "reason": "Rust offload::server::tests::cpp_parity_file_storage_batch_load_failure_does_not_record_ssd_metrics drives the same production LocalDisk batch helper through a real FilePerKey backend; an existing first key followed by a missing key returns an error while read, total, and write operations, bytes, and latency observations all remain zero, strengthening the C++ two-missing-key fixture against partial publication.",
       "review": {"oracle": "file_storage_test.cpp BatchLoadFailureDoesNotRecordSsdMetrics and file_storage.cpp BatchLoad failure path", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/src/offload/server.rs", "test": "cpp_parity_file_storage_batch_load_failure_does_not_record_ssd_metrics"}],
+      "status": "covered"
     },
     {
       "behavior": "A successful FileStorage batch read with a null optional SSD metrics pointer does not crash.",
