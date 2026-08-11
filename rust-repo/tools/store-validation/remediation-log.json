@@ -4625,5 +4625,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_transfer_failure_releases_and_continues -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "compile-red failed because inject_promotion_test_transfer_failure was absent; repaired exact witness PASS 1/1 with two allocations, one successful real FilePerKey read reaching one transfer attempt, zero success notifications, two failure notifications, and normal batch completion; adjacent BatchLoadFailure, AllocStartFailure, and NonPositiveSize witnesses PASS 1/1 each; client lib PASS 383/383; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.NotifyFailureDoesNotAbortBatch",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_notify_failure_releases_and_continues",
+    "first_divergence": "After a successful promotion write, Rust propagated NotifyPromotionSuccess failure with ?, skipped failure notification, and aborted later tasks. The processor now attempts best-effort failure notification and continues, matching the current C++ release-and-continue contract.",
+    "repair_commit": "1b260efe",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_notify_failure_releases_and_continues -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "compile-red first proved the transfer-success seam absent; after adding it, behavioral red failed with real Master KeyNotFound from success notification. Repaired exact witness PASS 1/1 with two allocations, one real FilePerKey read, one transfer attempt, one success-notify attempt, two failure-notify attempts, promoted zero, and normal completion; adjacent four promotion failure witnesses PASS 1/1 each; client lib PASS 384/384; touched Rust file passes rustfmt --check"
   }
 ]

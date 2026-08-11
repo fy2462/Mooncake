@@ -1676,10 +1676,10 @@
       "behavior": "If success notification fails after a completed promotion write, the client attempts best-effort failure notification and continues processing later queued tasks.",
       "boundary": ["client", "promotion", "commit", "failure-notification", "batch-liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.NotifyFailureDoesNotAbortBatch"},
-      "reason": "Rust propagates NotifyPromotionSuccess failure with ? and neither attempts NotifyPromotionFailure nor continues the batch; no Rust client-loop test covers the required release-and-continue contract.",
+      "reason": "Rust now handles a failed success notification per key: it attempts best-effort failure notification and continues. The witness performs a real tenant-scoped FilePerKey read, injects only allocation and transfer success, observes the real Master success-notify KeyNotFound boundary, and proves a later task still reaches allocation.",
       "review": {"oracle": "file_storage_promotion_test.cpp NotifyFailureDoesNotAbortBatch and mooncake-store/src/file_storage.cpp success-notify-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_notify_failure_releases_and_continues"}],
+      "status": "covered"
     },
     {
       "behavior": "Per-key allocation, LocalDisk load, transfer, and commit failures do not prevent later promotion tasks from being attempted.",
