@@ -1712,37 +1712,57 @@
       "behavior": "Grouping 35 one-byte offload tasks with a ten-key bucket limit emits three full buckets, retains five tasks, then emits four buckets on the next call and clears residue.",
       "boundary": ["client", "file-storage", "bucket-grouping", "stateful-queue"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_bucket_keys_limit"},
-      "reason": "Rust packs individual writes but has no offload-task grouping API or retained ungrouped queue implementing the two-call 35/5 residue contract.",
+      "reason": "Rust BucketStorageBackend::allocate_offloading_buckets now uses the configured key limit and a mutex-protected residue map. The exact witness proves the C++ two-call 35-task contract: three ten-key groups plus five retained entries, then four ten-key groups and empty residue.",
       "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_bucket_keys_limit and storage_backend.cpp grouping path", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+          "test": "cpp_parity_file_storage_group_offloading_keys_by_bucket_key_limit"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Grouping 35 one-byte offload tasks with a ten-byte bucket limit emits three full buckets, retains five tasks, then clears that residue on a second call.",
       "boundary": ["client", "file-storage", "bucket-grouping", "stateful-queue"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_bucket_size_limit"},
-      "reason": "Rust has no task-residue queue or size-driven two-call grouping contract; per-write packing cannot establish this scheduling behavior.",
+      "reason": "Rust BucketStorageBackend::allocate_offloading_buckets now applies the configured task-data byte limit while retaining an incomplete tail. The exact witness proves three ten-byte groups plus five retained entries on the first call and four ten-byte groups with empty residue on the second.",
       "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_bucket_size_limit and storage_backend.cpp grouping path", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+          "test": "cpp_parity_file_storage_group_offloading_keys_by_bucket_size_limit"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Every emitted grouping bucket contains at most nine keys and at most 496 total input bytes when both limits are configured.",
       "boundary": ["client", "file-storage", "bucket-grouping"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_bucket_size_limit_and_bucket_keys_limit"},
-      "reason": "Rust prepare_write enforces component limits, but no test drives varied task sizes through a grouping result and checks every emitted bucket.",
+      "reason": "Rust BucketStorageBackend::allocate_offloading_buckets now enforces key-count and checked task-data byte accumulation together. The exact varied-size witness checks every emitted group has at most nine keys and at most 496 input bytes.",
       "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_bucket_size_limit_and_bucket_keys_limit and storage_backend.cpp grouping path", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+          "test": "cpp_parity_file_storage_group_offloading_keys_by_bucket_combined_limits"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Repeated grouping calls with one task, no new tasks, then seven tasks succeed while persistent ungrouped state participates; the C++ test has no count or content oracle.",
       "boundary": ["client", "file-storage", "bucket-grouping", "stateful-queue"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.GroupOffloadingKeysByBucket_ungrouped_offloading_objects"},
-      "reason": "Rust exposes neither an ungrouped-task residue queue nor a no-new-work flush contract.",
+      "reason": "Rust BucketStorageBackend now owns the same persistent ungrouped-task state. The exact witness proves one-task residue survives an empty call and coherently combines with the following seven-task call without premature emission.",
       "review": {"oracle": "file_storage_test.cpp GroupOffloadingKeysByBucket_ungrouped_offloading_objects and storage_backend.cpp grouping path", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+          "test": "cpp_parity_file_storage_group_offloading_keys_by_bucket_retains_residue"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "With no environment overrides, FileStorage and Bucket backend defaults include path, buffer, scan, bucket/global limits, heartbeat, enabled eviction, and 0.90/0.80 watermarks.",
