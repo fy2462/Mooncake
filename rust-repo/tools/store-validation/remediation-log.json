@@ -4751,5 +4751,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_ -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "index-only exact group PASS 4/4. Two clients create distinct LocalDisk storage namespaces and generations, both remain dormant after fresh restore, both recover independently, and public queries preserve their distinct holder/storage identities, 16384/32768-byte sizes, endpoints, and generations. Shared-tree master lib PASS 618/618."
+  },
+  {
+    "cpp": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp:MasterServicePromotionSnapshotTest.InFlightPromotionTaskSnapshotSafe",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_service_promotion_snapshot_in_flight_task_safe",
+    "first_divergence": "The existing restore unit synthesized orphan promotion allocation state, while the C++ oracle saves after a real read-triggered PromotionTask has pinned its LocalDisk source and entered both task indexes.",
+    "repair_commit": "6d7972f9",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_in_flight_task_safe -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "compile-red failed on absent verify_in_flight_promotion_snapshot_safe. Exact witness PASS 1/1 and five-row promotion snapshot group PASS 5/5: before save, production GetReplicaList admission creates one global promotion task, one per-holder queue entry, and LocalDisk refcnt=1; fresh restore has no transient tasks/queue and refcnt=0; exact inventory recovery returns only the unchanged 1024-byte LocalDisk descriptor. The immediately preceding master lib run PASS 618/618, and this test raises the working-tree lib count to 619."
   }
 ]
