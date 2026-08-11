@@ -4396,36 +4396,36 @@
     "cpp": "file_storage_test.cpp:FileStorageTest.GroupOffloadingKeysByBucket_bucket_keys_limit",
     "rust": "mooncake-store-client/src/local_storage_backend/bucket.rs:cpp_parity_file_storage_group_offloading_keys_by_bucket_key_limit",
     "first_divergence": "Rust had durable per-write bucket packing but no stateful task-grouping boundary or retained tail. BucketStorageBackend now mirrors the C++ planner, and the witness proves the exact 35-task two-call key-limit transition.",
-    "repair_commit": "979fca83",
+    "repair_commit": "15f805aa",
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::bucket::tests::cpp_parity_file_storage_group_offloading_keys_by_bucket_key_limit -- --exact",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
-    "evidence": "exact key-limit witness PASS 1/1; client lib PASS 370/370"
+    "evidence": "exact key-limit and skipped-slot regression witnesses PASS; client lib PASS 372/372"
   },
   {
     "cpp": "file_storage_test.cpp:FileStorageTest.GroupOffloadingKeysByBucket_bucket_size_limit",
     "rust": "mooncake-store-client/src/local_storage_backend/bucket.rs:cpp_parity_file_storage_group_offloading_keys_by_bucket_size_limit",
     "first_divergence": "Rust had no size-driven offload task residue contract. The production planner now accounts task data bytes and the witness proves the exact 35-task two-call size-limit transition.",
-    "repair_commit": "979fca83",
+    "repair_commit": "15f805aa",
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::bucket::tests::cpp_parity_file_storage_group_offloading_keys_by_bucket_size_limit -- --exact",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
-    "evidence": "exact size-limit witness PASS 1/1; client lib PASS 370/370"
+    "evidence": "exact size-limit and skipped-slot regression witnesses PASS; client lib PASS 372/372"
   },
   {
     "cpp": "file_storage_test.cpp:FileStorageTest.GroupOffloadingKeysByBucket_bucket_size_limit_and_bucket_keys_limit",
     "rust": "mooncake-store-client/src/local_storage_backend/bucket.rs:cpp_parity_file_storage_group_offloading_keys_by_bucket_combined_limits",
     "first_divergence": "Rust enforced physical bucket limits per write but did not expose grouped task results under both constraints. The production planner and varied-size witness now check every emitted group against both limits.",
-    "repair_commit": "979fca83",
+    "repair_commit": "15f805aa",
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::bucket::tests::cpp_parity_file_storage_group_offloading_keys_by_bucket_combined_limits -- --exact",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
-    "evidence": "exact combined-limit witness PASS 1/1; client lib PASS 370/370"
+    "evidence": "exact combined-limit and skipped-slot regression witnesses PASS; client lib PASS 372/372"
   },
   {
     "cpp": "file_storage_test.cpp:FileStorageTest.GroupOffloadingKeysByBucket_ungrouped_offloading_objects",
     "rust": "mooncake-store-client/src/local_storage_backend/bucket.rs:cpp_parity_file_storage_group_offloading_keys_by_bucket_retains_residue",
     "first_divergence": "Rust exposed no persistent ungrouped task state. BucketStorageBackend now retains incomplete groups across calls, and the witness proves empty input preserves residue before later work is combined coherently.",
-    "repair_commit": "979fca83",
+    "repair_commit": "15f805aa",
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::bucket::tests::cpp_parity_file_storage_group_offloading_keys_by_bucket_retains_residue -- --exact",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
-    "evidence": "exact residue witness PASS 1/1; client lib PASS 370/370"
+    "evidence": "exact residue and skipped-slot regression witnesses PASS; client lib PASS 372/372"
   }
 ]
