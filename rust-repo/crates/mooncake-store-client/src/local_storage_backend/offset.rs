@@ -1181,9 +1181,32 @@ impl OffsetAllocatorStorageBackend {
         }
     }
 
+    /// Fallible existence query matching the storage-backend interface.
+    pub fn is_exist(&self, key: &str) -> StoreResult<bool> {
+        self.ensure_init()?;
+        Ok(self.state.lock().index.entries.contains_key(key))
+    }
+
+    /// Convenience query for callers that intentionally treat an
+    /// uninitialized backend as empty.
     pub fn exists(&self, key: &str) -> bool {
-        self.initialized.load(Ordering::Acquire)
-            && self.state.lock().index.entries.contains_key(key)
+        self.is_exist(key).unwrap_or(false)
+    }
+
+    /// Report whether a new offload may be attempted under the configured
+    /// logical size and key limits.
+    pub fn is_enable_offloading(&self) -> StoreResult<bool> {
+        self.ensure_init()?;
+        if self.config.eviction_policy != OffsetEvictionPolicy::None {
+            return Ok(true);
+        }
+
+        let state = self.state.lock();
+        let logical_used_bytes = state.index.entries.values().fold(0_u64, |total, entry| {
+            total.saturating_add(entry.value_len())
+        });
+        Ok(logical_used_bytes < state.quota_bytes
+            && state.index.entries.len() < self.config.total_keys_limit)
     }
 
     pub fn space_usage(&self) -> (u64, u64) {
