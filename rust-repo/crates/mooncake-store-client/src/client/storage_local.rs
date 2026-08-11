@@ -1,5 +1,5 @@
 use super::MooncakeClient;
-use super::storage::OffloadTaskItem;
+use super::storage::{OffloadTaskItem, PromotionTaskItem};
 use crate::local_storage_backend::{
     AttachedLocalStorage, LocalStorageRecordMetadata, PendingStorageEviction, local_storage_key,
     parse_local_storage_key,
@@ -870,6 +870,13 @@ impl MooncakeClient {
             }
             Err(error) => return Err(error),
         };
+        self.process_promotion_tasks(tasks).await
+    }
+
+    async fn process_promotion_tasks(
+        &mut self,
+        tasks: Vec<PromotionTaskItem>,
+    ) -> StoreResult<usize> {
         if tasks.is_empty() {
             return Ok(0);
         }
@@ -884,13 +891,8 @@ impl MooncakeClient {
         for task in &tasks {
             let key = task.key.as_str();
             let tenant_id = task.tenant_id.as_str();
-            if task.size < 0 {
-                tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "promotion: invalid negative task size");
-                #[cfg(test)]
-                record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
-                let _ = self
-                    .notify_promotion_failure_for_tenant(key, tenant_id)
-                    .await;
+            if task.size <= 0 {
+                tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "promotion: skipping non-positive task size");
                 continue;
             }
             // Read from local disk (blocking I/O).
@@ -1899,6 +1901,85 @@ mod tests {
         assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
         assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 0);
         assert!(disk.scan_meta().unwrap().is_empty());
+
+        drop(client);
+        server.abort();
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_non_positive_size_is_skipped() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "non-positive-promotion-size".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        disk.write_object(&local_storage_key("tenant-a", "good"), b"data")
+            .unwrap();
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(Arc::clone(&disk));
+
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
+        let promoted = client
+            .process_promotion_tasks(vec![
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "negative".to_string(),
+                    size: -1,
+                },
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "zero".to_string(),
+                    size: 0,
+                },
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "good".to_string(),
+                    size: 4,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(promoted, 0);
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            disk.read_object(&local_storage_key("tenant-a", "good"))
+                .unwrap(),
+            b"data"
+        );
 
         drop(client);
         server.abort();
