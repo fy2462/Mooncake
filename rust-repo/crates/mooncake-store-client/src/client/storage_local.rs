@@ -660,22 +660,11 @@ impl MooncakeClient {
         }
 
         if !notify_tasks.is_empty() {
-            if let Err(error) = self
+            let notification_result = self
                 .notify_offload_success_tasks(notify_tasks, metadatas)
-                .await
-            {
-                let storage = storage.clone();
-                tokio::task::spawn_blocking(move || {
-                    for storage_key in committed_storage_keys {
-                        if let Err(cleanup_error) = storage.delete_object(&storage_key) {
-                            tracing::warn!(target: "storage_debug", %storage_key, %cleanup_error, "offload: failed to roll back unpublished local object");
-                        }
-                    }
-                })
-                .await
-                .map_err(|join_error| StoreError::Internal(join_error.to_string()))?;
-                return Err(error);
-            }
+                .await;
+            finalize_offload_publication(storage, committed_storage_keys, notification_result)
+                .await?;
         }
 
         Ok(offloaded)
@@ -1546,6 +1535,27 @@ fn ranges_overlap_u64(left_start: u64, left_end: u64, right_start: u64, right_en
     left_start < right_end && right_start < left_end
 }
 
+async fn finalize_offload_publication(
+    storage: AttachedLocalStorage,
+    committed_storage_keys: Vec<String>,
+    notification_result: StoreResult<()>,
+) -> StoreResult<()> {
+    let Err(error) = notification_result else {
+        return Ok(());
+    };
+
+    tokio::task::spawn_blocking(move || {
+        for storage_key in committed_storage_keys {
+            if let Err(cleanup_error) = storage.delete_object(&storage_key) {
+                tracing::warn!(target: "storage_debug", %storage_key, %cleanup_error, "offload: failed to roll back unpublished local object");
+            }
+        }
+    })
+    .await
+    .map_err(|join_error| StoreError::Internal(join_error.to_string()))?;
+    Err(error)
+}
+
 fn failed_offload_metadata() -> proto::StorageObjectMetadata {
     proto::StorageObjectMetadata {
         bucket_id: -1,
@@ -1560,7 +1570,8 @@ fn failed_offload_metadata() -> proto::StorageObjectMetadata {
 mod tests {
     use super::*;
     use crate::local_storage_backend::{
-        AttachedLocalStorage, LocalStorageBackend, LocalStorageConfig,
+        AttachedLocalStorage, LocalStorageBackend, LocalStorageConfig, OffsetAllocatorConfig,
+        OffsetAllocatorStorageBackend, OffsetEvictionPolicy,
     };
     use mooncake_store_master::proto as master_proto;
     use mooncake_store_master::proto::master_service_server::{MasterService, MasterServiceServer};
@@ -1589,6 +1600,48 @@ mod tests {
         drop(cleanup);
 
         assert!(!DROPPED.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_offset_completion_failure_propagates_and_rolls_back() {
+        let root = tempfile::tempdir().unwrap();
+        let offset = Arc::new(OffsetAllocatorStorageBackend::new(OffsetAllocatorConfig {
+            root_dir: root.path().to_path_buf(),
+            fsdir: "offset-completion-failure".to_string(),
+            eviction_policy: OffsetEvictionPolicy::None,
+            quota_bytes: 1024 * 1024,
+            total_keys_limit: 100,
+            high_ratio: 0.90,
+            low_ratio: 0.80,
+            keys_high_ratio: 0.90,
+            keys_low_ratio: 0.80,
+            max_evict_per_offload: 16,
+            fallback_evict_batch: 2,
+        }));
+        offset.init().unwrap();
+        let storage = AttachedLocalStorage::OffsetAllocator(Arc::clone(&offset));
+        let storage_key = local_storage_key("tenant-a", "key");
+        let pending = storage.prepare_write(&storage_key, 5).unwrap();
+        storage
+            .commit_write(&storage_key, b"value", pending, Uuid::new_v4())
+            .unwrap();
+        assert!(offset.exists(&storage_key));
+
+        let result = finalize_offload_publication(
+            storage,
+            vec![storage_key.clone()],
+            Err(StoreError::Internal(
+                "injected completion failure".to_string(),
+            )),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(StoreError::Internal(message)) if message == "injected completion failure")
+        );
+        assert!(!offset.exists(&storage_key));
+        assert_eq!(offset.space_usage().0, 0);
+        assert!(offset.scan_meta().unwrap().is_empty());
     }
 
     #[derive(Default)]
