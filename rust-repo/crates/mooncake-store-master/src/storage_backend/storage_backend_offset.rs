@@ -4,6 +4,35 @@ use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 
 const MAX_OFFSET_KEY_LENGTH: usize = 1024 * 1024;
 
+#[cfg(test)]
+static OFFSET_TEST_FAILURE: std::sync::Mutex<Option<(PathBuf, String)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct OffsetTestFailureGuard;
+
+#[cfg(test)]
+impl Drop for OffsetTestFailureGuard {
+    fn drop(&mut self) {
+        *OFFSET_TEST_FAILURE.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+fn inject_offset_test_failure(root: &Path, key: &str) -> OffsetTestFailureGuard {
+    *OFFSET_TEST_FAILURE.lock().unwrap() = Some((root.to_path_buf(), key.to_string()));
+    OffsetTestFailureGuard
+}
+
+#[cfg(test)]
+fn offset_test_write_should_fail(root: &Path, key: &str) -> bool {
+    OFFSET_TEST_FAILURE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|(failed_root, failed_key)| failed_root == root && failed_key == key)
+}
+
 impl StorageBackend {
     pub(super) fn offset_data_path(&self) -> PathBuf {
         self.disk_dir.join("offset_allocator.data")
@@ -54,6 +83,10 @@ impl StorageBackend {
         let mut next_offset = file.seek(SeekFrom::End(0))?;
         for (key, value) in entries {
             if key.len() > MAX_OFFSET_KEY_LENGTH {
+                continue;
+            }
+            #[cfg(test)]
+            if offset_test_write_should_fail(&self.disk_dir, key) {
                 continue;
             }
             file.write_all(value)?;
@@ -149,5 +182,44 @@ impl StorageBackend {
             .into_iter()
             .map(|(key, entry)| (key, entry.len))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpp_parity_offset_partial_success_persists_exact_subset() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StorageBackend::new(StorageBackendType::OffsetAllocator, root.path());
+        let _failure = inject_offset_test_failure(root.path(), "key2");
+        let entries = vec![
+            ("key1".to_string(), vec![b'a'; 1024]),
+            ("key2".to_string(), vec![b'b'; 1024]),
+            ("key3".to_string(), vec![b'c'; 1024]),
+        ];
+
+        backend.batch_offload(&entries).unwrap();
+        assert!(backend.is_exist("key1").unwrap());
+        assert!(!backend.is_exist("key2").unwrap());
+        assert!(backend.is_exist("key3").unwrap());
+        assert_eq!(
+            backend
+                .batch_load(&["key1".to_string(), "key2".to_string(), "key3".to_string()])
+                .unwrap(),
+            vec![
+                ("key1".to_string(), vec![b'a'; 1024]),
+                ("key3".to_string(), vec![b'c'; 1024]),
+            ]
+        );
+
+        let restarted = StorageBackend::new(StorageBackendType::OffsetAllocator, root.path());
+        let mut scanned = restarted.scan_meta().unwrap();
+        scanned.sort_unstable();
+        assert_eq!(
+            scanned,
+            vec![("key1".to_string(), 1024), ("key3".to_string(), 1024)]
+        );
     }
 }
