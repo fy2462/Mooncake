@@ -237,7 +237,7 @@ Run:
 for manifest in parity-map.json transfer-engine-parity-map.json tent-parity-map.json wheel-store-parity-map.json; do
   /home/fy2462/Mooncake/.venv/bin/python rust-repo/tools/store-validation/validate_parity.py \
     --manifest "rust-repo/tools/store-validation/$manifest" \
-    --repo-root rust-repo
+    --repo-root .
 done
 ```
 
