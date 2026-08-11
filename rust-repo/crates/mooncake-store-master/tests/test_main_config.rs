@@ -246,6 +246,21 @@ fn test_build_ha_spec_k8s_uses_explicit_connstring() {
 }
 
 #[test]
+fn cpp_parity_k8s_client_spec_preserves_connstring_then_rejects_serving() {
+    let mut args = base_args();
+    args.ha_backend_type = "k8s".to_string();
+    args.ha_backend_connstring = Some("default/master".to_string());
+
+    let spec = build_ha_spec(&args).expect("build exact K8s HA client spec");
+
+    assert_eq!(spec.backend_type, HABackendType::K8s);
+    assert_eq!(spec.connstring, "default/master");
+    let error = validate_ha_backend_for_serving(&spec).unwrap_err();
+    assert!(matches!(error, HaError::UnavailableInCurrentMode(_)));
+    assert!(error.to_string().contains("shared ordered oplog"));
+}
+
+#[test]
 fn test_build_ha_spec_k8s_uses_pod_identity() {
     let mut args = base_args();
     args.ha_backend_type = "k8s".to_string();
