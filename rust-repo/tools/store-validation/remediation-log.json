@@ -4490,5 +4490,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_ && LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "exact cross-client Disk witness PASS 1/1; non-CXL in-process integration tests PASS 42/42; client lib PASS 375/375; the first exact attempt lacked LD_LIBRARY_PATH and was rerun successfully with the existing native Transfer Engine build"
+  },
+  {
+    "cpp": "e2e/storage_backend_e2e_test.cpp:StorageBackendE2ETest.DiskOnlyReadAfterEviction",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_global_disk_only_read_after_memory_eviction",
+    "first_divergence": "Rust had global-Disk readback and separate memory-pressure eviction evidence, but no discoverable client E2E joined successful shared-Disk publication, expired Memory eviction, a proved Disk-only metadata state, and an exact public read from that state.",
+    "repair_commit": "15684bed",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_only_read_after_memory_eviction -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_ && LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "exact Disk-only eviction witness PASS 3/3; non-CXL in-process integration tests PASS 43/43; client lib PASS 375/375; cargo fmt --all -- --check remains blocked only by pre-existing formatting drift elsewhere in the accumulated worktree, while the new witness itself produces no rustfmt diff and its exact staged diff passes git diff --check"
   }
 ]
