@@ -1905,10 +1905,10 @@
       "behavior": "With the FilePerKey adaptor, 100 offloaded objects batch-load into allocated slices whose bytes exactly equal every source value.",
       "boundary": ["client", "file-storage", "file-per-key", "batch-load"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.BatchLoad_WithStorageBackendAdaptor"},
-      "reason": "Rust has exact one-key roundtrip and lifecycle tests but no multi-key caller-slice BatchLoad equivalent covering the 100-object boundary.",
+      "reason": "Rust cpp_parity_file_storage_batch_load_100_objects writes 100 varied-size values through the real FilePerKey backend, preallocates an exact-size caller-owned buffer for every object, invokes the public batch_read_into boundary once, and verifies every returned byte against its source.",
       "review": {"oracle": "file_storage_test.cpp BatchLoad_WithStorageBackendAdaptor and StorageBackendAdaptor::BatchLoad", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-client/tests/test_local_storage_backend.rs", "test": "cpp_parity_file_storage_batch_load_100_objects"}],
+      "status": "covered"
     },
     {
       "behavior": "A successful batch read records one read op per slice, summed bytes, exactly one latency observation, and no write metrics when setup bypasses FileStorage.",

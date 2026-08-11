@@ -4769,5 +4769,14 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_snapshot_ssd_cache_totals -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib -- --test-threads=1",
     "evidence": "compile-red failed on absent verify_snapshot_ssd_restore_preserves_cache_total_metrics. Initial commit 356a86e4 passed focused 1/1 and shared-tree lib 620/620, but independent review rejected its lib-private lock and capture-only second-save claim. Repair 8a463894 moves the witness into a one-test integration binary, asserts the retention read leaves both gauges unchanged, and performs two real native asynchronous save plus fresh-constructor load cycles. Exact HEAD-plus-repair integration PASS 1/1: each fresh load rebuilds MEMORY_TOTAL/SSD_TOTAL to one, durable object/replica/segment fields survive both cycles, exact Memory rebind succeeds, and public GetReplicaList returns one Complete Memory plus one Complete Disk. Process-global absolute reset is isolated to the dedicated test process."
+  },
+  {
+    "cpp": "file_storage_test.cpp:FileStorageTest.BatchLoad_WithStorageBackendAdaptor",
+    "rust": "mooncake-store-client/tests/test_local_storage_backend.rs:cpp_parity_file_storage_batch_load_100_objects",
+    "first_divergence": "Rust had only single-key FilePerKey reads; the initial draft merely looped over read_object and therefore did not exercise the C++ caller-slice batch boundary. The repair adds one public batch_read_into call over 100 preallocated caller-owned buffers.",
+    "repair_commit": "4349be1b",
+    "focused_command": "cargo test -p mooncake-store-client --test test_local_storage_backend cpp_parity_file_storage_batch_load_100_objects -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --test test_local_storage_backend -- --nocapture",
+    "evidence": "TDD compile-red failed with E0599 before batch_read_into existed. An exact HEAD-plus-index tree passed the focused witness 1/1 and the complete integration binary 34/34. The witness writes 100 varied-size real FilePerKey records, supplies exact-size preallocated buffers to one batch call, and compares every loaded byte with its source; no metrics or atomic-failure semantics are claimed."
   }
 ]
