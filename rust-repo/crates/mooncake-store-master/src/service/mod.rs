@@ -2980,6 +2980,11 @@ mod snapshot_restore_tests {
         verify_multiple_local_disk_holders_snapshot_round_trip().await;
     }
 
+    #[tokio::test]
+    async fn cpp_parity_master_service_promotion_snapshot_in_flight_task_safe() {
+        verify_in_flight_promotion_snapshot_safe().await;
+    }
+
     #[derive(Clone)]
     struct LocalDiskSnapshotFixture {
         client_id: Uuid,
@@ -3522,6 +3527,78 @@ mod snapshot_restore_tests {
         .await;
         assert_ne!(first_fixture.client_id, second_fixture.client_id);
         assert_ne!(first_fixture.storage_id, second_fixture.storage_id);
+    }
+
+    async fn verify_in_flight_promotion_snapshot_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            offload_on_evict: true,
+            promotion_on_hit: true,
+            promotion_admission_threshold: 1,
+            ..Default::default()
+        });
+        let fixture = create_snapshot_local_disk_fixture(
+            &source,
+            Uuid::new_v4(),
+            "snapshot-in-flight-promotion",
+            1024,
+            false,
+        )
+        .await;
+        let scoped_key = TenantId::default().make_scoped_key(&fixture.key);
+        assert!(source.state.promotion_tasks.contains_key(&scoped_key));
+        assert!(
+            source
+                .state
+                .local_disk_segments
+                .get(&fixture.storage_id)
+                .unwrap()
+                .promotion_objects
+                .contains_key(&scoped_key)
+        );
+        let source_disk_refcnt = source
+            .state
+            .objects
+            .get(&scoped_key)
+            .unwrap()
+            .replicas
+            .iter()
+            .find(|replica| replica.replica_type == ReplicaType::LocalDisk)
+            .unwrap()
+            .refcnt;
+        assert_eq!(source_disk_refcnt, 1, "promotion pins its LocalDisk source");
+
+        let (_first, restored) =
+            restore_local_disk_snapshot(&provider, &source, "20260811_010000_005").await;
+        assert!(restored.state.promotion_tasks.is_empty());
+        let restored_local_disk = restored
+            .state
+            .local_disk_segments
+            .get(&fixture.storage_id)
+            .unwrap();
+        assert!(restored_local_disk.promotion_objects.is_empty());
+        drop(restored_local_disk);
+        let restored_disk_refcnt = restored
+            .state
+            .objects
+            .get(&scoped_key)
+            .unwrap()
+            .replicas
+            .iter()
+            .find(|replica| replica.replica_type == ReplicaType::LocalDisk)
+            .unwrap()
+            .refcnt;
+        assert_eq!(restored_disk_refcnt, 0, "transient source pin is discarded");
+
+        recover_snapshot_local_disk(&restored, &fixture, false).await;
+        assert_snapshot_local_disk_replica(
+            &restored,
+            &fixture,
+            &[proto::replica_descriptor::ReplicaType::LocalDisk as i32],
+        )
+        .await;
     }
 
     const SNAPSHOT_CHILD_SEGMENT_BASE: u64 = 0x310000000;
