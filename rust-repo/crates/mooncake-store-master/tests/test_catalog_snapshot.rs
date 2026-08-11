@@ -52,6 +52,40 @@ fn empty_loaded_snapshot(snapshot_id: &str, snapshot_sequence_id: u64) -> Loaded
     }
 }
 
+struct DownloadFailureSnapshotObjectStore {
+    inner: Arc<LocalFileSnapshotObjectStore>,
+    failing_key: String,
+}
+
+impl SnapshotObjectStore for DownloadFailureSnapshotObjectStore {
+    fn upload_buffer(&self, key: &str, buffer: &[u8]) -> Result<(), HaError> {
+        self.inner.upload_buffer(key, buffer)
+    }
+
+    fn download_buffer(&self, key: &str) -> Result<Vec<u8>, HaError> {
+        if key == self.failing_key {
+            return Err(HaError::Snapshot("permission denied".into()));
+        }
+        self.inner.download_buffer(key)
+    }
+
+    fn delete_objects_with_prefix(&self, prefix: &str) -> Result<(), HaError> {
+        self.inner.delete_objects_with_prefix(prefix)
+    }
+
+    fn list_objects_with_prefix(&self, prefix: &str) -> Result<Vec<String>, HaError> {
+        self.inner.list_objects_with_prefix(prefix)
+    }
+
+    fn is_not_found_error(&self, error: &str) -> bool {
+        self.inner.is_not_found_error(error)
+    }
+
+    fn connection_info(&self) -> String {
+        self.inner.connection_info()
+    }
+}
+
 #[test]
 fn cpp_parity_snapshot_child_generated_timestamp_matches_expected_format() {
     let root = tempdir().unwrap();
@@ -204,6 +238,94 @@ fn cpp_parity_embedded_catalog_rejects_invalid_snapshot_ids() {
         catalog.get_latest(),
         Err(HaError::InvalidParams(_))
     ));
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_skips_missing_descriptor() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    object_store
+        .upload_string(
+            "mooncake_master_snapshot/20240303_120000_001/manifest.txt",
+            "m3",
+        )
+        .unwrap();
+
+    assert!(catalog.list(0).unwrap().is_empty());
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_skips_unreadable_newest_descriptor() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    for snapshot_id in ["20240301_120000_001", "20240303_120000_001"] {
+        catalog
+            .publish(&SnapshotDescriptor::new(snapshot_id))
+            .unwrap();
+    }
+    object_store
+        .delete_objects_with_prefix("mooncake_master_snapshot/20240303_120000_001/descriptor.txt")
+        .unwrap();
+
+    let snapshots = catalog.list(0).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].snapshot_id, "20240301_120000_001");
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_skips_non_not_found_descriptor_error() {
+    let root = tempdir().unwrap();
+    let inner = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let object_store = Arc::new(DownloadFailureSnapshotObjectStore {
+        inner,
+        failing_key: "mooncake_master_snapshot/20240303_120000_001/descriptor.txt".to_string(),
+    });
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store);
+    for snapshot_id in ["20240301_120000_001", "20240303_120000_001"] {
+        catalog
+            .publish(&SnapshotDescriptor::new(snapshot_id))
+            .unwrap();
+    }
+
+    let snapshots = catalog.list(1).unwrap();
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].snapshot_id, "20240301_120000_001");
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_propagates_latest_marker_read_error() {
+    let root = tempdir().unwrap();
+    let inner = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let object_store = Arc::new(DownloadFailureSnapshotObjectStore {
+        inner,
+        failing_key: "mooncake_master_snapshot/latest.txt".to_string(),
+    });
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store);
+
+    let error = catalog.get_latest().unwrap_err();
+    assert!(matches!(error, HaError::Snapshot(_)));
+    assert!(error.to_string().contains("permission denied"));
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_delete_latest_falls_back_to_previous() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store);
+    for snapshot_id in ["20240301_120000_001", "20240302_120000_001"] {
+        catalog
+            .publish(&SnapshotDescriptor::new(snapshot_id))
+            .unwrap();
+    }
+
+    catalog.delete("20240302_120000_001").unwrap();
+
+    assert_eq!(
+        catalog.get_latest().unwrap().unwrap().snapshot_id,
+        "20240301_120000_001"
+    );
 }
 
 #[test]

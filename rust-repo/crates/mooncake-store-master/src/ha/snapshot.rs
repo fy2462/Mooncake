@@ -557,7 +557,6 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
     }
 
     fn list(&self, limit: usize) -> Result<Vec<SnapshotDescriptor>, HaError> {
-        let descriptor_suffix = format!("/{SNAPSHOT_DESCRIPTOR_FILE}");
         let snapshot_root = self.snapshot_root.as_str();
         let mut ids: Vec<String> = self
             .object_store
@@ -565,27 +564,27 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
             .into_iter()
             .filter_map(|key| {
                 let trimmed = key.strip_prefix(snapshot_root)?;
-                let snapshot_id = trimmed.strip_suffix(&descriptor_suffix)?;
+                let (snapshot_id, _) = trimmed.split_once('/')?;
                 is_valid_snapshot_id(snapshot_id).then(|| snapshot_id.to_string())
             })
             .collect();
         ids.sort_by(|a, b| b.cmp(a));
-        if limit != 0 {
-            ids.truncate(limit);
-        }
+        ids.dedup();
 
         let mut snapshots = Vec::new();
         for id in ids {
+            if limit != 0 && snapshots.len() >= limit {
+                break;
+            }
             let payload = match self
                 .object_store
                 .download_string(&build_descriptor_key(&self.snapshot_root, &id))
             {
                 Ok(payload) => payload,
-                Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
-                    tracing::warn!(snapshot_id = id, %error, "snapshot descriptor disappeared from embedded listing");
+                Err(error) => {
+                    tracing::warn!(snapshot_id = id, %error, "skipping unreadable embedded snapshot descriptor");
                     continue;
                 }
-                Err(error) => return Err(error),
             };
             match deserialize_snapshot_descriptor(&self.snapshot_root, &id, &payload) {
                 Ok(descriptor) => snapshots.push(descriptor),
@@ -601,20 +600,25 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
         validate_snapshot_id(snapshot_id)?;
         let deletes_latest = self
             .get_latest()?
-            .as_ref()
-            .map(|latest| latest.snapshot_id.as_str() == snapshot_id)
-            .unwrap_or(false);
-        // Remove catalog visibility before payloads. If payload cleanup then
-        // fails, recovery ignores an unreachable orphan instead of following
-        // a descriptor whose data has already disappeared.
-        if deletes_latest {
+            .is_some_and(|latest| latest.snapshot_id.as_str() == snapshot_id);
+        let next_latest = if deletes_latest {
+            self.list(0)?
+                .into_iter()
+                .find(|candidate| candidate.snapshot_id != snapshot_id)
+        } else {
+            None
+        };
+        self.object_store
+            .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
+        if let Some(next_latest) = next_latest {
+            self.object_store.upload_string(
+                &build_latest_key(&self.snapshot_root),
+                &next_latest.snapshot_id,
+            )?;
+        } else if deletes_latest {
             self.object_store
                 .delete_objects_with_prefix(&build_latest_key(&self.snapshot_root))?;
         }
-        self.object_store
-            .delete_objects_with_prefix(&build_descriptor_key(&self.snapshot_root, snapshot_id))?;
-        self.object_store
-            .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
         Ok(())
     }
 

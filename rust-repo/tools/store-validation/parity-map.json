@@ -13533,13 +13533,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.GetLatestReturnsErrorOnBackendReadFailure"
    },
-   "reason": "Rust propagates a non-not-found object-store download failure, but no discoverable fault-injecting Rust test forces latest-marker read failure and asserts the error.",
+   "reason": "Rust parity test cpp_parity_embedded_catalog_propagates_latest_marker_read_error (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) injects a non-not-found permission-denied failure for latest.txt and requires get_latest to propagate the Snapshot/persistent backend error; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp GetLatestReturnsErrorOnBackendReadFailure and embedded_snapshot_catalog_store.cpp GetLatest; Rust snapshot.rs get_latest",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_propagates_latest_marker_read_error"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "ASCII whitespace surrounding a latest marker is ignored before the referenced descriptor is loaded.",
@@ -13612,13 +13617,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.ListSkipsSnapshotsWhenDescriptorMissing"
    },
-   "reason": "Semantic difference: C++ discovers ids from any object under the snapshot prefix, whereas Rust discovers only descriptor.txt keys and therefore does not attempt this missing descriptor read; no exact Rust test exists.",
+   "reason": "Rust parity test cpp_parity_embedded_catalog_skips_missing_descriptor (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) creates only the same valid-id manifest object, then requires unlimited listing to succeed empty after the descriptor read is skipped; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp ListSkipsSnapshotsWhenDescriptorMissing and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_skips_missing_descriptor"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After two snapshots are published and the newer snapshot's only discoverable descriptor object is removed, listing returns the remaining healthy older snapshot.",
@@ -13635,13 +13645,22 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries"
    },
-   "reason": "The C++ fixture removes the newer descriptor key, leaving that id undiscoverable rather than injecting a failed descriptor read. No discoverable Rust test removes one of two published descriptor keys and asserts healthy-entry retention, and the implementations still differ because C++ discovers ids from any object below a snapshot prefix while Rust discovers descriptor keys only.",
+   "reason": "Rust parity tests cpp_parity_embedded_catalog_skips_unreadable_newest_descriptor and cpp_parity_embedded_catalog_skips_non_not_found_descriptor_error (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) cover both the C++ fixture's removed newer descriptor and a permission-denied newer descriptor; listing skips either failure and returns the healthy older descriptor, including limit-one success counting; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_skips_unreadable_newest_descriptor"
+    },
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_skips_non_not_found_descriptor_error"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Listing on a catalog constructed without an object store returns INVALID_PARAMS.",
@@ -13710,13 +13729,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.DeleteLatestFallsBackToPreviousSnapshot"
    },
-   "reason": "Semantic difference: C++ rewrites latest.txt to the prior descriptor, while Rust deletes latest.txt and provider recovery uses list() candidates; provider fallback is not the direct catalog GetLatest contract.",
+   "reason": "Rust parity test cpp_parity_embedded_catalog_delete_latest_falls_back_to_previous (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) publishes two ordered descriptors, deletes the current latest, and requires direct get_latest to return the previous snapshot id; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp DeleteLatestFallsBackToPreviousSnapshot and embedded_snapshot_catalog_store.cpp Delete/GetLatest; Rust snapshot.rs delete and catalog_snapshot.rs provider recovery",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_delete_latest_falls_back_to_previous"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Deleting the only latest snapshot clears the latest marker so a later latest read returns no snapshot.",
