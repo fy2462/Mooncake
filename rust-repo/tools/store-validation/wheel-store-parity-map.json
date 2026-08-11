@@ -4479,12 +4479,12 @@
    "status": "missing"
   },
   {
-   "behavior": "Default and replica-two three-key batch puts each return zero, exact per-key bytes, and successful post-TTL removals. No Rust test proves both configuration paths and exact batch lifecycle.",
+   "behavior": "Default and replica-two three-key batch puts each return zero, exact per-key bytes, and successful post-TTL removals.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Default and replica-two three-key batch puts each return zero, exact per-key bytes, and successful post-TTL removals. No Rust test proves both configuration paths and exact batch lifecycle.",
+   "reason": "Rust parity test test_cpp_parity_put_batch_with_config_parameter creates two real Rust Store clients and verifies the exact default and replica-two three-key batch put statuses, per-key bytes, configured-TTL waits, and non-force removals. Verified PASS without skip.",
    "reference": {
     "file": "test_replicated_distributed_object_store.py",
     "test": "TestDistributedObjectStoreReplication.test_put_batch_with_config_parameter"
@@ -4493,8 +4493,13 @@
     "oracle": "mooncake-wheel/tests/test_replicated_distributed_object_store.py::TestDistributedObjectStoreReplication.test_put_batch_with_config_parameter test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_pybind_client_parity.py",
+     "test": "test_cpp_parity_put_batch_with_config_parameter"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "One registered buffer supports default and replica-two put_from with exact gets; each key removes, the buffer unregisters, and custom soft/hard pins are false. No Rust registered replicated-write test proves it.",
@@ -4515,12 +4520,12 @@
    "status": "missing"
   },
   {
-   "behavior": "Default and replica-two keyword puts each return zero, exact get bytes, and post-TTL remove; misspelled key/value/config keyword names each raise TypeError. Rust has no complete default/custom replication lifecycle and Python-call-surface equivalent.",
+   "behavior": "Default and replica-two keyword puts each return zero, exact get bytes, and post-TTL remove; misspelled key/value/config keyword names each raise TypeError.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Default and replica-two keyword puts each return zero, exact get bytes, and post-TTL remove; misspelled key/value/config keyword names each raise TypeError. Rust has no complete default/custom replication lifecycle and Python-call-surface equivalent.",
+   "reason": "Rust parity test test_cpp_parity_put_with_config_parameter creates two real Rust Store clients, verifies default and replica-two keyword puts return zero with exact bytes, waits past the configured lease TTL and removes without force, and asserts all three misspelled keyword forms raise TypeError. Verified PASS without skip.",
    "reference": {
     "file": "test_replicated_distributed_object_store.py",
     "test": "TestDistributedObjectStoreReplication.test_put_with_config_parameter"
@@ -4529,8 +4534,13 @@
     "oracle": "mooncake-wheel/tests/test_replicated_distributed_object_store.py::TestDistributedObjectStoreReplication.test_put_with_config_parameter test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_pybind_client_parity.py",
+     "test": "test_cpp_parity_put_with_config_parameter"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Replica-two put/get succeeds; closing the main Store returns zero; the second Store still reads exact bytes; reinitializing the main Store also reads exact bytes, then remove succeeds. No Rust test proves this failover/rejoin data continuity.",

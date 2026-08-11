@@ -179,6 +179,97 @@ async def test_put_get_buffer_and_exists_visible_results(cachelib_master):
         await client.close()
 
 
+@pytest.mark.parametrize(
+    "cachelib_master",
+    [{"lease_ttl_ms": 20, "memory_allocator": "offset"}],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_cpp_parity_put_with_config_parameter(cachelib_master):
+    client1 = await _client(
+        cachelib_master,
+        global_segment_size=SLAB_SIZE,
+        local_hostname="localhost:12345",
+    )
+    client2 = await _client(
+        cachelib_master,
+        global_segment_size=SLAB_SIZE,
+        local_hostname="localhost:12346",
+    )
+    value = b"Hello, Config World!"
+    try:
+        key = "test_put_config_key"
+        assert await client1.put(key=key, value=value) == 0
+        assert await client1.get(key) == value
+        await asyncio.sleep(0.05)
+        assert await client1.remove(key) == 0
+
+        config = ReplicateConfig(replica_num=2)
+        key2 = "test_put_config_key2"
+        assert await client1.put(key=key2, value=value, config=config) == 0
+        assert await client1.get(key2) == value
+        await asyncio.sleep(0.05)
+        assert await client1.remove(key2) == 0
+
+        with pytest.raises(TypeError):
+            client1.put(key_arg_name_error=key, value=value, config=config)
+        with pytest.raises(TypeError):
+            client1.put(key=key, value_arg_name_error=value, config=config)
+        with pytest.raises(TypeError):
+            client1.put(key=key, value=value, config_arg_name_error=config)
+    finally:
+        await client2.close()
+        await client1.close()
+
+
+@pytest.mark.parametrize(
+    "cachelib_master",
+    [{"lease_ttl_ms": 20, "memory_allocator": "offset"}],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_cpp_parity_put_batch_with_config_parameter(cachelib_master):
+    client1 = await _client(
+        cachelib_master,
+        global_segment_size=SLAB_SIZE,
+        local_hostname="localhost:12345",
+    )
+    client2 = await _client(
+        cachelib_master,
+        global_segment_size=SLAB_SIZE,
+        local_hostname="localhost:12346",
+    )
+    values = [b"Batch Data 1", b"Batch Data 2", b"Batch Data 3"]
+    try:
+        keys = [
+            "test_batch_config_key1",
+            "test_batch_config_key2",
+            "test_batch_config_key3",
+        ]
+        assert await client1.put_batch(keys, values) == 0
+        for key, value in zip(keys, values):
+            assert await client1.get(key) == value
+        await asyncio.sleep(0.05)
+        for key in keys:
+            assert await client1.remove(key) == 0
+
+        keys2 = [
+            "test_batch_config_key4",
+            "test_batch_config_key5",
+            "test_batch_config_key6",
+        ]
+        config = ReplicateConfig(replica_num=2)
+        assert await client1.put_batch(keys=keys2, values=values, config=config) == 0
+        for key, value in zip(keys2, values):
+            assert await client1.get(key) == value
+        await asyncio.sleep(0.05)
+        for key in keys2:
+            assert await client1.remove(key) == 0
+    finally:
+        await client2.close()
+        await client1.close()
+
+
 @pytest.mark.asyncio
 async def test_get_into_accepts_interior_registered_buffer_range(cachelib_master):
     client = await _client(cachelib_master, global_segment_size=SLAB_SIZE)
