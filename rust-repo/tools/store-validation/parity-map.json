@@ -1667,10 +1667,10 @@
       "behavior": "A reached promotion transfer-write failure attempts best-effort failure notification, performs no success commit, and leaves later tasks eligible for processing.",
       "boundary": ["client", "promotion", "transfer", "failure-notification", "batch-liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.TransferWriteFailureLeavesNoNotify"},
-      "reason": "Rust's reached write-error branch sends best-effort failure notification and continues, but no discoverable Rust client-loop test reaches and asserts it. The C++ fixture permits BatchLoad to fail first, so it does not prove its configured transfer failure was reached.",
+      "reason": "The witness stores exact bytes in a real tenant-scoped FilePerKey backend, injects only allocation success and a UUID/tenant/key-isolated one-shot transfer error, and reaches the production write-failure branch after a successful disk read. Exact observer counts prove failure rather than success notification and prove a later task still reaches allocation.",
       "review": {"oracle": "file_storage_promotion_test.cpp TransferWriteFailureLeavesNoNotify and mooncake-store/src/file_storage.cpp PromotionWrite-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_transfer_failure_releases_and_continues"}],
+      "status": "covered"
     },
     {
       "behavior": "If success notification fails after a completed promotion write, the client attempts best-effort failure notification and continues processing later queued tasks.",

@@ -4616,5 +4616,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_batch_load_failure_releases_and_continues -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "exact witness PASS 1/1: a UUID/key-isolated C++-FakeClient-equivalent allocation seam admits the first task, its real empty FilePerKey backend read fails, failure notification count becomes one, transfer/success counts stay zero, and the later task still reaches a second allocation plus its own failure notification; alloc-failure and non-positive regression witnesses PASS 1/1 each; client lib PASS 382/382; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.TransferWriteFailureLeavesNoNotify",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_transfer_failure_releases_and_continues",
+    "first_divergence": "Rust's production write-error branch already attempted best-effort failure notification and continued, but no discoverable witness could deterministically pass allocation plus LocalDisk read and then fail exactly at transfer. The new test-only one-shot seam controls only that transfer result while preserving the real surrounding processor path.",
+    "repair_commit": "30e793cf",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_transfer_failure_releases_and_continues -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "compile-red failed because inject_promotion_test_transfer_failure was absent; repaired exact witness PASS 1/1 with two allocations, one successful real FilePerKey read reaching one transfer attempt, zero success notifications, two failure notifications, and normal batch completion; adjacent BatchLoadFailure, AllocStartFailure, and NonPositiveSize witnesses PASS 1/1 each; client lib PASS 383/383; touched Rust file passes rustfmt --check"
   }
 ]
