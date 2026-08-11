@@ -4693,10 +4693,10 @@
     "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sContendedLeadershipAndHandover",
     "rust": "mooncake-store-master/tests/test_k8s_ha_live.rs:cpp_parity_k8s_contended_leadership_and_handover",
     "first_divergence": "The broad Rust live test observed leader A during contention but did not assert the C++ exact equality between B's observed view version and A's acquired session version.",
-    "repair_commit": "c133d183",
+    "repair_commit": "db9df247",
     "focused_command": "MOONCAKE_K8S_E2E=1 MOONCAKE_K8S_E2E_NAMESPACE=<namespace> cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_contended_leadership_and_handover -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
-    "evidence": "local target PASS 6/6 with explicit opt-in skips and no local live-pass claim. Enabled mode uses two real coordinators and asserts contended address plus exact view version, release observation, B takeover under a newer transition, and release. K8s backend unit group PASS 6/6; master lib PASS 614/614."
+    "evidence": "local target PASS 6/6 with explicit opt-in skips and no local live-pass claim. Review repair db9df247 changed the release observation to a 10 s internal wait bounded by a 2 s outer deadline, excluding the stable-timeout path. Enabled mode uses two real coordinators and asserts contended address plus exact view version, prompt release observation, B takeover under a newer transition, and release. K8s backend unit group PASS 6/6; master lib PASS 614/614."
   },
   {
     "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sConnstringValidFormatPassesParsing",
