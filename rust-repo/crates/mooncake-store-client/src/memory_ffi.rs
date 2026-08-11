@@ -967,6 +967,193 @@ fn page_ranges(page_count: usize, workers: usize) -> io::Result<Vec<Range<usize>
         .collect())
 }
 
+fn parse_linux_id_list(input: &str) -> io::Result<Vec<usize>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Linux ID list must not be empty",
+        ));
+    }
+
+    let mut ids = Vec::new();
+    for component in input.split(',') {
+        if component.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Linux ID list contains an empty component",
+            ));
+        }
+        if let Some((start, end)) = component.split_once('-') {
+            if start.is_empty() || end.is_empty() || end.contains('-') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Linux ID range is malformed",
+                ));
+            }
+            let start = start.parse::<usize>().map_err(|error| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid ID: {error}"))
+            })?;
+            let end = end.parse::<usize>().map_err(|error| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid ID: {error}"))
+            })?;
+            if start > end {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Linux ID range must be ascending",
+                ));
+            }
+            ids.extend(start..=end);
+        } else {
+            ids.push(component.parse::<usize>().map_err(|error| {
+                io::Error::new(io::ErrorKind::InvalidData, format!("invalid ID: {error}"))
+            })?);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn numa_page_ranges(
+    page_count: usize,
+    numa_nodes: &[usize],
+    available_workers: usize,
+) -> io::Result<Vec<(usize, Range<usize>)>> {
+    if page_count == 0 || numa_nodes.is_empty() || available_workers == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "page count, NUMA nodes, and worker count must be non-zero",
+        ));
+    }
+    if page_count % numa_nodes.len() != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "NUMA regions must contain equal whole-page ranges",
+        ));
+    }
+
+    let worker_count = numa_nodes
+        .len()
+        .max(available_workers.min(16).min(page_count));
+    let base_workers_per_node = worker_count / numa_nodes.len();
+    let extra_workers = worker_count % numa_nodes.len();
+    let pages_per_node = page_count / numa_nodes.len();
+    let mut ranges = Vec::with_capacity(worker_count);
+
+    for (node_index, &node) in numa_nodes.iter().enumerate() {
+        let node_workers = base_workers_per_node + usize::from(node_index < extra_workers);
+        let pages_per_worker = pages_per_node.div_ceil(node_workers);
+        let region_start = node_index * pages_per_node;
+        let region_end = region_start + pages_per_node;
+        for worker in 0..node_workers {
+            let start = region_start + worker * pages_per_worker;
+            if start >= region_end {
+                break;
+            }
+            ranges.push((node, start..(start + pages_per_worker).min(region_end)));
+        }
+    }
+    Ok(ranges)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn online_numa_nodes() -> io::Result<Vec<usize>> {
+    parse_linux_id_list(&std::fs::read_to_string("/sys/devices/system/node/online")?)
+}
+
+#[cfg(target_os = "linux")]
+fn bind_current_thread_to_numa_node(node: usize) -> io::Result<()> {
+    let cpus = parse_linux_id_list(&std::fs::read_to_string(format!(
+        "/sys/devices/system/node/node{node}/cpulist"
+    ))?)?;
+    let mut cpu_set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    let mut representable_cpu = false;
+    unsafe { libc::CPU_ZERO(&mut cpu_set) };
+    for cpu in cpus {
+        if cpu < libc::CPU_SETSIZE as usize {
+            unsafe { libc::CPU_SET(cpu, &mut cpu_set) };
+            representable_cpu = true;
+        }
+    }
+    if !representable_cpu {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "NUMA node has no CPU representable by cpu_set_t",
+        ));
+    }
+    let result = unsafe {
+        libc::pthread_setaffinity_np(
+            libc::pthread_self(),
+            std::mem::size_of::<libc::cpu_set_t>(),
+            &cpu_set,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(result))
+    }
+}
+
+/// Populate equal HugeTLB regions on workers affinitized to their NUMA nodes.
+///
+/// Affinity is best-effort: every page is still touched if the current process
+/// cannot bind a worker to the requested node.
+///
+/// # Safety
+///
+/// `ptr..ptr.add(len)` must be a valid, uniquely writable mapping for the
+/// duration of this call. `page_size` must describe that mapping's page size.
+#[cfg(target_os = "linux")]
+unsafe fn populate_hugetlb_numa_pages(
+    ptr: *mut u8,
+    len: usize,
+    page_size: usize,
+    numa_nodes: &[usize],
+) -> io::Result<()> {
+    if ptr.is_null() || len == 0 || page_size == 0 || numa_nodes.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mapping, length, page size, and NUMA nodes must be valid",
+        ));
+    }
+    if len % numa_nodes.len() != 0
+        || (len / numa_nodes.len()) % page_size != 0
+        || len % page_size != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mapping must contain equal whole-page NUMA regions",
+        ));
+    }
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let ranges = numa_page_ranges(len / page_size, numa_nodes, workers)?;
+    let base_addr = ptr as usize;
+    std::thread::scope(|scope| -> io::Result<()> {
+        let mut handles = Vec::with_capacity(ranges.len());
+        for (node, range) in ranges {
+            handles.push(scope.spawn(move || {
+                if let Err(error) = bind_current_thread_to_numa_node(node) {
+                    tracing::warn!(node, %error, "failed to bind HugeTLB population worker");
+                }
+                for page_index in range {
+                    let address = base_addr + page_index * page_size;
+                    unsafe { std::ptr::write_volatile(address as *mut u8, 0) };
+                }
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| io::Error::other("NUMA HugeTLB population worker panicked"))?;
+        }
+        Ok(())
+    })
+}
+
 /// Populate a HugeTLB mapping by touching the first byte of every huge page.
 ///
 /// # Safety
@@ -1041,8 +1228,11 @@ fn align_up(size: usize, alignment: usize) -> Option<usize> {
 mod tests {
     use super::{
         HUGEPAGE_1_GIB, HUGEPAGE_2_MIB, HugepagePolicy, OwnedBuffer, RegisteredBufferAllocation,
-        StoreSegmentArena, page_ranges, populate_hugetlb_mapping, populate_hugetlb_pages,
+        StoreSegmentArena, numa_page_ranges, page_ranges, parse_linux_id_list,
+        populate_hugetlb_mapping, populate_hugetlb_pages,
     };
+    #[cfg(target_os = "linux")]
+    use super::{online_numa_nodes, populate_hugetlb_numa_pages};
     use mooncake_store_core::StoreError;
 
     #[test]
@@ -1543,6 +1733,74 @@ mod tests {
     fn page_ranges_reject_zero_sized_inputs() {
         assert!(page_ranges(0, 1).is_err());
         assert!(page_ranges(1, 0).is_err());
+    }
+
+    #[test]
+    fn linux_id_list_parser_accepts_ranges_and_rejects_malformed_values() {
+        assert_eq!(
+            parse_linux_id_list("0-3,8,10-11\n").unwrap(),
+            vec![0, 1, 2, 3, 8, 10, 11]
+        );
+        assert!(parse_linux_id_list("").is_err());
+        assert!(parse_linux_id_list("3-1").is_err());
+        assert!(parse_linux_id_list("1,,2").is_err());
+    }
+
+    #[test]
+    fn numa_page_ranges_partition_equal_node_regions_without_overlap() {
+        let ranges = numa_page_ranges(8, &[0, 2], 6).unwrap();
+
+        assert_eq!(ranges, vec![(0, 0..2), (0, 2..4), (2, 4..6), (2, 6..8)]);
+        assert_eq!(
+            ranges
+                .iter()
+                .flat_map(|(_, range)| range.clone())
+                .collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert!(numa_page_ranges(0, &[0], 1).is_err());
+        assert!(numa_page_ranges(2, &[], 1).is_err());
+        assert!(numa_page_ranges(2, &[0], 0).is_err());
+        assert!(numa_page_ranges(3, &[0, 1], 2).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cpp_parity_numa_hugetlb_population_touches_every_region() {
+        let mut numa_nodes = match online_numa_nodes() {
+            Ok(nodes) if !nodes.is_empty() => nodes,
+            Ok(_) => {
+                eprintln!("skipping NUMA population parity: online node list is empty");
+                return;
+            }
+            Err(error) => {
+                eprintln!("skipping NUMA population parity: {error}");
+                return;
+            }
+        };
+        numa_nodes.truncate(2);
+        let page_count = 2 * numa_nodes.len();
+        let map_size = page_count * HUGEPAGE_2_MIB;
+        let mut mapping = vec![0xcd; map_size];
+        for page in 0..page_count {
+            mapping[page * HUGEPAGE_2_MIB] = 0xab;
+        }
+
+        unsafe {
+            populate_hugetlb_numa_pages(
+                mapping.as_mut_ptr(),
+                mapping.len(),
+                HUGEPAGE_2_MIB,
+                &numa_nodes,
+            )
+            .expect("valid NUMA population succeeds");
+        }
+
+        for page in 0..page_count {
+            let boundary = page * HUGEPAGE_2_MIB;
+            assert_eq!(mapping[boundary], 0);
+            assert_eq!(mapping[boundary + 1], 0xcd);
+        }
     }
 
     #[test]
