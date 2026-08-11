@@ -13479,13 +13479,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.PublishAndGetLatestRoundTrip"
    },
-   "reason": "The direct Rust round-trip test asserts only snapshot id, sequence, and view; the provider compatibility test does not directly read and assert descriptor manifest_key, object_prefix, and created_at_ms, so neither proves the full C++ descriptor oracle.",
+   "reason": "Rust parity test cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) publishes a descriptor with frozen sequence, view, creation time, manifest key, object prefix, and snapshot id, then requires get_latest to return the identical descriptor; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp PublishAndGetLatestRoundTrip and embedded_snapshot_catalog_store.cpp Publish/GetLatest; Rust snapshot.rs EmbeddedSnapshotCatalogStore",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Reading latest from a catalog with no latest marker succeeds with no snapshot.",
@@ -13550,13 +13555,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.GetLatestTrimsWhitespaceMarker"
    },
-   "reason": "Semantic difference: Rust trim accepts broader Unicode whitespace, and its whitespace-only marker test returns an error whereas C++ TrimAsciiWhitespace returns an empty latest result; no exact Rust padded-ASCII-marker test exists.",
+   "reason": "Rust parity test cpp_parity_embedded_catalog_trims_ascii_whitespace_marker (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) publishes the descriptor, rewrites latest.txt with the C++ oracle's leading spaces/newline and trailing tab/CRLF, then requires the identical descriptor; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp GetLatestTrimsWhitespaceMarker and embedded_snapshot_catalog_store.cpp GetLatest/TrimAsciiWhitespace; Rust snapshot.rs get_latest and test_embedded_snapshot_catalog_rejects_empty_latest_marker",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_trims_ascii_whitespace_marker"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Listing valid snapshots sorts ids descending and returns the requested number while ignoring unrelated paths.",
@@ -13574,13 +13584,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.ListReturnsSnapshotsInDescendingOrder"
    },
-   "reason": "Semantic difference: Rust sorts descriptor ids descending but truncates ids before descriptor reads, while C++ keeps scanning until it has limit healthy descriptors; its one-entry round trip is not this ordering/limit oracle.",
+   "reason": "Rust parity test cpp_parity_embedded_catalog_lists_newest_snapshots_with_limit (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) publishes the same three out-of-order ids, adds an unrelated object, lists with limit two, and requires the two newest ids in descending order; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp ListReturnsSnapshotsInDescendingOrder and embedded_snapshot_catalog_store.cpp List; Rust snapshot.rs list",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_lists_newest_snapshots_with_limit"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Listing discovers a snapshot id from an object below its prefix, skips it when its descriptor is absent, and succeeds with the remaining entries.",
@@ -13746,13 +13761,18 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreTest.RejectsInvalidSnapshotIds"
    },
-   "reason": "Rust validate_snapshot_id enforces the same 19-byte ASCII digit/underscore shape for publish, delete, and get_latest, but no discoverable test directly exercises invalid publish, invalid delete, and invalid latest marker together.",
+   "reason": "Rust parity test cpp_parity_embedded_catalog_rejects_invalid_snapshot_ids (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) requires invalid-id publish and delete to fail, writes invalid-id as the latest marker, and requires get_latest to fail; verified PASS.",
    "review": {
     "oracle": "embedded_snapshot_catalog_store_test.cpp RejectsInvalidSnapshotIds and embedded_snapshot_catalog_store.cpp validation paths; Rust snapshot.rs validate_snapshot_id/publish/delete/get_latest",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_rejects_invalid_snapshot_ids"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Deleting the latest of two published Redis catalog snapshots promotes the remaining older snapshot as latest, leaves it as the sole list entry, and deletes the removed snapshot's payload prefix.",

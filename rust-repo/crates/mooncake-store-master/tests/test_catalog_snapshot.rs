@@ -8,7 +8,7 @@ use mooncake_store_master::allocator::{
     AllocationStrategy, AllocatorSnapshotConfig, MemoryAllocatorKind,
 };
 use mooncake_store_master::ha::{
-    CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, LoadedSnapshot,
+    CatalogBackedSnapshotProvider, EmbeddedSnapshotCatalogStore, HaError, LoadedSnapshot,
     LocalFileSnapshotObjectStore, SnapshotCatalogStore, SnapshotCatalogStoreType,
     SnapshotDescriptor, SnapshotObjectStore, SnapshotObjectStoreType, SnapshotProvider,
     create_catalog_backed_snapshot_provider,
@@ -138,6 +138,72 @@ fn cpp_parity_snapshot_child_persist_state_uses_frozen_descriptor() {
     catalog.publish(&descriptor).unwrap();
 
     assert_eq!(catalog.get_latest().unwrap(), Some(descriptor));
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_trims_ascii_whitespace_marker() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let snapshot_id = "20240301_120000_002";
+    let mut descriptor = SnapshotDescriptor::new(snapshot_id);
+    descriptor.last_included_seq = 42;
+    catalog.publish(&descriptor).unwrap();
+    object_store
+        .upload_string(
+            "mooncake_master_snapshot/latest.txt",
+            &format!("  \n{snapshot_id}\t\r\n"),
+        )
+        .unwrap();
+
+    assert_eq!(catalog.get_latest().unwrap(), Some(descriptor));
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_lists_newest_snapshots_with_limit() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    for snapshot_id in [
+        "20240301_120000_001",
+        "20240303_120000_001",
+        "20240302_120000_001",
+    ] {
+        catalog
+            .publish(&SnapshotDescriptor::new(snapshot_id))
+            .unwrap();
+    }
+    object_store
+        .upload_string("mooncake_master_snapshot/not-a-snapshot/file.txt", "ignore")
+        .unwrap();
+
+    let snapshots = catalog.list(2).unwrap();
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].snapshot_id, "20240303_120000_001");
+    assert_eq!(snapshots[1].snapshot_id, "20240302_120000_001");
+}
+
+#[test]
+fn cpp_parity_embedded_catalog_rejects_invalid_snapshot_ids() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+
+    assert!(matches!(
+        catalog.publish(&SnapshotDescriptor::new("invalid-id")),
+        Err(HaError::InvalidParams(_))
+    ));
+    assert!(matches!(
+        catalog.delete("invalid-id"),
+        Err(HaError::InvalidParams(_))
+    ));
+    object_store
+        .upload_string("mooncake_master_snapshot/latest.txt", "invalid-id")
+        .unwrap();
+    assert!(matches!(
+        catalog.get_latest(),
+        Err(HaError::InvalidParams(_))
+    ));
 }
 
 #[test]
