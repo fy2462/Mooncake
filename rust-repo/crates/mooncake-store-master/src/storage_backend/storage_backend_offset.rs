@@ -2,6 +2,8 @@ use super::storage_backend_config::{OffsetAllocatorIndex, OffsetIndexEntry};
 use super::*;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 
+const MAX_OFFSET_KEY_LENGTH: usize = 1024 * 1024;
+
 impl StorageBackend {
     pub(super) fn offset_data_path(&self) -> PathBuf {
         self.disk_dir.join("offset_allocator.data")
@@ -51,6 +53,9 @@ impl StorageBackend {
             .open(self.offset_data_path())?;
         let mut next_offset = file.seek(SeekFrom::End(0))?;
         for (key, value) in entries {
+            if key.len() > MAX_OFFSET_KEY_LENGTH {
+                continue;
+            }
             file.write_all(value)?;
             index.entries.insert(
                 key.clone(),
