@@ -22,11 +22,12 @@ to `run_disk_watermark_eviction`.
 Add one `link-native` in-process integration witness in
 `test_client_inproc_e2e.rs`:
 
-1. Write three canonical default-tenant records to a persistent FilePerKey
-   backend before attaching it.
-2. Create a zero-memory-segment client and mount that backend as an offloading
-   LocalDisk segment. The real recovery path publishes generation-bearing
-   LocalDisk metadata, so each object has no masking Memory replica.
+1. Create a zero-memory-segment client and mount an empty persistent FilePerKey
+   backend as an offloading LocalDisk segment.
+2. Write three canonical default-tenant records, then use the public classic
+   completion API to publish generation-bearing LocalDisk metadata. Each object
+   therefore has no masking Memory replica. Writing after mount is deliberate:
+   fresh-Master recovery correctly discards records the Master does not know.
 3. Call the real offload heartbeat once and assert it returns no tasks.
 4. Start the real background workers with offloading and disk watermark
    eviction enabled, promotion/task polling/capacity reporting disabled, a

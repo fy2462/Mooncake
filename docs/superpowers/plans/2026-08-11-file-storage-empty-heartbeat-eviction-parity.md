@@ -11,10 +11,10 @@ when its offload heartbeat returns no tasks.
 
 - [ ] Add
   `cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction`.
-- [ ] Seed three canonical persistent FilePerKey records and attach them to a
-  zero-memory-segment client.
-- [ ] Mount LocalDisk through the real recovery path and assert all three
-  Master queries expose LocalDisk replicas.
+- [ ] Attach an empty persistent FilePerKey backend to a zero-memory-segment
+  client and mount LocalDisk first.
+- [ ] Seed three canonical records, publish them through the public classic
+  completion API, and assert all three Master queries expose LocalDisk replicas.
 - [ ] Assert an explicit offload heartbeat returns zero tasks.
 - [ ] Start real background workers with a short storage interval and tiny
   watermarks; use a bounded poll until backend and Master state are empty.

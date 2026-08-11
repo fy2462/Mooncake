@@ -17,6 +17,7 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
+use uuid::Uuid;
 
 async fn start_master() -> (String, oneshot::Sender<()>) {
     start_master_with_config(MasterRuntimeConfig::default()).await
@@ -947,6 +948,140 @@ async fn zero_segment_heartbeat_activates_after_local_disk_mount() {
         .await
         .unwrap();
     wait_for_healthy(&slot).await;
+
+    background.shutdown().await;
+    drop(slot.lock().await.take());
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction() {
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        enable_offload: true,
+        ..Default::default()
+    })
+    .await;
+    let backend = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+        root_dir: root.path().join("client"),
+        fsdir: "heartbeat-watermark".into(),
+        enable_eviction: true,
+        quota_bytes: 4 * 1024 * 1024,
+    }));
+    backend.init().unwrap();
+    let keys = ["heartbeat-key-1", "heartbeat-key-2", "heartbeat-key-3"];
+    let storage_keys = keys.map(|key| format!("v1:7:default{key}"));
+
+    let mut client = create_tcp_client_with_segment_size(&master, 0)
+        .await
+        .with_local_storage_backend(Arc::clone(&backend));
+    client.mount_local_disk_segment(true).await.unwrap();
+    for (index, storage_key) in storage_keys.iter().enumerate() {
+        backend
+            .write_object(storage_key, &vec![b'a' + index as u8; 512])
+            .unwrap();
+    }
+    let transport_endpoint = client.get_hostname();
+    client
+        .notify_offload_success_tasks(
+            keys.iter()
+                .map(|key| mooncake_store_client::OffloadTaskItem {
+                    tenant_id: "default".into(),
+                    key: (*key).into(),
+                    size: 512,
+                    generation_id: Uuid::new_v4(),
+                })
+                .collect(),
+            keys.iter()
+                .map(|key| proto::StorageObjectMetadata {
+                    key_size: key.len() as i64,
+                    data_size: 512,
+                    transport_endpoint: transport_endpoint.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let user_keys = keys.map(str::to_string);
+    client.health_check().await.unwrap();
+    for key in &user_keys {
+        let replicas = client.query(key).await.unwrap().replicas;
+        let local_disk = replicas
+            .iter()
+            .find(|replica| replica.replica_type == ReplicaType::LocalDisk)
+            .unwrap_or_else(|| panic!("published replicas for {key}: {replicas:?}"));
+        assert_eq!(local_disk.holder_client_id, Some(client.client_id()));
+        assert_eq!(
+            local_disk.local_disk_storage_id,
+            Some(backend.storage_id().unwrap())
+        );
+    }
+    assert!(
+        client
+            .offload_object_heartbeat_tasks(true)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        ClientBackgroundConfig {
+            health_interval: std::time::Duration::from_secs(1),
+            storage_interval: std::time::Duration::from_millis(10),
+            enable_offloading: true,
+            enable_promotion: false,
+            enable_task_poll: false,
+            report_ssd_capacity: false,
+            enable_disk_watermark_eviction: true,
+            disk_eviction_high_watermark_ratio: 1e-12,
+            disk_eviction_low_watermark_ratio: 0.5e-12,
+            ..Default::default()
+        },
+    );
+
+    let eviction = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let backend_empty = storage_keys
+                .iter()
+                .all(|storage_key| !backend.exists(storage_key));
+            let master_empty = {
+                let mut client = slot.lock().await;
+                let client = client.as_mut().unwrap();
+                client
+                    .batch_get_replica_list_results(&user_keys)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .all(|result| matches!(result, Err(StoreError::KeyNotFound(_))))
+            };
+            if backend_empty && master_empty {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if eviction.is_err() {
+        let backend_present = storage_keys
+            .iter()
+            .map(|storage_key| backend.exists(storage_key))
+            .collect::<Vec<_>>();
+        let master_results = slot
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .batch_get_replica_list_results(&user_keys)
+            .await
+            .unwrap();
+        panic!(
+            "empty-work storage heartbeat did not evict all LocalDisk records: \
+             backend_present={backend_present:?}, master_results={master_results:?}"
+        );
+    }
 
     background.shutdown().await;
     drop(slot.lock().await.take());
