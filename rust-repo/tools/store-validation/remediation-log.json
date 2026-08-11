@@ -4481,5 +4481,14 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_main_config cpp_parity_k8s_client_spec_preserves_connstring_then_rejects_serving -- --exact",
     "crate_command": "cargo test -p mooncake-store-master --test test_main_config",
     "evidence": "Rust serving-policy witness PASS 1/1 and main config binary PASS 28/28; review rejected using it as client URI parser parity, so the manifest row is not-applicable"
+  },
+  {
+    "cpp": "e2e/storage_backend_e2e_test.cpp:StorageBackendE2ETest.CrossClientReadback",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes",
+    "first_divergence": "Rust had single-client global-Disk readback and separate two-client Memory transfer coverage, but no discoverable witness joined shared Disk visibility to exact reads from a distinct client.",
+    "repair_commit": "7399da8b",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_ && LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "exact cross-client Disk witness PASS 1/1; non-CXL in-process integration tests PASS 42/42; client lib PASS 375/375; the first exact attempt lacked LD_LIBRARY_PATH and was rerun successfully with the existing native Transfer Engine build"
   }
 ]
