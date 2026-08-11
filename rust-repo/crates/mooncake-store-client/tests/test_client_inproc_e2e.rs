@@ -2130,6 +2130,7 @@ async fn cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup() {
         let mut writer = create_tcp_client_with_segment_size(&master, 16 * 1024 * 1024).await;
         let writer_segment = writer.get_hostname();
         for (key, value) in keys.iter().zip(&values) {
+            writer.health_check().await.unwrap();
             writer
                 .put(
                     key,
@@ -2142,19 +2143,21 @@ async fn cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup() {
                 )
                 .await
                 .unwrap();
-            assert!(
-                writer
-                    .query(key)
-                    .await
-                    .unwrap()
-                    .replicas
-                    .iter()
-                    .any(|replica| replica.replica_type == ReplicaType::Disk)
-            );
         }
+        writer.health_check().await.unwrap();
+        let writer_replicas = writer.batch_get_replica_list(&keys).await.unwrap();
+        assert!(writer_replicas.iter().all(|replicas| {
+            replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Disk)
+                && replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::Memory)
+        }));
+        writer.health_check().await.unwrap();
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2_300)).await;
     let mut reader = create_tcp_client_with_segment_size(&master, 16 * 1024 * 1024).await;
     for (key, expected) in keys.iter().zip(&values) {
         let replicas = reader.query(key).await.unwrap().replicas;
