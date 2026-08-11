@@ -13,25 +13,27 @@ one read-latency observation while leaving write metrics unchanged. If any
 backend read fails, it publishes none of those read metrics.
 
 Rust already owns the corresponding FilePerKey backend and `ClientMetrics`
-families. Its promotion path currently reads LocalDisk objects one at a time
-and records one SSD latency observation after each successful object. That
-does not provide the all-or-nothing, one-observation-per-batch contract.
+families. Its production P2P offload handler already accepts a batch of
+LocalDisk keys and reads them through `AttachedLocalStorage`, but it does not
+publish SSD read metrics. That leaves the all-or-nothing,
+one-observation-per-batch contract uncovered.
 
 ## Chosen Design
 
-Add one client-layer LocalDisk batch-read helper beside `promote_objects`. It
-accepts the production `LocalStorageBackend`, an ordered collection of storage
-keys, and optional `ClientMetrics`. It reads every value through the real
-backend, returning the exact values in input order. Only after all reads
-succeed does it call `observe_ssd_read` once with the total byte count, key
-count, and elapsed duration.
+Add one client-layer LocalDisk batch-read helper in `offload/server.rs`. It
+accepts the production `AttachedLocalStorage`, an ordered collection of
+tenant-scoped storage keys and expected sizes, and optional `ClientMetrics`.
+It reads every value through the real backend, validates each exact size, and
+returns the values in input order. Only after all reads succeed does it call
+`observe_ssd_read` once with the total byte count, key count, and elapsed
+duration.
 
-Change `promote_objects` to load the complete heartbeat task batch through
-this helper before processing allocations and notifications. Pair each task
-with its already-loaded value in the existing order. This preserves the
-current failure boundary: a LocalDisk read error aborts promotion before any
-allocation or success notification. It improves metric fidelity without
-moving client concerns into the storage backend.
+The production `batch_get_offload_object` handler calls this helper before it
+registers the returned values with Transfer Engine. `OffloadReadHandler`
+receives the same optional `Arc<ClientMetrics>` owned by `MooncakeClient`, so
+metrics configuration and lifecycle remain shared with the client HTTP and
+summary surfaces. The handler then performs its existing registration and
+buffer-pool commit steps without changing their error semantics.
 
 Alternatives rejected:
 
@@ -39,8 +41,9 @@ Alternatives rejected:
   persistence layer depend on client observability.
 - Testing `observe_ssd_read` directly would prove only the metric primitive,
   not that a production batch-load result controls publication.
-- Retaining per-object metric calls and summing them in tests would contradict
-  the C++ requirement of exactly one latency observation per batch.
+- Rebatching `promote_objects` would alter the ordering between read failures,
+  invalid tasks, and promotion notifications even though a direct production
+  batch-read boundary already exists.
 
 ## Data and Error Semantics
 
@@ -50,11 +53,11 @@ number of requested keys, read bytes equal the checked sum of returned value
 lengths, read and total latency counts each increase by exactly one, and all
 write counters and write latency counts remain zero.
 
-The failure fixture requests two absent keys from an initialized FilePerKey
-backend. The helper returns the backend error and leaves read operations,
-bytes, read latency, total operations, total bytes, and total latency at zero.
-No partial metric publication is allowed if an earlier key was readable but a
-later key failed.
+The failure fixture requests one existing key followed by one absent key from
+an initialized FilePerKey backend. The helper returns the backend error and
+leaves read operations, bytes, read latency, total operations, total bytes,
+and total latency at zero. This strengthens the two-missing-key C++ fixture by
+proving that an earlier successful read cannot cause partial publication.
 
 Byte and key totals use checked conversions and addition. Overflow returns a
 Store error before metric publication. Metrics remain optional: the batch read
@@ -62,8 +65,7 @@ must behave identically when metrics are disabled.
 
 ## TDD and Witnesses
 
-Add two independently discoverable tests in the client storage-local test
-module:
+Add two independently discoverable tests in the offload server test module:
 
 - `cpp_parity_file_storage_batch_load_records_ssd_metrics` writes several
   real FilePerKey values, invokes the production batch helper, verifies exact
@@ -75,8 +77,9 @@ module:
   zero.
 
 Write both tests before the helper exists and retain their missing-symbol RED.
-After the minimal implementation passes, run both exact filters and the full
-client library suite with the native Transfer Engine link feature.
+After the minimal implementation passes, run both exact filters, the complete
+offload server tests, and the full client library suite with the native
+Transfer Engine link feature.
 
 ## Manifest and Ledger
 
@@ -90,8 +93,8 @@ unchanged at 52 missing rows.
 
 ## Verification
 
-Run both exact tests, the complete client library suite, and the relevant
-client integration target if the helper changes its behavior. Then run all
+Run both exact tests, the complete client library suite, and an offload RPC
+integration target covering successful batch reads. Then run all
 four parity validators, validator self-tests, Rust 2024 formatting checks,
 pre-commit on touched files, JSON parsing, and `git diff --check`. Confirm the
 two manifest entries are covered and no unrelated manifest row changes status.
@@ -100,7 +103,7 @@ two manifest entries are covered and no unrelated manifest row changes status.
 
 - No storage-backend metrics dependency.
 - No change to offload write metrics or remote LocalDisk RPC metrics.
-- No change to allocation, promotion notification, or failure-retry policy.
+- No change to promotion, allocation, notification, or failure-retry policy.
 - No C/C++ source changes.
 - No claim that these two witnesses cover the seven other missing
   `FileStorageTest` rows.
