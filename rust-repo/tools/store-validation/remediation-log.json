@@ -4670,5 +4670,50 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests::cpp_parity_numa_hugetlb_population_touches_every_region -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "compile-red failed on the four absent NUMA helpers; repaired memory_ffi group PASS 45/45 with the online-node witness executing locally, and client lib PASS 390/390. The planner also proves equal regions cover every page once and the sysfs parser covers ranges plus malformed input; affinity failure is deliberately best-effort while population remains mandatory; touched Rust file passes rustfmt and git diff --check"
+  },
+  {
+    "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sBasicMasterViewOperations",
+    "rust": "mooncake-store-master/tests/test_k8s_ha_live.rs:cpp_parity_k8s_basic_master_view_operations",
+    "first_divergence": "Rust had no exact lifecycle witness, and its K8s watch converted a normal stable deadline into InvalidBackend instead of the C++ normal timed-out outcome. The watch now returns Ok(None) at its hard deadline while preserving real API and stream errors.",
+    "repair_commit": "c133d183",
+    "focused_command": "MOONCAKE_K8S_E2E=1 MOONCAKE_K8S_E2E_NAMESPACE=<namespace> cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_basic_master_view_operations -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
+    "evidence": "compile-red failed on the absent five-case live fixture; local target PASS 6/6 with all five new parity cases explicitly opt-in skipped because no live K8s was configured, so no local live pass is claimed. K8s backend unit group PASS 6/6 and master lib PASS 614/614. The enabled witness requires real RBAC/API access and proves stable 200 ms timeout plus prompt release change."
+  },
+  {
+    "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sCanReacquireAfterRelease",
+    "rust": "mooncake-store-master/tests/test_k8s_ha_live.rs:cpp_parity_k8s_can_reacquire_after_release",
+    "first_divergence": "Rust implemented release and term advancement but had no same-coordinator live witness for two acquire/renew/release cycles.",
+    "repair_commit": "c133d183",
+    "focused_command": "MOONCAKE_K8S_E2E=1 MOONCAKE_K8S_E2E_NAMESPACE=<namespace> cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_can_reacquire_after_release -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
+    "evidence": "local target PASS 6/6 with all five new parity cases explicitly opt-in skipped because no live K8s was configured; no local live pass is claimed. Enabled mode requires real RBAC/API access and asserts empty holder after release, a distinct second leader, strictly newer transition, renewal, and final release. K8s backend unit group PASS 6/6; master lib PASS 614/614."
+  },
+  {
+    "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sContendedLeadershipAndHandover",
+    "rust": "mooncake-store-master/tests/test_k8s_ha_live.rs:cpp_parity_k8s_contended_leadership_and_handover",
+    "first_divergence": "The broad Rust live test observed leader A during contention but did not assert the C++ exact equality between B's observed view version and A's acquired session version.",
+    "repair_commit": "c133d183",
+    "focused_command": "MOONCAKE_K8S_E2E=1 MOONCAKE_K8S_E2E_NAMESPACE=<namespace> cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_contended_leadership_and_handover -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
+    "evidence": "local target PASS 6/6 with explicit opt-in skips and no local live-pass claim. Enabled mode uses two real coordinators and asserts contended address plus exact view version, release observation, B takeover under a newer transition, and release. K8s backend unit group PASS 6/6; master lib PASS 614/614."
+  },
+  {
+    "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sConnstringValidFormatPassesParsing",
+    "rust": "mooncake-store-master/tests/test_k8s_ha_live.rs:cpp_parity_k8s_connstring_valid_format_passes_parsing",
+    "first_divergence": "Rust's lazy constructor could prove syntax without proving the C++ fixture's reachable-client precondition. The exact witness now follows namespace/name parsing with real read, acquire, holder observation, and release operations.",
+    "repair_commit": "c133d183",
+    "focused_command": "MOONCAKE_K8S_E2E=1 MOONCAKE_K8S_E2E_NAMESPACE=<namespace> cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_connstring_valid_format_passes_parsing -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
+    "evidence": "local target PASS 6/6 with explicit opt-in skips and no local live-pass claim. Enabled mode requires usable kube configuration and RBAC, so lazy construction cannot pass without successful real Lease operations. K8s backend unit group PASS 6/6; master lib PASS 614/614."
+  },
+  {
+    "cpp": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp:HighAvailabilityTest.K8sConnstringNoSlashDefaultsNamespace",
+    "rust": "mooncake-store-master/tests/test_k8s_ha_live.rs:cpp_parity_k8s_connstring_no_slash_defaults_namespace",
+    "first_divergence": "The existing parser unit proved the name-only default syntactically but did not prove that production operations actually target the default namespace through a reachable client.",
+    "repair_commit": "c133d183",
+    "focused_command": "MOONCAKE_K8S_E2E=1 cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_connstring_no_slash_defaults_namespace -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
+    "evidence": "local target PASS 6/6 with explicit opt-in skips and no local live-pass claim. Enabled mode supplies only a Lease name to the coordinator while independently reading its holder through Api<Lease> explicitly scoped to default, then releases it. K8s backend unit group PASS 6/6; master lib PASS 614/614."
   }
 ]

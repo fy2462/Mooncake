@@ -967,17 +967,17 @@
       "behavior": "A Kubernetes Lease coordinator acquires 127.0.0.1:8899, reads that leader back, renews, times out after 200 ms with no view change, releases, and then observes a changed view.",
       "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "view-change"],
       "reference": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sBasicMasterViewOperations"},
-      "reason": "Rust has K8s read/acquire/renew/release and live handover coverage, but no discoverable test reproduces this exact same-coordinator no-change timeout then release/view-change sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "reason": "The opt-in live Rust witness uses one real Lease coordinator for read/acquire/renew, proves a stable 200 ms wait returns a normal timeout, then proves release clears the holder and wakes a 10 s view waiter within 2 s. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sBasicMasterViewOperations; Rust ha/coordinator.rs, coordinator_k8s.rs, test_k8s_ha_live.rs, and main_config.rs", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_k8s_ha_live.rs","test":"cpp_parity_k8s_basic_master_view_operations"}], "status": "covered"
     },
     {
       "behavior": "After one coordinator acquires, renews, and explicitly releases a Kubernetes Lease, that same coordinator reacquires it for a different address, renews, and releases again.",
       "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "reacquire"],
       "reference": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sCanReacquireAfterRelease"},
-      "reason": "Rust clears the active owner token on release and implements new K8s Lease transitions, but no discoverable live Rust test exercises the exact same-coordinator release/reacquire/renew sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "reason": "The opt-in live Rust witness uses the same real Lease coordinator to acquire, renew, release, verify the empty holder, reacquire under a second address with a strictly newer transition, renew, and release. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sCanReacquireAfterRelease; Rust ha/coordinator.rs, coordinator_k8s.rs, and main_config.rs", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_k8s_ha_live.rs","test":"cpp_parity_k8s_can_reacquire_after_release"}], "status": "covered"
     },
     {
       "behavior": "An empty namespace and empty Kubernetes Lease name produce the exact connection string / and are rejected as invalid parameters.",
@@ -994,17 +994,17 @@
       "behavior": "With an enabled and reachable Kubernetes client, a name-only Lease connection string defaults its namespace to default and the factory connects and constructs a coordinator.",
       "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connection-probe"],
       "reference": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringNoSlashDefaultsNamespace"},
-      "reason": "Rust's focused test proves only that a name-only Lease defaults to the default namespace; Rust coordinator construction is lazy and no discoverable test reproduces the C++ enabled/reachable-client factory Connect/Init sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "reason": "The opt-in live Rust witness passes only a Lease name, then performs real read/acquire/release operations while independently observing the holder through a Lease API explicitly scoped to the default namespace. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringNoSlashDefaultsNamespace; Rust tests/test_coordinator.rs test_parse_k8s_lease_connstring_accepts_name_only, coordinator.rs new_k8s, and coordinator_k8s.rs k8s_lease_api", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_k8s_ha_live.rs","test":"cpp_parity_k8s_connstring_no_slash_defaults_namespace"}], "status": "covered"
     },
     {
       "behavior": "With two Kubernetes Lease coordinators, A acquires and renews, B observes A's contended view version, A releases, B observes the change, and B takes over the Lease.",
       "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "leadership-handover"],
       "reference": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sContendedLeadershipAndHandover"},
-      "reason": "Rust's live K8s test covers A acquisition/renewal, B contention observing leader A, A release, view change, B takeover, and release, but it never asserts that B's contended view_version equals A's acquired session view_version. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "reason": "The dedicated opt-in live Rust witness proves A acquisition/renewal, B contention with exact leader address and view-version equality, A release and empty-view observation, then B takeover under a strictly newer transition and release. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sContendedLeadershipAndHandover; Rust tests/test_k8s_ha_live.rs test_k8s_ha_live_rbac_watch_backoff_e2e. This is partial coordinator-only evidence; main_config.rs rejects K8s for production HA serving.", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_k8s_ha_live.rs","test":"cpp_parity_k8s_contended_leadership_and_handover"}], "status": "covered"
     },
     {
       "behavior": "When explicitly releasing a monitored Kubernetes Lease session, the C++ StartLeadershipMonitor loss callback is not invoked.",
@@ -1026,9 +1026,9 @@
       "behavior": "A reachable enabled Kubernetes client accepts a namespace/lease-name connection string and constructs a coordinator after probing the API.",
       "boundary": ["master", "ha", "k8s", "coordinator-only", "not-serving", "connection-probe"],
       "reference": {"file": "ha/leadership/backends/k8s/high_availability_k8s_test.cpp", "test": "HighAvailabilityTest.K8sConnstringValidFormatPassesParsing"},
-      "reason": "Rust accepts namespace/lease-name and lazily constructs a coordinator without an API probe; no discoverable Rust test proves the C++ reachable-client connection-probe sequence. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
+      "reason": "The opt-in live Rust witness parses namespace/lease-name and then performs real read, acquire, holder observation, and release operations, so lazy construction cannot produce a false positive when the API is unreachable. Kubernetes remains fail-fast for production HA serving because it has no shared ordered oplog.",
       "review": {"oracle": "mooncake-store/tests/ha/leadership/backends/k8s/high_availability_k8s_test.cpp K8sConnstringValidFormatPassesParsing; Rust coordinator.rs new_k8s, coordinator_k8s.rs k8s_lease_api, tests/test_main_config.rs, and main_config.rs", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-master/tests/test_k8s_ha_live.rs","test":"cpp_parity_k8s_connstring_valid_format_passes_parsing"}], "status": "covered"
     },
     {
       "behavior": "Ten PUT_END records are submitted before LocalFS standby startup, the first nine through Append and the final write through AppendAndPersist; all use the asynchronous PUT_END store path, then standby catch-up awaits eventual batch visibility and reaches WATCHING with zero lag and applied sequence at least the final sequence, while the exported snapshot contains all ten keys with size at least ten.",
