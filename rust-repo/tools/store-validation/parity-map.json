@@ -1218,10 +1218,10 @@
       "behavior": "A live LocalDisk/SSD snapshot with complete Memory and Disk replicas restores into a fresh service with MEMORY_TOTAL and SSD_TOTAL still one and a readable two-replica list, while preserving the fixture's descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
       "boundary": ["master", "snapshot", "restore", "local-disk", "ssd", "metrics"],
       "reference": {"file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp", "test": "MasterServiceSSDSnapshotTest.RestorePreservesCacheTotalMetrics"},
-      "reason": "test_snapshot_restore_rebuilds_memory_and_disk_cache_total_metrics restores a synthetic StorageBackend inventory and checks gauges, not a snapshot saved by a live service. It does not assert the restored RPC list or the fixture's fresh-service and second-save LocalDisk/SSD state equivalence.",
+      "reason": "Covered by Rust master lib test `mooncake-store-master/src/service/mod.rs::snapshot_restore_tests::cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics`: a live public PutStart plus Memory/Disk PutEnd creates one completed Memory and one global-Disk replica and increments both cache-total gauges. A public read retains the live object under Rust's snapshot-expiry contract; the production catalog publish/load path then restores into a fresh service, rebuilds both gauges from decoded non-accounted objects, preserves durable object/segment inventory through a second save, rebinds the exact Memory segment, and returns exactly two Complete replicas through public GetReplicaList. Verified by running `cargo test -p mooncake-store-master --lib cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics -- --nocapture`: PASS 1/1 in the exact HEAD-plus-repair tree.",
       "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RestorePreservesCacheTotalMetrics plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics"}],
+      "status": "covered"
     },
     {
       "behavior": "After Memory PutEnd, revoking the processing Disk replica leaves exactly one readable Memory replica, and snapshot save followed by fresh LocalDisk/SSD service restore preserves that result, replica metadata, segment/accounting, LocalDisk state/tasks, and second-save state.",

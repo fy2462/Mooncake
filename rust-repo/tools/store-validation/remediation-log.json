@@ -4760,5 +4760,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_in_flight_task_safe -- --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "compile-red failed on absent verify_in_flight_promotion_snapshot_safe. Exact witness PASS 1/1 and five-row promotion snapshot group PASS 5/5: before save, production GetReplicaList admission creates one global promotion task, one per-holder queue entry, and LocalDisk refcnt=1; fresh restore has no transient tasks/queue and refcnt=0; exact inventory recovery returns only the unchanged 1024-byte LocalDisk descriptor. The immediately preceding master lib run PASS 618/618, and this test raises the working-tree lib count to 619."
+  },
+  {
+    "cpp": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp:MasterServiceSSDSnapshotTest.RestorePreservesCacheTotalMetrics",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics",
+    "first_divergence": "The existing Rust metric test restored a synthetic native StorageBackend map and never proved the live public Memory-plus-global-Disk workflow, production catalog codec, fresh-service second-save inventory, exact Memory rebind, or final public two-replica list.",
+    "repair_commit": "356a86e4",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "compile-red failed on absent verify_snapshot_ssd_restore_preserves_cache_total_metrics. Exact HEAD-plus-repair tree PASS 1/1: live PutStart returns two replicas, both PutEnd calls raise MEMORY_TOTAL/SSD_TOTAL by one, a public read retains the ttl=0 object for Rust catalog recovery, decoded accounting flags are false, fresh restore rebuilds both gauges to one, second-save durable object/segment fields match, exact Memory rebind succeeds, and public GetReplicaList returns exactly one Complete Memory plus one Complete Disk replica. RAII restores both process-global gauges even on panic."
   }
 ]
