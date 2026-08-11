@@ -604,3 +604,29 @@ fn test_full_local_storage_lifecycle() {
     backend.delete_object("lifecycle_key").unwrap();
     assert!(!backend.exists("lifecycle_key"));
 }
+
+#[test]
+fn cpp_parity_file_storage_batch_load_100_objects() {
+    // C++ FileStorageTest.BatchLoad_WithStorageBackendAdaptor: after 100
+    // objects are offloaded, BatchLoad fills caller-owned slices with every
+    // exact value through the FilePerKey adaptor.
+    let backend = test_backend();
+    let mut expected = Vec::with_capacity(100);
+    for index in 0..100 {
+        let key = format!("batch_load_key_{index}");
+        let value = format!("batch-load-value-{index}")
+            .repeat(1 + index % 7)
+            .into_bytes();
+        backend.write_object(&key, &value).unwrap();
+        expected.push((key, value));
+    }
+
+    let mut batch = expected
+        .iter()
+        .map(|(key, value)| (key.clone(), vec![0; value.len()]))
+        .collect::<Vec<_>>();
+    backend.batch_read_into(&mut batch).unwrap();
+    for ((key, loaded), (_, value)) in batch.iter().zip(&expected) {
+        assert_eq!(loaded, value, "exact batch-load bytes for {key}");
+    }
+}

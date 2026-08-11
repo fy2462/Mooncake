@@ -1470,6 +1470,26 @@ impl LocalStorageBackend {
         Ok(value.to_vec())
     }
 
+    /// Load a batch of FilePerKey objects into caller-owned buffers.
+    ///
+    /// Every target must already have the exact expected size. Earlier
+    /// targets may have been filled when a later key fails, matching the C++
+    /// `StorageBackendAdaptor::BatchLoad` caller-slice contract.
+    pub fn batch_read_into(&self, objects: &mut [(String, Vec<u8>)]) -> StoreResult<()> {
+        for (key, target) in objects {
+            let value = self.read_object(key)?;
+            if value.len() != target.len() {
+                return Err(StoreError::InvalidParams(format!(
+                    "FilePerKey batch target for {key:?} has {} bytes, stored value has {}",
+                    target.len(),
+                    value.len()
+                )));
+            }
+            target.copy_from_slice(&value);
+        }
+        Ok(())
+    }
+
     /// Delete a key's file from disk.
     ///
     /// C++ equivalent: `StorageBackend::RemoveFile`.
