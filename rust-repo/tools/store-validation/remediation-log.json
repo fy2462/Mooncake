@@ -4445,5 +4445,14 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_notify_evicted_disk_replicas_routes_same_key_by_tenant -- --exact && cargo test -p mooncake-store-master --test test_tenant_id_parity cpp_parity_notify_evicted_disk_replicas_removes_same_key_for_both_tenants -- --exact",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib && cargo test -p mooncake-store-master --test test_tenant_id_parity",
     "evidence": "exact client and Master witnesses PASS 1/1 each; client lib PASS 375/375; Master tenant parity binary PASS 25/25"
+  },
+  {
+    "cpp": "file_storage_test.cpp:FileStorageTest.HeartbeatRunsDiskWatermarkEvictionWithoutOffloadWork",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction",
+    "first_divergence": "Rust independently scheduled offload and disk watermark work in one production storage-worker iteration, but no discoverable integration witness proved that an empty offload heartbeat still reaches tenant-aware Master notification, local commit deletion, and KeyNotFound for every LocalDisk-only object.",
+    "repair_commit": "82d317ff",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction -- --exact --nocapture",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib && cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e",
+    "evidence": "exact heartbeat witness PASS 1/1; client lib PASS 375/375; in-proc integration non-CXL tests PASS 42/42, while 3 pre-existing CXL subprocess tests are unavailable because the local Transfer Engine was built without CXL transport"
   }
 ]

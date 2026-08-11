@@ -1810,10 +1810,12 @@
       "behavior": "A heartbeat with no offload work still evicts local-disk victims above ultra-low watermarks and Master queries then return OBJECT_NOT_FOUND.",
       "boundary": ["client", "heartbeat", "watermark-eviction", "master", "local-disk"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.HeartbeatRunsDiskWatermarkEvictionWithoutOffloadWork"},
-      "reason": "Rust backend commit tests delete local victims, but no classic client test proves empty-work heartbeat scheduling plus Master notification and OBJECT_NOT_FOUND outcome.",
+      "reason": "The Rust in-process witness mounts a real FilePerKey LocalDisk backend, publishes three LocalDisk-only objects, proves the offload heartbeat is empty, then starts the production storage background worker and observes both local record deletion and per-key Master KeyNotFound results after watermark eviction.",
       "review": {"oracle": "file_storage_test.cpp HeartbeatRunsDiskWatermarkEvictionWithoutOffloadWork, file_storage.cpp heartbeat, and storage_backend.cpp eviction", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {"file": "mooncake-store-client/tests/test_client_inproc_e2e.rs", "test": "cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction"}
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Evicting two tenant-scoped versions of the same user key removes each tenant's LocalDisk Master metadata without cross-tenant collision.",
