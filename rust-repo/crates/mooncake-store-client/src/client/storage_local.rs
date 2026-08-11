@@ -809,7 +809,14 @@ impl MooncakeClient {
     ///
     /// 返回成功 promotion 的对象数量。
     pub async fn promote_objects(&mut self) -> StoreResult<usize> {
-        let tasks = self.promotion_object_heartbeat_tasks().await?;
+        let tasks = match self.promotion_object_heartbeat_tasks().await {
+            Ok(tasks) => tasks,
+            Err(StoreError::KeyNotFound(message)) => {
+                tracing::debug!(target: "storage_debug", %message, "promotion: local disk session disappeared; waiting for remount");
+                return Ok(0);
+            }
+            Err(error) => return Err(error),
+        };
         if tasks.is_empty() {
             return Ok(0);
         }
@@ -1688,6 +1695,54 @@ mod tests {
         client.mount_local_disk_segment(false).await.unwrap();
 
         assert!(client.local_storage.is_some());
+        assert_eq!(client.promote_objects().await.unwrap(), 0);
+        assert!(disk.scan_meta().unwrap().is_empty());
+
+        client.tear_down_all().await.unwrap();
+        server.abort();
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_missing_session_is_benign() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let endpoint_probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_host = endpoint_probe.local_addr().unwrap().to_string();
+        drop(endpoint_probe);
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "missing-promotion-session".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            &local_host,
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(Arc::clone(&disk));
+
         assert_eq!(client.promote_objects().await.unwrap(), 0);
         assert!(disk.scan_meta().unwrap().is_empty());
 
