@@ -222,6 +222,7 @@ pub struct BucketStorageBackend {
     backend_id: Uuid,
     config: BucketStorageConfig,
     state: Mutex<BucketState>,
+    ungrouped_offloading_objects: Mutex<HashMap<String, u64>>,
     init_lock: Mutex<()>,
     reservations: Arc<BucketReservationRegistry>,
     next_token: AtomicU64,
@@ -233,10 +234,81 @@ impl BucketStorageBackend {
             backend_id: Uuid::new_v4(),
             config,
             state: Mutex::new(BucketState::default()),
+            ungrouped_offloading_objects: Mutex::new(HashMap::new()),
             init_lock: Mutex::new(()),
             reservations: Arc::new(BucketReservationRegistry::default()),
             next_token: AtomicU64::new(1),
         }
+    }
+
+    pub(crate) fn allocate_offloading_buckets(
+        &self,
+        offloading_objects: &HashMap<String, u64>,
+    ) -> StoreResult<Vec<Vec<String>>> {
+        self.ensure_initialized()?;
+        if offloading_objects.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let existing = self
+            .state
+            .lock()
+            .records
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut ungrouped = self.ungrouped_offloading_objects.lock();
+        let objects = offloading_objects.iter().collect::<Vec<_>>();
+        let mut next = 0usize;
+        let mut buckets = Vec::new();
+
+        while next < objects.len() {
+            let mut bucket_keys = Vec::new();
+            let mut bucket_objects = HashMap::new();
+            let mut bucket_data_size = 0u64;
+
+            for (key, size) in ungrouped.drain() {
+                bucket_data_size = bucket_data_size.checked_add(size).ok_or_else(|| {
+                    StoreError::Internal("offload bucket data size overflow".to_string())
+                })?;
+                bucket_keys.push(key.clone());
+                bucket_objects.insert(key, size);
+            }
+
+            while bucket_keys.len() < self.config.bucket_keys_limit {
+                let Some((key, size)) = objects.get(next).copied() else {
+                    ungrouped.extend(bucket_objects);
+                    return Ok(buckets);
+                };
+                if *size > self.config.bucket_size_limit || existing.contains(key) {
+                    next += 1;
+                    continue;
+                }
+                let projected = bucket_data_size.checked_add(*size).ok_or_else(|| {
+                    StoreError::Internal("offload bucket data size overflow".to_string())
+                })?;
+                if projected > self.config.bucket_size_limit {
+                    break;
+                }
+
+                bucket_data_size = projected;
+                bucket_keys.push(key.clone());
+                bucket_objects.insert(key.clone(), *size);
+                next += 1;
+                if bucket_data_size == self.config.bucket_size_limit {
+                    break;
+                }
+            }
+
+            buckets.push(bucket_keys);
+        }
+
+        Ok(buckets)
+    }
+
+    #[cfg(test)]
+    fn ungrouped_offloading_objects_size(&self) -> usize {
+        self.ungrouped_offloading_objects.lock().len()
     }
 
     fn backend_dir(&self) -> PathBuf {
@@ -1198,6 +1270,100 @@ mod tests {
         backend
             .commit_write_with_generation(key, value, pending, generation)
             .unwrap();
+    }
+
+    fn one_byte_tasks(count: usize) -> HashMap<String, u64> {
+        (0..count).map(|i| (format!("test{i}"), 1)).collect()
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_group_offloading_keys_by_bucket_key_limit() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 969;
+        let backend = BucketStorageBackend::new(config);
+        let tasks = one_byte_tasks(35);
+
+        let first = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().all(|bucket| bucket.len() == 10));
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 5);
+
+        let second = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert_eq!(second.len(), 4);
+        assert!(second.iter().all(|bucket| bucket.len() == 10));
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 0);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_group_offloading_keys_by_bucket_size_limit() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 969;
+        config.bucket_size_limit = 10;
+        let backend = BucketStorageBackend::new(config);
+        let tasks = one_byte_tasks(35);
+
+        let first = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert_eq!(first.len(), 3);
+        assert!(first.iter().all(|bucket| bucket.len() == 10));
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 5);
+
+        let second = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert_eq!(second.len(), 4);
+        assert!(second.iter().all(|bucket| bucket.len() == 10));
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 0);
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_group_offloading_keys_by_bucket_combined_limits() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 9;
+        config.bucket_size_limit = 496;
+        let backend = BucketStorageBackend::new(config);
+        let tasks = (0..500)
+            .map(|i| (format!("test{i}"), i as u64))
+            .collect::<HashMap<_, _>>();
+
+        let buckets = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert!(!buckets.is_empty());
+        for bucket in buckets {
+            assert!(bucket.len() <= 9);
+            assert!(bucket.iter().map(|key| tasks[key]).sum::<u64>() <= 496);
+        }
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_group_offloading_keys_by_bucket_retains_residue() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 500;
+        config.bucket_size_limit = 256 * 1024 * 1024;
+        let backend = BucketStorageBackend::new(config);
+
+        assert!(
+            backend
+                .allocate_offloading_buckets(&one_byte_tasks(1))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 1);
+        assert!(
+            backend
+                .allocate_offloading_buckets(&HashMap::new())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 1);
+        assert!(
+            backend
+                .allocate_offloading_buckets(&one_byte_tasks(7))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 7);
     }
 
     #[test]
