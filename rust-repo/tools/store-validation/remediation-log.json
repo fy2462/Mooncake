@@ -4763,11 +4763,11 @@
   },
   {
     "cpp": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp:MasterServiceSSDSnapshotTest.RestorePreservesCacheTotalMetrics",
-    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics",
-    "first_divergence": "The existing Rust metric test restored a synthetic native StorageBackend map and never proved the live public Memory-plus-global-Disk workflow, production catalog codec, fresh-service second-save inventory, exact Memory rebind, or final public two-replica list.",
-    "repair_commit": "356a86e4",
-    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics -- --nocapture",
-    "crate_command": "cargo test -p mooncake-store-master --lib",
-    "evidence": "compile-red failed on absent verify_snapshot_ssd_restore_preserves_cache_total_metrics. Exact HEAD-plus-repair tree PASS 1/1: live PutStart returns two replicas, both PutEnd calls raise MEMORY_TOTAL/SSD_TOTAL by one, a public read retains the ttl=0 object for Rust catalog recovery, decoded accounting flags are false, fresh restore rebuilds both gauges to one, second-save durable object/segment fields match, exact Memory rebind succeeds, and public GetReplicaList returns exactly one Complete Memory plus one Complete Disk replica. RAII restores both process-global gauges even on panic."
+    "rust": "mooncake-store-master/tests/test_snapshot_ssd_cache_totals.rs:cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics",
+    "first_divergence": "The existing Rust metric test restored a synthetic native StorageBackend map and never proved the live public Memory-plus-global-Disk workflow, production asynchronous snapshot writer, fresh-constructor second-save inventory, exact Memory rebind, or final public two-replica list.",
+    "repair_commit": "8a463894",
+    "focused_command": "cargo test -p mooncake-store-master --test test_snapshot_ssd_cache_totals -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib -- --test-threads=1",
+    "evidence": "compile-red failed on absent verify_snapshot_ssd_restore_preserves_cache_total_metrics. Initial commit 356a86e4 passed focused 1/1 and shared-tree lib 620/620, but independent review rejected its lib-private lock and capture-only second-save claim. Repair 8a463894 moves the witness into a one-test integration binary, asserts the retention read leaves both gauges unchanged, and performs two real native asynchronous save plus fresh-constructor load cycles. Exact HEAD-plus-repair integration PASS 1/1: each fresh load rebuilds MEMORY_TOTAL/SSD_TOTAL to one, durable object/replica/segment fields survive both cycles, exact Memory rebind succeeds, and public GetReplicaList returns one Complete Memory plus one Complete Disk. Process-global absolute reset is isolated to the dedicated test process."
   }
 ]
