@@ -11,6 +11,7 @@ import asyncio
 import ctypes
 import os
 import threading
+import time
 from collections.abc import Iterator
 
 import pytest
@@ -18,6 +19,7 @@ import pytest
 import mooncake.store as ms
 
 _real_stores: list[object] = []
+_default_kv_lease_ttl_ms = int(os.getenv("DEFAULT_KV_LEASE_TTL", "10000"))
 
 
 def real_store(local_buffer_size: int = 4 * 1024 * 1024) -> ms.MooncakeDistributedStore:
@@ -82,7 +84,8 @@ def test_cpp_parity_basic_put_get_exist_operations() -> None:
     # Duplicate same-key/same-value put succeeds.
     assert store.put(key, test_data) == 0
     assert store.is_exist(key) == 1
-    store.remove(key, force=True)
+    time.sleep(_default_kv_lease_ttl_ms / 1000)
+    assert store.remove(key) == 0
 
 
 def test_cpp_parity_batch_is_exist_operations() -> None:
@@ -103,8 +106,9 @@ def test_cpp_parity_batch_is_exist_operations() -> None:
     assert store.batch_is_exist([keys[0]]) == [1]
     assert store.batch_is_exist(["missing_single"]) == [0]
 
+    time.sleep(_default_kv_lease_ttl_ms / 1000)
     for key in keys[: batch_size // 2]:
-        store.remove(key, force=True)
+        assert store.remove(key) == 0
 
 
 def test_cpp_parity_batch_get_buffer_operations() -> None:

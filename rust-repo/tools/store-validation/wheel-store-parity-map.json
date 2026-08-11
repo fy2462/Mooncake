@@ -694,7 +694,7 @@
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves the complete oracle because the current Python parity test uses immediate force cleanup rather than waiting for lease expiry and asserting non-force removal.",
+   "reason": "Rust parity test test_cpp_parity_basic_put_get_exist_operations reproduces the exact put/get-size/get/duplicate-put lifecycle against a real Rust client and master, waits for the configured KV lease TTL, and verifies non-force removal succeeds. Verified PASS.",
    "reference": {
     "file": "test_distributed_object_store.py",
     "test": "TestDistributedObjectStoreSingleStore.test_basic_put_get_exist_operations"
@@ -703,8 +703,13 @@
     "oracle": "mooncake-wheel/tests/test_distributed_object_store.py::TestDistributedObjectStoreSingleStore.test_basic_put_get_exist_operations test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_batch_operations_parity.py",
+     "test": "test_cpp_parity_basic_put_get_exist_operations"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Two present keys return two non-null buffers with exact sizes/bytes; present+missing preserves order with `None`; empty, single-present, and single-missing cases have exact shapes, then keys remove.",
@@ -758,7 +763,7 @@
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves the complete oracle because the current Python parity test uses immediate force cleanup rather than waiting for lease expiry and asserting non-force removal.",
+   "reason": "Rust parity test test_cpp_parity_batch_is_exist_operations reproduces the exact twenty-key half-present bitmap plus empty/single-present/single-missing cases against a real Rust client and master, waits for the configured KV lease TTL, and verifies every inserted key removes without force. Verified PASS.",
    "reference": {
     "file": "test_distributed_object_store.py",
     "test": "TestDistributedObjectStoreSingleStore.test_batch_is_exist_operations"
@@ -767,8 +772,13 @@
     "oracle": "mooncake-wheel/tests/test_distributed_object_store.py::TestDistributedObjectStoreSingleStore.test_batch_is_exist_operations test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_batch_operations_parity.py",
+     "test": "test_cpp_parity_batch_is_exist_operations"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Three spaced registered sources return three zeros and exact regular-get bytes; mismatched arrays return two negatives, empty arrays return empty, then registration and keys clean up.",
