@@ -416,17 +416,17 @@ struct PromotionTestCallCounts {
 }
 
 #[cfg(test)]
-static PROMOTION_TEST_CALL_COUNTS: std::sync::Mutex<
-    Option<(Uuid, std::sync::Arc<PromotionTestCallCounts>)>,
-> = std::sync::Mutex::new(None);
+static PROMOTION_TEST_CALL_COUNTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Arc<PromotionTestCallCounts>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 #[cfg(test)]
-struct PromotionTestCallGuard;
+struct PromotionTestCallGuard(Uuid);
 
 #[cfg(test)]
 impl Drop for PromotionTestCallGuard {
     fn drop(&mut self) {
-        *PROMOTION_TEST_CALL_COUNTS.lock().unwrap() = None;
+        PROMOTION_TEST_CALL_COUNTS.lock().unwrap().remove(&self.0);
     }
 }
 
@@ -438,8 +438,11 @@ fn observe_promotion_test_calls(
     PromotionTestCallGuard,
 ) {
     let counts = std::sync::Arc::new(PromotionTestCallCounts::default());
-    *PROMOTION_TEST_CALL_COUNTS.lock().unwrap() = Some((client_id, std::sync::Arc::clone(&counts)));
-    (counts, PromotionTestCallGuard)
+    PROMOTION_TEST_CALL_COUNTS
+        .lock()
+        .unwrap()
+        .insert(client_id, std::sync::Arc::clone(&counts));
+    (counts, PromotionTestCallGuard(client_id))
 }
 
 #[cfg(test)]
@@ -447,9 +450,7 @@ fn record_promotion_test_call(
     client_id: Uuid,
     field: fn(&PromotionTestCallCounts) -> &std::sync::atomic::AtomicUsize,
 ) {
-    if let Some((observed_client_id, counts)) = PROMOTION_TEST_CALL_COUNTS.lock().unwrap().as_ref()
-        && *observed_client_id == client_id
-    {
+    if let Some(counts) = PROMOTION_TEST_CALL_COUNTS.lock().unwrap().get(&client_id) {
         field(counts).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -1810,10 +1811,96 @@ mod tests {
         .unwrap()
         .with_local_storage_backend(Arc::clone(&disk));
 
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
         assert_eq!(client.promote_objects().await.unwrap(), 0);
         assert!(disk.scan_meta().unwrap().is_empty());
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 0);
 
         client.tear_down_all().await.unwrap();
+        server.abort();
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_hard_heartbeat_error_propagates() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "hard-promotion-heartbeat-error".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(Arc::clone(&disk));
+
+        let storage_uuid = disk.storage_id().unwrap();
+        let (storage_high, storage_low) = storage_uuid.as_u64_pair();
+        let recovery_uuid = Uuid::new_v4();
+        let (recovery_high, recovery_low) = recovery_uuid.as_u64_pair();
+        let request = client.rpc_request(proto::MountLocalDiskSegmentRequest {
+            client_id: Some(client.client_id_proto()),
+            enable_offloading: false,
+            storage_id: Some(proto::Uuid {
+                high: storage_high,
+                low: storage_low,
+            }),
+            recovery_complete: false,
+            recovery_session_id: Some(proto::Uuid {
+                high: recovery_high,
+                low: recovery_low,
+            }),
+        });
+        client
+            .master
+            .mount_local_disk_segment(request)
+            .await
+            .unwrap();
+
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
+        let result = client.promote_objects().await;
+        assert!(
+            matches!(&result, Err(StoreError::Internal(message)) if message.contains("inventory recovery is not complete")),
+            "unexpected heartbeat result: {result:?}"
+        );
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 0);
+        assert!(disk.scan_meta().unwrap().is_empty());
+
+        drop(client);
         server.abort();
     }
 
