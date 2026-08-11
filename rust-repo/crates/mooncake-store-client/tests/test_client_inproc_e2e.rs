@@ -1034,6 +1034,168 @@ async fn cpp_parity_offload_on_eviction_small_workload_stays_memory_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_legacy_ssd_overflow_single_and_batch_reads() {
+    const SEGMENT_SIZE: u64 = 512 * 1024 * 1024;
+    const VALUE_SIZE: usize = 1024 * 1024;
+    const KEY_COUNT: usize = 1000;
+    const BATCH_SIZE: usize = 4;
+    const BUFFER_SPACING: usize = 2 * 1024 * 1024;
+
+    fn value_for(index: usize) -> Vec<u8> {
+        let mut value = vec![(index % 251) as u8; VALUE_SIZE];
+        value[..std::mem::size_of::<u64>()].copy_from_slice(&(index as u64).to_le_bytes());
+        value
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: false,
+        lease_ttl: std::time::Duration::from_millis(500),
+        eviction_interval: std::time::Duration::from_millis(5),
+        eviction_high_watermark_ratio: 0.90,
+        eviction_ratio: 0.10,
+        ..Default::default()
+    })
+    .await;
+    let backend = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+        root_dir: root.path().join("client"),
+        fsdir: "legacy-ssd-overflow".into(),
+        enable_eviction: false,
+        quota_bytes: 2 * 1024 * 1024 * 1024,
+    }));
+    backend.init().unwrap();
+    let mut client = create_tcp_client_with_segment_size(&master, SEGMENT_SIZE)
+        .await
+        .with_local_storage_backend(backend);
+    client.mount_local_disk_segment(true).await.unwrap();
+    let destination =
+        RegisteredBufferAllocation::allocate(BATCH_SIZE * BUFFER_SPACING, 4096).unwrap();
+    let destination_registration = client
+        .register_owned_buffer(destination.clone(), "cpu:0")
+        .unwrap();
+
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        ClientBackgroundConfig {
+            health_interval: std::time::Duration::from_secs(1),
+            storage_interval: std::time::Duration::from_millis(10),
+            enable_offloading: true,
+            enable_promotion: false,
+            enable_task_poll: false,
+            report_ssd_capacity: false,
+            enable_disk_watermark_eviction: false,
+            ..Default::default()
+        },
+    );
+
+    let keys = (0..KEY_COUNT)
+        .map(|index| format!("k_{index}"))
+        .collect::<Vec<_>>();
+    for (index, key) in keys.iter().enumerate() {
+        let value = value_for(index);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let result = slot
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .put(key, &value, None)
+                .await;
+            match result {
+                Ok(()) => break,
+                Err(StoreError::NoAvailableHandle) => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "NO_AVAILABLE_HANDLE retry budget expired for {key}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("unexpected put error for {key}: {error}"),
+            }
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut local_disk_only = 0_usize;
+    for key in &keys {
+        let replicas = slot
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .query(key)
+            .await
+            .unwrap()
+            .replicas;
+        if replicas
+            .iter()
+            .any(|replica| replica.replica_type == ReplicaType::LocalDisk)
+            && replicas
+                .iter()
+                .all(|replica| replica.replica_type != ReplicaType::Memory)
+        {
+            local_disk_only += 1;
+        }
+    }
+    assert!(
+        local_disk_only > 0,
+        "512-MiB segment pressure produced no LOCAL_DISK-only object"
+    );
+
+    for (index, key) in keys.iter().enumerate() {
+        assert_eq!(
+            slot.lock().await.as_mut().unwrap().get(key).await.unwrap(),
+            value_for(index),
+            "single get returned wrong bytes for {key}"
+        );
+    }
+
+    let base = destination.as_ptr().cast::<u8>();
+    for (batch_index, batch_keys) in keys.chunks(BATCH_SIZE).enumerate() {
+        let buffers = (0..batch_keys.len())
+            .map(|index| unsafe { base.add(index * BUFFER_SPACING).cast() })
+            .collect::<Vec<_>>();
+        let sizes = vec![VALUE_SIZE; batch_keys.len()];
+        let results = slot
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .batch_get_into(batch_keys, &buffers, &sizes)
+            .await
+            .unwrap();
+        assert_eq!(results, vec![VALUE_SIZE as i64; batch_keys.len()]);
+        for index in 0..batch_keys.len() {
+            let object_index = batch_index * BATCH_SIZE + index;
+            let actual =
+                unsafe { std::slice::from_raw_parts(base.add(index * BUFFER_SPACING), VALUE_SIZE) };
+            assert_eq!(
+                actual,
+                value_for(object_index),
+                "batch get returned wrong bytes for {}",
+                batch_keys[index]
+            );
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    background.shutdown().await;
+    let mut client = slot.lock().await.take().unwrap();
+    client
+        .unregister_buffer_handle(destination_registration)
+        .unwrap();
+    for key in &keys {
+        client.remove(key, false).await.unwrap();
+    }
+    drop(destination);
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cpp_parity_promotion_below_watermark_workload_stays_memory_only() {
     const SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
     const VALUE_SIZE: usize = 1024;

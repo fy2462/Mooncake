@@ -462,7 +462,7 @@ impl MooncakeClient {
             storage: storage.clone(),
             engine: self.engine.required_arc()?,
             pool,
-            te_endpoint: self.local_hostname.clone(),
+            te_endpoint: self.local_transport_endpoint.clone(),
             metrics: self.metrics.clone(),
         };
 
