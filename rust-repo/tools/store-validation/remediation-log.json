@@ -4522,10 +4522,10 @@
     "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_IsEnableOffloadingLimits",
     "rust": "mooncake-store-client/tests/test_storage_backend_offset_remaining_parity.rs:cpp_parity_offset_allocator_enablement_tracks_key_limit",
     "first_divergence": "The exact witness initially failed to compile because Rust exposed no dynamic Offset enablement result. The new fallible query follows the C++ no-eviction logical size/key limits and returns false exactly when the configured five-key limit is reached.",
-    "repair_commit": "717d180f",
+    "repair_commit": "373cbfcb",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib",
     "focused_command": "cargo test -p mooncake-store-client --test test_storage_backend_offset_remaining_parity cpp_parity_offset_allocator_enablement_tracks_key_limit -- --exact",
-    "evidence": "compile-red proved the API was absent; repaired exact witness PASS 1/1; combined Offset remaining parity binary PASS 3/3; client lib PASS 375/375"
+    "evidence": "initial implementation 717d180f added the missing API; review then found payload-only size accounting, repaired by 373cbfcb to use full record bytes with an exact 4,097-byte full-arena regression; repaired exact witness PASS 1/1; combined Offset remaining parity binary PASS 3/3; client lib PASS 375/375"
   },
   {
     "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_AllMethodsFailWhenNotInitialized",
