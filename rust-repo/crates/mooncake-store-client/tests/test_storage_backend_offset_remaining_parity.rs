@@ -45,6 +45,19 @@ fn cpp_parity_offset_allocator_enablement_tracks_key_limit() {
             .unwrap();
     }
     assert!(!backend.is_enable_offloading().unwrap());
+
+    // A one-byte key and one-byte value occupy a complete 4,097-byte record:
+    // 24-byte header + key + alignment padding + value. Readiness follows the
+    // full record accounting, not only the payload byte.
+    let exact_root = tempfile::tempdir().unwrap();
+    let mut exact_config = config(exact_root.path());
+    exact_config.quota_bytes = 4_097;
+    let exact_backend = OffsetAllocatorStorageBackend::new(exact_config);
+    exact_backend.init().unwrap();
+    assert!(exact_backend.is_enable_offloading().unwrap());
+    exact_backend.write_object("k", b"v").unwrap();
+    assert_eq!(exact_backend.space_usage(), (4_097, 4_097));
+    assert!(!exact_backend.is_enable_offloading().unwrap());
 }
 
 #[test]

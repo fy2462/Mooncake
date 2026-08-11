@@ -1202,10 +1202,7 @@ impl OffsetAllocatorStorageBackend {
         }
 
         let state = self.state.lock();
-        let logical_used_bytes = state.index.entries.values().fold(0_u64, |total, entry| {
-            total.saturating_add(entry.value_len())
-        });
-        Ok(logical_used_bytes < state.quota_bytes
+        Ok(state.used_bytes < state.quota_bytes
             && state.index.entries.len() < self.config.total_keys_limit)
     }
 
