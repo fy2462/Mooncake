@@ -1640,10 +1640,10 @@
       "behavior": "Tasks with size less than or equal to zero are skipped before LocalDisk I/O, allocation, transfer, or promotion notification, while valid queued tasks remain independently eligible.",
       "boundary": ["client", "promotion", "input-validation", "local-disk", "batch-liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.NonPositiveSizeSkipped"},
-      "reason": "Rust skips only negative sizes and sends NotifyPromotionFailure for them; zero reaches LocalDisk I/O and allocation. The C++ fixture only returns k_good on this tick, so the source gate—not its weak fixture—defines the oracle; no Rust client-loop test covers it.",
+      "reason": "The production promotion task processor now skips every size <= 0 before disk I/O or notification. The witness supplies missing-disk negative and zero tasks followed by a valid persisted task; success plus exact observer counts prove only the valid task reaches one disk read and one allocation attempt, while the batch remains live.",
       "review": {"oracle": "file_storage_promotion_test.cpp NonPositiveSizeSkipped and mooncake-store/src/file_storage.cpp size <= 0 gate; Rust storage_local.rs promote_objects", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_non_positive_size_is_skipped"}],
+      "status": "covered"
     },
     {
       "behavior": "When promotion allocation is rejected before any staging allocation or LocalDisk read, the client attempts best-effort failure notification, performs no transfer or success commit for that key, and continues to allocate later tasks.",

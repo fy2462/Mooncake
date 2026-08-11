@@ -4589,5 +4589,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_hard_heartbeat_error_propagates -- --exact",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "the first server-abort attempt still reached tonic's existing connection and correctly exercised benign NotFound, so the stable witness uses a real recovery-incomplete session; exact hard-error witness PASS 1/1 with Internal propagation and 1/0/0/0/0/0 calls; promotion policy group PASS 3/3; client lib PASS 379/379"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.NonPositiveSizeSkipped",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_non_positive_size_is_skipped",
+    "first_divergence": "The red witness failed with KeyNotFound for the zero-sized task because Rust skipped only negative sizes and also notified failure for those. The production processor now skips every non-positive task without disk I/O or notification and continues to the next valid task.",
+    "repair_commit": "11fdbc5f",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_non_positive_size_is_skipped -- --exact",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "red exact witness failed on zero with KeyNotFound(v1:8:tenant-azero); repaired exact witness PASS 1/1 with negative and zero missing-disk tasks skipped, the following valid task reaching exactly one disk read and allocation attempt, and only its expected failure notification; client lib PASS 380/380; touched Rust file passes rustfmt --check"
   }
 ]
