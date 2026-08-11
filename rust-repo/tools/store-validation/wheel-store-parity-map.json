@@ -1076,12 +1076,12 @@
    "status": "missing"
   },
   {
-   "behavior": "The same default/custom Python ReplicateConfig fields and replica-three string assertion hold under the CXL suite. Rust tests remain incomplete for the display oracle.",
+   "behavior": "The same default/custom Python ReplicateConfig fields and replica-three string assertion hold under the CXL suite.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: The same default/custom Python ReplicateConfig fields and replica-three string assertion hold under the CXL suite. Rust tests remain incomplete for the display oracle.",
+   "reason": "The CXL suite oracle is byte-for-byte the same client-independent ReplicateConfig test as the normal and dummy suites. Rust test test_cpp_parity_replicate_config_creation_and_properties asserts the exact default fields, assigned 3/true/node1:12345 values, string type, and replica-three display. Verified PASS.",
    "reference": {
     "file": "test_distributed_object_store_cxl.py",
     "test": "TestDistributedObjectStoreSingleStore.test_replicate_config_creation_and_properties"
@@ -1090,8 +1090,13 @@
     "oracle": "mooncake-wheel/tests/test_distributed_object_store_cxl.py::TestDistributedObjectStoreSingleStore.test_replicate_config_creation_and_properties test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_batch_operations_parity.py",
+     "test": "test_cpp_parity_replicate_config_creation_and_properties"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Without explicit registration, a host buffer supports CXL put_from and exact get, get_into restores exact bytes/length, a half-size destination returns negative, and the key removes. No Rust CXL zero-copy test proves implicit buffer handling.",
@@ -1220,12 +1225,12 @@
    "status": "missing"
   },
   {
-   "behavior": "Default Python ReplicateConfig is replica one, soft-pin false, and empty preferred segment; assignment produces 3/true/`node1:12345`; string conversion returns a string containing `3`. Rust default/custom tests prove the fields, but no approved test asserts the custom replica-three display result.",
+   "behavior": "Default Python ReplicateConfig is replica one, soft-pin false, and empty preferred segment; assignment produces 3/true/`node1:12345`; string conversion returns a string containing `3`.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Default Python ReplicateConfig is replica one, soft-pin false, and empty preferred segment; assignment produces 3/true/`node1:12345`; string conversion returns a string containing `3`. Rust default/custom tests prove the fields, but no approved test asserts the custom replica-three display result.",
+   "reason": "The dummy-suite oracle is byte-for-byte the same client-independent ReplicateConfig test as the normal and CXL suites. Rust test test_cpp_parity_replicate_config_creation_and_properties asserts the exact default fields, assigned 3/true/node1:12345 values, string type, and replica-three display. Verified PASS.",
    "reference": {
     "file": "test_dummy_client.py",
     "test": "TestDistributedObjectStoreSingleStore.test_replicate_config_creation_and_properties"
@@ -1234,8 +1239,13 @@
     "oracle": "mooncake-wheel/tests/test_dummy_client.py::TestDistributedObjectStoreSingleStore.test_replicate_config_creation_and_properties test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_batch_operations_parity.py",
+     "test": "test_cpp_parity_replicate_config_creation_and_properties"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "PUT with three spaces returns JSON HTTP 400 and does not insert the blank spelling.",
