@@ -2114,7 +2114,7 @@ async fn cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup() {
     let root = tempfile::tempdir().unwrap();
     let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
         storage_fs_dir: root.path().to_string_lossy().into_owned(),
-        client_live_ttl: std::time::Duration::from_millis(500),
+        client_live_ttl: std::time::Duration::from_millis(2_000),
         client_monitor_interval: std::time::Duration::from_millis(20),
         ..Default::default()
     })
