@@ -4427,5 +4427,14 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::bucket::tests::cpp_parity_file_storage_group_offloading_keys_by_bucket_retains_residue -- --exact",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "exact residue and skipped-slot regression witnesses PASS; client lib PASS 372/372"
+  },
+  {
+    "cpp": "file_storage_test.cpp:FileStorageTest.IsEnableOffloading",
+    "rust": "mooncake-store-client/src/local_storage_backend/bucket.rs:cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket",
+    "first_divergence": "Rust rejected only actual writes and exposed no whole-bucket preflight against FileStorage-owned global limits. BucketStorageBackend now projects one configured bucket over current metadata, preserves the eviction-capacity fast path, and fails closed on arithmetic overflow.",
+    "repair_commit": "8ff28af4",
+    "focused_command": "cargo test -p mooncake-store-client --features link-native --lib local_storage_backend::bucket::tests::cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket -- --exact",
+    "crate_command": "cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "exact witness PASS 1/1; bucket tests PASS 18/18; client lib PASS 373/373"
   }
 ]

@@ -1694,10 +1694,15 @@
       "behavior": "An empty FileStorage permits offloading, while a global key or byte limit smaller than one full configured bucket rejects offloading before work begins.",
       "boundary": ["client", "file-storage", "bucket-admission"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.IsEnableOffloading"},
-      "reason": "Rust BucketStorageBackend::prepare_write only rejects an actual projected write; it has no whole-maximum-bucket IsEnableOffloading preflight or 9-vs-10/100-vs-969 boundary test.",
+      "reason": "Rust BucketStorageBackend::is_enable_offloading now combines current metadata and backend-owned bucket limits with explicit FileStorage global limits. The exact witness proves empty admission plus the C++ 9-vs-10 key and 100-vs-969 byte rejection boundaries.",
       "review": {"oracle": "file_storage_test.cpp IsEnableOffloading and storage_backend.cpp BucketStorageBackend::IsEnableOffloading", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [
+        {
+          "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+          "test": "cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "Batch allocation followed by FileStorage BatchLoad succeeds; the test's intended byte comparison is vacuous because it iterates an empty separate slice map.",
