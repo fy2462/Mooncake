@@ -4499,5 +4499,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_only_read_after_memory_eviction -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_ && LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "initial witness 15684bed was stabilized after review by e8b801dc so metadata observation cannot refresh leases during eviction; repaired exact Disk-only eviction witness PASS 3/3; non-CXL in-process integration tests PASS 43/43; client lib PASS 375/375; cargo fmt --all -- --check remains blocked only by pre-existing formatting drift elsewhere in the accumulated worktree, while the witness itself produces no rustfmt diff and its exact staged diff passes git diff --check"
+  },
+  {
+    "cpp": "e2e/storage_backend_e2e_test.cpp:StorageBackendE2ETest.DiskReplicaSurvivesWriterDeath",
+    "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup",
+    "first_divergence": "Rust had owner-bound LocalDisk recovery tests and shared-Disk readback while writers remained alive, but no discoverable witness dropped a shared-Disk writer, waited for production client-liveness cleanup, and proved all four objects retained Disk-only metadata for a successor.",
+    "repair_commit": "eda22a58",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_",
+    "evidence": "exact writer-death witness PASS 3/3; non-CXL in-process integration tests PASS 44/44; client lib remains PASS 375/375 from the adjacent storage-backend wave"
   }
 ]
