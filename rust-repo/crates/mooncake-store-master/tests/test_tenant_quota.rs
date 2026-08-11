@@ -12,6 +12,83 @@ use std::os::unix::fs::PermissionsExt;
 use tonic::{Code, Request};
 use uuid::Uuid;
 
+const TENANT_QUOTA_ETCD_ENDPOINTS_ENV: &str = "MOONCAKE_TENANT_QUOTA_ETCD_ENDPOINTS";
+
+struct LiveTenantQuotaEtcdFixture {
+    endpoints: String,
+    cluster_id: String,
+    cleaned: bool,
+}
+
+impl LiveTenantQuotaEtcdFixture {
+    fn new(label: &str) -> Option<Self> {
+        let endpoints = std::env::var(TENANT_QUOTA_ETCD_ENDPOINTS_ENV)
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let Some(endpoints) = endpoints else {
+            eprintln!(
+                "skipping live tenant quota etcd parity; set {TENANT_QUOTA_ETCD_ENDPOINTS_ENV}"
+            );
+            return None;
+        };
+        let cluster_id = format!(
+            "tenant_quota_{label}_rust_{}_{}",
+            std::process::id(),
+            Uuid::new_v4().simple()
+        );
+        cleanup_tenant_quota_etcd_key(&endpoints, &cluster_id)
+            .expect("clean tenant quota etcd key before test");
+        Some(Self {
+            endpoints,
+            cluster_id,
+            cleaned: false,
+        })
+    }
+
+    fn cleanup(&mut self) {
+        cleanup_tenant_quota_etcd_key(&self.endpoints, &self.cluster_id)
+            .expect("clean tenant quota etcd key after test");
+        self.cleaned = true;
+    }
+}
+
+impl Drop for LiveTenantQuotaEtcdFixture {
+    fn drop(&mut self) {
+        if !self.cleaned
+            && let Err(error) = cleanup_tenant_quota_etcd_key(&self.endpoints, &self.cluster_id)
+        {
+            eprintln!(
+                "failed to clean tenant quota etcd key for '{}': {error}",
+                self.cluster_id
+            );
+        }
+    }
+}
+
+fn cleanup_tenant_quota_etcd_key(endpoints: &str, cluster_id: &str) -> Result<(), String> {
+    let endpoints = endpoints
+        .split(';')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let key = format!("mooncake-store/{cluster_id}/tenant_quota_policy");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("create tenant quota etcd cleanup runtime: {error}"))?
+        .block_on(async move {
+            let mut client = etcd_client::Client::connect(endpoints, None)
+                .await
+                .map_err(|error| format!("connect tenant quota etcd cleanup client: {error}"))?;
+            client
+                .delete(key, None)
+                .await
+                .map_err(|error| format!("delete tenant quota etcd test key: {error}"))?;
+            Ok(())
+        })
+}
+
 static NEXT_SEGMENT_BASE: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0x7_0000_0000);
 
@@ -1122,6 +1199,41 @@ fn test_tenant_quota_policy_connectors_require_uri() {
         .unwrap_err();
         assert!(save_err.contains("non-empty uri"));
     }
+}
+
+#[test]
+fn cpp_parity_etcd_missing_key_loads_empty_snapshot() {
+    let Some(mut fixture) = LiveTenantQuotaEtcdFixture::new("missing") else {
+        return;
+    };
+
+    let loaded = load_tenant_quota_policy("etcd", &fixture.endpoints, &fixture.cluster_id)
+        .expect("load absent tenant quota policy from etcd");
+
+    assert_eq!(loaded, TenantQuotaPolicySnapshot::default());
+    fixture.cleanup();
+}
+
+#[test]
+fn cpp_parity_etcd_round_trips_snapshot() {
+    let Some(mut fixture) = LiveTenantQuotaEtcdFixture::new("roundtrip") else {
+        return;
+    };
+    let snapshot = TenantQuotaPolicySnapshot {
+        producer_view_version: 0,
+        tenant_quotas: std::collections::BTreeMap::from([
+            ("tenant-a".to_string(), 1024),
+            ("tenant-b".to_string(), 2048),
+        ]),
+    };
+
+    save_tenant_quota_policy("etcd", &fixture.endpoints, &fixture.cluster_id, &snapshot)
+        .expect("save tenant quota policy to etcd");
+    let loaded = load_tenant_quota_policy("etcd", &fixture.endpoints, &fixture.cluster_id)
+        .expect("reload tenant quota policy from etcd");
+
+    assert_eq!(loaded, snapshot);
+    fixture.cleanup();
 }
 
 #[test]
