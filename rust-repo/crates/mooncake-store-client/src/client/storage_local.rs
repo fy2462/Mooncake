@@ -1712,6 +1712,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_notify_evicted_disk_replicas_routes_same_key_by_tenant() {
+        let tenant_a_key = local_storage_key("tenant-a", "shared-key");
+        let tenant_b_key = local_storage_key("tenant-b", "shared-key");
+        let mut notifier = ScriptedEvictionNotifier {
+            outcomes: BTreeMap::from([
+                ("tenant-a".to_string(), VecDeque::from([true])),
+                ("tenant-b".to_string(), VecDeque::from([true])),
+            ]),
+            calls: Vec::new(),
+        };
+
+        let accepted = notify_evicted_disk_replicas_with(
+            &mut notifier,
+            &[tenant_b_key.clone(), tenant_a_key.clone()],
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(accepted, HashSet::from([tenant_a_key, tenant_b_key]));
+        assert_eq!(
+            notifier.calls,
+            [
+                ("tenant-a".to_string(), vec!["shared-key".to_string()]),
+                ("tenant-b".to_string(), vec!["shared-key".to_string()]),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn eviction_notification_retries_only_unaccepted_keys_within_tenant() {
         let accepted_key = local_storage_key("tenant-a", "accepted");
         let rejected_key = local_storage_key("tenant-a", "rejected");

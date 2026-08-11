@@ -408,6 +408,137 @@ async fn admitted_offload_task_can_complete_after_tenant_registration_is_removed
 }
 
 #[tokio::test]
+async fn cpp_parity_notify_evicted_disk_replicas_removes_same_key_for_both_tenants() {
+    let service = strict_service(true);
+    let client_id = Uuid::new_v4();
+    let segment_id = MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "tenant-eviction:1".into(),
+            size: 16 * 1024,
+            base_addr: 0x100000000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .segment_id
+    .expect("mounted memory segment has an id");
+    mount_local_disk(&service, client_id).await;
+    for tenant_id in ["tenant-a", "tenant-b"] {
+        service.upsert_tenant_quota_policy(tenant_id, 4096).unwrap();
+        put_complete(
+            &service,
+            client_id,
+            "tenant-eviction:1",
+            tenant_id,
+            tenant_id,
+            "shared-key",
+        )
+        .await;
+    }
+
+    let mut tasks = MasterService::offload_object_heartbeat(
+        &service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .tasks;
+    tasks.sort_by(|left, right| left.tenant_id.cmp(&right.tenant_id));
+    assert_eq!(
+        tasks
+            .iter()
+            .map(|task| (task.tenant_id.as_str(), task.key.as_str()))
+            .collect::<Vec<_>>(),
+        [("tenant-a", "shared-key"), ("tenant-b", "shared-key")]
+    );
+    assert!(tasks.iter().all(|task| {
+        task.generation_id
+            .as_ref()
+            .is_some_and(|generation_id| generation_id.high != 0 || generation_id.low != 0)
+    }));
+
+    MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec![],
+            metadatas: tasks
+                .iter()
+                .map(|_| offload_metadata("shared-key", 128))
+                .collect(),
+            tasks,
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(segment_id),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+
+    for tenant_id in ["tenant-a", "tenant-b"] {
+        let replicas = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "shared-key".into(),
+                tenant_id: tenant_id.into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .replicas;
+        assert_eq!(replicas.len(), 1);
+        assert_eq!(
+            replicas[0].replica_type,
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32
+        );
+
+        let statuses = MasterService::batch_evict_disk_replica(
+            &service,
+            Request::new(proto::BatchEvictDiskReplicaRequest {
+                client_id: Some(proto_uuid(client_id)),
+                keys: vec!["shared-key".into()],
+                replica_type: proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+                tenant_id: tenant_id.into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .statuses;
+        assert_eq!(statuses, [0]);
+
+        let error = MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "shared-key".into(),
+                tenant_id: tenant_id.into(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), Code::NotFound);
+    }
+}
+
+#[tokio::test]
 async fn unsolicited_offload_success_rejects_unregistered_tenant_without_mutation() {
     let service = strict_service_with_unregistered_object("unregistered", "unsolicited");
     let client_id = Uuid::new_v4();
