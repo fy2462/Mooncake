@@ -1613,7 +1613,7 @@
       "behavior": "A successful promotion heartbeat with no tasks returns success without allocation, LocalDisk I/O, transfer, or either promotion notification.",
       "boundary": ["client", "promotion", "heartbeat", "local-disk"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.EmptyQueueIsNoOp"},
-      "reason": "A real client mounts an empty persistent LocalDisk session on an offload-enabled Master, invokes the public promotion cycle once, and receives exactly Ok(0). The LocalDisk inventory is empty before and after, and the fresh Master has no object on which allocation, transfer, or notification could succeed, proving the empty heartbeat takes the no-op path.",
+      "reason": "A real client mounts an empty persistent LocalDisk session on an offload-enabled Master and invokes the public promotion cycle once. A client-scoped test observer proves exactly one heartbeat and zero LocalDisk reads, allocations, transfer writes, success notifications, and failure notifications; the call returns Ok(0) and the disk inventory remains empty.",
       "review": {"oracle": "file_storage_promotion_test.cpp EmptyQueueIsNoOp; mooncake-store/src/file_storage.cpp ProcessPromotionTasks; Rust storage_local.rs promote_objects", "reviewed": true},
       "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_empty_queue_is_noop"}],
       "status": "covered"
