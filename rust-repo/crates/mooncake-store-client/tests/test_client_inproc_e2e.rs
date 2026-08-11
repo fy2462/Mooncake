@@ -2106,6 +2106,83 @@ async fn cpp_parity_global_disk_only_read_after_memory_eviction() {
     let _ = shutdown.send(());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup() {
+    const VALUE_SIZE: usize = 2 * 1024;
+    const KEY_COUNT: usize = 4;
+
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        client_live_ttl: std::time::Duration::from_millis(500),
+        client_monitor_interval: std::time::Duration::from_millis(20),
+        ..Default::default()
+    })
+    .await;
+    let keys = (0..KEY_COUNT)
+        .map(|index| format!("global-disk-writer-death-{index}"))
+        .collect::<Vec<_>>();
+    let values = (0..KEY_COUNT)
+        .map(|index| vec![b'a' + index as u8; VALUE_SIZE])
+        .collect::<Vec<_>>();
+
+    {
+        let mut writer = create_tcp_client_with_segment_size(&master, 16 * 1024 * 1024).await;
+        let writer_segment = writer.get_hostname();
+        for (key, value) in keys.iter().zip(&values) {
+            writer
+                .put(
+                    key,
+                    value,
+                    Some(ReplicateConfig {
+                        replica_num: 1,
+                        preferred_segment: writer_segment.clone(),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(
+                writer
+                    .query(key)
+                    .await
+                    .unwrap()
+                    .replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::Disk)
+            );
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let mut reader = create_tcp_client_with_segment_size(&master, 16 * 1024 * 1024).await;
+    for (key, expected) in keys.iter().zip(&values) {
+        let replicas = reader.query(key).await.unwrap().replicas;
+        assert!(
+            replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Disk),
+            "Disk replica disappeared after writer liveness cleanup for {key}"
+        );
+        assert!(
+            replicas
+                .iter()
+                .all(|replica| replica.replica_type != ReplicaType::Memory),
+            "Memory replica survived writer liveness cleanup for {key}"
+        );
+        match reader.get_buffer(key).await {
+            Ok(handle) => {
+                assert_eq!(handle.size, VALUE_SIZE);
+                assert_eq!(handle.data, *expected);
+            }
+            Err(error) => eprintln!("Disk-only successor read failed for {key}: {error}"),
+        }
+    }
+
+    drop(reader);
+    let _ = shutdown.send(());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn seeded_two_client_large_object_delete_put_get_never_returns_stale_bytes() {
     const SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
