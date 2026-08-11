@@ -513,6 +513,48 @@ fn promotion_test_replica(size: u64) -> mooncake_store_core::ReplicaDescriptor {
     }
 }
 
+#[cfg(test)]
+static PROMOTION_TEST_TRANSFER_FAILURES: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(Uuid, String, String)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(test)]
+struct PromotionTestTransferFailureGuard(Uuid, String, String);
+
+#[cfg(test)]
+impl Drop for PromotionTestTransferFailureGuard {
+    fn drop(&mut self) {
+        PROMOTION_TEST_TRANSFER_FAILURES.lock().unwrap().remove(&(
+            self.0,
+            self.1.clone(),
+            self.2.clone(),
+        ));
+    }
+}
+
+#[cfg(test)]
+fn inject_promotion_test_transfer_failure(
+    client_id: Uuid,
+    tenant_id: &str,
+    key: &str,
+) -> PromotionTestTransferFailureGuard {
+    PROMOTION_TEST_TRANSFER_FAILURES.lock().unwrap().insert((
+        client_id,
+        tenant_id.to_string(),
+        key.to_string(),
+    ));
+    PromotionTestTransferFailureGuard(client_id, tenant_id.to_string(), key.to_string())
+}
+
+#[cfg(test)]
+fn take_promotion_test_transfer_failure(client_id: Uuid, tenant_id: &str, key: &str) -> bool {
+    PROMOTION_TEST_TRANSFER_FAILURES.lock().unwrap().remove(&(
+        client_id,
+        tenant_id.to_string(),
+        key.to_string(),
+    ))
+}
+
 impl MooncakeClient {
     /// Re-publish persistent local-disk replicas after the disk segment has
     /// been mounted. This is intentionally fail-closed: every record is
@@ -1017,7 +1059,17 @@ impl MooncakeClient {
             // Write data to the allocated memory replica.
             #[cfg(test)]
             record_promotion_test_call(self.client_id, |counts| &counts.transfer_write);
-            match self.write_to_replica(&replica, &data).await {
+            #[cfg(test)]
+            let injected_transfer_failure =
+                take_promotion_test_transfer_failure(self.client_id, tenant_id, key);
+            #[cfg(not(test))]
+            let injected_transfer_failure = false;
+            let write_result = if injected_transfer_failure {
+                Err(StoreError::OperationFailed(-1))
+            } else {
+                self.write_to_replica(&replica, &data).await
+            };
+            match write_result {
                 Ok(()) => {
                     #[cfg(test)]
                     record_promotion_test_call(self.client_id, |counts| &counts.notify_success);
@@ -2199,6 +2251,80 @@ mod tests {
         assert_eq!(counts.alloc.load(Ordering::Relaxed), 2);
         assert_eq!(counts.disk_read.load(Ordering::Relaxed), 1);
         assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 2);
+
+        drop(client);
+        server.abort();
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_transfer_failure_releases_and_continues() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "promotion-transfer-failure".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        let payload = vec![0x5a; 1024];
+        disk.write_object(&local_storage_key("tenant-a", "transfer-fails"), &payload)
+            .unwrap();
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(disk);
+
+        let _alloc_success =
+            inject_promotion_test_alloc_success(client.client_id, "transfer-fails", 1024);
+        let _transfer_failure =
+            inject_promotion_test_transfer_failure(client.client_id, "tenant-a", "transfer-fails");
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
+        let promoted = client
+            .process_promotion_tasks(vec![
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "transfer-fails".to_string(),
+                    size: 1024,
+                },
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "later-task".to_string(),
+                    size: 1024,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(promoted, 0);
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 2);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 1);
         assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
         assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 2);
 
