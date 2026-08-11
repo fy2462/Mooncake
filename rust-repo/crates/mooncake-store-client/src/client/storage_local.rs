@@ -895,21 +895,6 @@ impl MooncakeClient {
                 tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "promotion: skipping non-positive task size");
                 continue;
             }
-            // Read from local disk (blocking I/O).
-            #[cfg(test)]
-            record_promotion_test_call(self.client_id, |counts| &counts.disk_read);
-            let key_owned = local_storage_key(tenant_id, key);
-            let read_started_at = std::time::Instant::now();
-            let data = {
-                let s = storage.clone();
-                tokio::task::spawn_blocking(move || s.read_object(&key_owned))
-                    .await
-                    .map_err(|e| StoreError::Internal(e.to_string()))??
-            };
-            if let Some(metrics) = &self.metrics {
-                metrics.observe_ssd_read(data.len() as u64, 1, read_started_at.elapsed());
-            }
-
             // Allocate a memory replica.
             #[cfg(test)]
             record_promotion_test_call(self.client_id, |counts| &counts.alloc);
@@ -928,6 +913,22 @@ impl MooncakeClient {
                     continue;
                 }
             };
+
+            // Read from local disk (blocking I/O) only after the Master has
+            // reserved the promotion target, matching the C++ orchestration.
+            #[cfg(test)]
+            record_promotion_test_call(self.client_id, |counts| &counts.disk_read);
+            let key_owned = local_storage_key(tenant_id, key);
+            let read_started_at = std::time::Instant::now();
+            let data = {
+                let s = storage.clone();
+                tokio::task::spawn_blocking(move || s.read_object(&key_owned))
+                    .await
+                    .map_err(|e| StoreError::Internal(e.to_string()))??
+            };
+            if let Some(metrics) = &self.metrics {
+                metrics.observe_ssd_read(data.len() as u64, 1, read_started_at.elapsed());
+            }
 
             // Write data to the allocated memory replica.
             #[cfg(test)]
@@ -1970,7 +1971,7 @@ mod tests {
 
         assert_eq!(promoted, 0);
         assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 0);
-        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 0);
         assert_eq!(counts.alloc.load(Ordering::Relaxed), 1);
         assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
         assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
@@ -1980,6 +1981,73 @@ mod tests {
                 .unwrap(),
             b"data"
         );
+
+        drop(client);
+        server.abort();
+    }
+
+    #[cfg(feature = "link-native")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_file_storage_promotion_alloc_failure_skips_key() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master_address = listener.local_addr().unwrap();
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(MasterServiceServer::new(service))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+
+        let disk_root = tempfile::tempdir().unwrap();
+        let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+            root_dir: disk_root.path().to_path_buf(),
+            fsdir: "promotion-alloc-failure".to_string(),
+            enable_eviction: false,
+            quota_bytes: 1024 * 1024,
+        }));
+        disk.init().unwrap();
+        let mut client = MooncakeClient::create(
+            &master_address.to_string(),
+            "P2PHANDSHAKE",
+            "127.0.0.1",
+            "tcp",
+            "",
+            0,
+            8 * 1024 * 1024,
+        )
+        .await
+        .unwrap()
+        .with_local_storage_backend(disk);
+
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
+        let promoted = client
+            .process_promotion_tasks(vec![
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "first".to_string(),
+                    size: 1024,
+                },
+                PromotionTaskItem {
+                    tenant_id: "tenant-a".to_string(),
+                    key: "second".to_string(),
+                    size: 1024,
+                },
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(promoted, 0);
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 2);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 2);
 
         drop(client);
         server.abort();
