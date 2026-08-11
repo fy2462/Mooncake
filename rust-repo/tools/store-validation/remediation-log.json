@@ -4504,9 +4504,9 @@
     "cpp": "e2e/storage_backend_e2e_test.cpp:StorageBackendE2ETest.DiskReplicaSurvivesWriterDeath",
     "rust": "mooncake-store-client/tests/test_client_inproc_e2e.rs:cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup",
     "first_divergence": "Rust had owner-bound LocalDisk recovery tests and shared-Disk readback while writers remained alive, but no discoverable witness dropped a shared-Disk writer, waited for production client-liveness cleanup, and proved all four objects retained Disk-only metadata for a successor.",
-    "repair_commit": "eda22a58",
+    "repair_commit": "33006932",
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_",
-    "evidence": "exact writer-death witness PASS 3/3; non-CXL in-process integration tests PASS 44/44; client lib remains PASS 375/375 from the adjacent storage-backend wave"
+    "evidence": "initial witness eda22a58 was repaired by 00455a49 and 33006932 after review: production health checks keep the writer live, all four keys prove simultaneous Disk+Memory before the final heartbeat and Drop, and cleanup is observed only after the 2-second TTL; repaired exact PASS 1/1, prior exact PASS 3/3 and non-CXL integration PASS 44/44"
   }
 ]
