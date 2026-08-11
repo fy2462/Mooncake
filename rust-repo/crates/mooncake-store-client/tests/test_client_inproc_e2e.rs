@@ -2012,6 +2012,102 @@ async fn cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes() {
     let _ = shutdown.send(());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_global_disk_only_read_after_memory_eviction() {
+    const VALUE_SIZE: usize = 256 * 1024;
+    const SEED_COUNT: usize = 4;
+    const PRESSURE_COUNT: usize = 12;
+
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        lease_ttl: std::time::Duration::from_millis(1_000),
+        eviction_interval: std::time::Duration::from_millis(5),
+        eviction_high_watermark_ratio: 0.10,
+        eviction_ratio: 0.05,
+        ..Default::default()
+    })
+    .await;
+    let mut client = create_tcp_client_with_segment_size(&master, 16 * 1024 * 1024).await;
+    let segment = client.get_hostname();
+    let seed_keys = (0..SEED_COUNT)
+        .map(|index| format!("global-disk-evict-seed-{index}"))
+        .collect::<Vec<_>>();
+    let seed_values = (0..SEED_COUNT)
+        .map(|index| vec![b'A' + index as u8; VALUE_SIZE])
+        .collect::<Vec<_>>();
+
+    for (key, value) in seed_keys.iter().zip(&seed_values) {
+        client
+            .put(
+                key,
+                value,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: segment.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            client
+                .query(key)
+                .await
+                .unwrap()
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Disk)
+        );
+    }
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    for index in 0..PRESSURE_COUNT {
+        client
+            .put(
+                &format!("global-disk-evict-pressure-{index}"),
+                &vec![b'P' + (index % 8) as u8; VALUE_SIZE],
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: segment.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+    }
+
+    let evicted_seed_index = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            for (index, key) in seed_keys.iter().enumerate() {
+                let replicas = client.query(key).await.unwrap().replicas;
+                let has_disk = replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::Disk);
+                let has_memory = replicas
+                    .iter()
+                    .any(|replica| replica.replica_type == ReplicaType::Memory);
+                if has_disk && !has_memory {
+                    return index;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("memory eviction did not leave a Disk-only seed");
+
+    let handle = client
+        .get_buffer(&seed_keys[evicted_seed_index])
+        .await
+        .unwrap();
+    assert_eq!(handle.size, VALUE_SIZE);
+    assert_eq!(handle.data, seed_values[evicted_seed_index]);
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn seeded_two_client_large_object_delete_put_get_never_returns_stale_bytes() {
     const SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
