@@ -1691,10 +1691,10 @@
       "status": "missing"
     },
     {
-      "behavior": "An empty FileStorage permits offloading, while a global key or byte limit smaller than one full configured bucket rejects offloading before work begins.",
+      "behavior": "After initialization and a real 100-object batch write, FileStorage still permits offloading, while a global key or byte limit smaller than one full configured bucket rejects offloading before work begins.",
       "boundary": ["client", "file-storage", "bucket-admission"],
       "reference": {"file": "file_storage_test.cpp", "test": "FileStorageTest.IsEnableOffloading"},
-      "reason": "Rust BucketStorageBackend::is_enable_offloading now combines current metadata and backend-owned bucket limits with explicit FileStorage global limits. The exact witness proves empty admission plus the C++ 9-vs-10 key and 100-vs-969 byte rejection boundaries.",
+      "reason": "Rust BucketStorageBackend::is_enable_offloading now combines current metadata and backend-owned bucket limits with explicit FileStorage global limits. The exact witness proves admission after initialization and a real 100-object batch write, plus the C++ 9-vs-10 key and 100-vs-969 byte rejection boundaries.",
       "review": {"oracle": "file_storage_test.cpp IsEnableOffloading and storage_backend.cpp BucketStorageBackend::IsEnableOffloading", "reviewed": true},
       "rust": [
         {

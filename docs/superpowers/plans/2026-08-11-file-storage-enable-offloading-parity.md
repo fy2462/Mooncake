@@ -18,7 +18,8 @@ backend metadata and backend-owned bucket/eviction limits.
 
 - [ ] Add
   `cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket` with
-  the empty/default, 9-vs-10 key, and 100-vs-969 byte cases.
+  the initialized 100-object positive case, 9-vs-10 key rejection, and
+  100-vs-969 byte rejection.
 - [ ] Call the planned production method directly.
 - [ ] Run the exact test from `/home/fy2462/Mooncake/rust-repo`; expected red is
   a missing `is_enable_offloading` method.

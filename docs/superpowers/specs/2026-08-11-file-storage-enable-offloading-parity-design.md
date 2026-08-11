@@ -18,9 +18,9 @@ allowed because eviction creates capacity. Otherwise, the current stored key
 and byte totals plus one complete configured bucket must fit within the global
 limits.
 
-The C++ test checks an empty default backend is admitted, a global key limit of
-9 rejects a 10-key bucket, and a global byte limit of 100 rejects a 969-byte
-bucket.
+The C++ test checks that an initialized backend still admits offloading after a
+100-object batch write, that a global key limit of 9 rejects a 10-key bucket,
+and that a global byte limit of 100 rejects a 969-byte bucket.
 
 ## Rust Boundary
 
