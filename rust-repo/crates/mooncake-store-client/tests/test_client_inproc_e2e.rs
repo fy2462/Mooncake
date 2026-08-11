@@ -1729,6 +1729,137 @@ async fn batch_replica_clear_specific_segment_replica_keeps_other_readable() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_replicated_registered_put_from_config_matrix() {
+    const BUFFER_SPACING: usize = 1024 * 1024;
+    const BUFFER_SIZE: usize = 4 * BUFFER_SPACING;
+
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        lease_ttl: std::time::Duration::from_millis(20),
+        ..Default::default()
+    })
+    .await;
+    let mut writer = create_tcp_client(&master).await;
+    let reader = create_tcp_client(&master).await;
+    let allocation = RegisteredBufferAllocation::allocate(BUFFER_SIZE, 4096).unwrap();
+    let registration = writer
+        .register_owned_buffer(allocation.clone(), "cpu:0")
+        .unwrap();
+    let base = allocation.as_ptr().cast::<u8>();
+    let batch_values = [
+        b"Batch Config Data 1".as_slice(),
+        b"Batch Config Data 2".as_slice(),
+        b"Batch Config Data 3".as_slice(),
+    ];
+    let single_value = b"Hello, put_from config world!".as_slice();
+    for (index, value) in batch_values.iter().enumerate() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                value.as_ptr(),
+                base.add(index * BUFFER_SPACING),
+                value.len(),
+            );
+        }
+    }
+    let single_source = unsafe { base.add(3 * BUFFER_SPACING) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(single_value.as_ptr(), single_source, single_value.len());
+    }
+
+    let replicated = ReplicateConfig {
+        replica_num: 2,
+        with_soft_pin: false,
+        with_hard_pin: false,
+        preferred_segments: vec![writer.get_hostname(), reader.get_hostname()],
+        ..Default::default()
+    };
+    let single_keys = ["test_put_from_config_key", "test_put_from_config_key2"];
+    writer
+        .put_from(
+            single_keys[0],
+            single_source.cast(),
+            single_value.len(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(writer.get(single_keys[0]).await.unwrap(), single_value);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    writer.remove(single_keys[0], false).await.unwrap();
+
+    writer
+        .put_from(
+            single_keys[1],
+            single_source.cast(),
+            single_value.len(),
+            Some(replicated.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(writer.get(single_keys[1]).await.unwrap(), single_value);
+    assert_eq!(
+        writer.query(single_keys[1]).await.unwrap().replicas.len(),
+        2
+    );
+
+    let batch_sources = (0..batch_values.len())
+        .map(|index| unsafe { base.add(index * BUFFER_SPACING).cast() })
+        .collect::<Vec<_>>();
+    let batch_sizes = batch_values
+        .iter()
+        .map(|value| value.len())
+        .collect::<Vec<_>>();
+    let default_batch_keys = (1..=3)
+        .map(|index| format!("test_batch_put_from_config_key{index}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        writer
+            .batch_put_from(&default_batch_keys, &batch_sources, &batch_sizes, None)
+            .await
+            .unwrap(),
+        vec![0, 0, 0]
+    );
+    for (key, expected) in default_batch_keys.iter().zip(batch_values) {
+        assert_eq!(writer.get(key).await.unwrap(), expected);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    for key in &default_batch_keys {
+        writer.remove(key, false).await.unwrap();
+    }
+
+    let replicated_batch_keys = (4..=6)
+        .map(|index| format!("test_batch_put_from_config_key{index}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        writer
+            .batch_put_from(
+                &replicated_batch_keys,
+                &batch_sources,
+                &batch_sizes,
+                Some(replicated),
+            )
+            .await
+            .unwrap(),
+        vec![0, 0, 0]
+    );
+    for (key, expected) in replicated_batch_keys.iter().zip(batch_values) {
+        assert_eq!(writer.get(key).await.unwrap(), expected);
+        assert_eq!(writer.query(key).await.unwrap().replicas.len(), 2);
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    writer.unregister_buffer_handle(registration).unwrap();
+    writer.remove(single_keys[1], false).await.unwrap();
+    for key in &replicated_batch_keys {
+        writer.remove(key, false).await.unwrap();
+    }
+
+    drop(allocation);
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batch_replica_clear_mixed_expired_and_active_keeps_active_bytes() {
     let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
         lease_ttl: std::time::Duration::from_millis(200),

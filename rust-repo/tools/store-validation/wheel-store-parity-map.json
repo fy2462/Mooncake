@@ -4471,12 +4471,12 @@
    "status": "not-applicable"
   },
   {
-   "behavior": "Three spaced registered sources support default and replica-two batch_put_from, each producing three zeros and exact gets; both key sets remove and the registration unregisters. No Rust test proves it.",
+   "behavior": "Three spaced registered sources support default and replica-two batch_put_from, each producing three zeros and exact gets; both key sets remove and the registration unregisters.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Three spaced registered sources support default and replica-two batch_put_from, each producing three zeros and exact gets; both key sets remove and the registration unregisters. No Rust test proves it.",
+   "reason": "A real two-client Rust E2E registers one 4-MiB owner-backed source, writes three distinct values at 1-MiB spacing, and proves default and replica-two batch_put_from each return three zeros and exact bytes. It verifies two replicas for the custom batch, waits past the configured lease, unregisters the source, and removes both key sets without force. The focused link-native test passed.",
    "reference": {
     "file": "test_replicated_distributed_object_store.py",
     "test": "TestDistributedObjectStoreReplication.test_batch_put_from_with_config_parameter"
@@ -4485,8 +4485,13 @@
     "oracle": "mooncake-wheel/tests/test_replicated_distributed_object_store.py::TestDistributedObjectStoreReplication.test_batch_put_from_with_config_parameter test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_replicated_registered_put_from_config_matrix"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Default and replica-two three-key batch puts each return zero, exact per-key bytes, and successful post-TTL removals.",
@@ -4512,12 +4517,12 @@
    "status": "covered"
   },
   {
-   "behavior": "One registered buffer supports default and replica-two put_from with exact gets; each key removes, the buffer unregisters, and custom soft/hard pins are false. No Rust registered replicated-write test proves it.",
+   "behavior": "One registered buffer supports default and replica-two put_from with exact gets; each key removes, the buffer unregisters, and custom soft/hard pins are false.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: One registered buffer supports default and replica-two put_from with exact gets; each key removes, the buffer unregisters, and custom soft/hard pins are false. No Rust registered replicated-write test proves it.",
+   "reason": "A real two-client Rust E2E registers one owner-backed source and proves default and replica-two put_from return success with exact bytes. The custom config explicitly sets soft and hard pins false and the test verifies two replicas, waits past the configured lease, unregisters the source, and removes both keys without force. The focused link-native test passed.",
    "reference": {
     "file": "test_replicated_distributed_object_store.py",
     "test": "TestDistributedObjectStoreReplication.test_put_from_with_config_parameter"
@@ -4526,8 +4531,13 @@
     "oracle": "mooncake-wheel/tests/test_replicated_distributed_object_store.py::TestDistributedObjectStoreReplication.test_put_from_with_config_parameter test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_replicated_registered_put_from_config_matrix"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Default and replica-two keyword puts each return zero, exact get bytes, and post-TTL remove; misspelled key/value/config keyword names each raise TypeError.",
