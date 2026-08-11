@@ -4715,5 +4715,41 @@
     "focused_command": "MOONCAKE_K8S_E2E=1 cargo test -p mooncake-store-master --test test_k8s_ha_live cpp_parity_k8s_connstring_no_slash_defaults_namespace -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-master --test test_k8s_ha_live -- --nocapture",
     "evidence": "local target PASS 6/6 with explicit opt-in skips and no local live-pass claim. Enabled mode supplies only a Lease name to the coordinator while independently reading its holder through Api<Lease> explicitly scoped to default, then releases it. K8s backend unit group PASS 6/6; master lib PASS 614/614."
+  },
+  {
+    "cpp": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp:MasterServicePromotionSnapshotTest.LocalDiskReplicaRoundTrip",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_service_promotion_snapshot_local_disk_replica_round_trip",
+    "first_divergence": "Rust restored durable LocalDisk descriptors fail-closed but discarded the holder identity, endpoint, offloading policy, and queue needed for second-save continuity. The repair preserves those fields as dormant metadata while retaining handle_valid=false and requiring exact inventory recovery before routing.",
+    "repair_commit": "dcd34321",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "an index-only HEAD plus repair tree PASS 4/4 for the exact snapshot group. This row proves pre-recovery public GetReplicaList is FailedPrecondition, exact storage/generation inventory recovery succeeds, and the final sole LocalDisk descriptor preserves holder, 4096-byte size/object_size, endpoint, namespace, and generation. The shared working tree master lib PASS 618/618; the legacy dormant-state integration witness PASS 1/1; touched Rust files pass rustfmt --check and the staged diff passes git diff --check."
+  },
+  {
+    "cpp": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp:MasterServicePromotionSnapshotTest.MixedMemoryAndLocalDiskRoundTrip",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_service_promotion_snapshot_mixed_memory_and_local_disk_round_trip",
+    "first_divergence": "The raw DTO coverage did not prove a fresh MasterService restore, fail-closed process handles, production remount/recovery, or public replica order and LocalDisk metadata.",
+    "repair_commit": "dcd34321",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "index-only exact group PASS 4/4. The mixed witness saves Memory then LocalDisk, rejects public routing before recovery, remounts Memory by exact segment UUID, recovers LocalDisk by exact namespace/generation, and returns exactly [Memory, LocalDisk] with the original 8192-byte disk metadata. Shared-tree master lib PASS 618/618."
+  },
+  {
+    "cpp": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp:MasterServicePromotionSnapshotTest.LocalDiskSegmentEnableOffloadingPreserved",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_service_promotion_snapshot_enable_offloading_preserved",
+    "first_divergence": "MasterService restoration reset enable_offloading and offloading_objects even though the native DTO retained them, so a second service-level save was not equivalent to the first.",
+    "repair_commit": "dcd34321",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "index-only exact group PASS 4/4. The witness enables offloading through production heartbeat, proves first/second snapshot equality for the sorted LocalDisk records including client, flag, and durable queue, then commits recovery with enable_offloading=true and queries the restored descriptor. Runtime capacity remains intentionally zero. Shared-tree master lib PASS 618/618."
+  },
+  {
+    "cpp": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp:MasterServicePromotionSnapshotTest.MultipleLocalDiskHoldersRoundTrip",
+    "rust": "mooncake-store-master/src/service/mod.rs:cpp_parity_master_service_promotion_snapshot_multiple_local_disk_holders_round_trip",
+    "first_divergence": "Two-holder DTO serialization existed, but there was no fresh live service restoration and no independent recovery plus public query proof for both holders.",
+    "repair_commit": "dcd34321",
+    "focused_command": "cargo test -p mooncake-store-master --lib cpp_parity_master_service_promotion_snapshot_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --lib",
+    "evidence": "index-only exact group PASS 4/4. Two clients create distinct LocalDisk storage namespaces and generations, both remain dormant after fresh restore, both recover independently, and public queries preserve their distinct holder/storage identities, 16384/32768-byte sizes, endpoints, and generations. Shared-tree master lib PASS 618/618."
   }
 ]

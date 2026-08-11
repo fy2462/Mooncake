@@ -1119,37 +1119,37 @@
       "behavior": "After snapshot save and fresh MasterService restore, querying the offloaded key returns exactly one LocalDisk replica with the same client identity, object size, and transport endpoint, while the corresponding LocalDisk holder remains live.",
       "boundary": ["master", "snapshot", "promotion", "local-disk", "round-trip"],
       "reference": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.LocalDiskReplicaRoundTrip"},
-      "reason": "The native storage DTO test only reloads StorageBackend data and does not save a live MasterServiceImpl, construct a fresh restored service, and query the LocalDisk replica for its client identity, size, and endpoint. The existing service restore test deliberately fences LocalDisk session state by clearing client_id, enable_offloading, offloading_objects, and capacity, which diverges from the C++ full-state restore contract.",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp LocalDiskReplicaRoundTrip, master_service_test_for_snapshot_base.h TestSnapshotAndRestore/CompareServiceState, Rust test_storage.rs test_master_service_restores_local_disk_state_from_snapshot, and storage_backend_snapshot.rs DTO test", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "Rust now saves a live MasterServiceImpl through the production catalog, restores a fresh service, proves the dormant LocalDisk route is fail-closed, completes the production inventory recovery transaction with the exact Master-issued generation, and then queries exactly one LocalDisk descriptor with the original holder, object size, endpoint, storage namespace, and generation. Rust preserves C++ durable metadata while requiring an explicit post-process recovery handshake before routing.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp LocalDiskReplicaRoundTrip and master_service_test_for_snapshot_base.h TestSnapshotAndRestore/CompareServiceState", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_service_promotion_snapshot_local_disk_replica_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "After snapshot save and fresh MasterService restore, querying a key with Memory and LocalDisk replicas returns the same two observable descriptor variants in the original list order, including their LocalDisk metadata and live holder state.",
       "boundary": ["master", "snapshot", "promotion", "mixed-replicas"],
       "reference": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.MixedMemoryAndLocalDiskRoundTrip"},
-      "reason": "The raw StorageBackend round-trip test observes one Memory and one LocalDisk descriptor but bypasses MasterServiceImpl restoration; it neither creates a fresh service nor asserts the C++ required replica count/order, endpoint, or restored LocalDisk holder state. The service restore path fences that LocalDisk state instead of preserving it.",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp MixedMemoryAndLocalDiskRoundTrip, master_service_test_for_snapshot_base.h CompareReplicaListResponse/CompareServiceState, Rust storage_backend_snapshot.rs DTO test, and test_storage.rs LocalDisk restore test", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "The exact Rust witness persists a live mixed-replica object, restores a fresh MasterServiceImpl, proves neither process-bound route is exposed prematurely, remounts the original Memory segment by durable UUID, recovers the LocalDisk inventory by namespace and generation, and then verifies the public descriptor order is exactly Memory followed by LocalDisk with exact LocalDisk metadata.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp MixedMemoryAndLocalDiskRoundTrip and master_service_test_for_snapshot_base.h CompareReplicaListResponse/CompareServiceState", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_service_promotion_snapshot_mixed_memory_and_local_disk_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "After snapshot save and fresh MasterService restore, the mounted LocalDisk holder remains associated with its client and preserves enable_offloading=true and its offloading-object state.",
       "boundary": ["master", "snapshot", "promotion", "local-disk", "offloading"],
       "reference": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.LocalDiskSegmentEnableOffloadingPreserved"},
-      "reason": "Rust's raw snapshot DTO test preserves the flag, but no discoverable test asserts it through a live MasterServiceImpl save and fresh service restore. The existing MasterServiceImpl restore test explicitly asserts that a previously enabled LocalDisk holder restores with client_id=nil, enable_offloading=false, empty offloading_objects, and zero capacity, the opposite of the C++ service-level contract.",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp LocalDiskSegmentEnableOffloadingPreserved, master_service_test_for_snapshot_base.h CompareLocalDiskSegmentState/CompareServiceState, Rust test_storage.rs test_master_service_restores_local_disk_state_from_snapshot, and storage_backend_snapshot.rs DTO test", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "The exact Rust witness enables offloading through the production heartbeat, saves and reloads a live MasterServiceImpl, verifies second-save continuity for storage_id, client_id, enable_offloading, and the durable offloading queue, then completes recovery with enable_offloading=true and proves the recovered holder remains routable. Runtime-only capacity is intentionally reset.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp LocalDiskSegmentEnableOffloadingPreserved and master_service_test_for_snapshot_base.h CompareLocalDiskSegmentState/CompareServiceState", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_service_promotion_snapshot_enable_offloading_preserved"}],
+      "status": "covered"
     },
     {
       "behavior": "After snapshot save and fresh MasterService restore, two distinct LocalDisk holders remain independently client-bound and queries for their keys return the corresponding LocalDisk replicas with their original object sizes and endpoints.",
       "boundary": ["master", "snapshot", "promotion", "local-disk", "multi-client"],
       "reference": {"file": "ha/snapshot/master_service_promotion_test_for_snapshot.cpp", "test": "MasterServicePromotionSnapshotTest.MultipleLocalDiskHoldersRoundTrip"},
-      "reason": "The raw StorageBackend test serializes two LocalDisk records but does not restore a fresh MasterServiceImpl or query that both holders remain separately bound and usable with the C++ required replica metadata. The existing service restore test demonstrates that Rust intentionally clears the restored LocalDisk binding and offloading state.",
-      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp MultipleLocalDiskHoldersRoundTrip, master_service_test_for_snapshot_base.h CompareServiceState/CompareReplicaListResponse, Rust storage_backend_snapshot.rs DTO test, and test_storage.rs LocalDisk restore test", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "reason": "The exact Rust witness creates two independent production LocalDisk namespaces and Master-issued generations, saves and restores one live service snapshot, proves both are dormant before recovery, recovers each holder independently, and queries both keys to verify distinct client/storage identities plus their original sizes, endpoints, and generations.",
+      "review": {"oracle": "mooncake-store/tests/ha/snapshot/master_service_promotion_test_for_snapshot.cpp MultipleLocalDiskHoldersRoundTrip and master_service_test_for_snapshot_base.h CompareServiceState/CompareReplicaListResponse", "reviewed": true},
+      "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_master_service_promotion_snapshot_multiple_local_disk_holders_round_trip"}],
+      "status": "covered"
     },
     {
       "behavior": "After promotion-on-hit queues in-flight work, snapshot save and fresh MasterService restore complete without error, discard only transient promotion state, and still return exactly the original LocalDisk source replica for the queried key.",
