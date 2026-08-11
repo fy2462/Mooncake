@@ -16,6 +16,7 @@ from mooncake_store import (
     ReplicateConfig,
     StoreError,
 )
+from mooncake.store import MooncakeDistributedStore
 
 SLAB_SIZE = 1 << 24
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -394,6 +395,87 @@ async def test_batch_exists_preserves_mixed_input_order(cachelib_master):
         ) == [True, False, True, False]
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize(
+    "cachelib_master",
+    [{"lease_ttl_ms": 20, "memory_allocator": "offset"}],
+    indirect=True,
+)
+def test_cpp_parity_concurrent_stress_with_barrier(cachelib_master):
+    num_threads = 8
+    operations_per_thread = 100
+    value_size = 1024 * 1024
+    rpc_port, metadata_port = cachelib_master
+    store = MooncakeDistributedStore()
+    assert (
+        store.setup(
+            "localhost",
+            f"http://127.0.0.1:{metadata_port}/metadata",
+            3200 * 1024 * 1024,
+            512 * 1024 * 1024,
+            "tcp",
+            "",
+            f"127.0.0.1:{rpc_port}",
+        )
+        == 0
+    )
+
+    start_barrier = threading.Barrier(num_threads + 1)
+    put_barrier = threading.Barrier(num_threads + 1)
+    get_barrier = threading.Barrier(num_threads + 1)
+    thread_exceptions: list[str] = []
+
+    def abort_barriers() -> None:
+        for barrier in (start_barrier, put_barrier, get_barrier):
+            try:
+                barrier.abort()
+            except threading.BrokenBarrierError:
+                pass
+
+    def worker(thread_id: int) -> None:
+        try:
+            value = os.urandom(value_size)
+            keys = [
+                f"key_{thread_id}_{index}" for index in range(operations_per_thread)
+            ]
+            start_barrier.wait(timeout=30)
+            for key in keys:
+                assert store.put(key, value) == 0
+            put_barrier.wait(timeout=300)
+            for key in keys:
+                retrieved = store.get(key)
+                assert len(retrieved) == value_size
+                assert retrieved == value
+            get_barrier.wait(timeout=300)
+            time.sleep(0.05)
+            for key in keys:
+                assert store.remove(key) == 0
+        except Exception as error:
+            thread_exceptions.append(f"Thread {thread_id} failed: {error}")
+            abort_barriers()
+
+    threads = [
+        threading.Thread(target=worker, args=(index,), name=f"Worker-{index}")
+        for index in range(num_threads)
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for barrier in (start_barrier, put_barrier, get_barrier):
+            try:
+                barrier.wait(timeout=300)
+            except threading.BrokenBarrierError:
+                break
+        for thread in threads:
+            thread.join(timeout=300)
+        assert all(not thread.is_alive() for thread in threads)
+        assert thread_exceptions == []
+    finally:
+        abort_barriers()
+        for thread in threads:
+            thread.join(timeout=5)
+        store.close()
 
 
 @pytest.mark.asyncio

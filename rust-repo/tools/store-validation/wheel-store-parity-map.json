@@ -827,12 +827,12 @@
    "status": "covered"
   },
   {
-   "behavior": "Eight threads synchronize 100 puts each of thread-unique 1-MiB bytes, then 100 exact gets each, then post-TTL removals; all 800 operations per phase succeed with zero captured exception. Timing is printed but correctness remains applicable. No Rust test proves this scale/barrier matrix.",
+   "behavior": "Eight threads synchronize 100 puts each of thread-unique 1-MiB bytes, then 100 exact gets each, then post-TTL removals; all 800 operations per phase succeed with zero captured exception. Timing is printed but correctness remains applicable.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "Rust parity coverage for the 8-thread x 100 x 1-MiB barrier stress matrix is not yet registered; the batch cluster parity file covers deterministic batch/zero-copy operations. This heavy concurrency oracle remains to be added.",
+   "reason": "The Rust wheel-compatible facade test uses the same 3.2-GiB segment and 512-MiB local buffer, eight Python threads, three phase barriers, 100 thread-unique keys per worker, and 1-MiB random values. Every put returns zero, every get is length- and bit-exact, every post-TTL remove returns zero, all threads join, and the exception list stays empty. The isolated focused pytest passed in 5.28 seconds with a measured 3,930,832-KiB peak RSS and no swaps.",
    "reference": {
     "file": "test_distributed_object_store.py",
     "test": "TestDistributedObjectStoreSingleStore.test_concurrent_stress_with_barrier"
@@ -841,8 +841,13 @@
     "oracle": "mooncake-wheel/tests/test_distributed_object_store.py::TestDistributedObjectStoreSingleStore.test_concurrent_stress_with_barrier test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_pybind_client_parity.py",
+     "test": "test_cpp_parity_concurrent_stress_with_barrier"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Two registered 32-byte buffers receive five exact multi-key ranges and nested lengths; mismatched vectors, source/destination overflow, and missing-key continuation yield the specified negative/positive results; buffers and keys clean up.",
