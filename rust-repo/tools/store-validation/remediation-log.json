@@ -4521,7 +4521,7 @@
   {
     "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_IsEnableOffloadingLimits",
     "rust": "mooncake-store-client/tests/test_storage_backend_offset_remaining_parity.rs:cpp_parity_offset_allocator_enablement_tracks_key_limit",
-    "first_divergence": "The exact witness initially failed to compile because Rust exposed no dynamic Offset enablement result. The new fallible query follows the C++ no-eviction logical size/key limits and returns false exactly when the configured five-key limit is reached.",
+    "first_divergence": "The exact witness initially failed to compile because Rust exposed no dynamic Offset enablement result. The new fallible query follows the C++ no-eviction full-record size/key limits and returns false exactly when the configured five-key limit is reached.",
     "repair_commit": "373cbfcb",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib",
     "focused_command": "cargo test -p mooncake-store-client --test test_storage_backend_offset_remaining_parity cpp_parity_offset_allocator_enablement_tracks_key_limit -- --exact",
@@ -4535,5 +4535,14 @@
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib",
     "focused_command": "cargo test -p mooncake-store-client --test test_storage_backend_offset_remaining_parity cpp_parity_offset_allocator_operations_fail_before_init -- --exact",
     "evidence": "compile-red proved both fallible queries were absent; repaired exact five-operation matrix PASS 1/1; combined Offset remaining parity binary PASS 3/3; client lib PASS 375/375"
+  },
+  {
+    "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_Persist_OversizedKeyRejected",
+    "rust": "mooncake-store-master/tests/test_storage_backend_offset_remaining_parity.rs:cpp_parity_offset_persist_skips_oversized_key_and_accepts_boundary",
+    "first_divergence": "The public Rust Offset batch backend previously indexed a 1 MiB + 1 key, while the lower-level formatter rejected it with an error; neither matched C++ successful skip semantics. The batch writer now ignores only keys beyond the shared 1 MiB limit and retains the exact boundary key.",
+    "repair_commit": "86c5bed8",
+    "focused_command": "cargo test -p mooncake-store-master --test test_storage_backend_offset_remaining_parity cpp_parity_offset_persist_skips_oversized_key_and_accepts_boundary -- --exact",
+    "crate_command": "cargo test -p mooncake-store-master --test test_storage",
+    "evidence": "the exact witness first failed because the oversized key was present; repaired exact witness PASS 1/1; Master storage integration binary PASS 35/35; both touched Rust files pass rustfmt --check"
   }
 ]
