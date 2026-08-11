@@ -916,6 +916,9 @@ pub(crate) struct LocalDiskSegmentEntry {
     /// Currently bound process session. Restored snapshots start offline and
     /// cannot route reads until a client completes inventory recovery.
     pub(crate) active_client_id: Option<Uuid>,
+    /// Last client identity recorded in durable snapshot metadata. This is a
+    /// continuity hint only; it never authorizes routing or background work.
+    pub(crate) persisted_client_id: Option<Uuid>,
     /// Whether the current session has committed a complete disk inventory.
     pub(crate) recovery_complete: bool,
     /// Token of the currently authorized inventory transaction. The token is

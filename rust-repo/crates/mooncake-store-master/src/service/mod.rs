@@ -614,10 +614,9 @@ pub(crate) fn restore_loaded_snapshot_state(
                     // Legacy snapshots without an exact generation remain
                     // fail-closed and are removed if the next inventory cannot
                     // present a Master-issued identity.
-                    // Process sessions and endpoints are never restored as live.
-                    replica.holder_client_id = None;
+                    // Preserve process metadata for snapshot continuity, but
+                    // never restore it as a live route before inventory recovery.
                     replica.handle_valid = false;
-                    replica.segment_name.clear();
                 }
                 ReplicaType::Disk | ReplicaType::All => {}
             }
@@ -1348,11 +1347,13 @@ pub(crate) fn restore_loaded_snapshot_state(
             storage_id,
             state::LocalDiskSegmentEntry {
                 active_client_id: None,
+                persisted_client_id: (!local_disk.client_id.is_nil())
+                    .then_some(local_disk.client_id),
                 recovery_complete: false,
                 recovery_session_id: None,
                 recovered_objects: HashSet::new(),
-                enable_offloading: false,
-                offloading_objects: HashMap::new(),
+                enable_offloading: local_disk.enable_offloading,
+                offloading_objects: local_disk.offloading_objects,
                 promotion_objects: HashMap::new(),
                 // Capacity is a live process-session hint, not durable
                 // scheduling authority.
@@ -2347,7 +2348,10 @@ impl MasterServiceImpl {
                                 }
                                 local_disk_segments.push(LocalDiskSnapshotEntry {
                                     storage_id,
-                                    client_id: entry.active_client_id.unwrap_or_else(Uuid::nil),
+                                    client_id: entry
+                                        .active_client_id
+                                        .or(entry.persisted_client_id)
+                                        .unwrap_or_else(Uuid::nil),
                                     enable_offloading: entry.enable_offloading,
                                     offloading_objects,
                                     ssd_total_capacity_bytes: 0,
@@ -2519,7 +2523,10 @@ impl MasterServiceImpl {
                 .iter()
                 .map(|entry| LocalDiskSnapshotEntry {
                     storage_id: *entry.key(),
-                    client_id: entry.active_client_id.unwrap_or_else(Uuid::nil),
+                    client_id: entry
+                        .active_client_id
+                        .or(entry.persisted_client_id)
+                        .unwrap_or_else(Uuid::nil),
                     enable_offloading: entry.enable_offloading,
                     offloading_objects: entry.offloading_objects.clone(),
                     ssd_total_capacity_bytes: 0,
@@ -2951,6 +2958,570 @@ mod snapshot_restore_tests {
             snapshot.delayed_replica_releases,
             snapshot.allocator_config,
         )
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_master_service_promotion_snapshot_local_disk_replica_round_trip() {
+        verify_local_disk_replica_snapshot_round_trip().await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_master_service_promotion_snapshot_mixed_memory_and_local_disk_round_trip() {
+        verify_mixed_memory_and_local_disk_snapshot_round_trip().await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_master_service_promotion_snapshot_enable_offloading_preserved() {
+        verify_local_disk_enable_offloading_snapshot_round_trip().await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_master_service_promotion_snapshot_multiple_local_disk_holders_round_trip() {
+        verify_multiple_local_disk_holders_snapshot_round_trip().await;
+    }
+
+    #[derive(Clone)]
+    struct LocalDiskSnapshotFixture {
+        client_id: Uuid,
+        storage_id: Uuid,
+        segment_id: Uuid,
+        segment_name: String,
+        key: String,
+        size: u64,
+        endpoint: String,
+        generation_id: Uuid,
+    }
+
+    fn local_disk_snapshot_service() -> MasterServiceImpl {
+        MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            offload_on_evict: true,
+            ..Default::default()
+        })
+    }
+
+    async fn create_snapshot_local_disk_fixture(
+        service: &MasterServiceImpl,
+        client_id: Uuid,
+        key: &str,
+        size: u64,
+        keep_memory: bool,
+    ) -> LocalDiskSnapshotFixture {
+        let segment_name = format!("snapshot-memory-{key}");
+        let endpoint = format!("snapshot-local-disk-{key}:17813");
+        let mounted = MasterService::mount_segment(
+            service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment_name: segment_name.clone(),
+                size: SNAPSHOT_CHILD_SEGMENT_SIZE,
+                base_addr: SNAPSHOT_CHILD_SEGMENT_BASE + (u64::from(key.as_bytes()[0]) << 24),
+                te_endpoint: format!("memory-{key}:17813"),
+                protocol: "tcp".into(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .segment_id
+        .unwrap();
+        let segment_id = uuid_from_proto(&mounted);
+        let storage_id = Uuid::new_v4();
+        let recovery_session_id = Uuid::new_v4();
+        for recovery_complete in [false, true] {
+            MasterService::mount_local_disk_segment(
+                service,
+                Request::new(proto::MountLocalDiskSegmentRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    enable_offloading: true,
+                    storage_id: Some(uuid_to_proto(storage_id)),
+                    recovery_complete,
+                    recovery_session_id: Some(uuid_to_proto(recovery_session_id)),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        MasterService::put_start(
+            service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: size,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: segment_name.clone(),
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        service
+            .state
+            .objects
+            .get_mut(&TenantId::default().make_scoped_key(key))
+            .unwrap()
+            .lease_timeout = Some(SystemTime::UNIX_EPOCH);
+        assert!(service.run_eviction_cycle_for_test(1).is_empty());
+        let tasks = MasterService::offload_object_heartbeat(
+            service,
+            Request::new(proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                enable_offloading: true,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .tasks;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].key, key);
+        let generation_id = tasks[0]
+            .generation_id
+            .as_ref()
+            .map(uuid_from_proto)
+            .expect("Master-issued offload task has a generation");
+
+        MasterService::notify_offload_success(
+            service,
+            Request::new(proto::NotifyOffloadSuccessRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                keys: vec![key.into()],
+                metadatas: vec![proto::StorageObjectMetadata {
+                    bucket_id: 0,
+                    offset: 0,
+                    key_size: key.len() as i64,
+                    data_size: size as i64,
+                    transport_endpoint: endpoint.clone(),
+                }],
+                tasks,
+                recovery_session_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        if !keep_memory {
+            service
+                .state
+                .objects
+                .get_mut(&TenantId::default().make_scoped_key(key))
+                .unwrap()
+                .lease_timeout = Some(SystemTime::UNIX_EPOCH);
+            assert_eq!(
+                service.run_eviction_cycle_for_test(1),
+                vec![key.to_string()]
+            );
+            let replicas = snapshot_child_replicas(service, key).await;
+            assert_eq!(replicas.len(), 1);
+            assert_eq!(
+                replicas[0].replica_type,
+                proto::replica_descriptor::ReplicaType::LocalDisk as i32
+            );
+        } else {
+            assert_eq!(snapshot_child_replicas(service, key).await.len(), 2);
+        }
+
+        LocalDiskSnapshotFixture {
+            client_id,
+            storage_id,
+            segment_id,
+            segment_name,
+            key: key.into(),
+            size,
+            endpoint,
+            generation_id,
+        }
+    }
+
+    async fn restore_local_disk_snapshot(
+        provider: &CatalogBackedSnapshotProvider,
+        source: &MasterServiceImpl,
+        snapshot_id: &str,
+    ) -> (LoadedSnapshot, MasterServiceImpl) {
+        publish_service_snapshot(provider, source, snapshot_id, 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let first = loaded.clone();
+        assert!(first.objects.iter().any(|(_, object)| {
+            object
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::LocalDisk)
+        }));
+        let restored = local_disk_snapshot_service();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+
+        for (key, _) in &first.objects {
+            let user_key = TenantId::parse_scoped_key(key)
+                .map(|(_, user_key)| user_key)
+                .unwrap_or_else(|_| key.clone());
+            let error = MasterService::get_replica_list(
+                &restored,
+                Request::new(proto::GetReplicaListRequest {
+                    key: user_key,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+
+        let second = restored.capture_loaded_snapshot(format!("{snapshot_id}-second"));
+        let mut first_local_disks = first.local_disk_segments.clone();
+        first_local_disks.sort_by_key(|entry| entry.storage_id);
+        let mut second_local_disks = second.local_disk_segments.clone();
+        second_local_disks.sort_by_key(|entry| entry.storage_id);
+        assert_eq!(second_local_disks, first_local_disks);
+        assert_eq!(second.objects.len(), first.objects.len());
+        for (key, first_object) in &first.objects {
+            let second_object = second
+                .objects
+                .iter()
+                .find(|(candidate, _)| candidate == key)
+                .map(|(_, object)| object)
+                .expect("object survives second snapshot");
+            let first_disk = first_object
+                .replicas
+                .iter()
+                .filter(|replica| replica.replica_type == ReplicaType::LocalDisk)
+                .map(|replica| {
+                    (
+                        replica.segment_name.clone(),
+                        replica.size,
+                        replica.holder_client_id,
+                        replica.local_disk_storage_id,
+                        replica.local_disk_generation_id,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let second_disk = second_object
+                .replicas
+                .iter()
+                .filter(|replica| replica.replica_type == ReplicaType::LocalDisk)
+                .map(|replica| {
+                    (
+                        replica.segment_name.clone(),
+                        replica.size,
+                        replica.holder_client_id,
+                        replica.local_disk_storage_id,
+                        replica.local_disk_generation_id,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(second_disk, first_disk, "durable LocalDisk descriptor");
+        }
+        (first, restored)
+    }
+
+    async fn recover_snapshot_local_disk(
+        service: &MasterServiceImpl,
+        fixture: &LocalDiskSnapshotFixture,
+        enable_offloading: bool,
+    ) {
+        let restored_replica = service.state.objects.iter().find_map(|object| {
+            object
+                .replicas
+                .iter()
+                .find(|replica| {
+                    replica.replica_type == ReplicaType::LocalDisk
+                        && replica.local_disk_storage_id == Some(fixture.storage_id)
+                })
+                .cloned()
+        });
+        let restored_replica = restored_replica.unwrap_or_else(|| {
+            let inventory = service
+                .state
+                .objects
+                .iter()
+                .map(|object| {
+                    (
+                        object.key().clone(),
+                        object
+                            .replicas
+                            .iter()
+                            .map(|replica| (replica.replica_type, replica.local_disk_storage_id))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!("restored object retains dormant LocalDisk descriptor: {inventory:?}")
+        });
+        assert_eq!(
+            restored_replica.local_disk_storage_id,
+            Some(fixture.storage_id)
+        );
+        assert_eq!(
+            restored_replica.local_disk_generation_id,
+            Some(fixture.generation_id)
+        );
+        assert_eq!(restored_replica.size, fixture.size);
+        assert_eq!(restored_replica.status, ReplicaStatus::Complete);
+        let recovery_session_id = Uuid::new_v4();
+        MasterService::mount_local_disk_segment(
+            service,
+            Request::new(proto::MountLocalDiskSegmentRequest {
+                client_id: Some(uuid_to_proto(fixture.client_id)),
+                enable_offloading: false,
+                storage_id: Some(uuid_to_proto(fixture.storage_id)),
+                recovery_complete: false,
+                recovery_session_id: Some(uuid_to_proto(recovery_session_id)),
+            }),
+        )
+        .await
+        .unwrap();
+        let response = MasterService::notify_offload_success(
+            service,
+            Request::new(proto::NotifyOffloadSuccessRequest {
+                client_id: Some(uuid_to_proto(fixture.client_id)),
+                keys: vec![fixture.key.clone()],
+                metadatas: vec![proto::StorageObjectMetadata {
+                    bucket_id: 0,
+                    offset: 0,
+                    key_size: fixture.key.len() as i64,
+                    data_size: fixture.size as i64,
+                    transport_endpoint: fixture.endpoint.clone(),
+                }],
+                tasks: vec![proto::OffloadTaskItem {
+                    tenant_id: String::new(),
+                    key: fixture.key.clone(),
+                    size: fixture.size as i64,
+                    generation_id: Some(uuid_to_proto(fixture.generation_id)),
+                }],
+                recovery_session_id: Some(uuid_to_proto(recovery_session_id)),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert!(response.stale_recovery_tasks.is_empty());
+        MasterService::mount_local_disk_segment(
+            service,
+            Request::new(proto::MountLocalDiskSegmentRequest {
+                client_id: Some(uuid_to_proto(fixture.client_id)),
+                enable_offloading,
+                storage_id: Some(uuid_to_proto(fixture.storage_id)),
+                recovery_complete: true,
+                recovery_session_id: Some(uuid_to_proto(recovery_session_id)),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn remount_snapshot_memory(
+        service: &MasterServiceImpl,
+        fixture: &LocalDiskSnapshotFixture,
+    ) {
+        MasterService::re_mount_segment(
+            service,
+            Request::new(proto::ReMountSegmentRequest {
+                client_id: Some(uuid_to_proto(fixture.client_id)),
+                segment_names: vec![fixture.segment_name.clone()],
+                segment_sizes: vec![SNAPSHOT_CHILD_SEGMENT_SIZE],
+                base_addrs: vec![
+                    SNAPSHOT_CHILD_SEGMENT_BASE + (u64::from(fixture.key.as_bytes()[0]) << 24),
+                ],
+                te_endpoints: vec![format!("memory-{}:17813", fixture.key)],
+                protocols: vec!["tcp".into()],
+                segment_ids: vec![uuid_to_proto(fixture.segment_id)],
+                host_ids: vec![String::new()],
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn assert_snapshot_local_disk_replica(
+        service: &MasterServiceImpl,
+        fixture: &LocalDiskSnapshotFixture,
+        expected_replica_types: &[i32],
+    ) {
+        let replicas = snapshot_child_replicas(service, &fixture.key).await;
+        assert_eq!(
+            replicas
+                .iter()
+                .map(|replica| replica.replica_type)
+                .collect::<Vec<_>>(),
+            expected_replica_types
+        );
+        let disk = replicas
+            .iter()
+            .find(|replica| {
+                replica.replica_type == proto::replica_descriptor::ReplicaType::LocalDisk as i32
+            })
+            .expect("public query returns LocalDisk replica");
+        assert_eq!(
+            disk.local_disk_client_id.as_ref().map(uuid_from_proto),
+            Some(fixture.client_id)
+        );
+        assert_eq!(disk.object_size, fixture.size);
+        assert_eq!(disk.size, fixture.size);
+        assert_eq!(disk.transport_endpoint, fixture.endpoint);
+        assert_eq!(
+            disk.local_disk_storage_id.as_ref().map(uuid_from_proto),
+            Some(fixture.storage_id)
+        );
+        assert_eq!(
+            disk.local_disk_generation_id.as_ref().map(uuid_from_proto),
+            Some(fixture.generation_id)
+        );
+    }
+
+    async fn verify_local_disk_replica_snapshot_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = local_disk_snapshot_service();
+        let fixture = create_snapshot_local_disk_fixture(
+            &source,
+            Uuid::new_v4(),
+            "snapshot-local-disk-only",
+            4096,
+            false,
+        )
+        .await;
+        let (_first, restored) =
+            restore_local_disk_snapshot(&provider, &source, "20260811_010000_001").await;
+        recover_snapshot_local_disk(&restored, &fixture, false).await;
+        assert_snapshot_local_disk_replica(
+            &restored,
+            &fixture,
+            &[proto::replica_descriptor::ReplicaType::LocalDisk as i32],
+        )
+        .await;
+    }
+
+    async fn verify_mixed_memory_and_local_disk_snapshot_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = local_disk_snapshot_service();
+        let fixture = create_snapshot_local_disk_fixture(
+            &source,
+            Uuid::new_v4(),
+            "snapshot-mixed-replicas",
+            8192,
+            true,
+        )
+        .await;
+        let (_first, restored) =
+            restore_local_disk_snapshot(&provider, &source, "20260811_010000_002").await;
+        remount_snapshot_memory(&restored, &fixture).await;
+        recover_snapshot_local_disk(&restored, &fixture, false).await;
+        assert_snapshot_local_disk_replica(
+            &restored,
+            &fixture,
+            &[
+                proto::replica_descriptor::ReplicaType::Memory as i32,
+                proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+            ],
+        )
+        .await;
+    }
+
+    async fn verify_local_disk_enable_offloading_snapshot_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = local_disk_snapshot_service();
+        let fixture = create_snapshot_local_disk_fixture(
+            &source,
+            Uuid::new_v4(),
+            "snapshot-offloading-policy",
+            12288,
+            false,
+        )
+        .await;
+        MasterService::offload_object_heartbeat(
+            &source,
+            Request::new(proto::OffloadObjectHeartbeatRequest {
+                client_id: Some(uuid_to_proto(fixture.client_id)),
+                enable_offloading: true,
+            }),
+        )
+        .await
+        .unwrap();
+        let (first, restored) =
+            restore_local_disk_snapshot(&provider, &source, "20260811_010000_003").await;
+        let persisted = first
+            .local_disk_segments
+            .iter()
+            .find(|entry| entry.storage_id == fixture.storage_id)
+            .unwrap();
+        assert!(persisted.enable_offloading);
+        assert_eq!(persisted.client_id, fixture.client_id);
+        recover_snapshot_local_disk(&restored, &fixture, true).await;
+        assert!(
+            restored
+                .state
+                .local_disk_segments
+                .get(&fixture.storage_id)
+                .unwrap()
+                .enable_offloading
+        );
+        assert_snapshot_local_disk_replica(
+            &restored,
+            &fixture,
+            &[proto::replica_descriptor::ReplicaType::LocalDisk as i32],
+        )
+        .await;
+    }
+
+    async fn verify_multiple_local_disk_holders_snapshot_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = local_disk_snapshot_service();
+        let first_fixture = create_snapshot_local_disk_fixture(
+            &source,
+            Uuid::new_v4(),
+            "snapshot-holder-a",
+            16384,
+            false,
+        )
+        .await;
+        let second_fixture = create_snapshot_local_disk_fixture(
+            &source,
+            Uuid::new_v4(),
+            "snapshot-holder-b",
+            32768,
+            false,
+        )
+        .await;
+        let (first, restored) =
+            restore_local_disk_snapshot(&provider, &source, "20260811_010000_004").await;
+        assert_eq!(first.local_disk_segments.len(), 2);
+        recover_snapshot_local_disk(&restored, &first_fixture, false).await;
+        recover_snapshot_local_disk(&restored, &second_fixture, false).await;
+        assert_snapshot_local_disk_replica(
+            &restored,
+            &first_fixture,
+            &[proto::replica_descriptor::ReplicaType::LocalDisk as i32],
+        )
+        .await;
+        assert_snapshot_local_disk_replica(
+            &restored,
+            &second_fixture,
+            &[proto::replica_descriptor::ReplicaType::LocalDisk as i32],
+        )
+        .await;
+        assert_ne!(first_fixture.client_id, second_fixture.client_id);
+        assert_ne!(first_fixture.storage_id, second_fixture.storage_id);
     }
 
     const SNAPSHOT_CHILD_SEGMENT_BASE: u64 = 0x310000000;

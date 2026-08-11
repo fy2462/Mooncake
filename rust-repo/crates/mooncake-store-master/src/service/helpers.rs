@@ -2109,6 +2109,7 @@ mod tests {
             storage_id,
             LocalDiskSegmentEntry {
                 active_client_id: Some(holder_client_id),
+                persisted_client_id: Some(holder_client_id),
                 recovery_complete: false,
                 recovery_session_id: Some(Uuid::new_v4()),
                 recovered_objects: HashSet::new(),

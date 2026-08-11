@@ -298,7 +298,7 @@ fn test_storage_backend_loads_legacy_snapshot_without_local_disk_state() {
 }
 
 #[tokio::test]
-async fn test_master_service_restores_local_disk_state_from_snapshot() {
+async fn test_master_service_restores_dormant_local_disk_state_from_snapshot() {
     let tmp = temp_dir();
     let backend = StorageBackend::new(StorageBackendType::LocalDisk, &tmp);
     let segments = DashMap::new();
@@ -333,9 +333,14 @@ async fn test_master_service_restores_local_disk_state_from_snapshot() {
     assert_eq!(restored.local_disk_segments.len(), 1);
     let local_disk = &restored.local_disk_segments[0];
     assert_eq!(local_disk.storage_id, client_id);
-    assert_eq!(local_disk.client_id, Uuid::nil());
-    assert!(!local_disk.enable_offloading);
-    assert!(local_disk.offloading_objects.is_empty());
+    assert_eq!(local_disk.client_id, client_id);
+    assert!(local_disk.enable_offloading);
+    assert_eq!(
+        local_disk.offloading_objects,
+        HashMap::from([("tenant\0key".to_string(), 4096)])
+    );
+    // Capacity remains process-session state even though durable identity and
+    // policy survive for second-save continuity.
     assert_eq!(local_disk.ssd_total_capacity_bytes, 0);
 }
 
