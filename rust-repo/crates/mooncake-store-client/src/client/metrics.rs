@@ -232,7 +232,7 @@ impl ClientMetrics {
         .map(|metrics| Some(Arc::new(metrics)))
     }
 
-    pub(super) fn new(
+    pub(crate) fn new(
         labels: HashMap<String, String>,
         bandwidth_summary_enabled: bool,
         master_rpc_metrics_enabled: bool,

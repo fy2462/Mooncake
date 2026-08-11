@@ -463,6 +463,7 @@ impl MooncakeClient {
             engine: self.engine.required_arc()?,
             pool,
             te_endpoint: self.local_hostname.clone(),
+            metrics: self.metrics.clone(),
         };
 
         let (port, handle) = crate::offload::server::start_offload_server(handler)
