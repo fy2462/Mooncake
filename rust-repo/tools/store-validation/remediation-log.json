@@ -4571,5 +4571,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_empty_queue_is_noop -- --exact",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "initial witness 374935fd was strengthened by bc97a36e to assert the real persistent LocalDisk inventory remains empty; repaired exact witness PASS 1/1; client lib PASS 377/377; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.HeartbeatSegmentNotFoundIsBenign",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_missing_session_is_benign",
+    "first_divergence": "Before repair, the real-client missing-session setup returned StoreError::KeyNotFound from promote_objects. The client loop now recognizes that heartbeat-only NotFound as the C++ benign restart/remount condition and returns zero without entering the per-task path.",
+    "repair_commit": "e8ca3c56",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_missing_session_is_benign -- --exact",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "the equivalent real-client setup first failed with KeyNotFound(local disk session not found); repaired exact promotion witness PASS 1/1 with Ok(0) and unchanged empty disk; paired promotion tests PASS 2/2; client lib PASS 378/378; touched Rust file passes rustfmt --check"
   }
 ]
