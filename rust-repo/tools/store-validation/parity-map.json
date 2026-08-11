@@ -14165,13 +14165,18 @@
     "file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp",
     "test": "CatalogBackedSnapshotProviderTest.RejectsClusterMismatch"
    },
-   "reason": "test_catalog_provider_rejects_cluster_mismatch uses an Embedded fixture and asserts only is_err(); it does not assert Rust's HaError::InvalidParams variant or prove rejection before catalog access, as the C++ test requires INVALID_PARAMS. This intrinsic provider guard does not need etcd, but the C++ TEST_P is still instantiated for Embedded and optional Redis, and no exact Rust assertion covers the full observable oracle.",
+   "reason": "Rust parity test cpp_parity_catalog_provider_rejects_cluster_mismatch (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) uses a catalog whose every I/O operation panics, requests a mismatched cluster, and receives HaError::InvalidParams without touching the backend; this proves the provider-level guard for every catalog backend; verified PASS.",
    "review": {
     "oracle": "catalog_backed_snapshot_provider_test.cpp RejectsClusterMismatch and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot cluster guard; Rust catalog_snapshot.rs validate_cluster_id and test_catalog_provider_rejects_cluster_mismatch",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_catalog_provider_rejects_cluster_mismatch"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Uploading the non-text bytes {0, 1, 2, 128, 254, 255} to a nested key then downloading that key succeeds and returns the exact same byte vector.",

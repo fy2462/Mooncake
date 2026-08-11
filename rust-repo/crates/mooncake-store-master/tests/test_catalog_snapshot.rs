@@ -86,6 +86,30 @@ impl SnapshotObjectStore for DownloadFailureSnapshotObjectStore {
     }
 }
 
+struct UnexpectedCatalogAccess;
+
+impl SnapshotCatalogStore for UnexpectedCatalogAccess {
+    fn publish(&self, _: &SnapshotDescriptor) -> Result<(), HaError> {
+        panic!("cluster mismatch must be rejected before catalog publish")
+    }
+
+    fn get_latest(&self) -> Result<Option<SnapshotDescriptor>, HaError> {
+        panic!("cluster mismatch must be rejected before catalog read")
+    }
+
+    fn list(&self, _: usize) -> Result<Vec<SnapshotDescriptor>, HaError> {
+        panic!("cluster mismatch must be rejected before catalog list")
+    }
+
+    fn delete(&self, _: &str) -> Result<(), HaError> {
+        panic!("cluster mismatch must be rejected before catalog delete")
+    }
+
+    fn get_snapshot_root(&self) -> &str {
+        "mooncake_master_snapshot/"
+    }
+}
+
 #[test]
 fn cpp_parity_snapshot_child_generated_timestamp_matches_expected_format() {
     let root = tempdir().unwrap();
@@ -1181,10 +1205,19 @@ fn test_catalog_provider_preserves_expired_hard_pinned_objects() {
 }
 
 #[test]
-fn test_catalog_provider_rejects_cluster_mismatch() {
-    let (_root, provider, _, _, _) = publish_fixture(u64::MAX / 2);
+fn cpp_parity_catalog_provider_rejects_cluster_mismatch() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let provider = CatalogBackedSnapshotProvider::new(
+        "cluster-a",
+        Box::new(UnexpectedCatalogAccess),
+        object_store,
+    );
 
-    assert!(provider.load_latest_snapshot("cluster-b").is_err());
+    assert!(matches!(
+        provider.load_latest_snapshot("cluster-b"),
+        Err(HaError::InvalidParams(_))
+    ));
 }
 
 #[test]
