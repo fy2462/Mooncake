@@ -3682,12 +3682,12 @@
    "status": "missing"
   },
   {
-   "behavior": "Sixteen successful 1-KiB writes below the 32-MiB watermark remain MEMORY and never gain LOCAL_DISK after a full heartbeat window. No Rust real-client negative promotion/offload E2E proves it.",
+   "behavior": "Sixteen successful 1-KiB writes below the 32-MiB watermark remain MEMORY and never gain LOCAL_DISK after a full heartbeat window.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Sixteen successful 1-KiB writes below the 32-MiB watermark remain MEMORY and never gain LOCAL_DISK after a full heartbeat window. No Rust real-client negative promotion/offload E2E proves it.",
+   "reason": "A real Rust client mounts a persistent local-storage backend against an offload-on-evict, promotion-on-hit master, writes sixteen 1-KiB values into a 32-MiB memory segment, waits 100 ms with a 20-ms storage-heartbeat interval, then proves every key still has a MEMORY replica and none has a LOCAL_DISK replica before force cleanup. The focused native test passed with link-native.",
    "reference": {
     "file": "test_promotion_on_hit.py",
     "test": "TestPromotionDoesNotFire.test_below_watermark_workload_stays_memory_only"
@@ -3696,8 +3696,13 @@
     "oracle": "mooncake-wheel/tests/test_promotion_on_hit.py::TestPromotionDoesNotFire.test_below_watermark_workload_stays_memory_only test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_promotion_below_watermark_workload_stays_memory_only"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "From up to 96 1-MiB writes, at least one LOCAL_DISK-only key exists; four exact reads clear admission, later descriptors include MEMORY, a post-promotion read remains exact, and the offload-RPC read counter does not move, proving MEMORY served it. Rust promotion unit tests do not execute the full FileStorage/TE byte path.",
