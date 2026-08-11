@@ -2985,6 +2985,11 @@ mod snapshot_restore_tests {
         verify_in_flight_promotion_snapshot_safe().await;
     }
 
+    #[tokio::test]
+    async fn cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics() {
+        verify_snapshot_ssd_restore_preserves_cache_total_metrics().await;
+    }
+
     #[derive(Clone)]
     struct LocalDiskSnapshotFixture {
         client_id: Uuid,
@@ -3678,6 +3683,153 @@ mod snapshot_restore_tests {
         .unwrap()
         .into_inner()
         .replicas
+    }
+
+    async fn verify_snapshot_ssd_restore_preserves_cache_total_metrics() {
+        static METRICS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        struct ResetCacheTotals {
+            memory: i64,
+            disk: i64,
+        }
+
+        impl Drop for ResetCacheTotals {
+            fn drop(&mut self) {
+                metrics::MEM_CACHE_TOTAL.set(self.memory);
+                metrics::FILE_CACHE_TOTAL.set(self.disk);
+            }
+        }
+
+        let _guard = METRICS_LOCK.lock().await;
+        let base_memory_total = metrics::MEM_CACHE_TOTAL.get();
+        let base_disk_total = metrics::FILE_CACHE_TOTAL.get();
+        let _reset = ResetCacheTotals {
+            memory: base_memory_total,
+            disk: base_disk_total,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            storage_fs_dir: root.path().to_string_lossy().into_owned(),
+            cluster_id: "ssd-cache-total-snapshot-cluster".into(),
+            enable_disk_eviction: true,
+            quota_bytes: 1024 * 1024 * 1024,
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        let segment_name = "test_segment_restore_cache_totals";
+        let key = "restore_cache_total_metric_key";
+        mount_snapshot_child_segment(&source, client_id, segment_name).await;
+        let started = MasterService::put_start(
+            &source,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                slice_length: 1024,
+                tenant_id: String::new(),
+                config: Some(proto::ReplicateConfig {
+                    replica_num: 1,
+                    ..Default::default()
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.replicas.len(), 2);
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &source,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                key: key.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Disk as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_memory_total + 1);
+        assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_disk_total + 1);
+        assert_eq!(snapshot_child_replicas(&source, key).await.len(), 2);
+
+        let snapshot_id = "20260811_020000_001";
+        let first = source.capture_loaded_snapshot(snapshot_id);
+        publish_service_snapshot(&provider, &source, snapshot_id, 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.objects.len(), 1);
+        assert_eq!(loaded.objects[0].1.replicas.len(), 2);
+        assert!(!loaded.objects[0].1.memory_cache_total_accounted);
+        assert!(!loaded.objects[0].1.disk_cache_total_accounted);
+
+        metrics::MEM_CACHE_TOTAL.set(base_memory_total);
+        metrics::FILE_CACHE_TOTAL.set(base_disk_total);
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_memory_total + 1);
+        assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_disk_total + 1);
+
+        let second = restored.capture_loaded_snapshot(format!("{snapshot_id}-second"));
+        assert_eq!(second.objects.len(), first.objects.len());
+        assert_eq!(second.segments.len(), first.segments.len());
+        assert_eq!(second.tasks.len(), first.tasks.len());
+        assert_eq!(
+            second.local_disk_segments.len(),
+            first.local_disk_segments.len()
+        );
+        let (first_key, first_object) = &first.objects[0];
+        let (second_key, second_object) = &second.objects[0];
+        assert_eq!(second_key, first_key);
+        assert_eq!(second_object.size, first_object.size);
+        assert_eq!(second_object.tenant_id, first_object.tenant_id);
+        assert_eq!(second_object.user_key, first_object.user_key);
+        assert_eq!(second_object.group_id, first_object.group_id);
+        assert_eq!(second_object.replicas.len(), first_object.replicas.len());
+        for (second_replica, first_replica) in
+            second_object.replicas.iter().zip(&first_object.replicas)
+        {
+            assert_eq!(second_replica.segment_id, first_replica.segment_id);
+            assert_eq!(second_replica.segment_name, first_replica.segment_name);
+            assert_eq!(second_replica.offset, first_replica.offset);
+            assert_eq!(second_replica.size, first_replica.size);
+            assert_eq!(second_replica.status, first_replica.status);
+            assert_eq!(second_replica.replica_type, first_replica.replica_type);
+        }
+        let first_segment = &first.segments[0];
+        let second_segment = &second.segments[0];
+        assert_eq!(second_segment.segment.id, first_segment.segment.id);
+        assert_eq!(second_segment.segment.name, first_segment.segment.name);
+        assert_eq!(second_segment.segment.size, first_segment.segment.size);
+        assert_eq!(second_segment.used, first_segment.used);
+        assert_eq!(second_segment.client_id, first_segment.client_id);
+        assert_eq!(second_segment.status, first_segment.status);
+
+        mount_snapshot_child_segment(&restored, client_id, segment_name).await;
+        let replicas = snapshot_child_replicas(&restored, key).await;
+        assert_eq!(replicas.len(), 2);
+        assert!(replicas.iter().all(|replica| {
+            replica.status == proto::replica_descriptor::ReplicaStatus::Complete as i32
+        }));
+        assert!(replicas.iter().any(|replica| {
+            replica.replica_type == proto::replica_descriptor::ReplicaType::Memory as i32
+        }));
+        assert!(replicas.iter().any(|replica| {
+            replica.replica_type == proto::replica_descriptor::ReplicaType::Disk as i32
+        }));
     }
 
     async fn snapshot_child_exists(service: &MasterServiceImpl, key: &str) -> bool {
