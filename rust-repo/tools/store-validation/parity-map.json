@@ -14981,13 +14981,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.EnableSnapshotWithoutEnvVar_Throws"
    },
-   "reason": "No discoverable Rust test removes a local snapshot environment setting, enables the backend, and asserts construction failure; this is not an environment-based not-applicable case.",
+   "reason": "Rust parity test cpp_parity_enabled_local_snapshot_without_root_returns_invalid_params (rust-repo/crates/mooncake-store-master/tests/test_main_config.rs) launches an isolated child with MOONCAKE_SNAPSHOT_LOCAL_PATH removed, enables the local snapshot object store with no explicit root, executes the complete service preflight/factory path, and requires HaError::InvalidParams; verified PASS.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp EnableSnapshotWithoutEnvVar_Throws and LocalFileSnapshotObjectStore construction; Rust main configuration tests",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_main_config.rs",
+     "test": "cpp_parity_enabled_local_snapshot_without_root_returns_invalid_params"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With local snapshots disabled and MOONCAKE_SNAPSHOT_LOCAL_PATH absent, service construction succeeds because the backend is not created.",
@@ -15004,13 +15009,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.DisableSnapshotWithoutEnvVar_NoThrow"
    },
-   "reason": "No discoverable Rust test toggles disabled snapshots under an absent local-store environment and asserts the lazy no-throw construction behavior.",
+   "reason": "Rust parity test cpp_parity_disabled_snapshot_skips_unconfigured_local_object_store (rust-repo/crates/mooncake-store-master/tests/test_main_config.rs) disables snapshots while selecting the local object-store type with no explicit root, constructs the service, and requires preflight to return Ok(None) without constructing the backend; verified PASS.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp DisableSnapshotWithoutEnvVar_NoThrow and MasterService snapshot backend initialization; Rust main configuration tests",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_main_config.rs",
+     "test": "cpp_parity_disabled_snapshot_skips_unconfigured_local_object_store"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After restart, a complete object remains restored while a PutStart-only non-complete replica is removed from metadata.",

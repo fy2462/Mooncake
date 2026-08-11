@@ -7,6 +7,7 @@ use mooncake_store_master::main_config::{
     validate_ha_backend_for_serving, validate_rpc_protocol,
 };
 use mooncake_store_master::storage_backend::StorageBackendType;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -373,6 +374,56 @@ fn test_snapshot_pipeline_preflights_native_writer_before_serving() {
             .to_string_lossy()
             .starts_with(".mooncake_snapshot_preflight_")
     }));
+}
+
+#[test]
+fn cpp_parity_disabled_snapshot_skips_unconfigured_local_object_store() {
+    let mut args = base_args();
+    args.enable_snapshot = false;
+    args.snapshot_object_store_type = Some("local".to_string());
+    let service = build_master_service(None, None, build_runtime_config(&args).unwrap()).unwrap();
+
+    assert!(
+        preflight_snapshot_pipeline(&args, "cluster-a", &service)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn cpp_parity_enabled_local_snapshot_without_root_returns_invalid_params() {
+    const CHILD_MODE: &str = "MOONCAKE_ENABLED_SNAPSHOT_NO_ROOT_CHILD";
+    if std::env::var_os(CHILD_MODE).is_some() {
+        let mut args = base_args();
+        args.enable_snapshot = true;
+        args.snapshot_object_store_type = Some("local".to_string());
+        let service =
+            build_master_service(None, None, build_runtime_config(&args).unwrap()).unwrap();
+        let error = match preflight_snapshot_pipeline(&args, "cluster-a", &service) {
+            Ok(_) => panic!("enabled local snapshots without a root must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.downcast_ref::<HaError>(),
+            Some(HaError::InvalidParams(_))
+        ));
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .arg("cpp_parity_enabled_local_snapshot_without_root_returns_invalid_params")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD_MODE, "1")
+        .env_remove("MOONCAKE_SNAPSHOT_LOCAL_PATH")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "enabled snapshot child failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

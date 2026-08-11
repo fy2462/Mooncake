@@ -74,6 +74,9 @@ pub fn preflight_snapshot_pipeline(
     cluster_id: &str,
     service: &MasterServiceImpl,
 ) -> Result<Option<CatalogBackedSnapshotProvider>, Box<dyn std::error::Error>> {
+    if !args.enable_snapshot {
+        return Ok(None);
+    }
     let native_writer_available = service.preflight_snapshot_writer()?;
     let catalog_publisher = build_catalog_snapshot_publisher(args, cluster_id)?;
     if let Some(publisher) = &catalog_publisher {
