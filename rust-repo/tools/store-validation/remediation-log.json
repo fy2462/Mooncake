@@ -4661,5 +4661,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_post_alloc_failures_all_notify_master -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "compile-red proved keyed failure attempts and the matrix helper absent; exact witness PASS 1/1 with alloc-fails, load-fails, transfer-fails, notify-fails, and after-failures each recorded exactly once in order; all 11 promotion witnesses PASS; client lib PASS 387/387; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "mmap_arena_fallback_test.cpp:MmapArenaFallbackTest.PopulateNumaHugetlbMappingTouchesEveryRegion",
+    "rust": "mooncake-store-client/src/memory_ffi.rs:cpp_parity_numa_hugetlb_population_touches_every_region",
+    "first_divergence": "The compile-red witness could not import NUMA page planning, online-node discovery, Linux ID-list parsing, or NUMA-aware page population because Rust only exposed topology-agnostic parallel HugeTLB touching.",
+    "repair_commit": "80cd91c7",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib memory_ffi::tests::cpp_parity_numa_hugetlb_population_touches_every_region -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "compile-red failed on the four absent NUMA helpers; repaired memory_ffi group PASS 45/45 with the online-node witness executing locally, and client lib PASS 390/390. The planner also proves equal regions cover every page once and the sysfs parser covers ranges plus malformed input; affinity failure is deliberately best-effort while population remains mandatory; touched Rust file passes rustfmt and git diff --check"
   }
 ]

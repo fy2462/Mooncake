@@ -858,9 +858,9 @@
       "behavior": "NUMA-aware HugeTLB population touches every page across all configured NUMA regions.",
       "boundary": ["client", "memory", "hugetlb", "numa", "population"],
       "reference": {"file": "mmap_arena_fallback_test.cpp", "test": "MmapArenaFallbackTest.PopulateNumaHugetlbMappingTouchesEveryRegion"},
-      "reason": "Rust parallel HugeTLB population partitions pages across workers but does not implement or test NUMA-node region binding/population parity.",
+      "reason": "Rust now partitions equal page-aligned regions by NUMA node, distributes bounded workers across those regions, best-effort binds each worker through the node sysfs CPU list, and still touches every page if affinity is unavailable.",
       "review": {"oracle": "mooncake-store/tests/mmap_arena_fallback_test.cpp PopulateNumaHugetlbMappingTouchesEveryRegion and Rust memory_ffi population", "reviewed": true},
-      "rust": [], "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/memory_ffi.rs","test":"cpp_parity_numa_hugetlb_population_touches_every_region"}], "status": "covered"
     },
     {
       "behavior": "A failed initialization of the C++ process-global mmap arena is attempted only once and permanently selects its fallback path.",
