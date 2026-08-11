@@ -1658,10 +1658,10 @@
       "behavior": "After promotion admission, a LocalDisk BatchLoad failure attempts best-effort failure notification, performs no transfer or success commit, and does not abort the remaining promotion work.",
       "boundary": ["client", "promotion", "local-disk", "failure-notification", "batch-liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.BatchLoadFailureLeavesNoNotify"},
-      "reason": "Rust reads LocalDisk before allocation and propagates a read error from promote_objects without failure notification or continuation. The C++ title/comment are stale: current source does send NotifyPromotionFailure; the test asserts only no success notify.",
+      "reason": "The production processor now handles a post-allocation LocalDisk read failure per key: it attempts best-effort failure notification, performs no transfer or success notification, and continues to the next task. A UUID/key-isolated allocation-success seam equivalent to the C++ FakeClient drives the first task past allocation into a real missing FilePerKey read; exact observer counts then prove the second task still reaches allocation.",
       "review": {"oracle": "file_storage_promotion_test.cpp BatchLoadFailureLeavesNoNotify and mooncake-store/src/file_storage.cpp BatchLoad-failure branch; Rust storage_local.rs promote_objects", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_batch_load_failure_releases_and_continues"}],
+      "status": "covered"
     },
     {
       "behavior": "A reached promotion transfer-write failure attempts best-effort failure notification, performs no success commit, and leaves later tasks eligible for processing.",

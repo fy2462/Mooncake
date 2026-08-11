@@ -4607,5 +4607,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_alloc_failure_skips_key -- --exact",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "exact real-Master witness PASS 1/1 with two allocation attempts, two best-effort failure notifications, zero disk reads, zero transfer/success notifications, and normal batch completion; client lib PASS 381/381; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.BatchLoadFailureLeavesNoNotify",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_batch_load_failure_releases_and_continues",
+    "first_divergence": "After the alloc-first repair, Rust still propagated a LocalDisk read or blocking-task join error from the whole promotion batch, skipped failure notification, and prevented later tasks from running. The read failure is now handled independently per key with best-effort master-state release and continuation.",
+    "repair_commit": "2d553f68",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_batch_load_failure_releases_and_continues -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "exact witness PASS 1/1: a UUID/key-isolated C++-FakeClient-equivalent allocation seam admits the first task, its real empty FilePerKey backend read fails, failure notification count becomes one, transfer/success counts stay zero, and the later task still reaches a second allocation plus its own failure notification; alloc-failure and non-positive regression witnesses PASS 1/1 each; client lib PASS 382/382; touched Rust file passes rustfmt --check"
   }
 ]
