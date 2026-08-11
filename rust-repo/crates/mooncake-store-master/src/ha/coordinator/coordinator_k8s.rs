@@ -456,15 +456,25 @@ pub(super) async fn wait_for_k8s_view_change(
         let params = WatchParams::default()
             .fields(&format!("metadata.name={lease_name}"))
             .timeout(remaining.as_secs().max(1) as u32);
-        let stream = tokio::time::timeout(remaining, api.watch(&params, &resource_version))
-            .await
-            .map_err(|_| HaError::InvalidBackend("k8s lease watch timed out".into()))?
-            .map_err(|e| HaError::InvalidBackend(format!("k8s watch lease: {e}")))?;
+        let stream =
+            match tokio::time::timeout(remaining, api.watch(&params, &resource_version)).await {
+                Ok(result) => {
+                    result.map_err(|e| HaError::InvalidBackend(format!("k8s watch lease: {e}")))?
+                }
+                Err(_) => return Ok(None),
+            };
         pin_mut!(stream);
-        while let Some(event) = tokio::time::timeout(remaining, stream.next())
-            .await
-            .map_err(|_| HaError::InvalidBackend("k8s lease watch timed out".into()))?
-        {
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let Some(event) = (match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(event) => event,
+                Err(_) => return Ok(None),
+            }) else {
+                break;
+            };
             match event.map_err(|e| HaError::InvalidBackend(format!("k8s lease watch: {e}")))? {
                 WatchEvent::Added(lease) | WatchEvent::Modified(lease) => {
                     if let Some(rv) = lease.resource_version() {
