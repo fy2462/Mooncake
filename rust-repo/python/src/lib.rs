@@ -11,6 +11,7 @@
 // PyO3 根据下面的 #[pyclass] / #[pyfunction] / #[pymodule] 注解自动生成
 // CPython 胶水代码。
 
+mod buffer_export;
 mod buffer_pool;
 mod classic_transfer_engine;
 mod client;

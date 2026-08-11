@@ -1,4 +1,3 @@
-use pyo3::buffer::PyUntypedBuffer;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList, PyTuple};
@@ -898,8 +897,8 @@ fn export_tensor_buffer(
     buffer: &Bound<'_, PyAny>,
     size: usize,
     require_writable: bool,
-) -> PyResult<PyUntypedBuffer> {
-    let export = PyUntypedBuffer::get(buffer)?;
+) -> PyResult<crate::buffer_export::ExportedBufferView> {
+    let export = crate::buffer_export::ExportedBufferView::get(buffer)?;
     if !export.is_c_contiguous() {
         return Err(invalid_metadata("tensor buffer must be C-contiguous"));
     }
@@ -930,6 +929,18 @@ pub(crate) fn validate_tensor_buffer_object(
     // SAFETY: `export` owns a live Py_buffer view; `export_tensor_buffer`
     // checked the requested range against its byte capacity.
     let bytes = unsafe { std::slice::from_raw_parts(export.buf_ptr().cast::<u8>(), size) };
+    parse_metadata(bytes).map(|_| ())
+}
+
+/// Validate a tensor encoding in caller-managed memory.
+///
+/// # Safety
+///
+/// `ptr..ptr + size` must remain readable for the duration of this call.
+pub(crate) unsafe fn validate_tensor_raw_buffer(ptr: *const u8, size: usize) -> PyResult<()> {
+    // SAFETY: upheld by the caller; raw-address client paths first verify that
+    // this entire range belongs to a live registration.
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) };
     parse_metadata(bytes).map(|_| ())
 }
 

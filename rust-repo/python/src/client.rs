@@ -102,18 +102,18 @@ use mooncake_store_client::{
 use mooncake_store_core::{NoFSegment, ReplicateConfig};
 use parking_lot::Mutex;
 use pyo3::IntoPyObjectExt;
-use pyo3::buffer::PyUntypedBuffer;
+use pyo3::exceptions::PyBufferError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use std::collections::HashMap;
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 use std::fs::OpenOptions;
 use std::ops::{Deref, DerefMut};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, OwnedMutexGuard};
 use tracing::warn;
 use transfer_engine_ffi::StableMemoryOwner;
@@ -140,6 +140,7 @@ pub(crate) struct PythonMooncakeClient {
     pub(crate) background: Arc<AsyncMutex<Option<ClientBackgroundHandle>>>,
     pub(crate) registered_py_buffers: Arc<Mutex<Vec<PythonBufferRegistration>>>,
     pub(crate) compat_uninitialized: Arc<AtomicBool>,
+    pub(crate) close_in_progress: Arc<AtomicBool>,
 }
 
 pub(crate) type SharedClient = Arc<AsyncMutex<Option<MooncakeClient>>>;
@@ -198,6 +199,94 @@ pub(crate) struct PythonBufferRegistration {
     registration_id: BufferRegistrationId,
     python_object_identity: usize,
     registered_size: usize,
+    active_tensor_views: Arc<AtomicUsize>,
+}
+
+struct RawTensorViewLease {
+    active_views: Arc<AtomicUsize>,
+}
+
+impl RawTensorViewLease {
+    fn acquire(active_views: Arc<AtomicUsize>) -> Self {
+        active_views.fetch_add(1, Ordering::AcqRel);
+        Self { active_views }
+    }
+}
+
+impl Drop for RawTensorViewLease {
+    fn drop(&mut self) {
+        self.active_views.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[pyclass]
+struct RawTensorBufferOwner {
+    base: usize,
+    len: usize,
+    _lease: RawTensorViewLease,
+}
+
+struct ClientCloseGate {
+    flag: Arc<AtomicBool>,
+}
+
+impl ClientCloseGate {
+    fn acquire(flag: Arc<AtomicBool>) -> PyResult<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| to_py_err("client close is already in progress"))?;
+        Ok(Self { flag })
+    }
+}
+
+impl Drop for ClientCloseGate {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
+}
+
+#[pymethods]
+impl RawTensorBufferOwner {
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut pyo3::ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        if view.is_null() {
+            return Err(PyBufferError::new_err("buffer view pointer is null"));
+        }
+        let owner = slf.borrow();
+        let base = owner.base;
+        let len = owner.len;
+        drop(owner);
+        unsafe {
+            (*view).obj = slf.into_any().into_ptr();
+            (*view).buf = base as *mut c_void;
+            (*view).len = len as isize;
+            (*view).readonly = 0;
+            (*view).itemsize = 1;
+            (*view).format = if (flags & pyo3::ffi::PyBUF_FORMAT) == pyo3::ffi::PyBUF_FORMAT {
+                b"B\0".as_ptr() as *mut _
+            } else {
+                ptr::null_mut()
+            };
+            (*view).ndim = 1;
+            (*view).shape = if (flags & pyo3::ffi::PyBUF_ND) == pyo3::ffi::PyBUF_ND {
+                &mut (*view).len
+            } else {
+                ptr::null_mut()
+            };
+            (*view).strides = if (flags & pyo3::ffi::PyBUF_STRIDES) == pyo3::ffi::PyBUF_STRIDES {
+                &mut (*view).itemsize
+            } else {
+                ptr::null_mut()
+            };
+            (*view).suboffsets = ptr::null_mut();
+            (*view).internal = ptr::null_mut();
+        }
+        Ok(())
+    }
+
+    unsafe fn __releasebuffer__(&self, _view: *mut pyo3::ffi::Py_buffer) {}
 }
 
 #[derive(Debug)]
@@ -206,7 +295,7 @@ struct PythonBufferMemoryOwner {
     len: usize,
     // Retaining the exported Python buffer, rather than only its PyObject, prevents
     // resizable exporters such as bytearray from moving the registered memory.
-    _buffer_export: PyUntypedBuffer,
+    _buffer_export: crate::buffer_export::ExportedBufferView,
 }
 
 unsafe impl StableMemoryOwner for PythonBufferMemoryOwner {
@@ -310,6 +399,7 @@ impl Drop for FileMappingMemoryOwner {
 #[derive(Debug)]
 enum PythonMemoryOwner {
     Buffer(PythonBufferMemoryOwner),
+    RawAddress(RawAddressMemoryOwner),
     DLPack(DLPackMemoryOwner),
 }
 
@@ -317,6 +407,7 @@ unsafe impl StableMemoryOwner for PythonMemoryOwner {
     fn base_address(&self) -> NonNull<c_void> {
         match self {
             Self::Buffer(owner) => owner.base_address(),
+            Self::RawAddress(owner) => owner.base_address(),
             Self::DLPack(owner) => owner.base_address(),
         }
     }
@@ -324,8 +415,30 @@ unsafe impl StableMemoryOwner for PythonMemoryOwner {
     fn length(&self) -> usize {
         match self {
             Self::Buffer(owner) => owner.length(),
+            Self::RawAddress(owner) => owner.length(),
             Self::DLPack(owner) => owner.length(),
         }
+    }
+}
+
+/// Caller-owned raw address registration (C++ wheel contract): the caller
+/// guarantees the allocation stays alive until unregister_buffer.
+#[derive(Debug)]
+struct RawAddressMemoryOwner {
+    base: NonNull<c_void>,
+    len: usize,
+}
+
+unsafe impl Send for RawAddressMemoryOwner {}
+unsafe impl Sync for RawAddressMemoryOwner {}
+
+unsafe impl StableMemoryOwner for RawAddressMemoryOwner {
+    fn base_address(&self) -> NonNull<c_void> {
+        self.base
+    }
+
+    fn length(&self) -> usize {
+        self.len
     }
 }
 
@@ -495,8 +608,8 @@ fn normalize_client_http_config(
 fn export_c_contiguous_buffer(
     obj: &Bound<'_, PyAny>,
     require_writable: bool,
-) -> PyResult<PyUntypedBuffer> {
-    let buffer = PyUntypedBuffer::get(obj)?;
+) -> PyResult<crate::buffer_export::ExportedBufferView> {
+    let buffer = crate::buffer_export::ExportedBufferView::get(obj)?;
     if !buffer.is_c_contiguous() {
         return Err(to_py_err("Python buffer must be C-contiguous"));
     }
@@ -520,7 +633,7 @@ fn host_registration_location(requested: Option<&str>) -> PyResult<String> {
 }
 
 fn checked_python_buffer_owner(
-    buffer_export: PyUntypedBuffer,
+    buffer_export: crate::buffer_export::ExportedBufferView,
     expected_base: Option<usize>,
     size: usize,
 ) -> PyResult<PythonMemoryOwner> {
@@ -659,6 +772,46 @@ fn validate_registered_tensor_destination(
         ));
     }
     Ok(())
+}
+
+fn validate_registered_raw_tensor_range(
+    slf: &Bound<'_, PythonMooncakeClient>,
+    base: usize,
+    size: usize,
+) -> PyResult<()> {
+    let registered = slf
+        .borrow()
+        .registered_py_buffers
+        .lock()
+        .iter()
+        .any(|registration| registration.contains_range(base, size));
+    if !registered {
+        return Err(to_py_err(
+            "raw tensor buffer range is not registered with this client",
+        ));
+    }
+    Ok(())
+}
+
+fn acquire_raw_tensor_view_lease(
+    slf: &Bound<'_, PythonMooncakeClient>,
+    base: usize,
+    size: usize,
+) -> PyResult<RawTensorViewLease> {
+    let client = slf.borrow();
+    if client.close_in_progress.load(Ordering::Acquire) {
+        return Err(to_py_err("client close is in progress"));
+    }
+    let registrations = client.registered_py_buffers.lock();
+    if client.close_in_progress.load(Ordering::Acquire) {
+        return Err(to_py_err("client close is in progress"));
+    }
+    let active_views = registrations
+        .iter()
+        .find(|registration| registration.contains_range(base, size))
+        .map(|registration| Arc::clone(&registration.active_tensor_views))
+        .ok_or_else(|| to_py_err("raw tensor buffer range is not registered with this client"))?;
+    Ok(RawTensorViewLease::acquire(active_views))
 }
 
 /// Exclusive, cancellation-safe borrow of the shared Rust client.
@@ -1540,7 +1693,7 @@ fn nof_segment_from_dict(d: &Bound<'_, PyDict>) -> PyResult<NoFSegment> {
 //   1. Extract buffer pointers while GIL is held
 //      (在持有 GIL 时提取 buffer 指针)
 //   2. Clone the Arc<Mutex<...>>
-//   3. Call tokio::runtime::Handle::current().block_on(async { ... })
+//   3. Call pyo3_async_runtimes::tokio::get_runtime().block_on(async { ... })
 //   4. Use the same cancellation-safe async client guard.
 
 #[pymethods]
@@ -1557,6 +1710,7 @@ impl PythonMooncakeClient {
             background: Arc::new(AsyncMutex::new(None)),
             registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
             compat_uninitialized: Arc::new(AtomicBool::new(true)),
+            close_in_progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1697,6 +1851,7 @@ impl PythonMooncakeClient {
                 background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
                 compat_uninitialized: Arc::new(AtomicBool::new(false)),
+                close_in_progress: Arc::new(AtomicBool::new(false)),
             })
         })
     }
@@ -1782,6 +1937,7 @@ impl PythonMooncakeClient {
                 background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
                 compat_uninitialized: Arc::new(AtomicBool::new(false)),
+                close_in_progress: Arc::new(AtomicBool::new(false)),
             })
         })
     }
@@ -1846,6 +2002,7 @@ impl PythonMooncakeClient {
                 background: Arc::new(AsyncMutex::new(Some(background_handle))),
                 registered_py_buffers: Arc::new(Mutex::new(Vec::new())),
                 compat_uninitialized: Arc::new(AtomicBool::new(false)),
+                close_in_progress: Arc::new(AtomicBool::new(false)),
             })
         })
     }
@@ -2116,9 +2273,13 @@ impl PythonMooncakeClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let result = client.get(&key).await;
-            // Return Rust type — future_into_py handles IntoPy conversion with GIL
-            // 返回 Rust 类型 —— future_into_py 在持有 GIL 时处理 IntoPy 转换
-            result.map_err(to_py_err)
+            match result {
+                Ok(payload) => Ok(payload),
+                // The C++/wheel get contract returns empty bytes for an absent
+                // key instead of raising.
+                Err(mooncake_store_core::StoreError::KeyNotFound(_)) => Ok(Vec::new()),
+                Err(error) => Err(to_py_err(error)),
+            }
         })
     }
 
@@ -2134,7 +2295,15 @@ impl PythonMooncakeClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let result = client.get(&key).await;
-            let payload = result.map_err(to_py_err)?;
+            let payload = match result {
+                Ok(payload) => payload,
+                Err(mooncake_store_core::StoreError::KeyNotFound(_)) => {
+                    // The C++/wheel get_tensor contract returns None for an
+                    // absent key instead of raising.
+                    return Python::attach(|py| Ok(py.None()));
+                }
+                Err(error) => return Err(to_py_err(error)),
+            };
             Python::attach(|py| crate::tensor_codec::deserialize_tensor_bytes(py, &payload))
         })
     }
@@ -2211,7 +2380,13 @@ impl PythonMooncakeClient {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut client = take_client(&inner).await?;
             let result = client.remove(&key, force).await;
-            result.map(|()| 0).map_err(to_py_err)
+            match result {
+                Ok(()) => Ok(0),
+                // C++/wheel remove of an absent key reports an error code
+                // instead of raising, so cleanup paths can remove twice.
+                Err(mooncake_store_core::StoreError::KeyNotFound(_)) => Ok(-1),
+                Err(error) => Err(to_py_err(error)),
+            }
         })
     }
 
@@ -2232,6 +2407,16 @@ impl PythonMooncakeClient {
             let result = client.exists(&key).await;
             result.map_err(to_py_err)
         })
+    }
+
+    /// C++/wheel alias for single-key existence checks (`is_exist`).
+    #[pyo3(signature = (key))]
+    fn is_exist<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        key: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Self::exists(slf, py, key)
     }
 
     // ===================================================================
@@ -2825,13 +3010,18 @@ impl PythonMooncakeClient {
     }
 
     /// Load one tensor from a safetensors file, store it, and return it.
-    #[pyo3(signature = (key = None, *, file_name))]
+    #[pyo3(signature = (key = None, file_name = None))]
     fn load_tensor_from_safetensor(
         slf: &Bound<'_, Self>,
         key: Option<String>,
-        file_name: String,
+        file_name: Option<String>,
     ) -> PyResult<Py<PyAny>> {
         let py = slf.py();
+        let file_name = file_name.ok_or_else(|| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "load_tensor_from_safetensor() missing required argument 'file_name'",
+            )
+        })?;
         let loaded = match py
             .import("safetensors.torch")
             .and_then(|module| module.call_method1("load_file", (&file_name,)))
@@ -3137,7 +3327,20 @@ impl PythonMooncakeClient {
         let background = slf.borrow().background.clone();
         let registered_py_buffers = slf.borrow().registered_py_buffers.clone();
         let compat_uninitialized = slf.borrow().compat_uninitialized.clone();
+        let close_in_progress = slf.borrow().close_in_progress.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let _close_gate = ClientCloseGate::acquire(close_in_progress)?;
+            // Raw tensor reads acquire their view lease only while the close
+            // gate is open, so no new alias can slip past this check.
+            if registered_py_buffers
+                .lock()
+                .iter()
+                .any(|registration| registration.active_tensor_views.load(Ordering::Acquire) != 0)
+            {
+                return Err(to_py_err(
+                    "cannot close client while raw tensor views are active",
+                ));
+            }
             if let Some(handle) = background.lock().await.take() {
                 handle.shutdown().await;
             }
@@ -3724,7 +3927,7 @@ impl PythonMooncakeClient {
         key: String,
         buffer: Bound<'_, PyAny>,
         size: Option<usize>,
-    ) -> PyResult<usize> {
+    ) -> PyResult<i64> {
         let (ptr, size) = get_pointer_and_size(&buffer, size)?;
         let inner = slf.borrow().inner.clone();
         let mut client = slf.py().detach(move || {
@@ -3735,7 +3938,17 @@ impl PythonMooncakeClient {
         // pointer-bearing future synchronously while the Python owner lives.
         pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let result = client.get_into(&key, ptr, size).await;
-            result.map_err(to_py_err)
+            match result {
+                Ok(bytes) => Ok(bytes as i64),
+                // C++/wheel get_into reports capacity-style failures as
+                // negative sentinels, but missing keys and expired leases keep
+                // the Python exception contract.
+                Err(error) => match error {
+                    mooncake_store_core::StoreError::KeyNotFound(_)
+                    | mooncake_store_core::StoreError::LeaseExpired(_) => Err(to_py_err(error)),
+                    _ => Ok(-1),
+                },
+            }
         })
     }
 
@@ -3748,18 +3961,35 @@ impl PythonMooncakeClient {
         buffer: Bound<'_, PyAny>,
         size: usize,
     ) -> PyResult<Py<PyAny>> {
-        if buffer.extract::<usize>().is_ok() {
-            return Err(to_py_err(
-                "get_tensor_into requires an owner-bearing Python buffer, not a raw address",
-            ));
-        }
+        let raw_address = buffer.extract::<usize>().ok();
         let (ptr, capacity) = get_pointer_and_size(&buffer, Some(size))?;
+        let raw_view_lease = raw_address
+            .map(|address| acquire_raw_tensor_view_lease(slf, address, capacity))
+            .transpose()?;
         let inner = slf.borrow().inner.clone();
-        let total_length = tokio::runtime::Handle::current().block_on(async {
+        let total_length = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.get_into(&key, ptr, capacity).await;
             result.map_err(to_py_err)
         })?;
+        if let Some(raw_view_lease) = raw_view_lease {
+            // SAFETY: the complete destination capacity was verified against
+            // a live raw registration before the transfer. The caller owns
+            // that allocation until unregister_buffer, matching the wheel.
+            let owner = Py::new(
+                buffer.py(),
+                RawTensorBufferOwner {
+                    base: ptr as usize,
+                    len: total_length,
+                    _lease: raw_view_lease,
+                },
+            )?;
+            return crate::tensor_codec::deserialize_tensor_buffer_object(
+                buffer.py(),
+                owner.bind(buffer.py()).as_any(),
+                total_length,
+            );
+        }
         crate::tensor_codec::deserialize_tensor_buffer_object(buffer.py(), &buffer, total_length)
     }
 
@@ -3787,7 +4017,7 @@ impl PythonMooncakeClient {
         };
         let (ptr, capacity) = get_pointer_and_size(&buffer, Some(size))?;
         let inner = slf.borrow().inner.clone();
-        let total_length = tokio::runtime::Handle::current().block_on(async {
+        let total_length = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.get_into(&read_key, ptr, capacity).await;
             result.map_err(to_py_err)
@@ -3844,7 +4074,8 @@ impl PythonMooncakeClient {
         sizes: Vec<usize>,
     ) -> PyResult<Vec<i64>> {
         if keys.len() != buffers.len() || keys.len() != sizes.len() {
-            return Err(to_py_err("keys, buffers, sizes must have same length"));
+            // C++/wheel mismatch handling returns one negative status per key.
+            return Ok(vec![-1; keys.len()]);
         }
         let ptrs: Vec<*mut c_void> = buffers
             .iter()
@@ -3894,7 +4125,7 @@ impl PythonMooncakeClient {
             .map(get_writable_pointer)
             .collect::<PyResult<Vec<_>>>()?;
         let inner = slf.borrow().inner.clone();
-        let lengths = tokio::runtime::Handle::current().block_on(async {
+        let lengths = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
             result.map_err(to_py_err)
@@ -3956,7 +4187,7 @@ impl PythonMooncakeClient {
             .map(get_writable_pointer)
             .collect::<PyResult<Vec<_>>>()?;
         let inner = slf.borrow().inner.clone();
-        let lengths = tokio::runtime::Handle::current().block_on(async {
+        let lengths = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
             result.map_err(to_py_err)
@@ -4098,7 +4329,7 @@ impl PythonMooncakeClient {
             .map(get_writable_pointer)
             .collect::<PyResult<_>>()?;
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client
                 .get_into_ranges(
@@ -4134,14 +4365,14 @@ impl PythonMooncakeClient {
         buffer: Bound<'_, PyAny>,
         size: usize,
         config: Option<Bound<'_, ReplicateConfigPy>>,
-    ) -> PyResult<()> {
+    ) -> PyResult<i32> {
         let ptr = get_pointer(&buffer)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.put_from(&key, ptr, size, cfg).await;
-            result.map_err(to_py_err)
+            result.map(|()| 0).map_err(to_py_err)
         })
     }
 
@@ -4154,16 +4385,24 @@ impl PythonMooncakeClient {
         size: usize,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<i32> {
-        if buffer.extract::<usize>().is_ok() {
-            return Err(to_py_err(
-                "put_tensor_from requires an owner-bearing Python buffer, not a raw address",
-            ));
-        }
-        crate::tensor_codec::validate_tensor_buffer_object(&buffer, size)?;
         let ptr = get_pointer(&buffer)?;
+        let valid_metadata = if let Ok(address) = buffer.extract::<usize>() {
+            if validate_registered_raw_tensor_range(slf, address, size).is_err() {
+                return Ok(TENSOR_INVALID_PARAMS_STATUS);
+            }
+            // SAFETY: the full range was verified against a live registration.
+            unsafe {
+                crate::tensor_codec::validate_tensor_raw_buffer(ptr.cast::<u8>(), size).is_ok()
+            }
+        } else {
+            crate::tensor_codec::validate_tensor_buffer_object(&buffer, size).is_ok()
+        };
+        if !valid_metadata {
+            return Ok(TENSOR_INVALID_PARAMS_STATUS);
+        }
         let config = config.map(|value| value.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.put_from(&key, ptr, size, config).await;
             result.map(|()| 0).map_err(to_py_err)
@@ -4286,7 +4525,7 @@ impl PythonMooncakeClient {
             (0..tp_size).map(|rank| tp_shard_key(&key, rank)).collect()
         };
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let slices = payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
             let result = client.batch_put(&keys, &slices, None).await;
@@ -4308,10 +4547,14 @@ impl PythonMooncakeClient {
         sizes: Vec<usize>,
         config: Option<Bound<'_, ReplicateConfigPy>>,
     ) -> PyResult<Vec<i32>> {
+        if keys.len() != buffers.len() || keys.len() != sizes.len() {
+            // C++/wheel mismatch handling returns one negative status per key.
+            return Ok(vec![-1; keys.len()]);
+        }
         let ptrs: Vec<*mut c_void> = buffers.iter().map(get_pointer).collect::<PyResult<_>>()?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.batch_put_from(&keys, &ptrs, &sizes, cfg).await;
             result.map_err(to_py_err)
@@ -4343,7 +4586,7 @@ impl PythonMooncakeClient {
             .collect::<PyResult<Vec<_>>>()?;
         let config = config.map(|value| value.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.batch_put_from(&keys, &ptrs, &sizes, config).await;
             result.map_err(to_py_err)
@@ -4533,7 +4776,7 @@ impl PythonMooncakeClient {
             return Ok(final_statuses);
         }
         let inner = slf.borrow().inner.clone();
-        let shard_statuses = tokio::runtime::Handle::current().block_on(async {
+        let shard_statuses = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let slices = shard_payloads.iter().map(Vec::as_slice).collect::<Vec<_>>();
             let result = client.batch_put(&shard_keys, &slices, None).await;
@@ -4569,7 +4812,7 @@ impl PythonMooncakeClient {
         let (metadata_ptr, _) = get_buffer_ptr(&metadata_buffer)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client
                 .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
@@ -4711,7 +4954,7 @@ impl PythonMooncakeClient {
         tenant_id: String,
     ) -> PyResult<Vec<String>> {
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let client_id = client.client_id();
             let result = client
@@ -4764,45 +5007,59 @@ impl PythonMooncakeClient {
             if address == 0 {
                 return Err(to_py_err("buffer address must not be zero"));
             }
-            let owner = owner.ok_or_else(|| {
-                to_py_err(
-                    "an allocation-owning Python object is required when registering a raw integer address",
-                )
-            })?;
-            let python_object_identity = owner.as_ptr() as usize;
-            match PyUntypedBuffer::get(&owner) {
-                Ok(buffer_export) => {
-                    let memory_owner =
-                        checked_python_buffer_owner(buffer_export, Some(address), size)?;
+            let owner = owner;
+            let python_object_identity = owner
+                .as_ref()
+                .map_or(address, |owner| owner.as_ptr() as usize);
+            match owner {
+                Some(owner) => match crate::buffer_export::ExportedBufferView::get(&owner) {
+                    Ok(buffer_export) => {
+                        let memory_owner =
+                            checked_python_buffer_owner(buffer_export, Some(address), size)?;
+                        (
+                            memory_owner,
+                            host_registration_location(location.as_deref())?,
+                            python_object_identity,
+                        )
+                    }
+                    Err(buffer_error) => {
+                        if !owner.hasattr("__dlpack__")? {
+                            return Err(to_py_err(format!(
+                                "raw registration owner exposes neither a Python buffer nor DLPack: {buffer_error}"
+                            )));
+                        }
+                        let device_owner = DLPackMemoryOwner::from_python(
+                            &owner,
+                            Some(address),
+                            Some(size),
+                            location.as_deref(),
+                        )?;
+                        let effective_location = device_owner.location().to_string();
+                        (
+                            PythonMemoryOwner::DLPack(device_owner),
+                            effective_location,
+                            python_object_identity,
+                        )
+                    }
+                },
+                None => {
+                    // C++/wheel registers raw caller addresses directly; the
+                    // caller guarantees lifetime until unregister_buffer.
+                    let memory_owner = PythonMemoryOwner::RawAddress(RawAddressMemoryOwner {
+                        base: NonNull::new(address as *mut c_void)
+                            .ok_or_else(|| to_py_err("buffer address must not be null"))?,
+                        len: size,
+                    });
                     (
                         memory_owner,
                         host_registration_location(location.as_deref())?,
                         python_object_identity,
                     )
                 }
-                Err(buffer_error) => {
-                    if !owner.hasattr("__dlpack__")? {
-                        return Err(to_py_err(format!(
-                            "raw registration owner exposes neither a Python buffer nor DLPack: {buffer_error}"
-                        )));
-                    }
-                    let device_owner = DLPackMemoryOwner::from_python(
-                        &owner,
-                        Some(address),
-                        Some(size),
-                        location.as_deref(),
-                    )?;
-                    let effective_location = device_owner.location().to_string();
-                    (
-                        PythonMemoryOwner::DLPack(device_owner),
-                        effective_location,
-                        python_object_identity,
-                    )
-                }
             }
         } else {
             let python_object_identity = buffer.as_ptr() as usize;
-            match PyUntypedBuffer::get(&buffer) {
+            match crate::buffer_export::ExportedBufferView::get(&buffer) {
                 Ok(buffer_export) => {
                     let memory_owner = checked_python_buffer_owner(buffer_export, None, size)?;
                     (
@@ -4864,6 +5121,7 @@ impl PythonMooncakeClient {
                     registration_id,
                     python_object_identity,
                     registered_size: size,
+                    active_tensor_views: Arc::new(AtomicUsize::new(0)),
                 });
         }
         Ok(0)
@@ -4894,7 +5152,7 @@ impl PythonMooncakeClient {
             let client = &*guard;
             let registrations = slf.borrow().registered_py_buffers.clone();
             let mut registered_py_buffers = registrations.lock();
-            let registration_id = registered_py_buffers
+            let registration = registered_py_buffers
                 .iter()
                 .find(|registration| {
                     registration.matches_python_object(python_object_identity)
@@ -4902,8 +5160,13 @@ impl PythonMooncakeClient {
                             registration.registration_id().base_address() == base
                         })
                 })
-                .map(PythonBufferRegistration::registration_id)
                 .ok_or_else(|| to_py_err("Python buffer object or address is not registered"))?;
+            if registration.active_tensor_views.load(Ordering::Acquire) != 0 {
+                return Err(to_py_err(
+                    "cannot unregister buffer while tensor views are active",
+                ));
+            }
+            let registration_id = registration.registration_id();
             client
                 .unregister_buffer_handle(registration_id)
                 .map_err(to_py_err)?;
@@ -4963,7 +5226,7 @@ impl PythonMooncakeClient {
         let ptr = get_pointer(&buffer)?;
         let config = config.map(|value| value.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.upsert_from(&key, ptr, size, config).await;
             result.map(|_| 0).map_err(to_py_err)
@@ -5110,7 +5373,7 @@ impl PythonMooncakeClient {
             .collect::<PyResult<Vec<_>>>()?;
         let config = config.map(|value| value.borrow().to_core());
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client
                 .batch_upsert_from_statuses(&keys, &ptrs, &sizes, config)

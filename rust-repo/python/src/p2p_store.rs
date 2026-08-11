@@ -15,7 +15,7 @@
 // Lifecycle (生命周期):
 //   create() -> register/unregister/get_replica/list -> close()
 //
-// Uses tokio::runtime::Handle::current().block_on() for all async operations
+// Uses pyo3_async_runtimes::tokio::get_runtime().block_on() for all async operations
 // because P2pStore methods are not Send (internal RPC connections).
 
 use mooncake_p2p_store::{P2pStore, P2pStoreError, PayloadInfo};
@@ -118,7 +118,7 @@ impl P2pStorePy {
         // block_on: the register future captures internal RPC connections,
         // making it not Send.
         // block_on: register future 捕获了内部 RPC 连接，使其不是 Send。
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let store = inner
                 .lock()
                 .take()
@@ -142,7 +142,7 @@ impl P2pStorePy {
     /// 从 P2P 注册表中注销一个命名的内存区域。
     fn unregister(slf: &Bound<'_, Self>, name: String) -> PyResult<()> {
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let store = inner
                 .lock()
                 .take()
@@ -161,7 +161,7 @@ impl P2pStorePy {
     /// 返回 Python 字典列表，包含 name, max_shard_size, total_size, size_list。
     fn list(slf: &Bound<'_, Self>, prefix: String) -> PyResult<Py<PyAny>> {
         let inner = slf.borrow().inner.clone();
-        let payloads = tokio::runtime::Handle::current().block_on(async {
+        let payloads = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let store = inner
                 .lock()
                 .take()
@@ -191,7 +191,7 @@ impl P2pStorePy {
         size_list: Vec<u64>,
     ) -> PyResult<()> {
         let inner = slf.borrow().inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let store = inner
                 .lock()
                 .take()

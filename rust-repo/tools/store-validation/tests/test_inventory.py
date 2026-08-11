@@ -61,6 +61,23 @@ class InventoryTest(unittest.TestCase):
             ],
         )
 
+    def test_rust_discovery_masks_raw_strings_and_quote_char_literals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory) / "raw_string_test.rs"
+            fixture.write_text(
+                'const EXAMPLE: &str = r###"#[test]\nfn phantom_test() {}"###;\n'
+                "const DOUBLE_QUOTE: char = '\"';\n"
+                "#[test]\nfn real_test_after_literals() {}\n",
+                encoding="utf-8",
+            )
+
+            refs = discover_rust_tests(Path(directory))
+
+        self.assertEqual(
+            [(ref.file, ref.name) for ref in refs],
+            [("raw_string_test.rs", "real_test_after_literals")],
+        )
+
     def test_discovers_python_test_declarations_without_importing_modules(self):
         refs = inventory.discover_python_tests(
             FIXTURES,

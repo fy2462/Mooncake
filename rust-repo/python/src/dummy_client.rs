@@ -300,7 +300,7 @@ impl PythonMooncakeDummyClient {
         let ptr = self.checked_ptr(addr, size)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.put_from(&key, ptr, size, cfg).await;
             result.map_err(to_py_err)
@@ -318,7 +318,7 @@ impl PythonMooncakeDummyClient {
         let ptrs = self.checked_ptrs(&addrs, &sizes)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.batch_put_from(&keys, &ptrs, &sizes, cfg).await;
             result.map_err(to_py_err)
@@ -339,7 +339,7 @@ impl PythonMooncakeDummyClient {
         let metadata_ptr = self.checked_ptr(metadata_addr, metadata_size)?;
         let cfg = config.map(|c| c.borrow().to_core());
         let inner = self.inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client
                 .put_from_with_metadata(&key, ptr, metadata_ptr, size, metadata_size, cfg)
@@ -351,7 +351,7 @@ impl PythonMooncakeDummyClient {
     fn get_into(&self, key: String, addr: u64, size: usize) -> PyResult<usize> {
         let ptr = self.checked_ptr(addr, size)?;
         let inner = self.inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.get_into(&key, ptr, size).await;
             result.map_err(to_py_err)
@@ -366,7 +366,7 @@ impl PythonMooncakeDummyClient {
     ) -> PyResult<Vec<i64>> {
         let ptrs = self.checked_ptrs(&addrs, &sizes)?;
         let inner = self.inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client.batch_get_into(&keys, &ptrs, &sizes).await;
             result.map_err(to_py_err)
@@ -390,7 +390,7 @@ impl PythonMooncakeDummyClient {
             .map(|(addrs, sizes)| self.checked_ptrs(addrs, sizes))
             .collect::<PyResult<Vec<_>>>()?;
         let inner = self.inner.clone();
-        tokio::runtime::Handle::current().block_on(async {
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
             let mut client = take_client(&inner).await?;
             let result = client
                 .batch_get_into_multi_buffers(&keys, &ptrs, &all_sizes, prefer_same_node)

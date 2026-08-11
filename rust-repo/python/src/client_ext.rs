@@ -101,7 +101,7 @@ pub(crate) fn batch_get_query_results(
     keys: Vec<String>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     let inner = slf.borrow().inner.clone();
-    let results = tokio::runtime::Handle::current().block_on(async {
+    let results = pyo3_async_runtimes::tokio::get_runtime().block_on(async {
         let mut client = take_client(&inner).await?;
         let result = client.batch_get_query_results(&keys).await;
         result.map_err(to_py_err)
@@ -166,7 +166,7 @@ pub(crate) fn get_into_ranges_cached(
         }
     }
     let inner = slf.borrow().inner.clone();
-    tokio::runtime::Handle::current().block_on(async {
+    pyo3_async_runtimes::tokio::get_runtime().block_on(async {
         let mut client = take_client(&inner).await?;
         let query_results = client
             .batch_get_query_results(&unique_keys)

@@ -36,7 +36,12 @@ def rust_client() -> Iterator[object]:
     try:
         yield client
     finally:
-        asyncio.run(client.close())
+        # future_into_py must be called inside a running event loop, so wrap
+        # the close awaitable instead of invoking client.close() directly.
+        async def close_client() -> None:
+            await client.close()
+
+        asyncio.run(close_client())
 
 
 def test_registered_pool_and_lease_are_public_aliases() -> None:
@@ -64,6 +69,27 @@ def test_buffer_lease_is_aligned_writable_and_idempotent(rust_client) -> None:
     lease.release()
     lease.release()
     assert pool.borrowed_bytes == 0
+    next_lease = pool.acquire(2048)
+    assert next_lease.size == 2048
+    next_lease.release()
+    pool.close()
+
+
+def test_buffer_pool_uses_store_local_buffer_by_default(rust_client) -> None:
+    binding = _binding()
+    pool = binding.BufferPool(rust_client)
+    lease = pool.acquire(1024)
+    assert lease.size == 1024
+    lease.release()
+    pool.close()
+
+
+def test_buffer_pool_uses_local_buffer_alignment(rust_client) -> None:
+    binding = _binding()
+    pool = binding.BufferPool(rust_client, min_size_class=4096, alignment=65536)
+    lease = pool.acquire(1024)
+    assert lease.ptr % 64 == 0
+    lease.release()
     pool.close()
 
 

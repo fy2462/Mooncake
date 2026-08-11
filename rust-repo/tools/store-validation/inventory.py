@@ -59,12 +59,44 @@ def _strip_c_like_comments(text: str, *, single_quoted_strings: bool = True) -> 
                     ):
                         token_start -= 1
                     digit_separator = text[token_start] in "0123456789"
+            if (
+                not single_quoted_strings
+                and char == "'"
+                and next_char == '"'
+                and index + 2 < len(text)
+                and text[index + 2] == "'"
+            ):
+                # Rust char literal whose content is a double quote ('"'):
+                # the embedded quote must not open a string in C++ scan mode.
+                output.extend(text[index : index + 3])
+                index += 2
+                continue
             if char == '"' or (
                 single_quoted_strings and char == "'" and not digit_separator
             ):
                 state = "string"
                 quote = char
                 output.append(char)
+            elif char == "r" and next_char in {'"', "#"}:
+                # Rust raw string literal r#"..."# / r##"..."## etc. The inner
+                # content may contain quotes that a generic string scanner
+                # would mistake for a terminator, swallowing later lines.
+                hash_count = 0
+                probe = index + 1
+                while probe < len(text) and text[probe] == "#":
+                    hash_count += 1
+                    probe += 1
+                if probe < len(text) and text[probe] == '"':
+                    terminator = '"' + "#" * hash_count
+                    end = text.find(terminator, probe + 1)
+                    if end != -1:
+                        literal = text[index : end + len(terminator)]
+                        output.extend("\n" if item == "\n" else " " for item in literal)
+                        index = end + len(terminator) - 1
+                    else:
+                        output.append(char)
+                else:
+                    output.append(char)
             elif char == "/" and next_char == "/":
                 state = "line_comment"
                 output.extend("  ")

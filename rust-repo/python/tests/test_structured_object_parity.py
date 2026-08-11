@@ -5,6 +5,8 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
+from typing import Any
 
 import numpy as np
 import pytest
@@ -422,7 +424,29 @@ def real_transfer(key_prefix: str) -> tuple[object, MooncakeBundleTransfer]:
     )
     if rc != 0:
         pytest.skip(f"MooncakeDistributedStore setup failed: {rc}")
+    _real_stores.append(store)
     return store, MooncakeBundleTransfer(store, key_prefix=key_prefix)
+
+
+_real_stores: list[object] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_real_stores_after_each_test() -> Iterator[None]:
+    """Close every real Store client created by this test module.
+
+    Real-store parity tests intentionally exercise the production client, and
+    each one leaks a mounted 16-MiB client segment when it is left open. Closing
+    the client after every test keeps the suite order-independent and prevents
+    later tests from being routed onto a previous test's leaked segment.
+    """
+    yield
+    while _real_stores:
+        store = _real_stores.pop()
+        try:
+            store.close()
+        except Exception:
+            pass
 
 
 def structured_payload(
@@ -1237,6 +1261,7 @@ def test_structured_object_direct_torch_tensor_materialize_into_uses_real_store(
     )
     if rc != 0:
         pytest.skip(f"MooncakeDistributedStore setup failed: {rc}")
+    _real_stores.append(store)
     transfer = MooncakeBundleTransfer(store, key_prefix="structured-test-direct")
     tensor = torch.arange(12, dtype=torch.int64).reshape(3, 4)
     ref = transfer.put_structured_object(
@@ -1401,6 +1426,7 @@ def test_structured_object_torch_tensor_zero_copy_uses_real_buffer_pool() -> Non
     )
     if rc != 0:
         pytest.skip(f"MooncakeDistributedStore setup failed: {rc}")
+    _real_stores.append(store)
     pool = mooncake_store.BufferPool(store, min_size_class=4096, alignment=4096)
     transfer = MooncakeBundleTransfer(
         store, key_prefix="structured-test", buffer_pool=pool

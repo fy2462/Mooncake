@@ -207,6 +207,7 @@ impl EngramStorePy {
             background: Arc::new(tokio::sync::Mutex::new(Some(background_handle))),
             registered_py_buffers: Arc::new(Mutex::new(registered_py_buffers)),
             compat_uninitialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            close_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
