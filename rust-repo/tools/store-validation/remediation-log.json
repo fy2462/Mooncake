@@ -4567,18 +4567,27 @@
     "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.EmptyQueueIsNoOp",
     "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_empty_queue_is_noop",
     "first_divergence": "The first real-client attempt used no LocalDisk session and correctly failed with KeyNotFound; after mounting an empty persistent backend it exposed the additional production prerequisite that the Master must have offload enabled. With both C++-equivalent fixture conditions present, the public promotion cycle returns zero.",
-    "repair_commit": "7a843bc8",
+    "repair_commit": "58d4e2c2",
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_empty_queue_is_noop -- --exact",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
-    "evidence": "initial witness 374935fd was strengthened by bc97a36e for disk inventory and by 7a843bc8 after review: client-scoped counters prove heartbeat=1 and disk-read/alloc/transfer-write/success-notify/failure-notify all zero, and the auto-reserved client port removes the probe/rebind race; repaired paired promotion witnesses PASS 2/2; client lib PASS 378/378; touched Rust file passes rustfmt --check"
+    "evidence": "initial witness 374935fd was strengthened by bc97a36e for disk inventory, 7a843bc8 for exact call counts/race-free port selection, and 58d4e2c2 for a UUID-indexed parallel-safe observer registry; repaired promotion policy witnesses PASS 3/3; client lib PASS 379/379; touched Rust file passes rustfmt --check"
   },
   {
     "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.HeartbeatSegmentNotFoundIsBenign",
     "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_missing_session_is_benign",
     "first_divergence": "Before repair, the real-client missing-session setup returned StoreError::KeyNotFound from promote_objects. The client loop now recognizes that heartbeat-only NotFound as the C++ benign restart/remount condition and returns zero without entering the per-task path.",
-    "repair_commit": "7a843bc8",
+    "repair_commit": "58d4e2c2",
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_missing_session_is_benign -- --exact",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
-    "evidence": "the equivalent real-client setup first failed with KeyNotFound(local disk session not found); production semantics were repaired by e8ca3c56, then 7a843bc8 switched the witness to the race-free auto-reserved client port; repaired exact witness PASS 1/1 with Ok(0) and unchanged empty disk; paired promotion tests PASS 2/2; client lib PASS 378/378; touched Rust file passes rustfmt --check"
+    "evidence": "the equivalent real-client setup first failed with KeyNotFound(local disk session not found); production semantics were repaired by e8ca3c56, 7a843bc8 switched to the race-free auto-reserved port, and 58d4e2c2 added parallel-safe exact 1/0/0/0/0/0 call assertions; repaired promotion policy witnesses PASS 3/3; client lib PASS 379/379; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.HeartbeatHardErrorPropagates",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_hard_heartbeat_error_propagates",
+    "first_divergence": "Rust already propagated non-NotFound heartbeat errors, but had no client-loop witness distinguishing them from the newly benign missing-session case. A real recovery-incomplete Master session now produces stable FailedPrecondition/Internal evidence.",
+    "repair_commit": "58d4e2c2",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_hard_heartbeat_error_propagates -- --exact",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "the first server-abort attempt still reached tonic's existing connection and correctly exercised benign NotFound, so the stable witness uses a real recovery-incomplete session; exact hard-error witness PASS 1/1 with Internal propagation and 1/0/0/0/0/0 calls; promotion policy group PASS 3/3; client lib PASS 379/379"
   }
 ]
