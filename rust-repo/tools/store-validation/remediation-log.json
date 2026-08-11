@@ -4544,5 +4544,14 @@
     "focused_command": "cargo test -p mooncake-store-master --test test_storage_backend_offset_remaining_parity cpp_parity_offset_persist_skips_oversized_key_and_accepts_boundary -- --exact",
     "crate_command": "cargo test -p mooncake-store-master --test test_storage",
     "evidence": "the exact witness first failed because the oversized key was present; repaired exact witness PASS 1/1; Master storage integration binary PASS 35/35; both touched Rust files pass rustfmt --check"
+  },
+  {
+    "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_CompleteHandlerFailure",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_offset_completion_failure_propagates_and_rolls_back",
+    "first_divergence": "Rust already deleted locally committed objects after a Master publication failure, but the rollback was embedded in offload_objects and had no discoverable Offset witness. The shared production finalizer now carries that exact path and is exercised with a real committed Offset record and injected Internal notification result.",
+    "repair_commit": "31d6eb36",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib client::storage_local::tests::cpp_parity_offset_completion_failure_propagates_and_rolls_back -- --exact",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib",
+    "evidence": "compile-red proved the production finalizer was not independently exercisable; repaired exact witness PASS 1/1 with exact Internal propagation, absent key, zero used bytes, and empty scan; client lib PASS 376/376"
   }
 ]
