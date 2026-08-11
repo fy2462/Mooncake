@@ -1565,12 +1565,30 @@
     {"behavior":"A 4 KiB put publishes a shared DISK replica and the same live client subsequently gets the exact payload; the ordinary get is not required to select DISK while memory remains available.","boundary":["client","master","shared-disk","disk-replica","data-integrity"],"reason":"Fresh native parity gate /tmp/mooncake-native-candidate-gate.c7bvia/parity.result.json executed every referenced Rust test with link-native: PASS (zero failed and zero zero-test records).","reference":{"file":"e2e/storage_backend_e2e_test.cpp","test":"StorageBackendE2ETest.OffloadAndReadback"},"review":{"oracle":"mooncake-store/tests/e2e/storage_backend_e2e_test.cpp OffloadAndReadback, mooncake-store/src/client_service.cpp PutToLocalFile, and Rust global Disk client paths","reviewed":true},"rust":[{"file":"mooncake-store-client/tests/test_client_inproc_e2e.rs","test":"global_disk_fifo_eviction_removes_only_the_oldest_master_replica"}],"status":"covered"},
     {
       "behavior": "After one client puts five 4 KiB objects and each publishes a shared DISK descriptor, a second live client observes every DISK descriptor and gets each exact payload; the ordinary gets are not required to select DISK while writer memory remains available.",
-      "boundary": ["client", "master", "multi-client", "shared-disk", "disk-replica", "data-integrity"],
-      "reference": {"file": "e2e/storage_backend_e2e_test.cpp", "test": "StorageBackendE2ETest.CrossClientReadback"},
-      "reason": "No discoverable Rust client E2E combines two clients, shared Disk-replica publication/visibility, and exact reader bytes; the global-Disk E2E is single-client, while the two-client roundtrip has no Disk configuration or assertion.",
-      "review": {"oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp CrossClientReadback, ClientTestWrapper replica queries, Rust test_client_inproc_e2e.rs global-Disk and two-client cases, and Rust global Disk client paths", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "boundary": [
+        "client",
+        "master",
+        "multi-client",
+        "shared-disk",
+        "disk-replica",
+        "data-integrity"
+      ],
+      "reference": {
+        "file": "e2e/storage_backend_e2e_test.cpp",
+        "test": "StorageBackendE2ETest.CrossClientReadback"
+      },
+      "reason": "Covered by Rust integration test `mooncake-store-client/tests/test_client_inproc_e2e.rs::cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes`: an isolated production global FilePerKey backend receives five indexed 4-KiB writer puts, writer and distinct reader queries each expose a Disk replica for every key, and the reader's public Get returns every exact indexed value. Verified by the exact witness, all 42 non-CXL in-process integration tests, and client lib: PASS.",
+      "review": {
+        "oracle": "mooncake-store/tests/e2e/storage_backend_e2e_test.cpp CrossClientReadback, ClientTestWrapper replica queries, Rust test_client_inproc_e2e.rs global-Disk and two-client cases, and Rust global Disk client paths",
+        "reviewed": true
+      },
+      "rust": [
+        {
+          "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+          "test": "cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes"
+        }
+      ],
+      "status": "covered"
     },
     {
       "behavior": "After expired memory replicas are evicted under pressure, at least one seed object retains a shared DISK replica but no memory replica, and GetWithExpectedSize returns its exact 256 KiB payload from the disk-only state.",
