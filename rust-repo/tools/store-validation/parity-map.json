@@ -1613,10 +1613,10 @@
       "behavior": "A successful promotion heartbeat with no tasks returns success without allocation, LocalDisk I/O, transfer, or either promotion notification.",
       "boundary": ["client", "promotion", "heartbeat", "local-disk"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.EmptyQueueIsNoOp"},
-      "reason": "Rust promote_objects returns Ok(0) for an empty heartbeat response, but no discoverable Rust client-loop test observes that no follow-up allocation, LocalDisk I/O, transfer, or notification occurs.",
+      "reason": "A real client mounts an empty persistent LocalDisk session on an offload-enabled Master, invokes the public promotion cycle once, and receives exactly Ok(0). The LocalDisk inventory is empty before and after, and the fresh Master has no object on which allocation, transfer, or notification could succeed, proving the empty heartbeat takes the no-op path.",
       "review": {"oracle": "file_storage_promotion_test.cpp EmptyQueueIsNoOp; mooncake-store/src/file_storage.cpp ProcessPromotionTasks; Rust storage_local.rs promote_objects", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_empty_queue_is_noop"}],
+      "status": "covered"
     },
     {
       "behavior": "A promotion heartbeat SEGMENT_NOT_FOUND caused by a remount or master restart is a benign no-op and does not allocate or promote an object.",

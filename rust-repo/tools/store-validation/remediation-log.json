@@ -4562,5 +4562,14 @@
     "focused_command": "cargo test -p mooncake-store-master --lib storage_backend::storage_backend_offset::tests::cpp_parity_offset_partial_success_persists_exact_subset -- --exact",
     "crate_command": "cargo test -p mooncake-store-master --lib",
     "evidence": "compile-red proved the selected-key failure seam was absent; repaired exact witness PASS 1/1 with key2 absent, exact key1/key3 bytes, and the same durable subset after reopening the backend; Master lib PASS 614/614; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.EmptyQueueIsNoOp",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_empty_queue_is_noop",
+    "first_divergence": "The first real-client attempt used no LocalDisk session and correctly failed with KeyNotFound; after mounting an empty persistent backend it exposed the additional production prerequisite that the Master must have offload enabled. With both C++-equivalent fixture conditions present, the public promotion cycle returns zero.",
+    "repair_commit": "bc97a36e",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_empty_queue_is_noop -- --exact",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "initial witness 374935fd was strengthened by bc97a36e to assert the real persistent LocalDisk inventory remains empty; repaired exact witness PASS 1/1; client lib PASS 377/377; touched Rust file passes rustfmt --check"
   }
 ]
