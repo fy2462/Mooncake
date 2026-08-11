@@ -1672,6 +1672,7 @@ mod tests {
             quota_bytes: 1024 * 1024,
         }));
         disk.init().unwrap();
+        assert!(disk.scan_meta().unwrap().is_empty());
         let mut client = MooncakeClient::create(
             &master_address.to_string(),
             "P2PHANDSHAKE",
@@ -1683,11 +1684,12 @@ mod tests {
         )
         .await
         .unwrap()
-        .with_local_storage_backend(disk);
+        .with_local_storage_backend(Arc::clone(&disk));
         client.mount_local_disk_segment(false).await.unwrap();
 
         assert!(client.local_storage.is_some());
         assert_eq!(client.promote_objects().await.unwrap(), 0);
+        assert!(disk.scan_meta().unwrap().is_empty());
 
         client.tear_down_all().await.unwrap();
         server.abort();
