@@ -413,12 +413,16 @@ async fn cpp_parity_k8s_contended_leadership_and_handover() {
     assert_eq!(observed.view_version, session_a.view.view_version);
 
     coordinator_a.release_leadership(&session_a).await.unwrap();
+    let released_view = tokio::time::timeout(
+        Duration::from_secs(2),
+        coordinator_b.wait_for_view_change(session_a.view.view_version, Duration::from_secs(10)),
+    )
+    .await
+    .expect("A's release must wake B's K8s view waiter promptly")
+    .expect("release-induced view change is not an error");
     assert!(
-        coordinator_b
-            .wait_for_view_change(session_a.view.view_version, Duration::from_secs(2))
-            .await
-            .unwrap()
-            .is_none()
+        released_view.is_none(),
+        "released Lease must have no leader"
     );
     let acquired_b = coordinator_b
         .try_acquire_leadership("127.0.0.1:7702", 5)
