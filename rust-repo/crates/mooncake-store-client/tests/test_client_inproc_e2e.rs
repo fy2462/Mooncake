@@ -955,6 +955,85 @@ async fn zero_segment_heartbeat_activates_after_local_disk_mount() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_offload_on_eviction_small_workload_stays_memory_only() {
+    const SEGMENT_SIZE: u64 = 128 * 1024 * 1024;
+    const VALUE_SIZE: usize = 1024;
+    const KEY_COUNT: usize = 16;
+
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        enable_offload: true,
+        offload_on_evict: true,
+        lease_ttl: std::time::Duration::from_secs(1),
+        eviction_interval: std::time::Duration::from_millis(10),
+        eviction_high_watermark_ratio: 0.95,
+        ..Default::default()
+    })
+    .await;
+    let backend = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
+        root_dir: root.path().join("client"),
+        fsdir: "offload-on-evict-small".into(),
+        enable_eviction: false,
+        quota_bytes: SEGMENT_SIZE,
+    }));
+    backend.init().unwrap();
+    let mut client = create_tcp_client_with_segment_size(&master, SEGMENT_SIZE)
+        .await
+        .with_local_storage_backend(backend);
+    client.mount_local_disk_segment(false).await.unwrap();
+
+    let keys = (0..KEY_COUNT)
+        .map(|index| format!("ooe_small_{index}"))
+        .collect::<Vec<_>>();
+    let values = (0..KEY_COUNT)
+        .map(|index| vec![b'A' + index as u8; VALUE_SIZE])
+        .collect::<Vec<_>>();
+    for (key, value) in keys.iter().zip(&values) {
+        client.put(key, value, None).await.unwrap();
+    }
+
+    let slot = Arc::new(tokio::sync::Mutex::new(Some(client)));
+    let background = MooncakeClient::start_background_workers(
+        Arc::clone(&slot),
+        ClientBackgroundConfig {
+            health_interval: std::time::Duration::from_secs(1),
+            storage_interval: std::time::Duration::from_millis(20),
+            enable_offloading: true,
+            enable_promotion: false,
+            enable_task_poll: false,
+            report_ssd_capacity: false,
+            enable_disk_watermark_eviction: false,
+            ..Default::default()
+        },
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    {
+        let mut guard = slot.lock().await;
+        let client = guard.as_mut().unwrap();
+        for (key, expected) in keys.iter().zip(&values) {
+            let replicas = client.query(key).await.unwrap().replicas;
+            assert!(
+                !replicas.is_empty()
+                    && replicas
+                        .iter()
+                        .all(|replica| replica.replica_type == ReplicaType::Memory),
+                "below-watermark key {key} had non-MEMORY replicas: {replicas:?}"
+            );
+            assert_eq!(client.get(key).await.unwrap(), *expected);
+        }
+    }
+
+    background.shutdown().await;
+    let mut client = slot.lock().await.take().unwrap();
+    for key in &keys {
+        client.remove(key, true).await.unwrap();
+    }
+    drop(client);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction() {
     let root = tempfile::tempdir().unwrap();
     let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {

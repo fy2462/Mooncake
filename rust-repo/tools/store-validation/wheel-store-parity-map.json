@@ -3641,12 +3641,12 @@
    "status": "missing"
   },
   {
-   "behavior": "Sixteen successful 1-KiB puts under a 128-MiB watermark remain MEMORY-only after an async-offload wait: descriptor scan finds zero non-memory replicas and every key reads bit-exact before cleanup. Rust offload-on-evict tests do not prove this real-client negative E2E and exact bytes.",
+   "behavior": "Sixteen successful 1-KiB puts under a 128-MiB watermark remain MEMORY-only after an async-offload wait: descriptor scan finds zero non-memory replicas and every key reads bit-exact before cleanup.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle. A valid parity test must configure a real local-storage backend and the wheel's offload wait before asserting that every replica remains MEMORY-only.",
+   "reason": "A real Rust client mounts a persistent local-storage backend against an offload-on-evict master, writes sixteen exact 1-KiB values into a 128-MiB memory segment, waits 100 ms with a 20-ms storage-heartbeat interval, and proves every descriptor remains MEMORY-only and every read is bit-exact before force cleanup. The focused native test passed with link-native.",
    "reference": {
     "file": "test_offload_on_eviction.py",
     "test": "TestOffloadOnEviction.test_small_workload_no_disk_replica"
@@ -3655,8 +3655,13 @@
     "oracle": "mooncake-wheel/tests/test_offload_on_eviction.py::TestOffloadOnEviction.test_small_workload_no_disk_replica test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_offload_on_eviction_small_workload_stays_memory_only"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A LOCAL_DISK-only victim supplies at least two exact pre-promotion reads, then becomes MEMORY; exact post-promotion reads do not increment offload-RPC count and post p50 is less than pre p50/1.3. Because correctness and path-selection assertions coexist with timing, the row remains applicable. Rust has no complete benchmark/E2E.",
