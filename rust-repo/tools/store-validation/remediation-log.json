@@ -4454,5 +4454,23 @@
     "focused_command": "cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_empty_offload_heartbeat_still_runs_disk_watermark_eviction -- --exact --nocapture",
     "crate_command": "cargo test -p mooncake-store-client --features link-native --lib && cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e",
     "evidence": "exact heartbeat witness PASS 1/1; client lib PASS 375/375; in-proc integration non-CXL tests PASS 42/42, while 3 pre-existing CXL subprocess tests are unavailable because the local Transfer Engine was built without CXL transport"
+  },
+  {
+    "cpp": "tenant_quota_test.cpp:TenantQuotaPolicyStoreTest.EtcdMissingKeyLoadsEmptySnapshot",
+    "rust": "mooncake-store-master/tests/test_tenant_quota.rs:cpp_parity_etcd_missing_key_loads_empty_snapshot",
+    "first_divergence": "Rust already mapped an absent etcd key to the default policy snapshot, but no discoverable live-connector witness isolated the key and exercised that result through the public policy-store boundary.",
+    "repair_commit": "809eb373",
+    "focused_command": "cargo test -p mooncake-store-master --test test_tenant_quota cpp_parity_etcd_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_tenant_quota",
+    "evidence": "default opt-in path PASS 2/2 with explicit missing-endpoint skip messages; tenant quota binary PASS 29/29; live etcd unavailable locally because port 2379 had no listener"
+  },
+  {
+    "cpp": "tenant_quota_test.cpp:TenantQuotaPolicyStoreTest.EtcdRoundTripsSnapshot",
+    "rust": "mooncake-store-master/tests/test_tenant_quota.rs:cpp_parity_etcd_round_trips_snapshot",
+    "first_divergence": "Rust already implemented the etcd CAS save and load paths, but no discoverable live-service witness proved an exact two-tenant durable round trip with panic-safe key isolation.",
+    "repair_commit": "809eb373",
+    "focused_command": "cargo test -p mooncake-store-master --test test_tenant_quota cpp_parity_etcd_ -- --nocapture",
+    "crate_command": "cargo test -p mooncake-store-master --test test_tenant_quota",
+    "evidence": "default opt-in path PASS 2/2 with explicit missing-endpoint skip messages; tenant quota binary PASS 29/29; live etcd unavailable locally because port 2379 had no listener"
   }
 ]
