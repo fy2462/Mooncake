@@ -30,6 +30,36 @@ async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, onesh
     (address.to_string(), shutdown_tx)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_zero_local_buffer_put_fails_without_creating_key() {
+    let (master, shutdown) = start_master().await;
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_host = probe.local_addr().unwrap().to_string();
+    drop(probe);
+    let mut client = MooncakeClient::create(
+        &master,
+        "P2PHANDSHAKE",
+        &local_host,
+        "tcp",
+        "",
+        16 * 1024 * 1024,
+        0,
+    )
+    .await
+    .unwrap();
+
+    let key = "test_zero_buffer_key";
+    let error = client
+        .put(key, b"test_zero_buffer_value", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StoreError::InvalidParams(_)));
+    assert!(!client.exists(key).await.unwrap());
+
+    drop(client);
+    let _ = shutdown.send(());
+}
+
 fn run_cxl_subprocess(mode: &str, cxl_size: u64) {
     let device = tempfile::NamedTempFile::new().unwrap();
     device.as_file().set_len(cxl_size).unwrap();

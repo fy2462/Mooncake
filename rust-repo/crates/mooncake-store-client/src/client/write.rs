@@ -465,6 +465,11 @@ impl MooncakeClient {
                 "key is empty or value has zero length".to_string(),
             ));
         }
+        if self.local_buffer.len() == 0 {
+            return Err(StoreError::InvalidParams(
+                "put requires a non-zero local buffer".to_string(),
+            ));
+        }
         let cfg = config.unwrap_or_default();
         let tenant_id = self.tenant_id.clone();
         self.invalidate_hot_cache_key_for_tenant(key, &tenant_id);

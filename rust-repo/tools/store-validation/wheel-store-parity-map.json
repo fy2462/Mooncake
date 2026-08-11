@@ -919,12 +919,12 @@
    "status": "covered"
   },
   {
-   "behavior": "A normal Store with local buffer size zero sets up, but put returns nonzero and the key remains absent. No Rust integration test proves this exact zero-buffer fail-closed result.",
+   "behavior": "A normal Store with local buffer size zero sets up, but put returns nonzero and the key remains absent.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "Divergence: Rust rpc_only clients support local put/get without a local buffer (StagingBuffer::rpc_only + local_memcpy), so put succeeds with local_buffer_size=0, while the C++/wheel oracle requires put to fail. A production decision is required on whether the Rust client rejects zero local buffers at setup.",
+   "reason": "Rust parity test cpp_parity_zero_local_buffer_put_fails_without_creating_key (rust-repo/crates/mooncake-store-client/tests/test_client_inproc_e2e.rs) creates a real TCP client with a zero-sized local buffer, proves setup succeeds, scalar put returns InvalidParams, and the key remains absent; verified PASS.",
    "reference": {
     "file": "test_distributed_object_store.py",
     "test": "TestZeroLocalBufferSize.test_zero_local_buffer_size"
@@ -933,8 +933,13 @@
     "oracle": "mooncake-wheel/tests/test_distributed_object_store.py::TestZeroLocalBufferSize.test_zero_local_buffer_size test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_zero_local_buffer_put_fails_without_creating_key"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A CXL Store auto endpoint begins `localhost:` with port in inclusive 12300..14300. No Rust created-CXL-client test proves the returned endpoint.",
