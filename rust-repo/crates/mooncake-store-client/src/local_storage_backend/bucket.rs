@@ -241,6 +241,29 @@ impl BucketStorageBackend {
         }
     }
 
+    pub(crate) fn is_enable_offloading(
+        &self,
+        total_keys_limit: usize,
+        total_size_limit: u64,
+    ) -> bool {
+        let state = self.state.lock();
+        if self.config.eviction_policy != BucketEvictionPolicy::None
+            && (self.config.quota_bytes > 0 || (state.initialized && state.capacity_bytes > 0))
+        {
+            return true;
+        }
+
+        state
+            .records
+            .len()
+            .checked_add(self.config.bucket_keys_limit)
+            .is_some_and(|projected| projected <= total_keys_limit)
+            && state
+                .total_logical_size
+                .checked_add(self.config.bucket_size_limit)
+                .is_some_and(|projected| projected <= total_size_limit)
+    }
+
     pub(crate) fn allocate_offloading_buckets(
         &self,
         offloading_objects: &HashMap<String, u64>,
@@ -1277,6 +1300,28 @@ mod tests {
 
     fn one_byte_tasks(count: usize) -> HashMap<String, u64> {
         (0..count).map(|i| (format!("test{i}"), 1)).collect()
+    }
+
+    #[test]
+    fn cpp_parity_file_storage_is_enable_offloading_preflights_full_bucket() {
+        let root = TempDir::new().unwrap();
+
+        let mut default_config = config(&root);
+        default_config.quota_bytes = 0;
+        let default_backend = BucketStorageBackend::new(default_config);
+        assert!(default_backend.is_enable_offloading(10_000_000, 2 * 1024 * 1024 * 1024 * 1024));
+
+        let mut key_limited_config = config(&root);
+        key_limited_config.quota_bytes = 0;
+        key_limited_config.bucket_keys_limit = 10;
+        let key_limited_backend = BucketStorageBackend::new(key_limited_config);
+        assert!(!key_limited_backend.is_enable_offloading(9, 2 * 1024 * 1024 * 1024 * 1024));
+
+        let mut size_limited_config = config(&root);
+        size_limited_config.quota_bytes = 0;
+        size_limited_config.bucket_size_limit = 969;
+        let size_limited_backend = BucketStorageBackend::new(size_limited_config);
+        assert!(!size_limited_backend.is_enable_offloading(10_000_000, 100));
     }
 
     #[test]
