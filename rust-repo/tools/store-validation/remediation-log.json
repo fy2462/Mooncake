@@ -4508,5 +4508,14 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_global_disk_replicas_survive_writer_liveness_cleanup -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e -- --skip cxl_",
     "evidence": "initial witness eda22a58 was repaired by 00455a49 and 33006932 after review: production health checks keep the writer live, all four keys prove simultaneous Disk+Memory before the final heartbeat and Drop, and cleanup is observed only after the 2-second TTL; repaired exact PASS 3/3 and non-CXL integration PASS 44/44"
+  },
+  {
+    "cpp": "storage_backend_test.cpp:StorageBackendTest.OffsetAllocatorStorageBackend_DoubleInit",
+    "rust": "mooncake-store-client/tests/test_storage_backend_offset_remaining_parity.rs:cpp_parity_offset_allocator_second_init_returns_internal_error + mooncake-store-client/src/local_storage_backend/offset.rs:init_is_serialized_for_one_backend_instance",
+    "first_divergence": "The first exact parity witness failed because Rust treated repeated init as idempotent Ok, while C++ requires INTERNAL_ERROR. OffsetAllocatorStorageBackend now rejects an already initialized instance under its existing init lock, and the concurrent regression proves exactly one caller wins without corrupting the usable backend.",
+    "repair_commit": "b022518f",
+    "focused_command": "cargo test -p mooncake-store-client --test test_storage_backend_offset_remaining_parity cpp_parity_offset_allocator_second_init_returns_internal_error -- --exact && LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib init_is_serialized_for_one_backend_instance",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features transfer-engine-ffi/link-native --lib",
+    "evidence": "the new exact witness first failed against idempotent second init and then PASS 1/1 after repair; concurrent init regression PASS 1/1 with exactly one success and seven Internal errors; client lib PASS 375/375; an initial lib-test link attempt without the link-native feature failed on unresolved Transfer Engine symbols and the recorded feature-enabled command passed"
   }
 ]
