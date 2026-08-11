@@ -4476,10 +4476,10 @@
   {
     "cpp": "ha/leadership/ha_backend_availability_test.cpp:HABackendAvailabilityTest.ClientSpecParsingMatchesK8sBuildFlag",
     "rust": "mooncake-store-master/tests/test_main_config.rs:cpp_parity_k8s_client_spec_preserves_connstring_then_rejects_serving",
-    "first_divergence": "Rust separately covered K8s spec construction and election-only backend serving rejection, but had no single discoverable witness for the C++ exact default/master client-spec input and its Rust unavailable-mode outcome.",
+    "first_divergence": "Review established that the C++ oracle is a client-side full-URI parser gated by STORE_USE_K8S_LEASE, while Rust exposes only Master CLI spec construction and a later shared-oplog serving gate. The row is therefore cpp-build-or-abi not-applicable; the Rust test records only the distinct serving policy.",
     "repair_commit": "50f0e7d2",
     "focused_command": "cargo test -p mooncake-store-master --test test_main_config cpp_parity_k8s_client_spec_preserves_connstring_then_rejects_serving -- --exact",
     "crate_command": "cargo test -p mooncake-store-master --test test_main_config",
-    "evidence": "exact K8s client-spec witness PASS 1/1; main config binary PASS 28/28"
+    "evidence": "Rust serving-policy witness PASS 1/1 and main config binary PASS 28/28; review rejected using it as client URI parser parity, so the manifest row is not-applicable"
   }
 ]

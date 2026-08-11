@@ -2,9 +2,9 @@
 
 ## Goal
 
-Close
-`HABackendAvailabilityTest.ClientSpecParsingMatchesK8sBuildFlag` with one
-exact Rust configuration witness.
+Classify `HABackendAvailabilityTest.ClientSpecParsingMatchesK8sBuildFlag`
+against the actual Rust product boundary and retain one exact Rust serving
+policy witness.
 
 ## C++ Oracle
 
@@ -14,19 +14,23 @@ that capability returns `UNAVAILABLE_IN_CURRENT_MODE`.
 
 ## Rust Boundary
 
-Rust does not compile K8s election support behind an equivalent Store feature.
-It can construct a K8s coordinator spec, but production serving deliberately
-rejects K8s because it has no shared ordered oplog. Therefore the portable
-Rust outcome corresponds to the C++ unavailable branch while still preserving
-the parsed spec fields.
+Rust does not expose the C++ client-side `k8s://` URI parser or compile K8s
+election support behind an equivalent Store feature. It can construct a K8s
+coordinator spec from Master CLI fields, but production serving deliberately
+rejects K8s because it has no shared ordered oplog. That is a different stage
+and reason from the C++ client parser's build-availability rejection.
 
-Add one test in `test_main_config.rs` that sets backend type `k8s` and the exact
-connstring `default/master`, then:
+Retain one test in `test_main_config.rs` that sets backend type `k8s` and the
+exact connstring payload `default/master`, then:
 
 1. calls the production `build_ha_spec` path;
 2. asserts K8s type and exact connstring preservation;
 3. calls `validate_ha_backend_for_serving` on that same spec;
 4. asserts `HaError::UnavailableInCurrentMode` and the shared-oplog reason.
+
+The manifest row is `not-applicable` with the `cpp-build-or-abi` category,
+matching the adjacent K8s availability row. The test is supporting evidence
+for Rust's distinct policy, not a claim that Rust parses the full C++ URI.
 
 ## Scope and Verification
 
