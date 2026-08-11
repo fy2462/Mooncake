@@ -580,7 +580,9 @@ impl OffsetAllocatorStorageBackend {
     pub fn init(&self) -> StoreResult<()> {
         let _init_guard = self.init_lock.lock();
         if self.initialized.load(Ordering::Acquire) {
-            return Ok(());
+            return Err(StoreError::Internal(
+                "offset allocator storage backend is already initialized".to_string(),
+            ));
         }
         self.config.validate().map_err(StoreError::InvalidParams)?;
         self.persistence
@@ -3831,9 +3833,17 @@ mod persistence_mode_tests {
             })
             .collect();
 
+        let mut successes = 0;
+        let mut duplicate_init_errors = 0;
         for thread in threads {
-            thread.join().unwrap().unwrap();
+            match thread.join().unwrap() {
+                Ok(()) => successes += 1,
+                Err(StoreError::Internal(_)) => duplicate_init_errors += 1,
+                Err(error) => panic!("unexpected initialization error: {error}"),
+            }
         }
+        assert_eq!(successes, 1);
+        assert_eq!(duplicate_init_errors, 7);
         backend.write_object("safe", b"value").unwrap();
         assert_eq!(backend.read_object("safe").unwrap(), b"value");
     }
