@@ -1205,7 +1205,14 @@ fn decode_metadata(
     let mut object_keys = HashSet::new();
     let mut shard_ids = HashSet::new();
     for (encoded_shard_id, blob) in shards {
-        let shard_id = value_u64(encoded_shard_id, "metadata shard id")?;
+        let shard_id = match encoded_shard_id {
+            Value::String(value) => value
+                .as_str()
+                .ok_or_else(|| snapshot_error("metadata shard id is not valid UTF-8"))?
+                .parse::<u64>()
+                .map_err(|_| snapshot_error("metadata shard id is not an unsigned integer"))?,
+            value => value_u64(value, "metadata shard id")?,
+        };
         if shard_id >= CPP_METADATA_SHARD_COUNT {
             return Err(snapshot_error("metadata shard id is out of range"));
         }

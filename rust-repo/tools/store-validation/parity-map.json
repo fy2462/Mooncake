@@ -14143,13 +14143,18 @@
     "file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp",
     "test": "CatalogBackedSnapshotProviderTest.RejectsOverflowingReplicaCount"
    },
-   "reason": "Rust decode_object has usize conversion and checked_add guards, but no discoverable Rust test builds this seven-field, UINT32_MAX-declared replica payload through CatalogBackedSnapshotProvider and asserts a Rust-native error. The C++ assertion requires exactly DESERIALIZE_FAIL. The C++ body is parameterized over Embedded and optional Redis while Rust has no corresponding provider test for either backend, so source guards are insufficient.",
+   "reason": "Rust parity test cpp_parity_catalog_provider_rejects_overflowing_replica_count (rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs) writes the C++ seven-field metadata entry with UINT32_MAX declared replicas and none packed, loads it through CatalogBackedSnapshotProvider, and requires a Snapshot/deserialization error containing replica count mismatch; the parser runs after backend-independent payload retrieval; verified PASS.",
    "review": {
     "oracle": "catalog_backed_snapshot_provider_test.cpp RejectsOverflowingReplicaCount, BuildMetadataPayloadWithDeclaredReplicaCount in snapshot_test_utils.h, and DeserializeStandbySnapshotMetadata; Rust catalog_snapshot.rs decode_object checked_add/field-count validation",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_catalog_provider_rejects_overflowing_replica_count"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Requesting a cluster id different from the provider's configured cluster rejects the load with INVALID_PARAMS before catalog access.",

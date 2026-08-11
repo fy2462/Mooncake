@@ -814,6 +814,24 @@ fn synthetic_cpp_metadata_with_disk_replica(
     )]))
 }
 
+fn synthetic_cpp_metadata_with_declared_replica_count(replica_count: u64) -> Vec<u8> {
+    let metadata = Value::Array(vec![
+        "1-2".into(),
+        1_700_000_000_000_u64.into(),
+        4096_u64.into(),
+        4_102_444_800_000_u64.into(),
+        false.into(),
+        0_u64.into(),
+        replica_count.into(),
+    ]);
+    let item = Value::Array(vec!["key-1".into(), metadata]);
+    let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
+    encode(&Value::Map(vec![(
+        "shards".into(),
+        Value::Map(vec![("0".into(), Value::Binary(compress(&shard)))]),
+    )]))
+}
+
 fn publish_disk_replica_fixture(
     lease_timeout_ms: u64,
     shape: SyntheticCppMetadataShape,
@@ -903,6 +921,27 @@ fn cpp_parity_catalog_provider_loads_default_disk_object_for_each_metadata_shape
         assert_eq!(replica.segment_name, "/tmp/mooncake_snapshot_disk.data");
         assert_eq!(replica.size, 4096);
     }
+}
+
+#[test]
+fn cpp_parity_catalog_provider_rejects_overflowing_replica_count() {
+    let future_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let (root, provider) =
+        publish_disk_replica_fixture(future_ms, SyntheticCppMetadataShape::CurrentV4);
+    std::fs::write(
+        root.path()
+            .join("mooncake_master_snapshot/20260610_120000_001/metadata"),
+        synthetic_cpp_metadata_with_declared_replica_count(u32::MAX as u64),
+    )
+    .unwrap();
+
+    let error = provider.load_latest_snapshot("cluster-a").unwrap_err();
+    assert!(matches!(error, HaError::Snapshot(_)));
+    assert!(error.to_string().contains("replica count mismatch"));
 }
 
 #[test]
