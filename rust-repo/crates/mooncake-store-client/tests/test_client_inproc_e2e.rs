@@ -1949,6 +1949,69 @@ async fn global_disk_fifo_eviction_removes_only_the_oldest_master_replica() {
     let _ = shutdown.send(());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_global_disk_cross_client_readback_preserves_exact_bytes() {
+    const KEY_COUNT: usize = 5;
+    const VALUE_SIZE: usize = 4096;
+
+    let root = tempfile::tempdir().unwrap();
+    let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {
+        storage_fs_dir: root.path().to_string_lossy().into_owned(),
+        ..Default::default()
+    })
+    .await;
+    let mut writer = create_tcp_client(&master).await;
+    let writer_segment = writer.get_hostname();
+    let keys = (0..KEY_COUNT)
+        .map(|index| format!("global-disk-cross-client-{index}"))
+        .collect::<Vec<_>>();
+    let values = (0..KEY_COUNT)
+        .map(|index| vec![b'A' + index as u8; VALUE_SIZE])
+        .collect::<Vec<_>>();
+
+    for (key, value) in keys.iter().zip(&values) {
+        writer
+            .put(
+                key,
+                value,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: writer_segment.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            writer
+                .query(key)
+                .await
+                .unwrap()
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Disk)
+        );
+    }
+
+    let mut reader = create_tcp_client(&master).await;
+    for (key, expected) in keys.iter().zip(&values) {
+        assert!(
+            reader
+                .query(key)
+                .await
+                .unwrap()
+                .replicas
+                .iter()
+                .any(|replica| replica.replica_type == ReplicaType::Disk)
+        );
+        assert_eq!(reader.get(key).await.unwrap(), *expected);
+    }
+
+    drop(reader);
+    drop(writer);
+    let _ = shutdown.send(());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn seeded_two_client_large_object_delete_put_get_never_returns_stale_bytes() {
     const SEGMENT_SIZE: u64 = 32 * 1024 * 1024;
