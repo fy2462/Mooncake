@@ -4634,5 +4634,32 @@
     "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_notify_failure_releases_and_continues -- --exact --nocapture",
     "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
     "evidence": "compile-red first proved the transfer-success seam absent; after adding it, behavioral red failed with real Master KeyNotFound from success notification. Repaired exact witness PASS 1/1 with two allocations, one real FilePerKey read, one transfer attempt, one success-notify attempt, two failure-notify attempts, promoted zero, and normal completion; adjacent four promotion failure witnesses PASS 1/1 each; client lib PASS 384/384; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.PerKeyFailuresAreIndependent",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_per_key_failures_are_independent",
+    "first_divergence": "The four individual Rust failure witnesses did not prove all promotion failure modes remained independent within one ordered batch. A shared real-client matrix now reaches allocation, LocalDisk, transfer, and commit failure branches before a final continuation task.",
+    "repair_commit": "14ae38e8",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_per_key_failures_are_independent -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "compile-red proved the shared matrix helper absent; exact witness PASS 1/1 with promoted zero and stage tuple alloc/disk/transfer/success/failure = 5/3/2/1/5, ending with after-failures; all 11 promotion witnesses PASS; client lib PASS 387/387; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.AllocStartFailureNotifiesMaster",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_alloc_failure_notifies_master",
+    "first_divergence": "Rust attempted failure notification on allocation rejection, but the existing two-task allocation witness did not provide a one-to-one exact tenant/key release assertion for this C++ row. The keyed test observer now records that call without replacing the real RPC.",
+    "repair_commit": "14ae38e8",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_alloc_failure_notifies_master -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "compile-red proved the dedicated helper absent; exact witness PASS 1/1 with alloc=1, keyed failure-notify tenant-a/alloc-fails exactly once, disk/transfer/success=0, promoted zero, and normal completion; all 11 promotion witnesses PASS; client lib PASS 387/387; touched Rust file passes rustfmt --check"
+  },
+  {
+    "cpp": "file_storage_promotion_test.cpp:FileStoragePromotionTest.PostAllocFailuresAllNotifyMaster",
+    "rust": "mooncake-store-client/src/client/storage_local.rs:cpp_parity_file_storage_promotion_post_alloc_failures_all_notify_master",
+    "first_divergence": "Aggregate Rust counters could not attribute release attempts to every failed tenant/key, and the C++ fixture's missing data could prevent its configured later branches from being reached. The keyed observer and prepared FilePerKey records now prove every intended branch executes and releases independently.",
+    "repair_commit": "14ae38e8",
+    "focused_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib client::storage_local::tests::cpp_parity_file_storage_promotion_post_alloc_failures_all_notify_master -- --exact --nocapture",
+    "crate_command": "LD_LIBRARY_PATH=/home/fy2462/Mooncake/build/mooncake-transfer-engine/src:/home/fy2462/Mooncake/build/mooncake-common/src cargo test -p mooncake-store-client --features link-native --lib",
+    "evidence": "compile-red proved keyed failure attempts and the matrix helper absent; exact witness PASS 1/1 with alloc-fails, load-fails, transfer-fails, notify-fails, and after-failures each recorded exactly once in order; all 11 promotion witnesses PASS; client lib PASS 387/387; touched Rust file passes rustfmt --check"
   }
 ]

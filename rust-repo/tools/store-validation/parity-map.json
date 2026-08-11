@@ -1685,28 +1685,28 @@
       "behavior": "Per-key allocation, LocalDisk load, transfer, and commit failures do not prevent later promotion tasks from being attempted.",
       "boundary": ["client", "promotion", "local-disk", "transfer", "commit", "batch-liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.PerKeyFailuresAreIndependent"},
-      "reason": "Rust continues after reached allocation and transfer failures but aborts promote_objects on LocalDisk read and success-notify failures, so the general C++ per-key liveness contract is not met and has no client-loop test.",
+      "reason": "A five-task production-loop witness reaches allocation, LocalDisk, transfer, and success-notify failures in order, then proves a final task still reaches allocation. Real Master RPCs and tenant-scoped FilePerKey reads surround the isolated allocation/transfer outcomes; exact stage counts are 5 allocations, 3 disk reads, 2 transfers, 1 success-notify attempt, and 5 failure-notify attempts.",
       "review": {"oracle": "file_storage_promotion_test.cpp PerKeyFailuresAreIndependent and mooncake-store/src/file_storage.cpp per-task continuation; Rust storage_local.rs promote_objects", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_per_key_failures_are_independent"}],
+      "status": "covered"
     },
     {
       "behavior": "An allocation-start rejection triggers exactly one best-effort failure notification for the tenant/key and no success notification, promptly releasing the in-flight promotion slot.",
       "boundary": ["client", "promotion", "allocation", "failure-notification", "master-state", "liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.AllocStartFailureNotifiesMaster"},
-      "reason": "Rust's reached allocation-failure branch attempts failure notification, but no discoverable Rust client-loop test proves the automatic tenant/key release notification. Existing master tests cover explicit failure RPC state, not this client-loop branch.",
+      "reason": "A dedicated one-task witness reaches a real Master allocation rejection and records exactly one failure-notification attempt for tenant-a/alloc-fails, with zero disk, transfer, or success-notify attempts and normal processor completion.",
       "review": {"oracle": "file_storage_promotion_test.cpp AllocStartFailureNotifiesMaster and mooncake-store/src/file_storage.cpp allocation-failure release; Rust storage_local.rs and master test_master_promotion.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_alloc_failure_notifies_master"}],
+      "status": "covered"
     },
     {
       "behavior": "Each reached allocation, LocalDisk load, transfer-write, or success-notify failure attempts one best-effort failure notification so staged state and the in-flight queue slot can be released while later tasks proceed.",
       "boundary": ["client", "promotion", "local-disk", "transfer", "commit", "failure-notification", "master-state", "liveness"],
       "reference": {"file": "file_storage_promotion_test.cpp", "test": "FileStoragePromotionTest.PostAllocFailuresAllNotifyMaster"},
-      "reason": "Rust matches reached allocation and transfer failure release branches but not LocalDisk read or success-notify failure release/continuation; no discoverable Rust client-loop test covers this lifecycle. The C++ k_notify_fail fixture lacks backing data, so its source contract rather than claimed reachability is the oracle.",
+      "reason": "The full failure matrix deliberately reaches allocation, missing-file load, transfer-write, and real Master success-notify failures, then a final continuation task. A UUID-isolated keyed observer proves each tenant/key receives exactly one best-effort failure-notification attempt; unlike the stale C++ fixture setup, backing data makes the configured transfer and notify branches genuinely reachable.",
       "review": {"oracle": "file_storage_promotion_test.cpp PostAllocFailuresAllNotifyMaster and mooncake-store/src/file_storage.cpp failure-release branches; Rust storage_local.rs and master test_master_promotion.rs", "reviewed": true},
-      "rust": [],
-      "status": "missing"
+      "rust": [{"file":"mooncake-store-client/src/client/storage_local.rs","test":"cpp_parity_file_storage_promotion_post_alloc_failures_all_notify_master"}],
+      "status": "covered"
     },
     {
       "behavior": "After initialization and a real 100-object batch write, FileStorage still permits offloading, while a global key or byte limit smaller than one full configured bucket rejects offloading before work begins.",
