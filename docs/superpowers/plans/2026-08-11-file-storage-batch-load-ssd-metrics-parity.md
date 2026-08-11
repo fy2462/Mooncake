@@ -10,6 +10,7 @@
 
 ## Global Constraints
 
+- Run every Cargo command from `/home/fy2462/Mooncake/rust-repo`.
 - Treat the four manifests in `rust-repo/tools/store-validation` as authoritative.
 - A successful batch publishes exact key count, summed bytes, and one latency observation; a failed batch publishes nothing.
 - Use the real FilePerKey backend in both witnesses; do not substitute a mock metric sink or mock backend.
