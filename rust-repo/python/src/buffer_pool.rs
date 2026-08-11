@@ -61,7 +61,7 @@ impl PoolCore {
 
     fn allocation_size(&self, requested_size: usize) -> PyResult<usize> {
         isize::try_from(requested_size)
-            .map_err(|_| pool_err("requested buffer size exceeds Python buffer limits"))?;
+            .map_err(|_| pool_err("requested buffer size exceeds Python buffer capacity"))?;
         let size = requested_size.max(1);
         if size > self.max_bytes {
             return Err(pool_err("requested buffer size exceeds pool capacity"));

@@ -93,6 +93,58 @@ def test_buffer_pool_uses_local_buffer_alignment(rust_client) -> None:
     pool.close()
 
 
+def test_buffer_pool_prewarm_and_close(rust_client) -> None:
+    binding = _binding()
+    pool = binding.BufferPool(
+        rust_client,
+        1024 * 1024,
+        min_size_class=4096,
+        alignment=4096,
+        prewarm_size=1024,
+        prewarm_count=2,
+    )
+    lease1 = pool.acquire(1024)
+    lease2 = pool.acquire(1024)
+    lease1.release()
+    lease2.release()
+    pool.close()
+
+
+def test_buffer_pool_rejects_invalid_alignment(rust_client) -> None:
+    binding = _binding()
+    with pytest.raises(RuntimeError, match="alignment"):
+        binding.BufferPool(rust_client, 1024 * 1024, alignment=12345)
+
+
+@pytest.mark.parametrize("size", [0, 1, 128 * 1024 + 1])
+def test_buffer_pool_supports_arbitrary_sizes(rust_client, size: int) -> None:
+    binding = _binding()
+    pool = binding.BufferPool(
+        rust_client,
+        1024 * 1024,
+        max_size_class=128 * 1024,
+        alignment=4096,
+    )
+    lease = pool.acquire(size)
+    assert lease.size == size
+    assert len(lease.buffer) == size
+    lease.release()
+    pool.close()
+
+
+def test_buffer_pool_rejects_huge_size_overflow(rust_client) -> None:
+    binding = _binding()
+    pool = binding.BufferPool(
+        rust_client,
+        1024 * 1024,
+        min_size_class=4096,
+        alignment=4096,
+    )
+    with pytest.raises(RuntimeError, match="overflow|capacity"):
+        pool.acquire((1 << 64) - 1)
+    pool.close()
+
+
 def test_release_rejects_exported_views(rust_client) -> None:
     binding = _binding()
     pool = binding.BufferPool(rust_client, 1024 * 1024, alignment=4096)

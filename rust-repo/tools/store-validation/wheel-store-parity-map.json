@@ -387,12 +387,12 @@
    "status": "missing"
   },
   {
-   "behavior": "A 1-MiB pool configured with 4096 classes/alignment and two prewarmed 1024 leases supplies both, accepts their release, and closes. No Rust API/test exposes prewarm count semantics.",
+   "behavior": "A 1-MiB pool configured with 4096 classes/alignment and two prewarmed 1024 leases supplies both, accepts their release, and closes.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: A 1-MiB pool configured with 4096 classes/alignment and two prewarmed 1024 leases supplies both, accepts their release, and closes. No Rust API/test exposes prewarm count semantics.",
+   "reason": "Rust parity test test_buffer_pool_prewarm_and_close configures the native pool with the exact 1-MiB/4096/prewarm-size-1024/count-two matrix, acquires both leases, releases them, and closes. Verified PASS.",
    "reference": {
     "file": "test_buffer_pool_native.py",
     "test": "test_buffer_pool_prewarm_and_close"
@@ -401,8 +401,13 @@
     "oracle": "mooncake-wheel/tests/test_buffer_pool_native.py::test_buffer_pool_prewarm_and_close test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_buffer_pool_rust.py",
+     "test": "test_buffer_pool_prewarm_and_close"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Closing with one active one-byte lease raises RuntimeError containing `active leases`; releasing it makes close succeed.",
@@ -428,12 +433,12 @@
    "status": "covered"
   },
   {
-   "behavior": "Acquiring unsigned-64 max from a 1-MiB pool raises RuntimeError matching `overflow|capacity`, and the pool remains closeable. Rust rejects `usize::MAX` in a different allocator/result boundary but does not prove the complete error/lifecycle oracle.",
+   "behavior": "Acquiring unsigned-64 max from a 1-MiB pool raises RuntimeError matching `overflow|capacity`, and the pool remains closeable.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Acquiring unsigned-64 max from a 1-MiB pool raises RuntimeError matching `overflow|capacity`, and the pool remains closeable. Rust rejects `usize::MAX` in a different allocator/result boundary but does not prove the complete error/lifecycle oracle.",
+   "reason": "Rust parity test test_buffer_pool_rejects_huge_size_overflow requests unsigned-64 max from the exact 1-MiB/4096 pool, asserts the wheel's overflow-or-capacity error text, then closes. Verified PASS after aligning the binding error message.",
    "reference": {
     "file": "test_buffer_pool_native.py",
     "test": "test_buffer_pool_rejects_huge_size_overflow"
@@ -442,16 +447,21 @@
     "oracle": "mooncake-wheel/tests/test_buffer_pool_native.py::test_buffer_pool_rejects_huge_size_overflow test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_buffer_pool_rust.py",
+     "test": "test_buffer_pool_rejects_huge_size_overflow"
+    }
+   ],
+   "status": "covered"
   },
   {
-   "behavior": "Constructing a 1-MiB pool with alignment 12345 raises RuntimeError containing `alignment`. Rust has no equivalent configurable alignment/error test.",
+   "behavior": "Constructing a 1-MiB pool with alignment 12345 raises RuntimeError containing `alignment`.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: Constructing a 1-MiB pool with alignment 12345 raises RuntimeError containing `alignment`. Rust has no equivalent configurable alignment/error test.",
+   "reason": "Rust parity test test_buffer_pool_rejects_invalid_alignment constructs the native 1-MiB pool with alignment 12345 and asserts RuntimeError text contains alignment. Verified PASS.",
    "reference": {
     "file": "test_buffer_pool_native.py",
     "test": "test_buffer_pool_rejects_invalid_alignment"
@@ -460,8 +470,13 @@
     "oracle": "mooncake-wheel/tests/test_buffer_pool_native.py::test_buffer_pool_rejects_invalid_alignment test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_buffer_pool_rust.py",
+     "test": "test_buffer_pool_rejects_invalid_alignment"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Deleting the Python lease and forcing GC releases the sole region so the pool closes without an active-lease error.",
@@ -483,12 +498,12 @@
    "status": "not-applicable"
   },
   {
-   "behavior": "For sizes 0, 1, and 131073, a 1-MiB pool with 128-KiB maximum class returns a lease and buffer of the exact requested length, then releases/closes. Rust `test_zero_and_overflowing_allocations_are_rejected` contradicts the zero-size case and no test proves the full matrix.",
+   "behavior": "For sizes 0, 1, and 131073, a 1-MiB pool with 128-KiB maximum class returns a lease and buffer of the exact requested length, then releases/closes.",
    "boundary": [
     "wheel",
     "store"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: For sizes 0, 1, and 131073, a 1-MiB pool with 128-KiB maximum class returns a lease and buffer of the exact requested length, then releases/closes. Rust `test_zero_and_overflowing_allocations_are_rejected` contradicts the zero-size case and no test proves the full matrix.",
+   "reason": "Parameterized Rust parity test test_buffer_pool_supports_arbitrary_sizes covers the exact 0, 1, and 131073 sizes with a 1-MiB pool and 128-KiB maximum class, asserting exact lease and buffer lengths before release/close. Verified PASS for all three cases.",
    "reference": {
     "file": "test_buffer_pool_native.py",
     "test": "test_buffer_pool_supports_arbitrary_sizes"
@@ -497,8 +512,13 @@
     "oracle": "mooncake-wheel/tests/test_buffer_pool_native.py::test_buffer_pool_supports_arbitrary_sizes test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_buffer_pool_rust.py",
+     "test": "test_buffer_pool_supports_arbitrary_sizes"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A second one-byte acquire with one-second timeout blocks while the sole lease is held, succeeds after a 100-ms release, joins within five seconds, then releases/closes.",
