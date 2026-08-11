@@ -404,6 +404,56 @@ fn recovered_local_disk_server_action(
     }))
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct PromotionTestCallCounts {
+    heartbeat: std::sync::atomic::AtomicUsize,
+    disk_read: std::sync::atomic::AtomicUsize,
+    alloc: std::sync::atomic::AtomicUsize,
+    transfer_write: std::sync::atomic::AtomicUsize,
+    notify_success: std::sync::atomic::AtomicUsize,
+    notify_failure: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+static PROMOTION_TEST_CALL_COUNTS: std::sync::Mutex<
+    Option<(Uuid, std::sync::Arc<PromotionTestCallCounts>)>,
+> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct PromotionTestCallGuard;
+
+#[cfg(test)]
+impl Drop for PromotionTestCallGuard {
+    fn drop(&mut self) {
+        *PROMOTION_TEST_CALL_COUNTS.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+fn observe_promotion_test_calls(
+    client_id: Uuid,
+) -> (
+    std::sync::Arc<PromotionTestCallCounts>,
+    PromotionTestCallGuard,
+) {
+    let counts = std::sync::Arc::new(PromotionTestCallCounts::default());
+    *PROMOTION_TEST_CALL_COUNTS.lock().unwrap() = Some((client_id, std::sync::Arc::clone(&counts)));
+    (counts, PromotionTestCallGuard)
+}
+
+#[cfg(test)]
+fn record_promotion_test_call(
+    client_id: Uuid,
+    field: fn(&PromotionTestCallCounts) -> &std::sync::atomic::AtomicUsize,
+) {
+    if let Some((observed_client_id, counts)) = PROMOTION_TEST_CALL_COUNTS.lock().unwrap().as_ref()
+        && *observed_client_id == client_id
+    {
+        field(counts).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl MooncakeClient {
     /// Re-publish persistent local-disk replicas after the disk segment has
     /// been mounted. This is intentionally fail-closed: every record is
@@ -809,6 +859,8 @@ impl MooncakeClient {
     ///
     /// 返回成功 promotion 的对象数量。
     pub async fn promote_objects(&mut self) -> StoreResult<usize> {
+        #[cfg(test)]
+        record_promotion_test_call(self.client_id, |counts| &counts.heartbeat);
         let tasks = match self.promotion_object_heartbeat_tasks().await {
             Ok(tasks) => tasks,
             Err(StoreError::KeyNotFound(message)) => {
@@ -833,12 +885,16 @@ impl MooncakeClient {
             let tenant_id = task.tenant_id.as_str();
             if task.size < 0 {
                 tracing::warn!(target: "storage_debug", %tenant_id, %key, size = task.size, "promotion: invalid negative task size");
+                #[cfg(test)]
+                record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
                 let _ = self
                     .notify_promotion_failure_for_tenant(key, tenant_id)
                     .await;
                 continue;
             }
             // Read from local disk (blocking I/O).
+            #[cfg(test)]
+            record_promotion_test_call(self.client_id, |counts| &counts.disk_read);
             let key_owned = local_storage_key(tenant_id, key);
             let read_started_at = std::time::Instant::now();
             let data = {
@@ -852,6 +908,8 @@ impl MooncakeClient {
             }
 
             // Allocate a memory replica.
+            #[cfg(test)]
+            record_promotion_test_call(self.client_id, |counts| &counts.alloc);
             let replica = match self
                 .promotion_alloc_start_for_tenant(key, tenant_id, task.size as u64, vec![])
                 .await
@@ -859,6 +917,8 @@ impl MooncakeClient {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "promotion: alloc failed");
+                    #[cfg(test)]
+                    record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
                     let _ = self
                         .notify_promotion_failure_for_tenant(key, tenant_id)
                         .await;
@@ -867,14 +927,20 @@ impl MooncakeClient {
             };
 
             // Write data to the allocated memory replica.
+            #[cfg(test)]
+            record_promotion_test_call(self.client_id, |counts| &counts.transfer_write);
             match self.write_to_replica(&replica, &data).await {
                 Ok(()) => {
+                    #[cfg(test)]
+                    record_promotion_test_call(self.client_id, |counts| &counts.notify_success);
                     self.notify_promotion_success_for_tenant(key, tenant_id)
                         .await?;
                     promoted += 1;
                 }
                 Err(e) => {
                     tracing::warn!(target: "storage_debug", %tenant_id, %key, %e, "promotion: write_to_replica failed");
+                    #[cfg(test)]
+                    record_promotion_test_call(self.client_id, |counts| &counts.notify_failure);
                     let _ = self
                         .notify_promotion_failure_for_tenant(key, tenant_id)
                         .await;
@@ -1668,9 +1734,6 @@ mod tests {
                 .unwrap();
         });
 
-        let endpoint_probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_host = endpoint_probe.local_addr().unwrap().to_string();
-        drop(endpoint_probe);
         let disk_root = tempfile::tempdir().unwrap();
         let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
             root_dir: disk_root.path().to_path_buf(),
@@ -1683,7 +1746,7 @@ mod tests {
         let mut client = MooncakeClient::create(
             &master_address.to_string(),
             "P2PHANDSHAKE",
-            &local_host,
+            "127.0.0.1",
             "tcp",
             "",
             0,
@@ -1695,8 +1758,15 @@ mod tests {
         client.mount_local_disk_segment(false).await.unwrap();
 
         assert!(client.local_storage.is_some());
+        let (counts, _observer) = observe_promotion_test_calls(client.client_id);
         assert_eq!(client.promote_objects().await.unwrap(), 0);
         assert!(disk.scan_meta().unwrap().is_empty());
+        assert_eq!(counts.heartbeat.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.disk_read.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.alloc.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.transfer_write.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_success.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.notify_failure.load(Ordering::Relaxed), 0);
 
         client.tear_down_all().await.unwrap();
         server.abort();
@@ -1719,9 +1789,6 @@ mod tests {
                 .unwrap();
         });
 
-        let endpoint_probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let local_host = endpoint_probe.local_addr().unwrap().to_string();
-        drop(endpoint_probe);
         let disk_root = tempfile::tempdir().unwrap();
         let disk = Arc::new(LocalStorageBackend::new_persistent(LocalStorageConfig {
             root_dir: disk_root.path().to_path_buf(),
@@ -1733,7 +1800,7 @@ mod tests {
         let mut client = MooncakeClient::create(
             &master_address.to_string(),
             "P2PHANDSHAKE",
-            &local_host,
+            "127.0.0.1",
             "tcp",
             "",
             0,
