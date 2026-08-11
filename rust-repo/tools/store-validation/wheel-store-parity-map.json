@@ -6115,13 +6115,13 @@
    "status": "not-applicable"
   },
   {
-   "behavior": "A real Store puts a 3×4 int64 tensor, materializes its encoded bytes into a caller-owned tensor-object buffer sized from the manifest, reconstructs exact tensor contents, and removes the bundle. Rust has no Store tensor materialize-into E2E.",
+   "behavior": "A real Store puts a 3×4 int64 tensor, materializes its encoded bytes into a caller-owned tensor-object buffer sized from the manifest, reconstructs exact tensor contents, and removes the bundle.",
    "boundary": [
     "wheel",
     "store",
     "structured-object"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: A real Store puts a 3×4 int64 tensor, materializes its encoded bytes into a caller-owned tensor-object buffer sized from the manifest, reconstructs exact tensor contents, and removes the bundle. Rust has no Store tensor materialize-into E2E.",
+   "reason": "Rust parity test test_structured_object_direct_torch_tensor_materialize_into_uses_real_store executes the complete 3x4 int64 manifest-sized caller-buffer materialize-into lifecycle against the real Rust Store and removes the bundle. Verified PASS without skip.",
    "reference": {
     "file": "test_structured_object_store.py",
     "test": "test_structured_object_direct_torch_tensor_materialize_into_uses_real_store"
@@ -6130,17 +6130,22 @@
     "oracle": "mooncake-wheel/tests/test_structured_object_store.py::test_structured_object_direct_torch_tensor_materialize_into_uses_real_store test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_structured_object_parity.py",
+     "test": "test_structured_object_direct_torch_tensor_materialize_into_uses_real_store"
+    }
+   ],
+   "status": "covered"
   },
   {
-   "behavior": "A real Store puts a 12×4 int64 tensor, selects only that member, range-reads rows 3..9, returns the exact tensor slice, and removes the bundle. Rust has no structured tensor range-read test.",
+   "behavior": "A real Store puts a 12×4 int64 tensor, selects only that member, range-reads rows 3..9, returns the exact tensor slice, and removes the bundle.",
    "boundary": [
     "wheel",
     "store",
     "structured-object"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: A real Store puts a 12×4 int64 tensor, selects only that member, range-reads rows 3..9, returns the exact tensor slice, and removes the bundle. Rust has no structured tensor range-read test.",
+   "reason": "Rust parity test test_structured_object_direct_torch_tensor_slice_uses_real_store_ranges executes the complete 12x4 int64 selected-member rows-3-through-9 range-read lifecycle against the real Rust Store and removes the bundle. Verified PASS without skip.",
    "reference": {
     "file": "test_structured_object_store.py",
     "test": "test_structured_object_direct_torch_tensor_slice_uses_real_store_ranges"
@@ -6149,8 +6154,13 @@
     "oracle": "mooncake-wheel/tests/test_structured_object_store.py::test_structured_object_direct_torch_tensor_slice_uses_real_store_ranges test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_structured_object_parity.py",
+     "test": "test_structured_object_direct_torch_tensor_slice_uses_real_store_ranges"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "The Python structured-object component executes the source-reviewed `test_structured_object_duplicate_destination_registration_is_tolerated` assertions against its in-file fake Store/component boundary.",
@@ -6613,13 +6623,13 @@
    "status": "not-applicable"
   },
   {
-   "behavior": "A real Store and native BufferPool serialize a 3×4 int64 tensor into a registered lease, zero-copy put it as a tensor-object buffer, materialize exact contents, then release/close. Rust has no complete BufferPool/tensor zero-copy lifecycle.",
+   "behavior": "A real Store and native BufferPool serialize a 3×4 int64 tensor into a registered lease, zero-copy put it as a tensor-object buffer, materialize exact contents, then release/close.",
    "boundary": [
     "wheel",
     "store",
     "structured-object"
    ],
-   "reason": "No discoverable approved Rust test proves this complete wheel oracle; add Rust implementation/test evidence for: A real Store and native BufferPool serialize a 3×4 int64 tensor into a registered lease, zero-copy put it as a tensor-object buffer, materialize exact contents, then release/close. Rust has no complete BufferPool/tensor zero-copy lifecycle.",
+   "reason": "Rust parity test test_structured_object_torch_tensor_zero_copy_uses_real_buffer_pool executes the complete native BufferPool registered-lease serialization, tensor-object zero-copy put, exact materialization, release, and close lifecycle against the real Rust Store. Verified PASS without skip.",
    "reference": {
     "file": "test_structured_object_store.py",
     "test": "test_structured_object_torch_tensor_zero_copy_uses_real_buffer_pool"
@@ -6628,8 +6638,13 @@
     "oracle": "mooncake-wheel/tests/test_structured_object_store.py::test_structured_object_torch_tensor_zero_copy_uses_real_buffer_pool test body and inspected Python/Store call path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_structured_object_parity.py",
+     "test": "test_structured_object_torch_tensor_zero_copy_uses_real_buffer_pool"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "The Python structured-object component executes the source-reviewed `test_structured_object_zero_byte_payload_skips_store_put` assertions against its in-file fake Store/component boundary.",
