@@ -1433,8 +1433,7 @@ mod tests {
         config.bucket_size_limit = 64;
         let backend = BucketStorageBackend::new(config);
         let mut tasks = one_byte_tasks(3);
-        let first_key = tasks.keys().next().unwrap().clone();
-        tasks.insert(first_key, 65);
+        *tasks.values_mut().next().unwrap() = 65;
 
         let buckets = backend.allocate_offloading_buckets(&tasks).unwrap();
         assert_eq!(buckets.len(), 1);
