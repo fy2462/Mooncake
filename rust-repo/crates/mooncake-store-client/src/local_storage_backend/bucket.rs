@@ -250,6 +250,7 @@ impl BucketStorageBackend {
             return Ok(Vec::new());
         }
 
+        let mut ungrouped = self.ungrouped_offloading_objects.lock();
         let existing = self
             .state
             .lock()
@@ -257,7 +258,6 @@ impl BucketStorageBackend {
             .keys()
             .cloned()
             .collect::<HashSet<_>>();
-        let mut ungrouped = self.ungrouped_offloading_objects.lock();
         let objects = offloading_objects.iter().collect::<Vec<_>>();
         let mut next = 0usize;
         let mut buckets = Vec::new();
@@ -275,13 +275,15 @@ impl BucketStorageBackend {
                 bucket_objects.insert(key, size);
             }
 
-            while bucket_keys.len() < self.config.bucket_keys_limit {
+            let mut candidate_slots = bucket_keys.len();
+            while candidate_slots < self.config.bucket_keys_limit {
                 let Some((key, size)) = objects.get(next).copied() else {
                     ungrouped.extend(bucket_objects);
                     return Ok(buckets);
                 };
                 if *size > self.config.bucket_size_limit || existing.contains(key) {
                     next += 1;
+                    candidate_slots += 1;
                     continue;
                 }
                 let projected = bucket_data_size.checked_add(*size).ok_or_else(|| {
@@ -295,6 +297,7 @@ impl BucketStorageBackend {
                 bucket_keys.push(key.clone());
                 bucket_objects.insert(key.clone(), *size);
                 next += 1;
+                candidate_slots += 1;
                 if bucket_data_size == self.config.bucket_size_limit {
                     break;
                 }
@@ -1364,6 +1367,40 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(backend.ungrouped_offloading_objects_size(), 7);
+    }
+
+    #[test]
+    fn cpp_parity_offload_bucket_grouping_oversized_skip_consumes_key_slot() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 2;
+        config.bucket_size_limit = 64;
+        let backend = BucketStorageBackend::new(config);
+        let mut tasks = one_byte_tasks(3);
+        let first_key = tasks.keys().next().unwrap().clone();
+        tasks.insert(first_key, 65);
+
+        let buckets = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].len(), 1);
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 1);
+    }
+
+    #[test]
+    fn cpp_parity_offload_bucket_grouping_existing_skip_consumes_key_slot() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 2;
+        config.bucket_size_limit = 64;
+        let backend = BucketStorageBackend::new(config);
+        let tasks = one_byte_tasks(3);
+        let first_key = tasks.keys().next().unwrap().clone();
+        write(&backend, &first_key, b"x", Uuid::new_v4());
+
+        let buckets = backend.allocate_offloading_buckets(&tasks).unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].len(), 1);
+        assert_eq!(backend.ungrouped_offloading_objects_size(), 1);
     }
 
     #[test]
