@@ -30,6 +30,92 @@ async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, onesh
     (address.to_string(), shutdown_tx)
 }
 
+async fn create_ipv6_tcp_client(master: &str) -> MooncakeClient {
+    let probe = tokio::net::TcpListener::bind("[::1]:0")
+        .await
+        .expect("IPv6 loopback is required for this parity fixture");
+    let local_host = probe.local_addr().unwrap().to_string();
+    drop(probe);
+    MooncakeClient::create(
+        master,
+        "P2PHANDSHAKE",
+        &local_host,
+        "tcp",
+        "",
+        16 * 1024 * 1024,
+        16 * 1024 * 1024,
+    )
+    .await
+    .expect("create real client on IPv6 loopback")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ipv6_loopback_put_get_roundtrip() {
+    let (master, shutdown) = start_master().await;
+    let mut client = create_ipv6_tcp_client(&master).await;
+    let key = "ipv6_test_key";
+    let payload = b"Hello, IPv6 World!";
+
+    client
+        .put(
+            key,
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let fetched = client.get(key).await.unwrap();
+    assert_eq!(fetched.len(), payload.len());
+    assert_eq!(fetched, payload);
+    assert!(client.exists(key).await.unwrap());
+
+    // Match the C++ fixture: cleanup may race the active lease and is not part
+    // of the IPv6 transport oracle.
+    let _ = client.remove(key, false).await;
+    client.tear_down_all().await.unwrap();
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ipv6_batch_put_get_exact_ten_payloads() {
+    let (master, shutdown) = start_master().await;
+    let mut client = create_ipv6_tcp_client(&master).await;
+    let keys = (0..10)
+        .map(|index| format!("ipv6_batch_key_{index}"))
+        .collect::<Vec<_>>();
+    let values = (0..10)
+        .map(|index| vec![b'A' + u8::try_from(index).unwrap(); 1024])
+        .collect::<Vec<_>>();
+    let borrowed = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+    let statuses = client
+        .batch_put(
+            &keys,
+            &borrowed,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(statuses, vec![0; 10]);
+
+    let fetched = client.batch_get(&keys).await.unwrap();
+    assert_eq!(fetched.len(), 10);
+    for (actual, expected) in fetched.into_iter().zip(values) {
+        let actual = actual.expect("every IPv6 batch key is present");
+        assert_eq!(actual.len(), 1024);
+        assert_eq!(actual, expected);
+    }
+
+    client.tear_down_all().await.unwrap();
+    let _ = shutdown.send(());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpp_parity_zero_local_buffer_put_fails_without_creating_key() {
     let (master, shutdown) = start_master().await;

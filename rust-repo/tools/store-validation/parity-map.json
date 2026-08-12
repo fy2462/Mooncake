@@ -33594,13 +33594,18 @@
     "file": "ipv6_client_test.cpp",
     "test": "IPv6ClientTest.BasicPutGetOverIPv6Loopback"
    },
-   "reason": "Production prerequisite: make the real Rust client setup path and its local listener/port reservation capable of a [::1] endpoint rather than IPv4-only reservation, and make the in-process Master fixture bindable for this IPv6 client path. Add rust-repo/crates/mooncake-store-client/tests/test_client_inproc_e2e.rs::cpp_parity_ipv6_loopback_put_get_roundtrip; require a host with IPv6 loopback capability, start the Master and client on the configured [::1] endpoint, serialize and restore MC_USE_IPV6/SERVER_ADDRESS around the test, then assert setup success, put success, exact Hello, IPv6 World! bytes and length, and exists true for ipv6_test_key. Existing IPv4 in-process round trips do not exercise the IPv6 endpoint or real environment wiring.",
+   "reason": "cpp_parity_ipv6_loopback_put_get_roundtrip requires a bindable IPv6 loopback, starts an in-process Master, passes the reserved bracketed [::1]:port endpoint through the real Rust P2PHANDSHAKE/TCP client setup path, and asserts put success plus exact Hello, IPv6 World! bytes, length, and existence for ipv6_test_key. The C++ fixture uses MC_USE_IPV6 only as its execution gate and FLAGS_server_address as the endpoint; the Rust test supplies that endpoint directly rather than mutating process-wide environment in a parallel test binary.",
    "review": {
     "oracle": "mooncake-store/tests/ipv6_client_test.cpp BasicPutGetOverIPv6Loopback and directly exercised mooncake-store/src/real_client.cpp/client_service.cpp setup path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_ipv6_loopback_put_get_roundtrip"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With MC_USE_IPV6=1 and a configured scoped link-local IPv6 endpoint, in-process Master and real client setup succeed; putting and getting ipv6_linklocal_test_key returns exactly the Hello, Link-Local IPv6! bytes and size. Cleanup remove has no asserted result.",
@@ -33640,13 +33645,18 @@
     "file": "ipv6_client_test.cpp",
     "test": "IPv6ClientTest.BatchOperationsOverIPv6"
    },
-   "reason": "Production prerequisite: complete the IPv6 real-client setup/listener path used by the loopback batch fixture. Add rust-repo/crates/mooncake-store-client/tests/test_client_inproc_e2e.rs::cpp_parity_ipv6_batch_put_get_exact_ten_payloads; require IPv6 loopback capability, serialize and restore MC_USE_IPV6/SERVER_ADDRESS, set up the real client on the configured IPv6 endpoint, call MooncakeClient::batch_put exactly once with the ten indexed keys and ten distinct 1024-byte A+i payload slices, and assert its returned Vec<i32> has exactly ten zero/success statuses. Then call MooncakeClient::batch_get exactly once with the ten keys and assert its returned Vec<Option<Vec<u8>>> has exactly ten present values, each length 1024 and exact per-index bytes. Existing IPv4 batch tests use different key/value matrices and do not prove IPv6 transport setup or this ten-payload result.",
+   "reason": "cpp_parity_ipv6_batch_put_get_exact_ten_payloads requires a bindable IPv6 loopback and passes the reserved bracketed [::1]:port endpoint through the real Rust P2PHANDSHAKE/TCP client setup path. It calls batch_put once for the exact ten indexed keys and distinct 1024-byte A+i payloads, asserts ten zero statuses, then calls batch_get once and asserts ten present values with exact size and bytes. The C++ MC_USE_IPV6 variable is only an execution gate; Rust exercises the IPv6 endpoint directly without process-wide environment mutation.",
    "review": {
     "oracle": "mooncake-store/tests/ipv6_client_test.cpp BatchOperationsOverIPv6 and directly exercised mooncake-store/src/real_client.cpp/client_service.cpp batch setup path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_ipv6_batch_put_get_exact_ten_payloads"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A fresh process-wide metrics manager reports zero memory/file allocation and capacity/ratios, key count, every asserted single-operation, copy/move, eviction, and batch counter, plus PutStart discard/release/staging gauges.",
