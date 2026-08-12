@@ -31,6 +31,11 @@ pub enum HaError {
     #[error("invalid ha backend: {0}")]
     InvalidBackend(String),
 
+    /// The oplog backend is healthy but contains no committed entries.
+    /// oplog 后端健康，但尚无已提交记录。
+    #[error("oplog entry not found: {0}")]
+    OpLogNotFound(String),
+
     /// A configured HA backend lost its transport connection.
     /// 已配置的 HA 后端丢失传输连接。
     #[error("ha backend disconnected: {0}")]

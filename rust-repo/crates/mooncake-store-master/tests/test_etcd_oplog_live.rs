@@ -917,6 +917,37 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testge
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_etcd_get_max_sequence_id_reports_empty_then_last_entry() {
+    let Some(mut fixture) = LiveEtcdFixture::new("max-empty-last").await else {
+        return;
+    };
+
+    let empty = fixture.store.max_sequence_id().unwrap_err();
+    assert!(matches!(
+        empty,
+        mooncake_store_master::ha::HaError::OpLogNotFound(message)
+            if message == "no committed oplog entries"
+    ));
+
+    fixture.store.update_latest_sequence_id(9).unwrap();
+    for sequence in 10..=15 {
+        assert_eq!(
+            fixture
+                .store
+                .append(&put_end_record(
+                    fixture.view,
+                    &format!("key_{sequence}"),
+                    &format!("value_{sequence}"),
+                ))
+                .unwrap(),
+            sequence
+        );
+    }
+    fixture.store.flush_async().await.unwrap();
+    assert_eq!(fixture.store.max_sequence_id().unwrap(), 15);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcleanupoplogbefore_empty()
  {
     let Some(mut fixture) = LiveEtcdFixture::new("cleanup-empty").await else {

@@ -10033,13 +10033,22 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestGetMaxSequenceIdAndEmpty"
    },
-   "reason": "Rust source has max_sequence_id but its empty/value model differs and no discoverable real-etcd test asserts the C++ empty-not-found then durable maximum lifecycle.",
+   "reason": "cpp_parity_etcd_get_max_sequence_id_reports_empty_then_last_entry runs against a live etcd namespace and asserts production EtcdOpLogStore::max_sequence_id returns the typed OpLogNotFound no-committed-entry result before any append. It then advances to sequence 9, appends and atomically flushes the exact durable range 10 through 15, and asserts the live backend maximum is 15. promotion_catch_up_accepts_empty_oplog_but_propagates_backend_failure separately proves promotion treats only that typed empty result as a successful no-op while propagating backend failures.",
    "review": {
     "oracle": "etcd_oplog_store_test.cpp TestGetMaxSequenceIdAndEmpty and EtcdOpLogStore::GetMaxSequenceId/GetMaxSequenceIdInternal; Rust oplog_etcd.rs max_sequence_id",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "promotion_catch_up_accepts_empty_oplog_but_propagates_backend_failure"
+    },
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_etcd_get_max_sequence_id_reports_empty_then_last_entry"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Directly updating the latest pointer to 12345 makes a subsequent latest read return 12345.",

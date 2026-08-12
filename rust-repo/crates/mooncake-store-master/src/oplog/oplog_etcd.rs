@@ -678,6 +678,8 @@ impl OpLogStore for EtcdOpLogStore {
             }
             max_seq = max_seq.max(committed_latest);
             max_seq = max_seq.max(backend_max);
+        } else if max_seq == 0 && committed_latest == 0 {
+            return Err(HaError::OpLogNotFound("no committed oplog entries".into()));
         }
         Ok(max_seq)
     }

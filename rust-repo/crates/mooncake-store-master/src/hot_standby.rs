@@ -148,7 +148,11 @@ fn run_promotion_catch_up(applier: &OpLogApplier, store: &dyn OpLogStore) -> Res
     // C++: FinalCatchUpForPromotionLocked. The Arc-backed Rust store is the
     // same logical reader C++ recreates for promotion.
     let mut expected = applier.get_expected_sequence_id();
-    let latest = store.max_sequence_id()?;
+    let latest = match store.max_sequence_id() {
+        Ok(latest) => latest,
+        Err(HaError::OpLogNotFound(_)) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     if latest < expected {
         return Ok(());
     }
@@ -740,6 +744,7 @@ mod tests {
         inner: InMemoryOpLog,
         runtime_thread_calls: Arc<AtomicUsize>,
         max_sequence_delay: std::time::Duration,
+        max_sequence_error: Option<HaError>,
     }
 
     impl PromotionThreadProbeOpLog {
@@ -772,6 +777,9 @@ mod tests {
         fn max_sequence_id(&self) -> Result<u64, HaError> {
             self.record_runtime_thread_call();
             std::thread::sleep(self.max_sequence_delay);
+            if let Some(error) = &self.max_sequence_error {
+                return Err(error.clone());
+            }
             self.inner.max_sequence_id()
         }
 
@@ -1946,6 +1954,7 @@ mod tests {
                 inner: InMemoryOpLog::new(4),
                 runtime_thread_calls: runtime_thread_calls.clone(),
                 max_sequence_delay: std::time::Duration::from_millis(100),
+                max_sequence_error: None,
             }));
             service.start().await.unwrap();
 
@@ -1963,6 +1972,30 @@ mod tests {
                 "promotion catch-up must yield the current-thread runtime while the sync store blocks"
             );
         });
+    }
+
+    #[test]
+    fn promotion_catch_up_accepts_empty_oplog_but_propagates_backend_failure() {
+        let applier = OpLogApplier::new(Arc::new(MasterState::empty()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let empty = PromotionThreadProbeOpLog {
+            inner: InMemoryOpLog::new(4),
+            runtime_thread_calls: calls.clone(),
+            max_sequence_delay: std::time::Duration::ZERO,
+            max_sequence_error: Some(HaError::OpLogNotFound("no committed oplog entries".into())),
+        };
+        assert_eq!(run_promotion_catch_up(&applier, &empty), Ok(()));
+
+        let disconnected = PromotionThreadProbeOpLog {
+            inner: InMemoryOpLog::new(4),
+            runtime_thread_calls: calls,
+            max_sequence_delay: std::time::Duration::ZERO,
+            max_sequence_error: Some(HaError::Disconnected("etcd unavailable".into())),
+        };
+        assert_eq!(
+            run_promotion_catch_up(&applier, &disconnected),
+            Err(HaError::Disconnected("etcd unavailable".into()))
+        );
     }
 
     #[tokio::test]
