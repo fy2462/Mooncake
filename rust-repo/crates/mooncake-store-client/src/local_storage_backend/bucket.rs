@@ -233,10 +233,18 @@ pub struct BucketStorageBackend {
     init_lock: Mutex<()>,
     reservations: Arc<BucketReservationRegistry>,
     next_token: AtomicU64,
+    available_space_probe: Box<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>,
 }
 
 impl BucketStorageBackend {
     pub fn new(config: BucketStorageConfig) -> Self {
+        Self::new_with_probe(config, |path| fs2::available_space(path))
+    }
+
+    fn new_with_probe(
+        config: BucketStorageConfig,
+        available_space_probe: impl Fn(&Path) -> std::io::Result<u64> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             backend_id: Uuid::new_v4(),
             config,
@@ -245,7 +253,16 @@ impl BucketStorageBackend {
             init_lock: Mutex::new(()),
             reservations: Arc::new(BucketReservationRegistry::default()),
             next_token: AtomicU64::new(1),
+            available_space_probe: Box::new(available_space_probe),
         }
+    }
+
+    #[cfg(test)]
+    fn new_with_available_space_probe(
+        config: BucketStorageConfig,
+        available_space_probe: impl Fn(&Path) -> std::io::Result<u64> + Send + Sync + 'static,
+    ) -> Self {
+        Self::new_with_probe(config, available_space_probe)
     }
 
     pub(crate) fn is_enable_offloading(
@@ -732,7 +749,8 @@ impl BucketStorageBackend {
             .saturating_sub(replaced_size)
             .checked_add(required_logical_size)
             .ok_or_else(|| StoreError::Internal("bucket projected usage overflow".to_string()))?;
-        let available = fs2::available_space(self.backend_dir())?;
+        let backend_dir = self.backend_dir();
+        let available = (self.available_space_probe)(&backend_dir)?;
         let disk_deficit = required_logical_size
             .saturating_add(MIN_FREE_SPACE_BYTES)
             .saturating_sub(available);
@@ -1754,6 +1772,53 @@ mod tests {
             Err(StoreError::KeyNotFound(_))
         ));
         assert_eq!(backend.read_object("newest").unwrap(), b"2222222222222222");
+    }
+
+    #[test]
+    fn cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketwatermarkevictiondoesnotoverevictforshareddisk_8022116a()
+     {
+        const AVAILABLE_BYTES: u64 = 1024 * 1024 * 1024;
+        const HIGH_WATERMARK_BYTES: u64 = 14 * 1024;
+        const LOW_WATERMARK_BYTES: u64 = 12 * 1024;
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = AVAILABLE_BYTES * 2;
+        let backend =
+            BucketStorageBackend::new_with_available_space_probe(config, |_| Ok(AVAILABLE_BYTES));
+        for index in 0..3 {
+            write(
+                &backend,
+                &format!("shared_disk_bucket_key_{index}"),
+                &vec![b'A' + index as u8; 6 * 1024],
+                Uuid::new_v4(),
+            );
+        }
+
+        let pending = backend
+            .prepare_watermark_eviction(
+                HIGH_WATERMARK_BYTES as f64 / (AVAILABLE_BYTES * 2) as f64,
+                LOW_WATERMARK_BYTES as f64 / (AVAILABLE_BYTES * 2) as f64,
+            )
+            .unwrap();
+        let victims = pending.keys();
+        assert!(!victims.is_empty());
+        assert!(victims.len() < 3);
+        assert_eq!(
+            victims,
+            ["shared_disk_bucket_key_0", "shared_disk_bucket_key_1"]
+        );
+        backend.commit_eviction(pending).unwrap();
+
+        assert!(matches!(
+            backend.read_object("shared_disk_bucket_key_0"),
+            Err(StoreError::KeyNotFound(_))
+        ));
+        assert_eq!(
+            backend.read_object("shared_disk_bucket_key_2").unwrap(),
+            vec![b'C'; 6 * 1024]
+        );
     }
 
     // BucketWatermarkEvictionRestoresMetadataWhenNotificationFails: a failed
