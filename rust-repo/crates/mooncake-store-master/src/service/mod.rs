@@ -6878,6 +6878,160 @@ mod snapshot_restore_tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_snapshot_put_start_expires_memory_and_disk() {
+        let root = tempfile::tempdir().unwrap();
+        let storage_root = tempfile::tempdir().unwrap();
+        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let provider = provider.with_expired_objects_retained(true);
+        let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            storage_fs_dir: storage_root.path().to_string_lossy().into_owned(),
+            put_start_discard_timeout: std::time::Duration::from_millis(100),
+            put_start_release_timeout: std::time::Duration::from_millis(200),
+            ..Default::default()
+        });
+        let client_id = Uuid::new_v4();
+        mount_snapshot_segment_named(&source, client_id, "put-start-expiry", 0).await;
+
+        let key = "test_key";
+        for (completed_type, discarded_type) in [
+            (
+                proto::replica_descriptor::ReplicaType::Memory,
+                proto::replica_descriptor::ReplicaType::Disk,
+            ),
+            (
+                proto::replica_descriptor::ReplicaType::Disk,
+                proto::replica_descriptor::ReplicaType::Memory,
+            ),
+        ] {
+            let request = || {
+                Request::new(proto::PutStartRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: key.into(),
+                    slice_length: 16 * 1024 * 1024,
+                    tenant_id: String::new(),
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: 1,
+                        ..Default::default()
+                    }),
+                })
+            };
+            let started = MasterService::put_start(&source, request())
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(started.replicas.len(), 2);
+            assert!(started.replicas.iter().all(|replica| {
+                replica.status == proto::replica_descriptor::ReplicaStatus::Allocating as i32
+            }));
+            MasterService::put_end(
+                &source,
+                Request::new(proto::PutEndRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: key.into(),
+                    replica_type: completed_type as i32,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+
+            source
+                .state
+                .objects
+                .get_mut(&TenantId::default().make_scoped_key(key))
+                .unwrap()
+                .put_start_time = Some(SystemTime::UNIX_EPOCH);
+            source.reap_expired_background_tasks_for_test();
+            let duplicate = MasterService::put_start(&source, request())
+                .await
+                .unwrap_err();
+            assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
+            source.reap_expired_background_tasks_for_test();
+
+            MasterService::put_end(
+                &source,
+                Request::new(proto::PutEndRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: key.into(),
+                    replica_type: discarded_type as i32,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            let replicas = MasterService::get_replica_list(
+                &source,
+                Request::new(proto::GetReplicaListRequest {
+                    key: key.into(),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .replicas;
+            assert_eq!(replicas.len(), 1);
+            assert_eq!(replicas[0].replica_type, completed_type as i32);
+
+            source
+                .state
+                .objects
+                .get_mut(&TenantId::default().make_scoped_key(key))
+                .unwrap()
+                .lease_timeout = Some(SystemTime::UNIX_EPOCH);
+            if completed_type == proto::replica_descriptor::ReplicaType::Memory {
+                assert_eq!(source.run_eviction_cycle_for_test(1), vec![key.to_string()]);
+                assert!(!snapshot_child_exists(&source, key).await);
+            } else {
+                let replicas = snapshot_child_replicas(&source, key).await;
+                assert_eq!(replicas.len(), 1);
+                assert_eq!(
+                    replicas[0].replica_type,
+                    proto::replica_descriptor::ReplicaType::Disk as i32
+                );
+            }
+        }
+
+        publish_service_snapshot(&provider, &source, "20260806_090002_001", 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.objects.len(), 1);
+        assert_eq!(
+            loaded.objects[0].0,
+            TenantId::default().make_scoped_key(key)
+        );
+        assert_eq!(loaded.objects[0].1.replicas.len(), 1);
+        assert_eq!(
+            loaded.objects[0].1.replicas[0].replica_type,
+            ReplicaType::Disk
+        );
+        assert!(loaded.delayed_replica_releases.is_empty());
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        assert_eq!(snapshot_child_replicas(&restored, key).await.len(), 1);
+        publish_service_snapshot(&provider, &restored, "20260806_090003_001", 1);
+        let second = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.objects.len(), 1);
+        assert_eq!(
+            second.objects[0].0,
+            TenantId::default().make_scoped_key(key)
+        );
+        assert_eq!(second.objects[0].1.replicas.len(), 1);
+        assert_eq!(
+            second.objects[0].1.replicas[0].replica_type,
+            ReplicaType::Disk
+        );
+        assert!(second.delayed_replica_releases.is_empty());
+        assert_eq!(second.segments.len(), 1);
+        assert_eq!(second.segments[0].segment.size, 16 * 1024 * 1024);
+    }
+
+    #[tokio::test]
     async fn cpp_parity_snapshot_try_evict_leased_object() {
         let root = tempfile::tempdir().unwrap();
         let (provider, _object_store) = snapshot_codec_provider(&root);

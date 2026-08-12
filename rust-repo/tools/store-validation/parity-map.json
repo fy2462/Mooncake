@@ -6537,13 +6537,18 @@
     "file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp",
     "test": "MasterServiceSSDSnapshotTest.PutStartExpires"
    },
-   "reason": "test_put_start_discard_timeout_removes_incomplete_memory_and_disk_replicas covers both timeout permutations, the one-replica result, and late PutEnd only in process. It omits the C++ OBJECT_ALREADY_EXISTS check before release, does not wait for final key expiry, and does not snapshot, fresh-restore, or second-save the resulting post-expiry LocalDisk/SSD state.",
+   "reason": "cpp_parity_snapshot_put_start_expires_memory_and_disk reuses one key across the C++ Memory-complete/Disk-discarded and Disk-complete/Memory-discarded permutations, driving production PutStart, PutEnd, and the production reaper with deterministic timestamp advancement. It asserts two Allocating replicas, exact AlreadyExists after discard, successful late PutEnd with exactly the completed sibling, and full eviction of the first Memory survivor before the same key is admitted again. The final expired Disk-only survivor is published and loaded with the C++ fixture's cleanup suppression, restored into a fresh service, published and loaded again with the exact Disk replica, empty delayed-release state, and 16-MiB segment retained.",
    "review": {
     "oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp PutStartExpires through each final key-expiry wait, followed by MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/mod.rs",
+     "test": "cpp_parity_snapshot_put_start_expires_memory_and_disk"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A zero-capacity client buffer allocator rejects a nonzero allocation.",
