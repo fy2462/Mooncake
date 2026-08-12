@@ -22618,7 +22618,7 @@
     "file": "pybind_client_test.cpp",
     "test": "RealClientTest.MountAndAllocateUnmountApisAcceptGracePeriod"
    },
-   "reason": "The PyO3 APIs expose nonzero grace periods on both ownership-specific unmount paths. The low-memory Python parity test allocates one 16-MiB segment and mounts one 16-MiB file segment, invokes both owning APIs with a one-second grace period, and verifies successful teardown and backing-file deletion.",
+   "reason": "The PyO3 APIs expose nonzero grace periods on both ownership-specific unmount paths. The low-memory Python parity test allocates one 16-MiB segment and mounts one 16-MiB file segment, invokes both owning APIs with a one-second C++ grace period (1000 ms for the millisecond unmount-and-free binding and 1 second for plain unmount), and verifies successful teardown and backing-file deletion.",
    "review": {
     "oracle": "mooncake-store/tests/pybind_client_test.cpp and direct graceful-unmount paths in mooncake-store/src/real_client.cpp",
     "reviewed": true

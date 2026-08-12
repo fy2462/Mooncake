@@ -179,7 +179,10 @@ async def test_segment_unmount_apis_accept_grace_period(
     client = await _client(cachelib_master)
     try:
         owned_ids, _ = await client.allocate_and_mount_segments(1)
-        assert await client.unmount_and_free_segments(owned_ids, 1) == 0
+        # This binding keeps the historical millisecond parameter; one C++
+        # grace second is therefore represented as 1000 ms. Success returns
+        # None (the underlying StoreResult<()>), not a status integer.
+        assert await client.unmount_and_free_segments(owned_ids, 1000) is None
 
         status, file_ids = await client.mount_file_segments(
             str(backing_file), 0, SLAB_SIZE, "tcp", ""
