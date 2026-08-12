@@ -9494,13 +9494,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.BasicMasterViewOperations"
    },
-   "reason": "coordinator_etcd.rs implements acquisition, renewal, release, and view reads, but no discoverable real-etcd Rust test asserts this acquire/renew/stable/release/reacquire lifecycle and view timing.",
+   "reason": "cpp_parity_high_availability_test_basic_master_view_operations uses production LeaderCoordinator with a unique opt-in live-etcd namespace. It proves the initial view is absent; acquisition and explicit renewal preserve exact address/version; a background production keepalive carries a two-second lease through the C++ oracle's TTL-plus-two-second window; a 250-ms stable wait returns no change after at least one 200-ms poll and before one second; explicit release removes the view; and reacquisition at a different address yields a strictly newer version before final release. The exact test was executed against an isolated etcd 3.5.17 container.",
    "review": {
     "oracle": "high_availability_test.cpp BasicMasterViewOperations and LeaderCoordinator lifecycle",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_basic_master_view_operations"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Releasing a leader after about 300 ms makes a five-second view-change wait return changed with no view in under three seconds, driven by deletion observation rather than timeout.",
