@@ -29137,13 +29137,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStart"
    },
-   "reason": "Production prerequisite: keep serving HA etcd-only and add a deterministic unsupported-etcd-capability startup result/status boundary in main_ha.rs and ha/standby.rs rather than adding Redis or Kubernetes serving. Then add cpp_parity_unsupported_etcd_capability_start_fails_closed to tests/test_ha_hot_standby_service.rs; invoke the production startup path without a usable etcd capability and assert exact HaError::InvalidBackend(\"etcd HA serving requires etcd support\") plus exported Failed state. As replacement-boundary strengthening beyond the C++ error/state assertions, also assert runtime never Serving, no follower task remains, and repeated cleanup is safe. Source-only failure handling and direct HotStandbyService unit tests do not cover that production boundary.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch requires Start to return INTERNAL_ERROR and leave Failed. Rust exercises the production unavailable-backend replacement by enabling oplog following without a store, receives the exact InvalidBackend missing-store error, and observes Failed. This row does not claim the skipped real-etcd integration intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:104-116 and HotStandbyService::Start",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:104-116 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "In a build without etcd support, two consecutive starts both return INTERNAL_ERROR after the first failed start; the etcd-enabled double-start branch is skipped.",
@@ -29160,13 +29165,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStart_AlreadyRunning"
    },
-   "reason": "Production prerequisite: preserve the failed startup result at the etcd-only supervisor boundary and make a repeated start deterministic without constructing a second follower. Add cpp_parity_repeated_unsupported_start_returns_the_same_error to tests/test_ha_hot_standby_service.rs; call the production standby start twice with the same unsupported etcd capability and assert exact HaError::InvalidBackend(\"etcd HA serving requires etcd support\") both times. As replacement-boundary strengthening beyond the two C++ error assertions, require zero Serving transitions, at most one Failed publication, no live replication worker, and idempotent stop. The existing controller test promotes after a different catalog failure and does not assert two start results.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; in its executable non-etcd branch both consecutive Start calls return INTERNAL_ERROR after the first leaves Failed. Rust retries the same production unavailable-backend start twice, receives the identical exact InvalidBackend missing-store error both times, remains Failed, and never creates a replication worker. This row does not claim double-start behavior after a successful etcd start.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:118-132 and HotStandbyService::Start",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:118-132 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_alreadyrunning",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_alreadyrunning"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "In a build without etcd support, starting with the literal invalid endpoint invalid_endpoint returns INTERNAL_ERROR; the etcd-enabled invalid-endpoint branch is skipped.",

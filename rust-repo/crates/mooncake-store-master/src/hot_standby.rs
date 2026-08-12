@@ -1973,6 +1973,46 @@ mod tests {
         assert_eq!(service.sync_status().state, StandbyState::Failed);
     }
 
+    #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart() {
+        let mut service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            service.start().await,
+            Err(HaError::InvalidBackend(message))
+                if message == "oplog following is enabled but no oplog store is configured"
+        ));
+        assert_eq!(service.sync_status().state, StandbyState::Failed);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_alreadyrunning()
+     {
+        let mut service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                ..Default::default()
+            },
+        );
+        let expected_message = "oplog following is enabled but no oplog store is configured";
+
+        for _ in 0..2 {
+            assert!(matches!(
+                service.start().await,
+                Err(HaError::InvalidBackend(message)) if message == expected_message
+            ));
+        }
+        assert_eq!(service.sync_status().state, StandbyState::Failed);
+        assert!(service.replication_thread.is_none());
+    }
+
     #[test]
     fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_initialstate()
      {
