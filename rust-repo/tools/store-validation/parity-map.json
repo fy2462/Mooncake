@@ -14723,13 +14723,14 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.HandleChildExit_NormalSuccess"
    },
-   "reason": "No discoverable Rust test creates and reaps a snapshot child process, asserts zero-exit handling, and observes the success outcome or accounting; spawn_blocking is not an exit-code contract.",
+   "reason": "C++ snapshots run in a forked OS child and this fixture only exercises waitpid exit-status dispatch. Rust production intentionally runs snapshot persistence as a Tokio spawn_blocking task and reports its typed outcome directly; it creates no child PID or exit-code handler, so a synthetic subprocess test would not exercise the Rust product boundary.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "snapshot_child_process_test.cpp HandleChildExit_NormalSuccess and master_snapshot_manager.cpp HandleChildExit; Rust service/mod.rs snapshot spawn_blocking path",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "A forked snapshot child that exits with code 1 is reaped and recorded as a failed persistence outcome without a fatal failure.",
@@ -14746,13 +14747,14 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.HandleChildExit_NormalFailure"
    },
-   "reason": "No discoverable Rust test asserts a nonzero snapshot child exit-code outcome and its failure accounting; a task Result is not the same process-boundary behavior.",
+   "reason": "The asserted nonzero waitpid status belongs to C++'s forked snapshot-child implementation. Rust production has no snapshot subprocess or exit-code adapter: spawn_blocking returns a typed Result/JoinError directly, whose failure accounting is a separate Rust task boundary.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "snapshot_child_process_test.cpp HandleChildExit_NormalFailure and master_snapshot_manager.cpp HandleChildExit; Rust service/mod.rs snapshot spawn_blocking path",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "A SIGKILL-terminated snapshot child is reaped and recorded as a failed persistence outcome without a fatal failure.",
@@ -14769,13 +14771,14 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.HandleChildExit_Signaled"
    },
-   "reason": "No discoverable Rust test kills and reaps a snapshot subprocess and asserts signaled-exit failure handling.",
+   "reason": "Signal termination and WIFSIGNALED handling are specific to C++'s forked snapshot child. Rust snapshot persistence uses an in-process blocking task and exposes no child PID, signal-status decoder, or reaping lifecycle; launching an unrelated process in a Rust test would not map production behavior.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "snapshot_child_process_test.cpp HandleChildExit_Signaled and master_snapshot_manager.cpp HandleChildExit; Rust service/mod.rs snapshot spawn_blocking path",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "When a snapshot child times out, the parent sends SIGTERM, escalates to SIGKILL if required, and leaves no running child unreaped.",
@@ -14793,13 +14796,14 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.HandleChildTimeout_KillsSleepingChild"
    },
-   "reason": "Rust cooperatively cancels a timed-out detached spawn_blocking writer, but no discoverable test proves process termination or reaping after timeout.",
+   "reason": "SIGTERM/SIGKILL escalation and waitpid reaping exist only because C++ snapshots run in a child process. Rust explicitly uses an in-process spawn_blocking writer that cannot be force-aborted and signals cooperative cancellation through an AtomicBool; its timeout/in-flight safety is a different applicable boundary, but there is no Rust process to terminate or reap.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "snapshot_child_process_test.cpp HandleChildTimeout_KillsSleepingChild and master_snapshot_manager.cpp HandleChildTimeout; Rust service/mod.rs snapshot timeout/cancellation path",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Catalog retention removes older snapshot object trees and leaves the two newest snapshots available.",
