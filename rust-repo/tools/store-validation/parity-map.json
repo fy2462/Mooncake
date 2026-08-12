@@ -34074,13 +34074,18 @@
     "file": "segment_test.cpp",
     "test": "SegmentTest.MountLocalDiskSegmentSuccess"
    },
-   "reason": "LocalDisk helpers in test_master_offload.rs complete a recovery session for later offload tests but do not assert exactly one client-owned enabled LocalDisk registration at the public boundary. Add cpp_parity_mount_local_disk_segment_success to mooncake-store-master/tests/test_master_offload.rs; create one enabled service with MasterRuntimeConfig { enable_offload: true, .. }, choose explicit client, storage, and recovery-session IDs, perform the real Begin(false) then Commit(true) LocalDisk recovery requests, and inspect the public snapshot/detail boundary to assert exactly one binding for that client/storage with enable_offloading=true. Do not require C++'s absent storage or generation fields, real I/O, or extra cleanup.",
+   "reason": "Rust exercises its real LocalDisk recovery protocol on an offload-enabled MasterService with explicit client, storage, and recovery-session IDs. A second successful Commit(true) is guarded by the production active-client/session binding (persisted ownership alone cannot pass), while the public consistent snapshot contains exactly one registration with the exact storage/client ownership, offloading enabled, and no queued objects. Storage/session identifiers are Rust protocol fields beyond the C++ fixture and do not weaken its mount-success oracle.",
    "review": {
-    "oracle": "mooncake-store/tests/segment_test.cpp MountLocalDiskSegmentSuccess; Rust test_master_offload.rs mount_local_disk helpers",
+    "oracle": "mooncake-store/tests/segment_test.cpp MountLocalDiskSegmentSuccess; Rust test_master_offload.rs cpp_parity_segment_test_cpp_segmenttest_mountlocaldisksegmentsuccess and production mount_local_disk_segment",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_offload.rs",
+     "test": "cpp_parity_segment_test_cpp_segmenttest_mountlocaldisksegmentsuccess"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A duplicate enabled LocalDisk mount for one client reports the C++ duplicate error without state change, while a distinct client can mount another enabled LocalDisk registration, leaving exactly two.",

@@ -208,6 +208,31 @@ async fn concurrent_local_disk_mounts_parity() {
 }
 
 #[tokio::test]
+async fn cpp_parity_segment_test_cpp_segmenttest_mountlocaldisksegmentsuccess() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    let storage_id = Uuid::new_v4();
+    let recovery_session_id = Uuid::new_v4();
+
+    begin_local_disk_recovery(&service, client_id, storage_id, recovery_session_id).await;
+    commit_local_disk_recovery(&service, client_id, storage_id, recovery_session_id).await;
+    // A completed retry is accepted only while this exact client and recovery
+    // session remain the active binding; persisted ownership alone is not enough.
+    commit_local_disk_recovery(&service, client_id, storage_id, recovery_session_id).await;
+
+    let snapshot = service.capture_loaded_snapshot("local-disk-mount");
+    assert_eq!(snapshot.local_disk_segments.len(), 1);
+    let mounted = &snapshot.local_disk_segments[0];
+    assert_eq!(mounted.storage_id, storage_id);
+    assert_eq!(mounted.client_id, client_id);
+    assert!(mounted.enable_offloading);
+    assert!(mounted.offloading_objects.is_empty());
+}
+
+#[tokio::test]
 async fn heartbeat_batches_three_thousand_new_objects_parity() {
     const KEY_COUNT: usize = 3000;
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
