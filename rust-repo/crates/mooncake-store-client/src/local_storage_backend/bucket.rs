@@ -1897,6 +1897,53 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingevictionrejectsconcurrentduplicatewrite_a77e9955()
+     {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = 10 * 1024;
+        let backend = BucketStorageBackend::new_with_available_space_probe(config, |_| {
+            Ok(1024 * 1024 * 1024)
+        });
+        let old_value = vec![b'A'; 6 * 1024];
+        let incoming_value = vec![b'B'; 6 * 1024];
+        let replacement_value = vec![b'C'; 3 * 1024];
+        write(&backend, "old_key", &old_value, Uuid::new_v4());
+
+        let incoming_pending = backend
+            .prepare_write("incoming_key", incoming_value.len() as u64)
+            .unwrap();
+        assert_eq!(incoming_pending.keys(), ["old_key"]);
+        assert!(matches!(
+            backend.prepare_write("old_key", replacement_value.len() as u64),
+            Err(StoreError::ObjectExists(key)) if key == "old_key"
+        ));
+
+        backend.rollback_eviction(incoming_pending);
+        assert_eq!(backend.read_object("old_key").unwrap(), old_value);
+        assert!(matches!(
+            backend.read_object("incoming_key"),
+            Err(StoreError::KeyNotFound(key)) if key == "incoming_key"
+        ));
+
+        let replacement_pending = backend
+            .prepare_write("old_key", replacement_value.len() as u64)
+            .unwrap();
+        assert!(replacement_pending.keys().is_empty());
+        backend
+            .commit_write_with_generation(
+                "old_key",
+                &replacement_value,
+                replacement_pending,
+                Uuid::new_v4(),
+            )
+            .unwrap();
+        assert_eq!(backend.read_object("old_key").unwrap(), replacement_value);
+    }
+
+    #[test]
     fn victim_partition_does_not_release_write_target_growth() {
         let root = TempDir::new().unwrap();
         let mut config = config(&root);

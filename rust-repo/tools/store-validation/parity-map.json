@@ -18343,13 +18343,22 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.BucketPendingEvictionRejectsConcurrentDuplicateWrite"
    },
-   "reason": "Rust production already reserves every pending victim key and rejects a second prepare_write for a reserved key, while dropping/rolling back the pending value releases reservations without changing stored bytes. No direct Rust test runs the nested failing-notification matrix, and the current rejection is StoreError::Internal(\"bucket key ... is busy\") rather than the C++ OBJECT_ALREADY_EXISTS result. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingevictionrejectsconcurrentduplicatewrite_a77e9955; assert outer notification error, mapped duplicate error, exact original bytes, and reservation release.",
+   "reason": "Rust splits C++ BatchOffload's callback boundary into the production pending-reservation primitive and the client offload loop. bucket.rs::cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingevictionrejectsconcurrentduplicatewrite_a77e9955 uses the exact 10-KiB quota and 6-KiB old/incoming plus 3-KiB replacement sizes, proves old_key is the sole victim, nested replacement returns ObjectExists, rollback preserves every original byte and leaves incoming absent, and retry proves reservation release. storage_local.rs::cpp_parity_bucket_pending_eviction_nested_duplicate_and_outer_failure drives the resolver used by production offload_objects: its failing notifier performs the nested replacement inside each real notification attempt, observes ObjectExists all three times, and the outer resolver returns the injected Internal error while production partial-finalize rollback preserves old bytes, leaves incoming absent, and releases the reservation. Rust offload_objects maps that returned error to failed task metadata before its final master publication rather than exposing C++ BatchOffload's return type.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:3163-3245, C++ pending-eviction reservation path, and Rust BucketStorageBackend::prepare_write/PendingBucketEviction::drop/rollback_eviction",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+     "test": "cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingevictionrejectsconcurrentduplicatewrite_a77e9955"
+    },
+    {
+     "file": "mooncake-store-client/src/client/storage_local.rs",
+     "test": "cpp_parity_bucket_pending_eviction_nested_duplicate_and_outer_failure"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Inside a failing eviction callback, the concurrent write returns FILE_WRITE_FAIL and the outer offload returns INTERNAL_ERROR; the old key remains and retrying the concurrent write succeeds.",

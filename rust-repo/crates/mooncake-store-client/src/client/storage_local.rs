@@ -222,6 +222,31 @@ async fn finalize_partially_accepted_eviction(
     Ok(accepted_count)
 }
 
+async fn resolve_pending_eviction_notification_with(
+    notifier: &mut (impl DiskEvictionNotifier + ?Sized),
+    storage: AttachedLocalStorage,
+    pending: PendingStorageEviction,
+    replica_type: i32,
+) -> StoreResult<PendingStorageEviction> {
+    let evicted_keys = pending.keys();
+    let Err(EvictionNotificationError {
+        accepted_storage_keys,
+        source,
+    }) = notify_evicted_disk_replicas_with(notifier, &evicted_keys, replica_type).await
+    else {
+        return Ok(pending);
+    };
+
+    finalize_partially_accepted_eviction(storage, pending, &accepted_storage_keys)
+        .await
+        .map_err(|cleanup_error| {
+            StoreError::Internal(format!(
+                "disk eviction notification failed: {source}; acknowledged local eviction finalization failed: {cleanup_error}"
+            ))
+        })?;
+    Err(source)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RecoveredLocalDiskRecord {
     task: OffloadTaskItem,
@@ -798,43 +823,22 @@ impl MooncakeClient {
             };
             let (pending_eviction, data) = pending;
             let evicted_keys = pending_eviction.keys();
-            if let Err(EvictionNotificationError {
-                accepted_storage_keys,
-                source,
-            }) = self.notify_evicted_disk_replicas(&evicted_keys).await
+            let pending_eviction = match resolve_pending_eviction_notification_with(
+                self,
+                storage.clone(),
+                pending_eviction,
+                proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+            )
+            .await
             {
-                match finalize_partially_accepted_eviction(
-                    storage.clone(),
-                    pending_eviction,
-                    &accepted_storage_keys,
-                )
-                .await
-                {
-                    Ok(accepted_count) if accepted_count > 0 => {
-                        tracing::info!(
-                            target: "storage_debug",
-                            %tenant_id,
-                            %key,
-                            accepted_count,
-                            "offload: committed the acknowledged subset of local evictions"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(cleanup_error) => {
-                        tracing::warn!(
-                            target: "storage_debug",
-                            %tenant_id,
-                            %key,
-                            %cleanup_error,
-                            "offload: failed to finalize acknowledged local evictions"
-                        );
-                    }
+                Ok(pending) => pending,
+                Err(source) => {
+                    tracing::warn!(target: "storage_debug", %tenant_id, %key, error = %source, "offload: failed to publish local eviction");
+                    notify_tasks.push(task.clone());
+                    metadatas.push(failed_offload_metadata());
+                    continue;
                 }
-                tracing::warn!(target: "storage_debug", %tenant_id, %key, error = %source, "offload: failed to publish local eviction");
-                notify_tasks.push(task.clone());
-                metadatas.push(failed_offload_metadata());
-                continue;
-            }
+            };
 
             let key_for_write = key_owned.clone();
             let generation_id = task.generation_id;
@@ -2827,6 +2831,91 @@ mod tests {
                 .push((tenant_id.to_string(), keys.to_vec(), replica_type));
             Ok(vec![0; keys.len()])
         }
+    }
+
+    struct NestedReplacementFailingNotifier {
+        storage: AttachedLocalStorage,
+        storage_key: String,
+        replacement_size: u64,
+        outcomes: Arc<std::sync::Mutex<Vec<bool>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DiskEvictionNotifier for NestedReplacementFailingNotifier {
+        async fn notify_disk_eviction(
+            &mut self,
+            _tenant_id: &str,
+            _keys: &[String],
+            _replica_type: i32,
+        ) -> StoreResult<Vec<i32>> {
+            let rejected_as_duplicate = matches!(
+                self.storage
+                    .prepare_write(&self.storage_key, self.replacement_size),
+                Err(StoreError::ObjectExists(key)) if key == self.storage_key
+            );
+            self.outcomes.lock().unwrap().push(rejected_as_duplicate);
+            Err(StoreError::Internal(
+                "injected eviction notification failure".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_bucket_pending_eviction_nested_duplicate_and_outer_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(BucketStorageBackend::new(BucketStorageConfig {
+            root_dir: root.path().to_path_buf(),
+            fsdir: "bucket-pending-nested-failure".to_string(),
+            bucket_size_limit: 8 * 1024,
+            bucket_keys_limit: 10,
+            eviction_policy: BucketEvictionPolicy::Fifo,
+            quota_bytes: 10 * 1024,
+            total_keys_limit: 100,
+        }));
+        let storage = AttachedLocalStorage::Bucket(Arc::clone(&bucket));
+        let old_key = local_storage_key("tenant-a", "old_key");
+        let incoming_key = local_storage_key("tenant-a", "incoming_key");
+        let old_value = vec![b'A'; 6 * 1024];
+        let incoming_value = vec![b'B'; 6 * 1024];
+        let old_pending = storage
+            .prepare_write(&old_key, old_value.len() as u64)
+            .unwrap();
+        storage
+            .commit_write(&old_key, &old_value, old_pending, Uuid::new_v4())
+            .unwrap();
+        let incoming_pending = storage
+            .prepare_write(&incoming_key, incoming_value.len() as u64)
+            .unwrap();
+        assert_eq!(incoming_pending.keys(), [old_key.clone()]);
+
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut notifier = NestedReplacementFailingNotifier {
+            storage: storage.clone(),
+            storage_key: old_key.clone(),
+            replacement_size: 3 * 1024,
+            outcomes: Arc::clone(&outcomes),
+        };
+        let result = resolve_pending_eviction_notification_with(
+            &mut notifier,
+            storage.clone(),
+            incoming_pending,
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(StoreError::Internal(message))
+                if message == "injected eviction notification failure"
+        ));
+        assert_eq!(*outcomes.lock().unwrap(), vec![true; 3]);
+        assert_eq!(storage.read_object(&old_key).unwrap(), old_value);
+        assert!(matches!(
+            storage.read_object(&incoming_key),
+            Err(StoreError::KeyNotFound(key)) if key == incoming_key
+        ));
+        let retry = storage.prepare_write(&old_key, 3 * 1024).unwrap();
+        assert!(retry.keys().is_empty());
     }
 
     #[test]
