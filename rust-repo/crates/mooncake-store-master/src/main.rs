@@ -28,8 +28,8 @@ use mooncake_store_master::main_args::Args;
 use mooncake_store_master::main_config::{
     build_ha_spec, build_master_service, build_runtime_config, create_coordinator,
     ensure_supported_rpc_protocol, new_supervisor, parse_snapshot_config,
-    preflight_snapshot_pipeline, publish_catalog_snapshot, resolve_cluster_id,
-    snapshot_dir_for_cluster, validate_ha_backend_for_serving,
+    preflight_snapshot_pipeline, resolve_cluster_id, snapshot_dir_for_cluster,
+    validate_ha_backend_for_serving,
 };
 
 mod main_ha;

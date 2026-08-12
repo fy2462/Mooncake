@@ -14813,13 +14813,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.AutoSnapshot_GeneratesFiles"
    },
-   "reason": "Rust schedules native/catalog snapshots, but no discoverable test runs that scheduler and observes automatic catalog publication or a latest marker.",
+   "reason": "The executable integration test runs the production periodic snapshot scheduler with a real MasterServiceImpl, Embedded catalog, and LocalFile object store. A one-second interval must automatically publish a nonempty mooncake_master_snapshot/latest.txt within the C++ five-second bound, after which shutdown is joined cleanly.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp AutoSnapshot_GeneratesFiles and master_snapshot_manager.cpp SnapshotThreadFunc; Rust main_server.rs scheduled snapshot path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_snapshot_scheduler.rs",
+     "test": "cpp_parity_snapshot_scheduler_automatically_generates_latest_marker"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Persisting state publishes a descriptor with the requested ID, derived manifest key and object prefix, sequence 0, configured producer view, and creation time bounded by the call.",
