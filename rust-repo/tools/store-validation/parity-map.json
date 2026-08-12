@@ -10228,13 +10228,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.SnapshotThenOpLogReplay"
    },
-   "reason": "Rust test_snapshot_oplog_following_and_promotion_converge_to_one_state uses an in-memory provider/oplog and a sequence-1 static snapshot; no discoverable elected-etcd, shared-oplog test verifies the durable snapshot-10 and replay-11-through-20 recovery boundary.",
+   "reason": "Rust starts the production HotStandbyService from a sequence-10 snapshot containing key_1 through key_10, then follows an in-memory shared oplog initialized at 10 with exact records 11 through 20. It waits for applied sequence 20 and proves the exact 20-key union remains, corresponding to the C++ applier's next expected sequence 21.",
    "review": {
-    "oracle": "ha_recovery_test.cpp SnapshotThenOpLogReplay and OpLogApplier::Recover/ApplyOpLogEntries; Rust hot_standby.rs test_snapshot_oplog_following_and_promotion_converge_to_one_state",
+    "oracle": "ha_recovery_test.cpp SnapshotThenOpLogReplay and OpLogApplier::Recover/ApplyOpLogEntries; Rust hot_standby.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotthenoplogreplay",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotthenoplogreplay"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When snapshot loading fails, recovery starts from zero and replays complete shared-oplog history 1 through 20 to materialize 20 objects.",

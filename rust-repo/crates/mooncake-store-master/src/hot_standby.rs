@@ -1855,6 +1855,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotthenoplogreplay() {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "snapshot-plus-oplog:1".into(),
+            base: 0,
+            size: 20 * 1024,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        let snapshot_objects = (1_u64..=10)
+            .map(|index| {
+                let key = format!("key_{index}");
+                (
+                    TenantId::default().make_scoped_key(&key),
+                    snapshot_object(&key, &segment, (index - 1) * 1024, 1024),
+                )
+            })
+            .collect::<Vec<_>>();
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "snap1".into(),
+            snapshot_sequence_id: 10,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: segment.clone(),
+                used: 10 * 1024,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: snapshot_objects,
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut oplog = InMemoryOpLog::new(32);
+        oplog.update_latest_sequence_id(10).unwrap();
+        for index in 11_u64..=20 {
+            let key = format!("key_{index}");
+            let replica = snapshot_object(&key, &segment, (index - 1) * 1024, 1024)
+                .replicas
+                .into_iter()
+                .next()
+                .unwrap();
+            let sequence = oplog.append_payload(
+                1,
+                serde_json::json!({
+                    "op": "put_end",
+                    "key": key,
+                    "size": 1024,
+                    "client_id": Uuid::nil().to_string(),
+                    "tenant_id": "default",
+                    "group_id": "",
+                    "user_key": format!("key_{index}"),
+                    "replicas": [replica],
+                })
+                .to_string(),
+            );
+            assert_eq!(sequence, index);
+        }
+
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "test_cluster".into(),
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+        service.set_oplog_store(Box::new(oplog));
+        service.start().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.latest_applied_sequence_id() < 20 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("standby did not replay sequences 11 through 20");
+        assert_eq!(state.objects.len(), 20);
+        for index in 1..=20 {
+            assert!(
+                state
+                    .objects
+                    .contains_key(&TenantId::default().make_scoped_key(&format!("key_{index}")))
+            );
+        }
+        assert_eq!(service.latest_applied_sequence_id(), 20);
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn test_oplog_bootstrap_falls_back_when_snapshot_load_fails() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
