@@ -122,10 +122,16 @@ struct BucketState {
 #[derive(Debug, Default)]
 struct BucketReservationRegistry {
     names: Mutex<HashMap<String, u64>>,
+    write_growth: Mutex<HashMap<u64, u64>>,
 }
 
 impl BucketReservationRegistry {
-    fn release(&self, token: u64, names: impl IntoIterator<Item = String>) {
+    fn release(
+        &self,
+        token: u64,
+        names: impl IntoIterator<Item = String>,
+        release_write_growth: bool,
+    ) {
         if token == 0 {
             return;
         }
@@ -134,6 +140,9 @@ impl BucketReservationRegistry {
             if reserved.get(&name).copied() == Some(token) {
                 reserved.remove(&name);
             }
+        }
+        if release_write_growth {
+            self.write_growth.lock().remove(&token);
         }
     }
 }
@@ -214,7 +223,11 @@ impl PendingBucketEviction {
 impl Drop for PendingBucketEviction {
     fn drop(&mut self) {
         if let Some(registry) = &self.registry {
-            registry.release(self.token, self.reservation_names());
+            registry.release(
+                self.token,
+                self.reservation_names(),
+                self.write_target.is_some(),
+            );
         }
     }
 }
@@ -748,6 +761,13 @@ impl BucketStorageBackend {
             .total_logical_size
             .saturating_sub(replaced_size)
             .checked_add(required_logical_size)
+            .and_then(|usage| {
+                self.reservations
+                    .write_growth
+                    .lock()
+                    .values()
+                    .try_fold(usage, |total, growth| total.checked_add(*growth))
+            })
             .ok_or_else(|| StoreError::Internal("bucket projected usage overflow".to_string()))?;
         let backend_dir = self.backend_dir();
         let available = (self.available_space_probe)(&backend_dir)?;
@@ -814,6 +834,10 @@ impl BucketStorageBackend {
         }
         reserved.insert(storage_key.to_string(), token);
         reserved.insert(bucket_reservation_name(target_bucket_id), token);
+        self.reservations
+            .write_growth
+            .lock()
+            .insert(token, required_logical_size.saturating_sub(replaced_size));
         drop(reserved);
         drop(state);
 
@@ -1818,6 +1842,91 @@ mod tests {
         assert_eq!(
             backend.read_object("shared_disk_bucket_key_2").unwrap(),
             vec![b'C'; 6 * 1024]
+        );
+    }
+
+    #[test]
+    fn cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketrollbackpreservescapacityagainstconcurrentwrite_3dc22122()
+     {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = 10 * 1024;
+        let backend = BucketStorageBackend::new_with_available_space_probe(config, |_| {
+            Ok(1024 * 1024 * 1024)
+        });
+        let old_value = vec![b'A'; 6 * 1024];
+        let incoming_value = vec![b'B'; 6 * 1024];
+        let concurrent_value = vec![b'C'; 3 * 1024];
+        write(&backend, "old_key", &old_value, Uuid::new_v4());
+
+        let incoming_pending = backend
+            .prepare_write("incoming_key", incoming_value.len() as u64)
+            .unwrap();
+        assert_eq!(incoming_pending.keys(), ["old_key"]);
+        assert!(matches!(
+            backend.prepare_write("concurrent_key", concurrent_value.len() as u64),
+            Err(StoreError::InvalidParams(message))
+                if message.contains("capacity") || message.contains("victim")
+        ));
+
+        backend.rollback_eviction(incoming_pending);
+        assert_eq!(backend.read_object("old_key").unwrap(), old_value);
+        assert!(matches!(
+            backend.read_object("incoming_key"),
+            Err(StoreError::KeyNotFound(_))
+        ));
+
+        let concurrent_pending = backend
+            .prepare_write("concurrent_key", concurrent_value.len() as u64)
+            .unwrap();
+        assert!(concurrent_pending.keys().is_empty());
+        backend
+            .commit_write_with_generation(
+                "concurrent_key",
+                &concurrent_value,
+                concurrent_pending,
+                Uuid::new_v4(),
+            )
+            .unwrap();
+        assert_eq!(
+            backend.read_object("concurrent_key").unwrap(),
+            concurrent_value
+        );
+    }
+
+    #[test]
+    fn victim_partition_does_not_release_write_target_growth() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 1;
+        config.bucket_size_limit = 64;
+        config.quota_bytes = 60;
+        let backend = BucketStorageBackend::new_with_available_space_probe(config, |_| {
+            Ok(1024 * 1024 * 1024)
+        });
+        write(&backend, "old", &[b'A'; 32], Uuid::new_v4());
+        let pending = backend.prepare_write("target", 32).unwrap();
+        assert_eq!(pending.keys(), ["old"]);
+        let token = pending.token;
+        let (accepted, target) = pending.partition_accepted(&HashSet::from(["old".to_string()]));
+
+        drop(accepted);
+        assert!(
+            backend
+                .reservations
+                .write_growth
+                .lock()
+                .contains_key(&token)
+        );
+        drop(target);
+        assert!(
+            !backend
+                .reservations
+                .write_growth
+                .lock()
+                .contains_key(&token)
         );
     }
 

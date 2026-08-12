@@ -18352,13 +18352,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.BucketRollbackPreservesCapacityAgainstConcurrentWrite"
    },
-   "reason": "Rust pending bucket evictions reserve victim keys and the write target/bucket, and rollback is intentionally non-mutating because prepare has not removed capacity; Drop releases all reservations. No discoverable Rust test attempts a different concurrent write while the capacity-reclaim reservation is live, verifies the replacement Rust capacity error, injects notification failure, proves the old key remains, then retries the concurrent write successfully after release. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketrollbackpreservescapacityagainstconcurrentwrite_3dc22122.",
+   "reason": "Rust bucket.rs:cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketrollbackpreservescapacityagainstconcurrentwrite_3dc22122 writes old_key as 6 KiB under the C++ 10-KiB quota, holds an incoming 6-KiB production pending write that reserves old_key for eviction and its target growth, and proves a distinct 3-KiB concurrent prepare returns InvalidParams because the reserved capacity cannot be reclaimed twice. Rolling back the outer pending preserves every old A byte and leaves incoming absent; after reservation release the same concurrent write commits successfully and reads back the exact C payload.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:3248-3287, C++ bucket rollback/capacity path, and Rust BucketStorageBackend reservation registry/prepare_write/rollback_eviction",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+     "test": "cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketrollbackpreservescapacityagainstconcurrentwrite_3dc22122"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Reentrant duplicate OBJECT_ALREADY_EXISTS; outer bytes remain.",
