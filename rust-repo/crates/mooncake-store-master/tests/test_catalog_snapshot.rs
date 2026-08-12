@@ -137,6 +137,26 @@ fn cpp_parity_snapshot_child_generated_timestamp_matches_expected_format() {
 }
 
 #[test]
+fn cpp_parity_ha_snapshot_catalog_backed_snapshot_provider_test_cpp_catalogbackedsnapshotprovidertest_loadlatestsnapshotreturnsemptywhencatalogmissing()
+ {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store_and_cluster_id(
+        object_store.clone(),
+        "empty-cluster",
+    );
+    let provider =
+        CatalogBackedSnapshotProvider::new("empty-cluster", Box::new(catalog), object_store);
+
+    assert!(
+        provider
+            .load_latest_snapshot("empty-cluster")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn cpp_parity_snapshot_child_persist_state_publishes_descriptor() {
     let root = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));

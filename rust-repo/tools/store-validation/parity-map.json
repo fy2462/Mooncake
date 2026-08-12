@@ -14086,13 +14086,18 @@
     "file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp",
     "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotReturnsEmptyWhenCatalogMissing"
    },
-   "reason": "Rust restore_descriptors source can yield no candidates for an empty Embedded catalog, but no discoverable Rust provider test constructs an initially markerless catalog and asserts Ok(None). The C++ TEST_P body runs for Embedded and, when STORE_USE_REDIS is enabled with an endpoint, Redis; Rust's nearby fixtures are Embedded only, so they do not cover either exact empty-marker oracle or the C++ backend matrix. Etcd is not involved in snapshot-catalog selection.",
+   "reason": "Rust constructs a fresh markerless Embedded catalog and LocalFile object store, passes both through the production CatalogBackedSnapshotProvider, and asserts load_latest_snapshot returns Ok(None). This covers the always-executed Embedded parameter and the provider's empty-descriptor behavior; the optional Redis catalog's own empty-key contract remains separately tracked by RedisSnapshotCatalogStoreTest.GetLatestReturnsEmptyWhenCatalogMissing and is not claimed here.",
    "review": {
-    "oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotReturnsEmptyWhenCatalogMissing, fixture BuildCatalogBackendParams in snapshot_test_utils.h, and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot; Rust catalog_snapshot.rs restore_descriptors/load_latest_snapshot",
+    "oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotReturnsEmptyWhenCatalogMissing mandatory Embedded parameter and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot; Rust test_catalog_snapshot.rs cpp_parity_ha_snapshot_catalog_backed_snapshot_provider_test_cpp_catalogbackedsnapshotprovidertest_loadlatestsnapshotreturnsemptywhencatalogmissing",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_ha_snapshot_catalog_backed_snapshot_provider_test_cpp_catalogbackedsnapshotprovidertest_loadlatestsnapshotreturnsemptywhencatalogmissing"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A published default snapshot round-trips its id and sequence plus one object with the asserted client id, size, sequence, complete disk replica path, and disk object size.",
