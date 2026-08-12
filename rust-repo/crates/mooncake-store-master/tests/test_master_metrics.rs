@@ -513,3 +513,51 @@ async fn cpp_parity_processing_global_disk_revoke_preserves_cache_totals() {
     assert_eq!(metrics::MEM_CACHE_TOTAL.get(), base_mem_total + 1);
     assert_eq!(metrics::FILE_CACHE_TOTAL.get(), base_file_total);
 }
+
+#[tokio::test]
+async fn cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let baseline = metrics::TOTAL_FILE_CAPACITY.get();
+    let client_id = Uuid::new_v4();
+    {
+        let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+            enable_offload: true,
+            ..Default::default()
+        });
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: "ssd-capacity-test-segment".into(),
+                size: 64 * 1024 * 1024,
+                base_addr: 0x5_0000_0000,
+                te_endpoint: "ssd-capacity-test-segment".into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        mount_local_disk(&service, client_id).await;
+
+        const CAPACITY_800_GIB: i64 = 800 * 1024 * 1024 * 1024;
+        const CAPACITY_400_GIB: i64 = 400 * 1024 * 1024 * 1024;
+        for (capacity, expected) in [
+            (CAPACITY_800_GIB, baseline + CAPACITY_800_GIB),
+            (CAPACITY_400_GIB, baseline + CAPACITY_400_GIB),
+            (CAPACITY_400_GIB, baseline + CAPACITY_400_GIB),
+        ] {
+            MasterService::report_ssd_capacity(
+                &service,
+                Request::new(proto::ReportSsdCapacityRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    ssd_total_capacity_bytes: capacity,
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(metrics::TOTAL_FILE_CAPACITY.get(), expected);
+        }
+    }
+    assert_eq!(metrics::TOTAL_FILE_CAPACITY.get(), baseline);
+}

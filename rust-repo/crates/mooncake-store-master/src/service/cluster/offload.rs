@@ -151,7 +151,7 @@ impl MasterServiceImpl {
                 "local disk session belongs to another client",
             ));
         }
-        entry.ssd_total_capacity_bytes = req.ssd_total_capacity_bytes;
+        entry.replace_reported_ssd_capacity(req.ssd_total_capacity_bytes);
         Ok(Response::new(proto::ReportSsdCapacityResponse {}))
     }
 
@@ -528,6 +528,7 @@ impl MasterServiceImpl {
                         offloading_objects: HashMap::new(),
                         promotion_objects: HashMap::new(),
                         ssd_total_capacity_bytes: 0,
+                        ssd_capacity_metric_accounted: false,
                     });
                 if let Some(mut entry) = self.state.local_disk_segments.get_mut(&storage_id) {
                     entry.active_client_id = Some(client_id);

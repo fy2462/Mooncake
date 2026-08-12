@@ -2136,6 +2136,7 @@ mod tests {
                 offloading_objects: HashMap::new(),
                 promotion_objects: HashMap::new(),
                 ssd_total_capacity_bytes: 0,
+                ssd_capacity_metric_accounted: false,
             },
         );
 

@@ -1534,6 +1534,7 @@ impl MasterServiceImpl {
                     // Capacity belongs to the previous process session and
                     // must be refreshed after every successful mount.
                     ssd_total_capacity_bytes: 0,
+                    ssd_capacity_metric_accounted: false,
                 },
             );
             self.state

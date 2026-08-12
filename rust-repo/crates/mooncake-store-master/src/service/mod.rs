@@ -1362,6 +1362,7 @@ pub(crate) fn restore_loaded_snapshot_state(
                 // Capacity is a live process-session hint, not durable
                 // scheduling authority.
                 ssd_total_capacity_bytes: 0,
+                ssd_capacity_metric_accounted: false,
             },
         );
     }

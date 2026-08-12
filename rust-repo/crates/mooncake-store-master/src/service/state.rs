@@ -938,6 +938,30 @@ pub(crate) struct LocalDiskSegmentEntry {
     pub(crate) promotion_objects: HashMap<String, i64>,
     /// 本地 SSD 总容量（字节）/ Total local SSD capacity in bytes.
     pub(crate) ssd_total_capacity_bytes: i64,
+    /// Whether this live session's capacity is included in the process-wide gauge.
+    pub(crate) ssd_capacity_metric_accounted: bool,
+}
+
+impl LocalDiskSegmentEntry {
+    pub(crate) fn replace_reported_ssd_capacity(&mut self, capacity_bytes: i64) {
+        if self.ssd_capacity_metric_accounted {
+            crate::metrics::TOTAL_FILE_CAPACITY.sub(self.ssd_total_capacity_bytes);
+        }
+        self.ssd_total_capacity_bytes = capacity_bytes;
+        self.ssd_capacity_metric_accounted = capacity_bytes > 0;
+        if self.ssd_capacity_metric_accounted {
+            crate::metrics::TOTAL_FILE_CAPACITY.add(capacity_bytes);
+        }
+    }
+}
+
+impl Drop for LocalDiskSegmentEntry {
+    fn drop(&mut self) {
+        if self.ssd_capacity_metric_accounted {
+            crate::metrics::TOTAL_FILE_CAPACITY.sub(self.ssd_total_capacity_bytes);
+            self.ssd_capacity_metric_accounted = false;
+        }
+    }
 }
 
 /// 任务条目：Copy/Move 任务的完整信息。

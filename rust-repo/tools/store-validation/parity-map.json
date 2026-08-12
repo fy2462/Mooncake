@@ -33534,13 +33534,15 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.LocalDiskSegmentCapacityHeartbeat"
    },
-   "reason": "No production change is assumed, but no discoverable Rust test proves the C++ metric result. Add cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates to mooncake-store-master/tests/test_master_metrics.rs; lock metrics, mount the exact 64-MiB Memory segment and LocalDisk, record TOTAL_FILE_CAPACITY, call ReportSsdCapacity with 800 GiB, 400 GiB, and 400 GiB, and assert exact baseline+800, baseline+400, baseline+400 after each successful response.",
+   "reason": "Rust now accounts each live LocalDisk session's reported capacity in TOTAL_FILE_CAPACITY, replaces the prior contribution on a changed heartbeat, and releases it with the session entry. The executable parity test locks the metric fixture, mounts the exact 64-MiB Memory segment and LocalDisk, then proves the 800-GiB, 400-GiB, repeated-400-GiB sequence and final service-drop cleanup against an exact baseline.",
    "review": {
-    "oracle": "mooncake-store/tests/master_metrics_test.cpp:666-702 and mooncake-store/src/master_service.cpp ReportSsdCapacity",
+    "oracle": "mooncake-store/tests/master_metrics_test.cpp:666-702; mooncake-store/src/master_service.cpp ReportSsdCapacity; rust-repo/crates/mooncake-store-master/tests/test_master_metrics.rs::cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    "mooncake-store-master/tests/test_master_metrics.rs::cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates"
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With no available segment, PutStart for 1,024 bytes fails as NO_AVAILABLE_HANDLE and increments both allocation-failure and general PutStart-failure counters exactly once from baseline.",

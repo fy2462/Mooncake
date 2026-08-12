@@ -453,6 +453,7 @@ fn purge_expired_client(state: &MasterState, metadata_state: &MetadataState, cli
         local_disk.recovery_complete = false;
         local_disk.recovery_session_id = None;
         local_disk.enable_offloading = false;
+        local_disk.replace_reported_ssd_capacity(0);
         local_disk.recovered_objects.clear();
         local_disk.offloading_objects.clear();
         local_disk.promotion_objects.clear();
